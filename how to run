@@ -1,0 +1,198 @@
+Yes, absolutely! While waiting for Apple's Critical Alerts approval, there is an official, approved iOS mechanism that functions immediately: **`time-sensitive` Interruption Level + Custom High-Intensity Siren & Haptics + `AVAudioSession` Speaker Override**.
+
+Major security apps (such as Nest, Ring, and Eufy) use this exact multi-tiered fallback strategy.
+
+---
+
+## 🛡️ Part 1: How the iOS Fallback Mechanism Works (Zero Wait Time)
+
+```
+ ┌────────────────────────────────────────────────────────────────────────────────────────┐
+ │                           iOS EMERGENCY ALERT FALLBACK STRATEGY                        │
+ ├────────────────────────────────────────────────────────────────────────────────────────┤
+ │                                                                                        │
+ │  1. Time-Sensitive Push (iOS 15+ Native):                                              │
+ │     • Uses `interruption-level: "time-sensitive"`.                                     │
+ │     • NO Apple form approval needed (available to every developer immediately).        │
+ │     • Breaks through Focus Modes / Scheduled DND and stays at the top of the           │
+ │       Lock Screen for 1 hour.                                                          │
+ │                                                                                        │
+ │  2. Custom High-Pitch Siren Sound (`sound: "emergency_siren.aiff"`):                   │
+ │     • Plays a dedicated 30-second escalating siren when phone is not muted.            │
+ │                                                                                        │
+ │  3. Continuous Heavy Haptic Vibration Engine:                                         │
+ │     • Triggers continuous `UIImpactFeedbackGenerator(style: .heavy)` pulses.           │
+ │                                                                                        │
+ │  4. Immediate Hardware Speaker Override on App Wake:                                  │
+ │     • Configures `AVAudioSessionCategory.playback` with `.defaultToSpeaker`.           │
+ │     • Blasts the alarm audio at 100% volume through the loudspeaker as soon as the    │
+ │       background push wakes the app or the user touches the notification.              │
+ │                                                                                        │
+ │  5. Lockscreen Actionable Buttons:                                                     │
+ │     • "👁️ View Live" (WebRTC <300ms), "🔕 Mute 5m", "📞 Call Emergency (911)".        │
+ └────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 💻 Part 2: Implementation of the iOS Fallback
+
+Let's update the Edge Backend push dispatcher to send **`time-sensitive`** by default so it works immediately on all iOS devices.
+
+Let's inspect and update `edge_backend/app/services/notification_service.py`.
+
+Viewed notification_service.py:1-160
+Created notification_service.py
+
+## 🚀 Complete Production Deployment Plan
+
+Here is the step-by-step production deployment plan for the **Edge Mini PC Backend**, **Android App**, **iOS App (TestFlight / Ad-Hoc)**, and the **PC Web / Desktop Client**.
+
+---
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                       PRODUCTION DEPLOYMENT OVERVIEW                                    │
+├────────────────────────────────┬────────────────────────────────┬───────────────────────────────────────┤
+│ 1. EDGE MINI PC (INTEL N100)   │ 2. ANDROID CLIENT              │ 3. iOS CLIENT (TESTFLIGHT / AD-HOC)   │
+├────────────────────────────────┼────────────────────────────────┼───────────────────────────────────────┤
+│ • Ubuntu 22.04 / 24.04 LTS     │ • Sideload APK (`.apk`)        │ • TestFlight (Zero App Store review)  │
+│ • HailoRT Driver + VA-API      │ • Play Console Internal Track  │ • Ad-Hoc install / AltStore           │
+│ • Docker Compose Stack         │ • Fullscreen Alarm channel     │ • Time-Sensitive + Sound Fallback     │
+│ • Systemd auto-restart service │ • Biometric Face/Fingerprint   │ • Lockscreen Action Buttons           │
+└────────────────────────────────┴────────────────────────────────┴───────────────────────────────────────┘
+```
+
+---
+
+### 🖥️ Phase 1: Edge Mini PC Backend Deployment (Intel N100 + Hailo M.2)
+
+#### 1. Hardware & Driver Setup on Host Ubuntu:
+```bash
+# 1. Update system packages
+sudo apt update && sudo apt upgrade -y
+
+# 2. Install Intel QuickSync VA-API drivers
+sudo apt install -y intel-media-va-driver-non-free vainfo vainfo
+
+# Verify hardware decode (/dev/dri/renderD128)
+vainfo
+
+# 3. Install HailoRT PCIe driver (for Hailo-8 M.2 module)
+sudo dpkg -i hailort-pcie-driver_*.deb
+sudo dpkg -i hailort_*.deb
+
+# Verify Hailo chip detection (/dev/hailo0)
+hailortcli scan
+```
+
+#### 2. Launch Stack with Docker Compose:
+```bash
+cd /home/meoclavezz/Projects-1/Edge_AI_CCTV/edge_backend
+
+# Generate local SSL certs for HTTPS and WSS
+python3 scripts/generate_certs.py
+
+# Launch all 5 microservices (coturn, go2rtc, edge_api, caddy, tailscale)
+docker compose up -d --build
+```
+
+#### 3. Enable Auto-Start on Boot via `systemd`:
+Create `/etc/systemd/system/cctv-edge.service`:
+```ini
+[Unit]
+Description=Edge AI CCTV Surveillance Stack
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/meoclavezz/Projects-1/Edge_AI_CCTV/edge_backend
+ExecStart=/usr/bin/docker compose up -d
+ExecStop=/usr/bin/docker compose down
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target
+```
+Enable and start:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable cctv-edge.service
+```
+
+---
+
+### 🤖 Phase 2: Android App Deployment
+
+#### 1. Build Direct-Install Standalone APK (Immediate Testing):
+```bash
+cd /home/meoclavezz/Projects-1/Edge_AI_CCTV/mobile_app
+
+# Build universal release APK
+flutter build apk --release --split-per-abi
+
+# The APK will be generated at:
+# build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+```
+* **Distribution**: Transfer the `.apk` directly to your Android device via USB, Google Drive, or local browser to install immediately.
+* **Permissions**: Android will prompt for `USE_FULL_SCREEN_INTENT`, `USE_BIOMETRIC`, and `SCHEDULE_EXACT_ALARM` upon first launch.
+
+#### 2. Build for Google Play Store (Internal Testing Track):
+```bash
+flutter build appbundle --release
+# Upload `build/app/outputs/bundle/release/app-release.aab` to Google Play Console.
+```
+
+---
+
+### 🍎 Phase 3: iOS App Deployment (Fast Track without App Store Delay)
+
+#### 1. Deploy via Apple **TestFlight** (Recommended):
+TestFlight allows you to distribute the app to up to **10,000 internal/external testers** without undergoing public App Store review.
+
+1. Open the project in Xcode:
+   ```bash
+   cd /home/meoclavezz/Projects-1/Edge_AI_CCTV/mobile_app/ios
+   open Runner.xcworkspace
+   ```
+2. Set your **Development Team** in **Signing & Capabilities**.
+3. Select **Any iOS Device (arm64)** as the build target.
+4. In the top menu, go to **Product > Archive**.
+5. Once archived, click **Distribute App > App Store Connect > Upload**.
+6. In [App Store Connect](https://appstoreconnect.apple.com), open your app > **TestFlight**, add your Apple ID as an Internal Tester, and install it via the **TestFlight app** on your iPhone.
+
+#### 2. Direct Sideloading via Xcode (Immediate Cable Install):
+1. Connect your iPhone to your Mac via USB.
+2. In Xcode, select your connected iPhone from the device dropdown.
+3. Click the **Run ▶** button. The app will install directly onto your iPhone with full debugging and push capabilities.
+
+---
+
+### 💻 Phase 4: PC Web & Desktop Dashboard Deployment
+
+The Flutter client can be built as a **responsive Web App** and hosted directly from the Mini PC's built-in Caddy server:
+
+```bash
+cd /home/meoclavezz/Projects-1/Edge_AI_CCTV/mobile_app
+
+# 1. Build the Flutter Web application
+flutter build web --release
+
+# 2. Copy the built web assets into the Edge backend web directory
+cp -r build/web/* /home/meoclavezz/Projects-1/Edge_AI_CCTV/edge_backend/web_dashboard/
+```
+
+Now, navigating to `https://edge-cctv.local` or `http://192.168.1.100:8000` on any computer browser (Chrome, Safari, Edge) automatically opens the **full desktop surveillance dashboard** with live WebRTC feeds, 24/7 DVR scrubber, and the interactive zone canvas.
+
+---
+
+### ⏱️ Summary of Deployment Options
+
+| Platform | Recommended Fast-Track Method | Time to Run | Requires Approval? |
+| :--- | :--- | :--- | :--- |
+| **Edge Mini PC** | Docker Compose + Systemd | **5 minutes** | ❌ No |
+| **Android Phone** | Direct APK Sideload (`flutter build apk`) | **2 minutes** | ❌ No |
+| **iPhone** | Direct Xcode USB install or TestFlight | **10 minutes** | ❌ No public review |
+| **PC Web / Desktop** | Static Web build hosted via Caddy/FastAPI | **3 minutes** | ❌ No |
