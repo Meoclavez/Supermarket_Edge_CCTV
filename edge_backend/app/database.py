@@ -8,8 +8,10 @@ import asyncio
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy import event, text
 from sqlalchemy.pool import QueuePool
-from sqlalchemy.exc import OperationalError, SQLAlchemyError
-from app.config import settings
+try:
+    from app.config import settings
+except ImportError:
+    from .config import settings
 
 logger = logging.getLogger("Database")
 
