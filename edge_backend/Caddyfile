@@ -1,0 +1,30 @@
+# Caddyfile - Edge CCTV Zero-Trust Local & Remote TLS Gateway
+
+{
+    admin off
+    auto_https off
+}
+
+:443 {
+    tls /certs/fullchain.pem /certs/privkey.pem
+
+    # 1. WebRTC & go2rtc Media Gateway Signaling
+    handle /api/webrtc* {
+        reverse_proxy http://127.0.0.1:1984
+    }
+
+    # 2. Edge CCTV Core API & Ingestion Engine
+    handle /api/* {
+        reverse_proxy http://127.0.0.1:8000
+    }
+
+    # 3. Static Assets / Snapshots / Video Clips
+    handle /storage/* {
+        reverse_proxy http://127.0.0.1:8000
+    }
+
+    # Fallback / Root
+    handle {
+        reverse_proxy http://127.0.0.1:8000
+    }
+}

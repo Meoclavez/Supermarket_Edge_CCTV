@@ -1,0 +1,28 @@
+# go2rtc Media Gateway Configuration for Intel N100 (VA-API /dev/dri)
+log:
+  level: info
+
+api:
+  listen: "127.0.0.1:1984" # Bound strictly to localhost for security
+
+rtsp:
+  listen: ":8554"
+
+webrtc:
+  listen: ":8555"
+  candidates:
+    - 192.168.1.100:8555
+    - stun:stun.l.google.com:19302
+
+streams:
+  cam_living_room:
+    - rtsp://admin:admin123@192.168.1.50:554/stream1
+    - "ffmpeg:cam_living_room#video=h264#hardware=vaapi"
+
+  cam_front_door:
+    - rtsp://admin:admin123@192.168.1.51:554/stream1
+    - "ffmpeg:cam_front_door#video=h264#hardware=vaapi"
+
+  cam_backyard:
+    - rtsp://admin:admin123@192.168.1.52:554/stream1
+    - "ffmpeg:cam_backyard#video=h264#hardware=vaapi"

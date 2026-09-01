@@ -1,0 +1,110 @@
+version: '3.8'
+
+services:
+  # 1. Coturn TURN/STUN Relay Server (RFC 5766 Dynamic Secret Auth)
+  coturn:
+    image: coturn/coturn:latest
+    container_name: cctv_coturn
+    restart: unless-stopped
+    network_mode: host
+    entrypoint: ["/entrypoint.sh"]
+    volumes:
+      - ./coturn/coturn.conf:/etc/coturn/coturn.conf:ro
+      - ./coturn/entrypoint.sh:/entrypoint.sh:ro
+    environment:
+      - TZ=UTC
+      - COTURN_SECRET=${COTURN_SECRET:-cctv_turn_super_secret_dynamic_key_change_me_in_prod}
+    security_opt:
+      - no-new-privileges:true
+
+  # 2. go2rtc Streaming Media Gateway
+  go2rtc:
+    image: alexxit/go2rtc:latest
+    container_name: cctv_go2rtc
+    restart: unless-stopped
+    network_mode: host
+    security_opt:
+      - no-new-privileges:true
+    devices:
+      - /dev/dri:/dev/dri # Intel QuickSync / VA-API hardware decoding
+    volumes:
+      - ./go2rtc.yaml:/config/go2rtc.yaml:ro
+    environment:
+      - TZ=UTC
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:1984/api/streams || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # 3. Edge AI Core API, Ingestion Engine, 24/7 DVR & mDNS Broadcaster
+  edge_api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cctv_edge_api
+    restart: unless-stopped
+    network_mode: host
+    security_opt:
+      - no-new-privileges:true
+    devices:
+      - /dev/dri:/dev/dri       # Intel QuickSync / VA-API for fast frame grabber
+      - /dev/hailo0:/dev/hailo0 # Hailo-8 / 8L PCIe accelerator for YOLOv8 & Pose inference
+    volumes:
+      - ./storage:/app/storage   # Persistent mount for SQLite DB + clips + snapshots + DVR
+      - ./models_hef:/app/models_hef
+      - ./certs:/app/certs
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8000
+      - GO2RTC_API_URL=http://127.0.0.1:1984
+      - JWT_SECRET=${JWT_SECRET:-""}
+      - INTERNAL_SERVICE_KEY=${INTERNAL_SERVICE_KEY:-"edge_ai_vision_internal_secret"}
+      - COTURN_SECRET=${COTURN_SECRET:-"cctv_turn_super_secret_dynamic_key_change_me_in_prod"}
+      - COTURN_REALM=cctv.local
+      - COTURN_PUBLIC_IP=${COTURN_PUBLIC_IP:-"192.168.1.100"}
+      - FCM_SERVER_KEY=${FCM_SERVER_KEY:-""}
+      - APNS_KEY_ID=${APNS_KEY_ID:-""}
+      - APNS_TEAM_ID=${APNS_TEAM_ID:-""}
+      - APNS_BUNDLE_ID=${APNS_BUNDLE_ID:-"com.cctv.edgeAiCctv"}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:8000/api/v1/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      go2rtc:
+        condition: service_healthy
+
+  # 4. Caddy Reverse Proxy (TLS Termination for HTTPS/WSS)
+  caddy:
+    image: caddy:2-alpine
+    container_name: cctv_caddy_gateway
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/certs:ro
+    depends_on:
+      - edge_api
+
+  # 5. Tailscale Zero-Trust VPN Gateway (Optional Subnet Router)
+  tailscale:
+    image: tailscale/tailscale:latest
+    container_name: cctv_tailscale
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ./tailscale_state:/var/lib/tailscale
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY:-""}
+      - TS_ROUTES=192.168.1.0/24
+      - TS_EXTRA_ARGS=--advertise-tags=tag:cctv-edge
+      - TS_STATE_DIR=/var/lib/tailscale

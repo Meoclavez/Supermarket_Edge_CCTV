@@ -1,0 +1,30 @@
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                   EDGE COMPUTING DEVICES COMPARISON MATRIX                                       │
+├───────────────────────┬────────────┬──────────────┬────────────────────────┬──────────────────────┬──────────────┤
+│ Edge Hardware         │ Total Cost │ Power Draw   │ Hardware Video Decode  │ AI Inference Engine  │ Max Cameras  │
+│ Platform              │ (USD Kit)  │ (Idle / Load)│ (VPU / QuickSync/NVDEC)│ (TOPS & Toolchain)   │ & Reliability│
+├───────────────────────┼────────────┼──────────────┼────────────────────────┼──────────────────────┼──────────────┤
+│ 1. Intel N100 Mini PC │ $150–$190  │ 6W Idle      │ Intel QuickSync VA-API │ Intel UHD iGPU       │ 4 – 8 Cams   │
+│    (16GB RAM, 1TB NVMe│ (Complete) │ 18W Peak     │ (Handles 12-16 streams)│ OpenVINO (4-6 TOPS)  │ ★★★★☆ (Top   │
+│    x86 Standalone)    │            │              │ Low CPU overhead (<10%)│ Standard x86 Docker  │ Budget Value)│
+├───────────────────────┼────────────┼──────────────┼────────────────────────┼──────────────────────┼──────────────┤
+│ 2. Intel N100 +       │ $280–$360  │ 8W Idle      │ Intel QuickSync VA-API │ Hailo-8 M.2 (26 TOPS)│ 8 – 16 Cams  │
+│    Hailo-8 M.2 NPU    │ (PC + NPU) │ 22W Peak     │ Handles 16-20 streams  │ Zero CPU load for AI │ ★★★★★ (Top   │
+│    (x86 + Accelerator)│            │              │ seamlessly             │ HailoRT Dataflow     │ Stability)   │
+├───────────────────────┼────────────┼──────────────┼────────────────────────┼──────────────────────┼──────────────┤
+│ 3. NVIDIA Jetson      │ $350–$420  │ 7W Idle      │ GStreamer / DeepStream │ 40 TOPS (Ampere GPU) │ 6 – 10 Cams  │
+│    Orin Nano (8GB)    │ (Dev Kit + │ 15W–25W Peak │ Software/GPU decode    │ TensorRT / PyTorch   │ ★★★★★ (Best  │
+│    (ARM + Ampere GPU) │ NVMe+Case) │              │ (Keep sub-stream 360p) │ Native CUDA          │ AI Toolchain)│
+├───────────────────────┼────────────┼──────────────┼────────────────────────┼──────────────────────┼──────────────┤
+│ 4. NVIDIA Jetson      │ $550–$690  │ 10W Idle     │ Dedicated NVDEC Engine │ 100 TOPS (Ampere)    │ 16 – 20 Cams │
+│    Orin NX (16GB)     │ (Module +  │ 25W–40W Peak │ Multi-channel 4K/1080p │ Massive AI headroom  │ ★★★★★        │
+│    (Industrial Box)   │ Carrier)   │              │ hardware decode        │ DeepStream pipeline  │ (Powerhouse) │
+├───────────────────────┼────────────┼──────────────┼────────────────────────┼──────────────────────┼──────────────┤
+│ 5. Rockchip RK3588    │ $140–$180  │ 4W Idle      │ Rockchip MPP VPU       │ 6 TOPS NPU           │ 4 – 8 Cams   │
+│    (Orange Pi 5 Plus) │ (SBC+NVMe) │ 14W Peak     │ Multi-channel 4K/8K    │ RKNN Toolkit (INT8)  │ ★★★☆☆ (High  │
+│    (ARM Octa-Core)    │            │              │ Dual 2.5GbE LAN        │ Manual quantization  │ Setup Labor) │
+├───────────────────────┼────────────┼──────────────┼────────────────────────┼──────────────────────┼──────────────┤
+│ 6. Raspberry Pi 5     │ $160–$210  │ 4W Idle      │ CPU/Software decode    │ 13–26 TOPS (Hailo-8) │ 3 – 5 Cams   │
+│    + Hailo-8 AI Kit   │ (Pi+HAT+   │ 12W Peak     │ (No H.264/H.265 VPU;   │ NPU is fast, but CPU │ ★★★☆☆        │
+│    (ARM + AI HAT)     │ NVMe+Case) │              │ CPU becomes bottleneck)│ decode chokes stream │(Decode Bound)│
+└───────────────────────┴────────────┴──────────────┴────────────────────────┴──────────────────────┴──────────────┘

@@ -1,0 +1,15 @@
+streams:
+{% for camera in cameras %}
+  {{ camera.id }}:
+    - {{ camera.rtsp_url }}
+    - "ffmpeg:{{ camera.id }}#video=h264#hardware={{ hardware.decoder_type }}"
+{% endfor %}
+
+webrtc:
+  listen: ":8555"
+  candidates:
+    - {{ host_ip | default("127.0.0.1") }}:8555
+    - stun:stun.l.google.com:19302
+
+api:
+  listen: ":1984"
