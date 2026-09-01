@@ -1,8 +1,15 @@
 """Edge AI CCTV Surveillance Core - FastAPI Application Entrypoint."""
 
 import os
+import sys
 import time
 from pathlib import Path
+
+# Ensure edge_backend directory is in sys.path for robust relative/absolute imports
+_EDGE_BACKEND_DIR = str(Path(__file__).resolve().parent.parent)
+if _EDGE_BACKEND_DIR not in sys.path:
+    sys.path.insert(0, _EDGE_BACKEND_DIR)
+
 from fastapi import FastAPI, Response, Request
 from fastapi.responses import HTMLResponse, StreamingResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
