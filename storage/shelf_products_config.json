@@ -1,0 +1,152 @@
+{
+  "zones": [
+    {
+      "id": "shelf_cereal_01",
+      "camera_id": "cam_03",
+      "name": "Top Shelf - Organic Granola 500g",
+      "points": [
+        {
+          "x": 0.2,
+          "y": 0.25
+        },
+        {
+          "x": 0.45,
+          "y": 0.25
+        },
+        {
+          "x": 0.45,
+          "y": 0.45
+        },
+        {
+          "x": 0.2,
+          "y": 0.45
+        }
+      ],
+      "sku_id": "SKU-ORG-GRA-500",
+      "category": "Breakfast & Cereals",
+      "price": 14.5,
+      "facing_count": 6,
+      "shelf_tier": "EYE_LEVEL",
+      "study_metrics": {
+        "track_hand_reach": true,
+        "track_dwell_time": true,
+        "track_put_back_friction": true,
+        "track_pos_conversion": true,
+        "ab_test_mode": true
+      },
+      "enabled": true,
+      "created_at": "2026-09-03T09:25:00.769875+00:00"
+    },
+    {
+      "id": "shelf_cereal_02",
+      "camera_id": "cam_03",
+      "name": "Bottom Shelf - Rolled Oats 1kg",
+      "points": [
+        {
+          "x": 0.2,
+          "y": 0.65
+        },
+        {
+          "x": 0.45,
+          "y": 0.65
+        },
+        {
+          "x": 0.45,
+          "y": 0.85
+        },
+        {
+          "x": 0.2,
+          "y": 0.85
+        }
+      ],
+      "sku_id": "SKU-OAT-1KG",
+      "category": "Breakfast & Cereals",
+      "price": 4.2,
+      "facing_count": 8,
+      "shelf_tier": "BOTTOM",
+      "study_metrics": {
+        "track_hand_reach": true,
+        "track_dwell_time": true,
+        "track_put_back_friction": true,
+        "track_pos_conversion": true,
+        "ab_test_mode": false
+      },
+      "enabled": true,
+      "created_at": "2026-09-03T09:25:00.769901+00:00"
+    },
+    {
+      "id": "shelf_snacks_01",
+      "camera_id": "cam_05",
+      "name": "Endcap A - Kettle Artisan Sea Salt Chips",
+      "points": [
+        {
+          "x": 0.55,
+          "y": 0.3
+        },
+        {
+          "x": 0.85,
+          "y": 0.3
+        },
+        {
+          "x": 0.85,
+          "y": 0.6
+        },
+        {
+          "x": 0.55,
+          "y": 0.6
+        }
+      ],
+      "sku_id": "SKU-CHIP-SALT-175",
+      "category": "Snacks & Confectionery",
+      "price": 4.5,
+      "facing_count": 10,
+      "shelf_tier": "ENDCAP",
+      "study_metrics": {
+        "track_hand_reach": true,
+        "track_dwell_time": true,
+        "track_put_back_friction": true,
+        "track_pos_conversion": true,
+        "ab_test_mode": true
+      },
+      "enabled": true,
+      "created_at": "2026-09-03T09:25:00.769917+00:00"
+    },
+    {
+      "id": "shelf_dairy_01",
+      "camera_id": "cam_02",
+      "name": "Reach Cooler - Full Cream Milk 2L",
+      "points": [
+        {
+          "x": 0.15,
+          "y": 0.3
+        },
+        {
+          "x": 0.4,
+          "y": 0.3
+        },
+        {
+          "x": 0.4,
+          "y": 0.7
+        },
+        {
+          "x": 0.15,
+          "y": 0.7
+        }
+      ],
+      "sku_id": "SKU-DAIRY-MILK-2L",
+      "category": "Dairy & Chilled",
+      "price": 3.2,
+      "facing_count": 12,
+      "shelf_tier": "REACH",
+      "study_metrics": {
+        "track_hand_reach": true,
+        "track_dwell_time": true,
+        "track_put_back_friction": true,
+        "track_pos_conversion": true,
+        "ab_test_mode": false
+      },
+      "enabled": true,
+      "created_at": "2026-09-03T09:25:00.769928+00:00"
+    }
+  ]
+}

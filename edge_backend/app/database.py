@@ -7,6 +7,7 @@ import sqlite3
 import asyncio
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy import event, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import QueuePool
 try:
     from app.config import settings
