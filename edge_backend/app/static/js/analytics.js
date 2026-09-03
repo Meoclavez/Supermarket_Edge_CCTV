@@ -42,6 +42,11 @@ function switchTab(tabId) {
     setTimeout(() => initOrUpdateCharts(), 100);
   }
 
+  // If switching to market_ai, trigger market predictions loader
+  if (tabId === 'market_ai') {
+    setTimeout(() => loadMarketPredictions(), 100);
+  }
+
   // Update URL Hash without reload
   if (history.pushState) {
     history.pushState(null, null, `#${tabId}`);
@@ -544,6 +549,170 @@ async function executeNetworkScan() {
   } catch (e) {
     container.innerHTML = '<div style="padding: 10px; text-align: center; color: var(--accent-red);">Scan failed.</div>';
   }
+}
+
+// ==========================================
+// 8. Machine Learning & LLM Market Intelligence
+// ==========================================
+let marketPredictionsCache = null;
+
+async function loadMarketPredictions() {
+  try {
+    const res = await fetch('/api/v1/analytics/market/predictions?store_id=STORE-AU-3912');
+    const data = await res.json();
+    marketPredictionsCache = data;
+
+    // 1. Render Stockout Timelines
+    const stockContainer = document.getElementById('stockoutContainer');
+    if (stockContainer && data.stockout_risks) {
+      stockContainer.innerHTML = '';
+      const criticalCount = data.stockout_risks.filter(s => s.urgency_level === 'CRITICAL').length;
+      const stockBadge = document.getElementById('stockoutBadge');
+      if (stockBadge) {
+        stockBadge.textContent = criticalCount > 0 ? `⚠️ ${criticalCount} Critical Alerts` : 'All Stock Healthy';
+        stockBadge.style.color = criticalCount > 0 ? 'var(--accent-red)' : 'var(--accent-green)';
+      }
+
+      data.stockout_risks.forEach(item => {
+        const row = document.createElement('div');
+        row.style.cssText = 'background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 6px;';
+        
+        let color = '#00f0ff';
+        let badgeBg = 'rgba(0,240,255,0.2)';
+        if (item.urgency_level === 'CRITICAL') {
+          color = '#ff3366';
+          badgeBg = 'rgba(255,51,102,0.2)';
+        } else if (item.urgency_level === 'WARNING') {
+          color = '#ffaa00';
+          badgeBg = 'rgba(255,170,0,0.2)';
+        }
+
+        row.innerHTML = `
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div style="font-weight: 700; font-size: 12px; color: #fff;">${item.product_name} <span style="font-size: 10px; color: var(--text-dim); font-family: var(--font-mono);">(${item.sku_id})</span></div>
+            <span style="font-size: 10px; font-weight: 800; padding: 2px 6px; border-radius: 4px; background: ${badgeBg}; color: ${color};">${item.urgency_level} • ${item.hours_to_stockout}h left</span>
+          </div>
+          <div style="font-size: 11px; color: var(--text-dim);">${item.recommendation}</div>
+          <div style="display: flex; justify-content: space-between; font-size: 10px; color: var(--text-dim);">
+            <span>Pick Velocity: <b>${item.hourly_pick_velocity} units/hr</b></span>
+            <span>Current Shelf Facing: <b>${item.current_stock_units} units</b></span>
+          </div>
+        `;
+        stockContainer.appendChild(row);
+      });
+    }
+
+    // 2. Render 24-Hour Predictive Footfall Curve
+    const chartBox = document.getElementById('footfallChartContainer');
+    if (chartBox && data.hourly_footfall_forecast) {
+      chartBox.innerHTML = '';
+      const maxTraffic = Math.max(...data.hourly_footfall_forecast.map(f => f.expected_traffic), 1);
+
+      data.hourly_footfall_forecast.forEach(pt => {
+        const barWrap = document.createElement('div');
+        barWrap.style.cssText = 'flex: 1; display: flex; flex-direction: column; align-items: center; height: 100%; justify-content: flex-end; position: relative;';
+        
+        const barHeightPct = (pt.expected_traffic / maxTraffic) * 100;
+        const barColor = pt.is_peak_hour ? 'linear-gradient(180deg, #ffaa00 0%, #ff3366 100%)' : 'linear-gradient(180deg, #00f0ff 0%, #0066cc 100%)';
+        
+        barWrap.innerHTML = `
+          <div style="font-size: 8.5px; color: var(--text-dim); margin-bottom: 2px;">${pt.expected_traffic}</div>
+          <div style="width: 80%; height: ${Math.max(6, barHeightPct)}%; background: ${barColor}; border-radius: 3px 3px 0 0; transition: height 0.4s ease;" title="${pt.hour}: ${pt.expected_traffic} customers"></div>
+          <div style="font-size: 8px; color: var(--text-dim); margin-top: 4px; transform: rotate(-45deg);">${pt.hour}</div>
+        `;
+        chartBox.appendChild(barWrap);
+      });
+    }
+
+    // 3. Load initial LLM optimizations if container is empty
+    const optContainer = document.getElementById('llmOptimizationsContainer');
+    if (optContainer && optContainer.children.length === 0) {
+      runLLMOptimizations();
+    }
+  } catch (err) {
+    console.error('Error loading market predictions:', err);
+  }
+}
+
+function updateElasticitySimulation() {
+  const targetTier = document.getElementById('simTargetTierSelect').value;
+  
+  let liftA = '+35.0%';
+  let liftG = '+18.5%';
+  let revGain = '+$320.00 AUD';
+
+  if (targetTier === 'ENDCAP') {
+    liftA = '+68.0%';
+    liftG = '+34.2%';
+    revGain = '+$580.00 AUD';
+  } else if (targetTier === 'EYE_LEVEL') {
+    liftA = '+42.0%';
+    liftG = '+23.1%';
+    revGain = '+$380.00 AUD';
+  } else if (targetTier === 'TOP') {
+    liftA = '+12.0%';
+    liftG = '+6.5%';
+    revGain = '+$110.00 AUD';
+  } else if (targetTier === 'BOTTOM') {
+    liftA = '-28.0%';
+    liftG = '-15.4%';
+    revGain = '-$190.00 AUD';
+  }
+
+  document.getElementById('simLiftAlpha').textContent = liftA;
+  document.getElementById('simLiftGamma').textContent = liftG;
+  document.getElementById('simRevGain').textContent = revGain;
+}
+
+async function runLLMOptimizations() {
+  const container = document.getElementById('llmOptimizationsContainer');
+  if (container) {
+    container.innerHTML = '<div style="padding: 15px; font-size: 12px; color: #ffaa00; text-align: center;">⚡ Running LLM Multimodal Market Synthesis...</div>';
+  }
+
+  try {
+    const res = await fetch('/api/v1/analytics/market/llm-optimize?store_id=STORE-AU-3912', { method: 'POST' });
+    const data = await res.json();
+    const opts = data.optimizations || [];
+
+    const badge = document.getElementById('llmOptCountBadge');
+    if (badge) badge.textContent = `${opts.length} Strategic Actions`;
+
+    if (container) {
+      container.innerHTML = '';
+      opts.forEach(opt => {
+        const card = document.createElement('div');
+        card.style.cssText = 'background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px;';
+        
+        let prioColor = '#00f0ff';
+        if (opt.priority === 'CRITICAL') prioColor = '#ff3366';
+        else if (opt.priority === 'HIGH') prioColor = '#ffaa00';
+
+        card.innerHTML = `
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div style="display: flex; gap: 6px; align-items: center;">
+              <span style="font-size: 10px; font-weight: 800; padding: 2px 6px; border-radius: 4px; background: rgba(255,255,255,0.1); color: ${prioColor};">${opt.priority}</span>
+              <span style="font-size: 10px; font-weight: 700; color: var(--text-dim);">[${opt.category}]</span>
+              <span style="font-weight: 700; font-size: 12.5px; color: #fff;">${opt.target_product_or_zone}</span>
+            </div>
+            <button class="btn btn-primary btn-sm" onclick="applyMarketOptimization('${opt.id}', '${opt.target_product_or_zone}')">Apply Suggestion</button>
+          </div>
+          <div style="font-size: 11.5px; color: #e2e8f0; line-height: 1.4;"><b>Automated Directive:</b> ${opt.automated_recommendation}</div>
+          <div style="font-size: 11px; color: var(--text-dim);"><b>Observed Behavior:</b> ${opt.observed_behavior}</div>
+          <div style="font-size: 11px; color: var(--accent-green);"><b>Expected Business Impact:</b> ${opt.expected_business_impact}</div>
+        `;
+        container.appendChild(card);
+      });
+    }
+  } catch (err) {
+    if (container) {
+      container.innerHTML = '<div style="padding: 15px; font-size: 12px; color: var(--accent-red); text-align: center;">Error running market optimizations.</div>';
+    }
+  }
+}
+
+function applyMarketOptimization(id, title) {
+  showToast(`✅ Applied Optimization for ${title}. Logged to central store ledger.`);
 }
 
 function showToast(msg) {

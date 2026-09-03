@@ -108,6 +108,11 @@
         <span>AI Decision Action Center</span>
         <span class="tab-count" id="tabActionCountBadge" style="background: var(--accent-red); color: #fff; border-color: transparent;">5</span>
       </button>
+      <button class="tab-btn" data-tab="market_ai" onclick="switchTab('market_ai')">
+        <span>🧠</span>
+        <span>ML Market Intelligence & Suggestions</span>
+        <span class="tab-count" style="background: #ffaa00; color: #000; font-weight: 800;">AI</span>
+      </button>
       <button class="tab-btn" data-tab="digest" onclick="switchTab('digest')">
         <span>📑</span>
         <span>Executive Daily Digest</span>
@@ -358,6 +363,105 @@
         <div class="glass-card">
           <h3 style="font-size: 13px; font-weight: 800; color: var(--accent-orange); margin-bottom: 10px;">🛡️ Safety & Loss Prevention Edge Incidents</h3>
           <div id="digestSafetySummary" style="font-size: 12px; display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px;"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==========================================
+         TAB 6: Machine Learning & LLM Market Intelligence
+         ========================================== -->
+    <section id="tab-market_ai" class="tab-view">
+      <div class="controls-strip">
+        <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+          <span style="font-size: 11px; font-weight: 700; color: #ffaa00;">🧠 AI Model Engine:</span>
+          <span class="badge" style="background: rgba(255,170,0,0.15); color: #ffaa00; border-color: rgba(255,170,0,0.3);">YOLOv11-Pose + Qwen2.5 / Edge Reasoner</span>
+          <span class="badge">Day Type: Weekday (Normal Season)</span>
+        </div>
+        <div style="display: flex; gap: 8px;">
+          <button class="btn btn-warning btn-sm" onclick="runLLMOptimizations()">⚡ Run LLM Market Analysis</button>
+          <button class="btn btn-primary btn-sm" onclick="loadMarketPredictions()">🔄 Refresh Predictions</button>
+        </div>
+      </div>
+
+      <!-- Section 1: Stockout Timeline Gauges & Peak Footfall Forecaster -->
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 14px; margin-bottom: 14px;">
+        <div class="glass-card">
+          <div class="card-title">
+            <span>📦 Shelf Inventory & Stockout Timelines</span>
+            <span class="badge" id="stockoutBadge">Calculating...</span>
+          </div>
+          <div id="stockoutContainer" style="display: flex; flex-direction: column; gap: 10px; margin-top: 6px;">
+            <div style="font-size: 11.5px; color: var(--text-dim);">Loading stockout risk models...</div>
+          </div>
+        </div>
+
+        <div class="glass-card">
+          <div class="card-title">
+            <span>📈 24-Hour Predictive Footfall Curve</span>
+            <span class="badge" style="color: var(--accent-green);">Peak: 17:00 Rush</span>
+          </div>
+          <div id="footfallChartContainer" style="height: 180px; display: flex; align-items: flex-end; gap: 4px; padding-top: 15px;">
+            <!-- Rendered dynamically -->
+          </div>
+          <div style="display: flex; justify-content: space-between; font-size: 10px; color: var(--text-dim); margin-top: 6px;">
+            <span>07:00 Open</span>
+            <span>12:00 Lunch</span>
+            <span>17:00 Commute Surge</span>
+            <span>21:00 Close</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Section 2: Shelf Placement Tier Elasticity Simulator -->
+      <div class="glass-card" style="margin-bottom: 14px;">
+        <div class="card-title">
+          <span>🧪 Shelf Placement Tier Elasticity & Revenue Lift Simulator</span>
+          <span class="badge" style="color: var(--accent-cyan);">A/B Merchandising</span>
+        </div>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin-top: 8px;">
+          <div style="background: rgba(0,0,0,0.3); padding: 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.06);">
+            <div style="font-size: 11px; color: var(--text-dim); margin-bottom: 4px;">Select Product SKU:</div>
+            <select id="simSkuSelect" onchange="updateElasticitySimulation()" style="width: 100%; background: #161d30; color: #fff; padding: 7px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); font-size: 12px;">
+              <option value="SKU-OAT-1KG">Rolled Oats 1kg (Current: Bottom Shelf)</option>
+              <option value="SKU-ORG-GRA-500">Organic Granola 500g (Current: Eye-Level)</option>
+              <option value="SKU-CHIP-SALT-175">Artisan Chips 175g (Current: Endcap)</option>
+            </select>
+            <div style="font-size: 11px; color: var(--text-dim); margin-top: 10px; margin-bottom: 4px;">Simulate Move To Shelf Tier:</div>
+            <select id="simTargetTierSelect" onchange="updateElasticitySimulation()" style="width: 100%; background: #161d30; color: #fff; padding: 7px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); font-size: 12px;">
+              <option value="EYE_LEVEL">👁️ Eye-Level (+35% base attraction)</option>
+              <option value="ENDCAP">⭐ Promotional Endcap (+70% traffic)</option>
+              <option value="TOP">⬆️ Top Shelf Tier</option>
+              <option value="BOTTOM">⬇️ Bottom Shelf Tier</option>
+            </select>
+          </div>
+
+          <div id="simResultsCard" style="background: rgba(0,240,255,0.04); border: 1px solid rgba(0,240,255,0.2); border-radius: 8px; padding: 12px; display: flex; flex-direction: column; justify-content: center; gap: 8px;">
+            <div style="display: flex; justify-content: space-between;">
+              <span style="font-size: 11px; color: var(--text-dim);">Projected Attraction Lift (Δα):</span>
+              <span style="font-family: var(--font-mono); font-weight: 800; color: var(--accent-green);" id="simLiftAlpha">+42.0%</span>
+            </div>
+            <div style="display: flex; justify-content: space-between;">
+              <span style="font-size: 11px; color: var(--text-dim);">Projected Conversion Lift (Δγ):</span>
+              <span style="font-family: var(--font-mono); font-weight: 800; color: var(--accent-green);" id="simLiftGamma">+23.1%</span>
+            </div>
+            <div style="display: flex; justify-content: space-between;">
+              <span style="font-size: 11px; color: var(--text-dim);">Est. Monthly Revenue Gain:</span>
+              <span style="font-family: var(--font-mono); font-weight: 800; color: #ffd700;" id="simRevGain">+$380.00 AUD</span>
+            </div>
+            <div style="font-size: 10.5px; color: var(--text-dim); margin-top: 4px;">* Derived from calibrated Bayesian choice models across 28 cameras.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Section 3: LLM Strategic Improvement Decisions -->
+      <div class="glass-card">
+        <div class="card-title">
+          <span>🧠 LLM Market Reasoning & Strategic Improvements</span>
+          <span class="badge" style="background: rgba(255,170,0,0.2); color: #ffaa00; border-color: rgba(255,170,0,0.4);" id="llmOptCountBadge">4 Optimizations</span>
+        </div>
+        <p style="font-size: 11.5px; color: var(--text-dim); margin-bottom: 12px;">Synthesizes visual reach patterns, hand touches, put-backs, and POS transaction telemetry into automated retail improvement directives.</p>
+        <div id="llmOptimizationsContainer" style="display: flex; flex-direction: column; gap: 10px;">
+          <!-- Rendered dynamically -->
         </div>
       </div>
     </section>

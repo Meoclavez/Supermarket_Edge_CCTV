@@ -122,6 +122,7 @@
             <button class="btn btn-primary btn-sm" style="flex: 1;" onclick="setDrawMode('TRIPWIRE')">⚡ Add Tripwire (2 Pts)</button>
             <button class="btn btn-primary btn-sm" style="flex: 1;" onclick="setDrawMode('INTRUSION')">🛑 Add Restricted Area (3+ Pts)</button>
             <button class="btn btn-primary btn-sm" style="flex: 1;" onclick="setDrawMode('EXCLUSION')">🌫️ Add Exclusion Mask (3+ Pts)</button>
+            <button class="btn btn-warning btn-sm" style="flex: 1.2; background: rgba(255,170,0,0.2); border-color: #ffaa00; color: #ffaa00;" onclick="setDrawMode('PRODUCT_SHELF')">🛒 Add Product Area (4+ Pts)</button>
             <button class="btn btn-success btn-sm" style="flex: 0.8;" onclick="saveDrawnZone()">💾 Save Zone</button>
             <button class="btn btn-danger btn-sm" style="flex: 0.6;" onclick="clearCanvasPoints()">✕ Cancel</button>
           </div>
@@ -134,6 +135,15 @@
       </div>
 
       <div style="display: flex; flex-direction: column; gap: 12px;">
+        <div class="glass-card">
+          <div class="card-title">
+            <span>🛒 Product Shelf Areas</span>
+          </div>
+          <div id="productShelfListContainer">
+            <div style="font-size: 11.5px; color: var(--text-dim);">No product shelf areas configured.</div>
+          </div>
+        </div>
+
         <div class="glass-card">
           <div class="card-title">
             <span>⚡ Active Tripwires</span>
@@ -181,6 +191,71 @@
             <span class="telemetry-val" id="fallStatusVal" style="color: var(--accent-green);">NORMAL</span>
           </div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Product Shelf ROI Mapping Modal -->
+  <div id="productModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.75); z-index:9999; align-items:center; justify-content:center; backdrop-filter: blur(8px);">
+    <div style="background:#0f1422; border:1px solid rgba(255,170,0,0.4); border-radius:12px; width:90%; max-width:480px; padding:20px; box-shadow:0 12px 36px rgba(0,0,0,0.8); display:flex; flex-direction:column; gap:12px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid rgba(255,255,255,0.1); padding-bottom:8px;">
+        <h3 style="margin:0; font-size:15px; color:#ffaa00; display:flex; align-items:center; gap:8px;">🛒 Map Product & Study Options</h3>
+        <button onclick="closeProductModal()" style="background:none; border:none; color:#a0aec0; font-size:16px; cursor:pointer;">✕</button>
+      </div>
+      <div>
+        <label style="font-size:11px; color:#a0aec0; display:block; margin-bottom:4px;">Product Display Name</label>
+        <input type="text" id="modalProductName" placeholder="e.g. Organic Almond Granola 500g" style="width:100%; background:#161d30; color:#fff; padding:8px; border-radius:6px; border:1px solid rgba(255,255,255,0.15); font-size:12px;" />
+      </div>
+      <div style="display:flex; gap:8px;">
+        <div style="flex:1;">
+          <label style="font-size:11px; color:#a0aec0; display:block; margin-bottom:4px;">SKU Identifier</label>
+          <input type="text" id="modalProductSku" placeholder="SKU-ORG-402" style="width:100%; background:#161d30; color:#fff; padding:8px; border-radius:6px; border:1px solid rgba(255,255,255,0.15); font-size:12px;" />
+        </div>
+        <div style="flex:1;">
+          <label style="font-size:11px; color:#a0aec0; display:block; margin-bottom:4px;">Category</label>
+          <select id="modalProductCategory" style="width:100%; background:#161d30; color:#fff; padding:8px; border-radius:6px; border:1px solid rgba(255,255,255,0.15); font-size:12px;">
+            <option value="Breakfast & Cereals">Breakfast & Cereals</option>
+            <option value="Snacks & Confectionery">Snacks & Confectionery</option>
+            <option value="Dairy & Chilled">Dairy & Chilled</option>
+            <option value="Beverages">Beverages</option>
+            <option value="Fresh Produce">Fresh Produce</option>
+            <option value="Bakery">Bakery</option>
+          </select>
+        </div>
+      </div>
+      <div style="display:flex; gap:8px;">
+        <div style="flex:1;">
+          <label style="font-size:11px; color:#a0aec0; display:block; margin-bottom:4px;">Price ($ AUD)</label>
+          <input type="number" step="0.05" id="modalProductPrice" value="12.50" style="width:100%; background:#161d30; color:#fff; padding:8px; border-radius:6px; border:1px solid rgba(255,255,255,0.15); font-size:12px;" />
+        </div>
+        <div style="flex:1;">
+          <label style="font-size:11px; color:#a0aec0; display:block; margin-bottom:4px;">Facing Count</label>
+          <input type="number" id="modalProductFacing" value="6" style="width:100%; background:#161d30; color:#fff; padding:8px; border-radius:6px; border:1px solid rgba(255,255,255,0.15); font-size:12px;" />
+        </div>
+        <div style="flex:1.2;">
+          <label style="font-size:11px; color:#a0aec0; display:block; margin-bottom:4px;">Shelf Placement Tier</label>
+          <select id="modalProductTier" style="width:100%; background:#161d30; color:#fff; padding:8px; border-radius:6px; border:1px solid rgba(255,255,255,0.15); font-size:12px;">
+            <option value="EYE_LEVEL">👁️ Eye-Level</option>
+            <option value="TOP">⬆️ Top Shelf</option>
+            <option value="REACH">✋ Reach Tier</option>
+            <option value="BOTTOM">⬇️ Bottom Shelf</option>
+            <option value="ENDCAP">⭐ Promo Endcap</option>
+          </select>
+        </div>
+      </div>
+      <div>
+        <label style="font-size:11px; color:#a0aec0; display:block; margin-bottom:6px;">Active Study Metrics & Service Options</label>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px; font-size:11px; color:#e2e8f0;">
+          <label style="display:flex; align-items:center; gap:6px; cursor:pointer;"><input type="checkbox" id="chkHandReach" checked /> ✋ Track Hand Reaches</label>
+          <label style="display:flex; align-items:center; gap:6px; cursor:pointer;"><input type="checkbox" id="chkDwellTime" checked /> ⏱️ Dwell Inspection</label>
+          <label style="display:flex; align-items:center; gap:6px; cursor:pointer;"><input type="checkbox" id="chkPutBack" checked /> 🔄 Put-Back / Friction</label>
+          <label style="display:flex; align-items:center; gap:6px; cursor:pointer;"><input type="checkbox" id="chkPosSales" checked /> 💳 Correlate with POS</label>
+          <label style="display:flex; align-items:center; gap:6px; cursor:pointer;"><input type="checkbox" id="chkAbTest" /> 🧪 A/B Placement Test</label>
+        </div>
+      </div>
+      <div style="display:flex; gap:8px; margin-top:8px;">
+        <button class="btn btn-primary" style="flex:1;" onclick="submitProductModal()">💾 Link & Save Product Area</button>
+        <button class="btn btn-danger" style="flex:0.5;" onclick="closeProductModal()">✕ Cancel</button>
       </div>
     </div>
   </div>

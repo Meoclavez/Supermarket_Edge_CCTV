@@ -4,7 +4,7 @@ import os
 import uuid
 import json
 import logging
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, HTTPException, Depends, Query, Body, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -14,6 +14,9 @@ from sqlalchemy import select, func, desc, and_
 
 from app.config import settings
 from app.database import get_db, async_session_factory
+from app.services.shelf_interaction_service import shelf_interaction_service, ProductShelfZone
+from app.services.market_predictor import market_predictor
+from app.services.llm_market_agent import llm_market_agent
 from app.models.db_models import (
     PlanogramItemModel,
     POSTransactionModel,
@@ -940,3 +943,126 @@ async def list_planogram_items(
 
     planogram_items = [PlanogramItem.model_validate(i) for i in items]
     return PlanogramItemListResponse(items=planogram_items, total=len(planogram_items))
+
+
+# ---------------- 11. Product Shelf ROI & Hand-Tracking Endpoints ----------------
+
+@router.get("/products/zones")
+async def get_product_shelf_zones(camera_id: Optional[str] = Query(None, description="Filter by camera ID")):
+    """List all interactive product shelf zones mapped to camera feeds."""
+    zones = shelf_interaction_service.get_zones(camera_id)
+    return {
+        "camera_id": camera_id or "all",
+        "total_zones": len(zones),
+        "zones": [z.model_dump() for z in zones]
+    }
+
+
+@router.post("/products/zones")
+async def save_product_shelf_zone(zone: ProductShelfZone = Body(...)):
+    """Create or update a product shelf zone linked to camera feed coordinates."""
+    saved = shelf_interaction_service.save_zone(zone)
+    return {
+        "status": "success",
+        "message": f"Product shelf zone '{saved.name}' mapped to {saved.camera_id}",
+        "zone": saved.model_dump()
+    }
+
+
+@router.delete("/products/zones/{zone_id}")
+async def delete_product_shelf_zone(zone_id: str):
+    """Delete a mapped product shelf zone."""
+    success = shelf_interaction_service.delete_zone(zone_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Product shelf zone not found")
+    return {"status": "success", "message": f"Deleted product shelf zone {zone_id}"}
+
+
+@router.get("/products/{zone_id}/stats")
+async def get_product_zone_stats(zone_id: str):
+    """Retrieve real-time hand reaches, dwell inspections, picks, and friction index for a product."""
+    stats = shelf_interaction_service.get_zone_stats(zone_id)
+    if not stats:
+        raise HTTPException(status_code=404, detail="Product shelf zone not found")
+    return stats
+
+
+@router.post("/products/interactions")
+async def record_hand_interaction(
+    camera_id: str = Query(..., description="Camera ID"),
+    track_id: int = Query(101, description="Customer track ID"),
+    keypoints: List[Dict[str, float]] = Body(..., description="17 keypoint poses"),
+    bbox: List[float] = Body([0.2, 0.2, 0.5, 0.8], description="Person Bounding Box")
+):
+    """Process person skeleton wrist keypoints against mapped product polygons."""
+    bbox_tuple = (bbox[0], bbox[1], bbox[2], bbox[3])
+    events = shelf_interaction_service.process_person_pose(
+        camera_id=camera_id,
+        track_id=track_id,
+        keypoints=keypoints,
+        bbox=bbox_tuple
+    )
+    return {
+        "status": "success",
+        "events_count": len(events),
+        "events": [e.model_dump() for e in events]
+    }
+
+
+# ---------------- 12. Machine Learning & LLM Market Predictions ----------------
+
+@router.get("/market/predictions")
+async def get_market_predictions(
+    store_id: str = Query("STORE-AU-3912", description="Store ID"),
+    day_type: str = Query("WEEKDAY", description="WEEKDAY or WEEKEND")
+):
+    """Predictive market engine: hourly footfall curve, stockout timelines, and tier elasticity."""
+    # 1. Hourly footfall forecast
+    forecast = market_predictor.forecast_hourly_footfall(daily_base_volume=3420, day_type=day_type)
+
+    # 2. Shelf stockout risk timelines across mapped products
+    zones = [shelf_interaction_service.get_zone_stats(z.id) for z in shelf_interaction_service.get_zones()]
+    stockout_risks = market_predictor.calculate_stockout_risks(zones)
+
+    # 3. Placement tier elasticity simulations
+    simulations = [
+        market_predictor.simulate_placement_elasticity(
+            sku_id="SKU-OAT-1KG",
+            product_name="Rolled Oats 1kg",
+            current_tier="BOTTOM",
+            target_tier="EYE_LEVEL",
+            price=4.20
+        ),
+        market_predictor.simulate_placement_elasticity(
+            sku_id="SKU-ORG-GRA-500",
+            product_name="Organic Granola 500g",
+            current_tier="EYE_LEVEL",
+            target_tier="ENDCAP",
+            price=14.50
+        )
+    ]
+
+    return {
+        "store_id": store_id,
+        "day_type": day_type,
+        "forecast_timestamp": datetime.now(timezone.utc).isoformat(),
+        "hourly_footfall_forecast": [f.model_dump() for f in forecast],
+        "stockout_risks": [s.model_dump() for s in stockout_risks],
+        "tier_elasticity_simulations": [s.model_dump() for s in simulations]
+    }
+
+
+@router.post("/market/llm-optimize")
+async def trigger_llm_market_optimizations(
+    store_id: str = Query("STORE-AU-3912", description="Store ID")
+):
+    """Trigger LLM market reasoning agent to synthesize visual metrics and POS data into action plans."""
+    zones = [shelf_interaction_service.get_zone_stats(z.id) for z in shelf_interaction_service.get_zones()]
+    forecast = [f.model_dump() for f in market_predictor.forecast_hourly_footfall(daily_base_volume=3420)]
+    
+    optimizations = llm_market_agent.generate_optimizations(
+        store_id=store_id,
+        product_stats=zones,
+        hourly_traffic_forecast=forecast
+    )
+    return optimizations.model_dump()

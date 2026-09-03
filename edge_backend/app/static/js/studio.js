@@ -53,6 +53,9 @@ function drawOverlay() {
   } else if (currentMode === 'EXCLUSION') {
     ctx.strokeStyle = '#a0aec0';
     ctx.fillStyle = 'rgba(160, 174, 192, 0.35)';
+  } else if (currentMode === 'PRODUCT_SHELF') {
+    ctx.strokeStyle = '#ffd700';
+    ctx.fillStyle = 'rgba(255, 215, 0, 0.22)';
   }
 
   ctx.lineWidth = 2.5;
@@ -64,7 +67,7 @@ function drawOverlay() {
     else ctx.lineTo(px, py);
   });
 
-  if ((currentMode === 'INTRUSION' || currentMode === 'EXCLUSION') && drawnPoints.length >= 3) {
+  if ((currentMode === 'INTRUSION' || currentMode === 'EXCLUSION' || currentMode === 'PRODUCT_SHELF') && drawnPoints.length >= 3) {
     ctx.closePath();
     ctx.fill();
   }
@@ -82,7 +85,11 @@ function setDrawMode(mode) {
   currentMode = mode;
   drawnPoints = [];
   drawOverlay();
-  showToast(`Mode: ${mode} - Click on video to place polygon vertices.`);
+  if (mode === 'PRODUCT_SHELF') {
+    showToast('🛒 Product Shelf Mode: Click 4+ corners around the shelf or product display.');
+  } else {
+    showToast(`Mode: ${mode} - Click on video to place polygon vertices.`);
+  }
 }
 
 function clearCanvasPoints() {
@@ -92,7 +99,75 @@ function clearCanvasPoints() {
   showToast('Drawing cancelled.');
 }
 
+function openProductModal() {
+  const modal = document.getElementById('productModal');
+  if (modal) {
+    modal.style.display = 'flex';
+    document.getElementById('modalProductName').focus();
+  }
+}
+
+function closeProductModal() {
+  const modal = document.getElementById('productModal');
+  if (modal) modal.style.display = 'none';
+}
+
+async function submitProductModal() {
+  const name = document.getElementById('modalProductName').value.trim() || 'Product Shelf Area';
+  const sku = document.getElementById('modalProductSku').value.trim() || ('SKU-' + Date.now().toString().slice(-5));
+  const category = document.getElementById('modalProductCategory').value;
+  const price = parseFloat(document.getElementById('modalProductPrice').value) || 0.0;
+  const facing = parseInt(document.getElementById('modalProductFacing').value) || 4;
+  const tier = document.getElementById('modalProductTier').value;
+
+  const study_metrics = {
+    track_hand_reach: document.getElementById('chkHandReach').checked,
+    track_dwell_time: document.getElementById('chkDwellTime').checked,
+    track_put_back_friction: document.getElementById('chkPutBack').checked,
+    track_pos_conversion: document.getElementById('chkPosSales').checked,
+    ab_test_mode: document.getElementById('chkAbTest').checked
+  };
+
+  const payload = {
+    id: `shelf_${Date.now().toString().slice(-6)}`,
+    camera_id: activeCameraId,
+    name: name,
+    points: drawnPoints,
+    sku_id: sku,
+    category: category,
+    price: price,
+    facing_count: facing,
+    shelf_tier: tier,
+    study_metrics: study_metrics,
+    enabled: true
+  };
+
+  try {
+    const res = await fetch('/api/v1/analytics/products/zones', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    closeProductModal();
+    clearCanvasPoints();
+    showToast(`✅ Mapped Product: ${name} (${sku})`);
+    loadZonesList();
+  } catch (err) {
+    showToast('Error mapping product: ' + err.message);
+  }
+}
+
 async function saveDrawnZone() {
+  if (currentMode === 'PRODUCT_SHELF') {
+    if (drawnPoints.length < 4) {
+      showToast('⚠️ Product shelf area requires at least 4 corner points.');
+      return;
+    }
+    openProductModal();
+    return;
+  }
+
   const defaultName = currentMode === 'TRIPWIRE' ? 'Tripwire' : (currentMode === 'INTRUSION' ? 'Restricted Area' : 'Exclusion Mask');
   const name = document.getElementById('zoneNameInput').value.trim() || defaultName;
   const allowed = document.getElementById('zoneClassSelect').value === 'person' ? ['person'] : (document.getElementById('zoneClassSelect').value === 'vehicle' ? ['vehicle'] : ['person', 'vehicle']);
@@ -147,7 +222,7 @@ async function saveDrawnZone() {
       clearCanvasPoints();
       loadZonesList();
     } else {
-      showToast('Please click points on video first (2 for tripwire, 3+ for polygons).');
+      showToast('Please click points on video first (2 for tripwire, 3+ for polygons, 4+ for shelf).');
     }
   } catch (err) {
     showToast('Error saving zone: ' + err.message);
@@ -180,8 +255,42 @@ async function clearAllZones() {
   }
 }
 
+async function deleteProductZone(id) {
+  try {
+    await fetch(`/api/v1/analytics/products/zones/${id}`, { method: 'DELETE' });
+    showToast('Product shelf area removed.');
+    loadZonesList();
+  } catch (err) {
+    showToast('Failed to delete product zone');
+  }
+}
+
 async function loadZonesList() {
   try {
+    // 1. Load Product Shelf Areas
+    try {
+      const prodRes = await fetch(`/api/v1/analytics/products/zones?camera_id=${activeCameraId}`);
+      const prodData = await prodRes.json();
+      const prodContainer = document.getElementById('productShelfListContainer');
+      if (prodContainer) {
+        const pZones = prodData.zones || [];
+        prodContainer.innerHTML = pZones.length === 0 ? '<div style="font-size: 11.5px; color: var(--text-dim);">No product shelf areas configured.</div>' : '';
+        pZones.forEach(pz => {
+          const item = document.createElement('div');
+          item.className = 'zone-item';
+          item.style.borderColor = 'rgba(255,170,0,0.3)';
+          item.innerHTML = `
+            <div class="zone-info">
+              <span class="zone-name" style="color:#ffaa00;">🛒 ${pz.name}</span>
+              <span class="zone-sub">${pz.sku_id} | $${pz.price.toFixed(2)} | [${pz.shelf_tier}]</span>
+            </div>
+            <button class="btn btn-danger btn-sm" onclick="deleteProductZone('${pz.id}')">🗑️</button>
+          `;
+          prodContainer.appendChild(item);
+        });
+      }
+    } catch (e) {}
+
     const res = await fetch('/api/zones');
     const data = await res.json();
 
