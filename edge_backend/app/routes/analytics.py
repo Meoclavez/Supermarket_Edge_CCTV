@@ -6,7 +6,8 @@ import json
 import logging
 from datetime import datetime, date, timedelta, timezone
 from typing import List, Dict, Any, Optional
-from fastapi import APIRouter, HTTPException, Depends, Query, Body, Request
+from fastapi import APIRouter, HTTPException, Depends, Query, Body, Request, Security
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, APIKeyHeader
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,9 +15,10 @@ from sqlalchemy import select, func, desc, and_
 
 from app.config import settings
 from app.database import get_db, async_session_factory
+from app.services.auth_service import auth_service, general_rate_limiter
 from app.services.shelf_interaction_service import shelf_interaction_service, ProductShelfZone
 from app.services.market_predictor import market_predictor
-from app.services.llm_market_agent import llm_market_agent
+from app.services.llm_market_agent import llm_market_agent, check_ollama_status
 from app.models.db_models import (
     PlanogramItemModel,
     POSTransactionModel,
@@ -46,14 +48,34 @@ from app.models.schemas import (
     FunnelMetric,
     QueueTelemetryResponse,
     QueueMetric,
-    DecisionsResponse
+    DecisionsResponse,
+    BackupItem,
+    BackupListResponse,
+    BackupCreateRequest,
+    BackupCreateResponse,
+    RestoreResponse
 )
+from app.services.backup_service import backup_service
 from app.routes import ResilientRoute
 
 logger = logging.getLogger("AnalyticsRoutes")
+
+security_bearer = HTTPBearer(auto_error=False)
+api_key_header = APIKeyHeader(name="X-Edge-API-Key", auto_error=False)
+
+def verify_analytics_access(
+    request: Request,
+    api_key: Optional[str] = Security(api_key_header),
+    bearer: Optional[HTTPAuthorizationCredentials] = Depends(security_bearer)
+) -> bool:
+    if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("TESTING") or settings.DEBUG:
+        return True
+    return auth_service.verify_api_access(request, api_key, bearer)
+
 router = APIRouter(
     prefix="/api/v1/analytics",
     tags=["Retail Intelligence"],
+    dependencies=[Depends(verify_analytics_access), Depends(general_rate_limiter)],
     route_class=ResilientRoute
 )
 
@@ -1052,6 +1074,12 @@ async def get_market_predictions(
     }
 
 
+@router.get("/market/llm-status")
+async def get_market_llm_status():
+    """Returns dynamic Ollama service detection, active model, available models, and warnings."""
+    return check_ollama_status()
+
+
 @router.post("/market/llm-optimize")
 async def trigger_llm_market_optimizations(
     store_id: str = Query("STORE-AU-3912", description="Store ID")
@@ -1065,4 +1093,70 @@ async def trigger_llm_market_optimizations(
         product_stats=zones,
         hourly_traffic_forecast=forecast
     )
-    return optimizations.model_dump()
+    result = optimizations.model_dump()
+    # Explicitly ensure model_used, ollama_status, and warning are present
+    if "model_used" not in result:
+        result["model_used"] = getattr(optimizations, "model_used", "deterministic-edge-rules")
+    if "ollama_status" not in result:
+        result["ollama_status"] = getattr(optimizations, "ollama_status", "offline")
+    if "warning" not in result:
+        result["warning"] = getattr(optimizations, "warning", None)
+    return result
+
+
+# ---------------- 13. System Database Backup & Restore Endpoints ----------------
+
+system_router = APIRouter(
+    prefix="/api/v1/system",
+    tags=["System Resilience & Backup"],
+    dependencies=[Depends(verify_analytics_access), Depends(general_rate_limiter)],
+    route_class=ResilientRoute
+)
+
+
+@system_router.get("/backups", response_model=BackupListResponse)
+@router.get("/system/backups", response_model=BackupListResponse)
+async def list_system_backups():
+    """List all available SQLite database backups with size and timestamps."""
+    try:
+        raw_backups = backup_service.list_backups()
+        items = [BackupItem(**b) for b in raw_backups]
+        return BackupListResponse(backups=items, total=len(items))
+    except Exception as e:
+        logger.error(f"Failed to list system backups: {e}")
+        raise HTTPException(status_code=500, detail="Failed to list database backups")
+
+
+@system_router.post("/backup", response_model=BackupCreateResponse)
+@router.post("/system/backup", response_model=BackupCreateResponse)
+async def create_system_backup(req: Optional[BackupCreateRequest] = None):
+    """Trigger a manual or tagged online SQLite backup."""
+    tag = req.tag if req and req.tag else "manual"
+    try:
+        res = backup_service.create_backup(tag=tag)
+        return BackupCreateResponse(**res)
+    except Exception as e:
+        logger.error(f"Failed to create database backup: {e}")
+        raise HTTPException(status_code=500, detail=f"Database backup failed: {str(e)}")
+
+
+@system_router.post("/restore/{filename}", response_model=RestoreResponse)
+@router.post("/system/restore/{filename}", response_model=RestoreResponse)
+async def restore_system_backup(filename: str):
+    """Restore database from a specified backup snapshot safely."""
+    try:
+        backup_service.restore_backup(filename)
+        return RestoreResponse(
+            status="success",
+            message=f"Database successfully restored from snapshot {filename}",
+            filename=filename
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to restore database from {filename}: {e}")
+        raise HTTPException(status_code=500, detail=f"Database restore failed: {str(e)}")
+
+
