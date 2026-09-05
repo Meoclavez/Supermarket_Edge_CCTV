@@ -53,6 +53,17 @@ class CameraModel(Base):
     last_seen: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
+    # Spatial, Floorplan & Channel Mapping
+    channel_number: Mapped[int] = mapped_column(Integer, default=1)
+    department: Mapped[str] = mapped_column(String(64), default="GENERAL")
+    floor_x: Mapped[float] = mapped_column(Float, default=100.0)
+    floor_y: Mapped[float] = mapped_column(Float, default=100.0)
+    floor_z: Mapped[float] = mapped_column(Float, default=3.2)
+    azimuth_deg: Mapped[float] = mapped_column(Float, default=0.0)
+    fov_deg: Mapped[float] = mapped_column(Float, default=85.0)
+    homography_matrix: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    features: Mapped[Optional[dict]] = mapped_column(JSON, default=dict)
+
     # Relationships
     events: Mapped[list["SecurityEventModel"]] = relationship(
         "SecurityEventModel", back_populates="camera", cascade="all, delete-orphan"
@@ -222,3 +233,41 @@ class AIDecisionRecommendationModel(Base):
     status: Mapped[str] = mapped_column(String(32), default="PENDING")  # PENDING, REVIEWED, APPLIED, DISMISSED
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class TheftIncidentModel(Base):
+    __tablename__ = "theft_incidents"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    camera_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    camera_name: Mapped[str] = mapped_column(String(128), default="Camera")
+    department: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    shelf_zone_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    theft_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)  # SHELF_SWEEPING, CONCEALMENT, SWEETHEARTING, PUSHOUT_EXIT_BYPASS, HIGH_RISK_CASING
+    severity: Mapped[str] = mapped_column(String(32), default="HIGH", index=True)  # CRITICAL, HIGH, MEDIUM
+    confidence: Mapped[float] = mapped_column(Float, default=0.85)
+    person_track_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    evidence_summary: Mapped[str] = mapped_column(String(1024), default="")
+    status: Mapped[str] = mapped_column(String(32), default="ACTIVE", index=True)  # ACTIVE, ACKNOWLEDGED, DISPATCHED, RESOLVED, FALSE_ALARM
+    snapshot_path: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    clip_path: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    officer_notes: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    
+    # Ancillary / Detailed telemetry fields
+    zone_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    estimated_loss_value: Mapped[float] = mapped_column(Float, default=0.0)
+    items_involved: Mapped[list] = mapped_column(JSON, default=list)
+    evidence_snapshot_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    evidence_clip_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    bounding_box: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    wrist_trajectory: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    guard_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    dispatch_details: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    resolution: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+

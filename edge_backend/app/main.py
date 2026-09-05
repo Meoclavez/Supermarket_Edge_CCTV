@@ -21,7 +21,7 @@ import numpy as np
 from .config import settings
 from .database import init_db
 from .services.hardware_detector import hardware_profile
-from .routes import cameras, events, webrtc, system, zones, health, setup, dvr, analytics
+from .routes import cameras, events, webrtc, system, zones, health, setup, dvr, analytics, theft
 
 
 @asynccontextmanager
@@ -56,6 +56,7 @@ app.include_router(setup.router, prefix="/api/v1")
 app.include_router(dvr.router)
 app.include_router(analytics.router)
 app.include_router(analytics.system_router)
+app.include_router(theft.router)
 
 # Mount Static Files
 STATIC_DIR = Path(__file__).resolve().parent / "static"

@@ -1120,3 +1120,168 @@ html, body {
     color: #111111 !important;
   }
 }
+
+/* ==========================================================================
+   Loss Prevention & Theft AI HUD & Alert Banner Styles
+   ========================================================================== */
+
+#theftAlertBanner {
+  display: none;
+  background: linear-gradient(90deg, rgba(255, 0, 85, 0.25), rgba(20, 10, 25, 0.95), rgba(255, 0, 85, 0.25));
+  border: 1.5px solid var(--accent-red);
+  border-radius: var(--radius-lg);
+  padding: 12px 18px;
+  box-shadow: 0 0 25px rgba(255, 0, 85, 0.6), inset 0 0 15px rgba(255, 0, 85, 0.2);
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  animation: theftPulse 1.8s infinite ease-in-out;
+  position: relative;
+  z-index: 90;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+@keyframes theftPulse {
+  0% { box-shadow: 0 0 20px rgba(255, 0, 85, 0.4); border-color: rgba(255, 0, 85, 0.8); }
+  50% { box-shadow: 0 0 35px rgba(255, 0, 85, 0.85); border-color: #ff0055; }
+  100% { box-shadow: 0 0 20px rgba(255, 0, 85, 0.4); border-color: rgba(255, 0, 85, 0.8); }
+}
+
+.theft-banner-left {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex: 1;
+}
+
+.theft-banner-icon {
+  font-size: 26px;
+  animation: bounceAlert 1s infinite alternate;
+}
+
+@keyframes bounceAlert {
+  from { transform: scale(1); filter: drop-shadow(0 0 4px #ff0055); }
+  to { transform: scale(1.18); filter: drop-shadow(0 0 12px #ff0055); }
+}
+
+.theft-banner-title {
+  font-size: 14px;
+  font-weight: 800;
+  color: #ffffff;
+  letter-spacing: 0.5px;
+}
+
+.theft-banner-meta {
+  font-size: 11px;
+  color: #ffb3c6;
+  font-family: var(--font-mono);
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.theft-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* Simulation Scenario Cards */
+.simulation-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.simulate-card-btn {
+  background: rgba(255, 0, 85, 0.1);
+  border: 1px solid rgba(255, 0, 85, 0.3);
+  color: #fff;
+  border-radius: var(--radius-md);
+  padding: 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.simulate-card-btn:hover {
+  background: rgba(255, 0, 85, 0.25);
+  border-color: var(--accent-red);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 18px rgba(255, 0, 85, 0.3);
+}
+
+.simulate-card-btn .sim-title {
+  font-size: 12px;
+  font-weight: 800;
+  color: #ff0055;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.simulate-card-btn .sim-desc {
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+
+/* Form Controls in Modal */
+.form-grid-2col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.form-group label {
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.form-input, .form-select {
+  background: #101624;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: var(--radius-sm);
+  color: #ffffff;
+  padding: 8px 10px;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  outline: none;
+}
+
+.form-input:focus, .form-select:focus {
+  border-color: var(--accent-cyan);
+  box-shadow: 0 0 10px rgba(0, 240, 255, 0.25);
+}
+
+.checkbox-group-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+  background: rgba(0, 0, 0, 0.3);
+  padding: 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-main);
+  cursor: pointer;
+}
