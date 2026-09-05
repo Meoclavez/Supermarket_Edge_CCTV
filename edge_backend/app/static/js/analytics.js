@@ -558,6 +558,57 @@ let marketPredictionsCache = null;
 
 async function loadMarketPredictions() {
   try {
+    // 0. Probe Ollama dynamic model status
+    try {
+      const statusRes = await fetch('/api/v1/analytics/market/llm-status');
+      if (statusRes.ok) {
+        const statusData = await statusRes.json();
+        const modelBadge = document.getElementById('ollamaModelBadge');
+        const warningBanner = document.getElementById('ollamaWarningBanner');
+
+        if (statusData.ollama_active && statusData.active_model) {
+          if (modelBadge) {
+            modelBadge.textContent = `🧠 Ollama: ${statusData.active_model}`;
+            modelBadge.className = 'badge badge-green';
+            modelBadge.style.display = 'inline-flex';
+          }
+          if (warningBanner) {
+            warningBanner.style.display = 'none';
+            warningBanner.innerHTML = '';
+          }
+        } else {
+          if (modelBadge) {
+            modelBadge.textContent = '⚡ Edge Heuristics Mode';
+            modelBadge.className = 'badge badge-warning';
+            modelBadge.style.display = 'inline-flex';
+          }
+          if (warningBanner) {
+            const warningMsg = statusData.warning || 'Ollama service offline or model unavailable. Using deterministic edge rule engine.';
+            warningBanner.style.display = 'block';
+            warningBanner.innerHTML = `
+              <div style="background: rgba(255, 170, 0, 0.12); border: 1px solid rgba(255, 170, 0, 0.35); border-radius: 8px; padding: 10px 14px; display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+                <div style="display: flex; align-items: center; gap: 10px;">
+                  <span style="font-size: 18px;">⚠️</span>
+                  <div>
+                    <div style="font-size: 12px; font-weight: 700; color: #ffaa00;">Local Ollama AI Engine Offline</div>
+                    <div style="font-size: 11px; color: #cbd5e1;">${warningMsg}</div>
+                  </div>
+                </div>
+                <span class="badge" style="background: rgba(255, 255, 255, 0.1); color: #fff; font-size: 10px;">Deterministic Fallback Active</span>
+              </div>
+            `;
+          }
+        }
+      }
+    } catch (statusErr) {
+      console.warn('Ollama status check failed:', statusErr);
+      const modelBadge = document.getElementById('ollamaModelBadge');
+      if (modelBadge) {
+        modelBadge.textContent = '⚡ Edge Heuristics Mode';
+        modelBadge.className = 'badge badge-warning';
+      }
+    }
+
     const res = await fetch('/api/v1/analytics/market/predictions?store_id=STORE-AU-3912');
     const data = await res.json();
     marketPredictionsCache = data;
@@ -674,9 +725,22 @@ async function runLLMOptimizations() {
     const res = await fetch('/api/v1/analytics/market/llm-optimize?store_id=STORE-AU-3912', { method: 'POST' });
     const data = await res.json();
     const opts = data.optimizations || [];
+    const modelUsed = data.model_used || (data.ollama_status === 'online' ? 'Ollama' : 'deterministic-edge-rules');
 
     const badge = document.getElementById('llmOptCountBadge');
     if (badge) badge.textContent = `${opts.length} Strategic Actions`;
+
+    // Dynamically update model badge if returned from optimization
+    const modelBadge = document.getElementById('ollamaModelBadge');
+    if (modelBadge && data.model_used) {
+      if (data.ollama_status === 'online') {
+        modelBadge.textContent = `🧠 Ollama: ${data.model_used}`;
+        modelBadge.className = 'badge badge-green';
+      } else {
+        modelBadge.textContent = `⚡ Edge Rules (${data.model_used})`;
+        modelBadge.className = 'badge badge-warning';
+      }
+    }
 
     if (container) {
       container.innerHTML = '';
@@ -688,9 +752,13 @@ async function runLLMOptimizations() {
         if (opt.priority === 'CRITICAL') prioColor = '#ff3366';
         else if (opt.priority === 'HIGH') prioColor = '#ffaa00';
 
+        const modelLabel = data.ollama_status === 'online' 
+          ? `Generated via Ollama: ${modelUsed}` 
+          : `Generated via: ${modelUsed}`;
+
         card.innerHTML = `
           <div style="display: flex; justify-content: space-between; align-items: center;">
-            <div style="display: flex; gap: 6px; align-items: center;">
+            <div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
               <span style="font-size: 10px; font-weight: 800; padding: 2px 6px; border-radius: 4px; background: rgba(255,255,255,0.1); color: ${prioColor};">${opt.priority}</span>
               <span style="font-size: 10px; font-weight: 700; color: var(--text-dim);">[${opt.category}]</span>
               <span style="font-weight: 700; font-size: 12.5px; color: #fff;">${opt.target_product_or_zone}</span>
@@ -700,6 +768,10 @@ async function runLLMOptimizations() {
           <div style="font-size: 11.5px; color: #e2e8f0; line-height: 1.4;"><b>Automated Directive:</b> ${opt.automated_recommendation}</div>
           <div style="font-size: 11px; color: var(--text-dim);"><b>Observed Behavior:</b> ${opt.observed_behavior}</div>
           <div style="font-size: 11px; color: var(--accent-green);"><b>Expected Business Impact:</b> ${opt.expected_business_impact}</div>
+          <div style="display: flex; justify-content: space-between; align-items: center; font-size: 10px; color: #94a3b8; font-family: var(--font-mono); border-top: 1px dashed rgba(255,255,255,0.08); padding-top: 6px; margin-top: 2px;">
+            <span>🤖 ${modelLabel}</span>
+            <span style="color: var(--text-dim);">${data.analysis_timestamp ? new Date(data.analysis_timestamp).toLocaleTimeString() : 'Real-time'}</span>
+          </div>
         `;
         container.appendChild(card);
       });

@@ -455,10 +455,14 @@
 
       <!-- Section 3: LLM Strategic Improvement Decisions -->
       <div class="glass-card">
-        <div class="card-title">
-          <span>🧠 LLM Market Reasoning & Strategic Improvements</span>
+        <div class="card-title" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <span>🧠 LLM Market Reasoning & Strategic Improvements</span>
+            <span id="ollamaModelBadge" class="badge badge-green" style="font-size: 11px;">🧠 Checking AI Engine...</span>
+          </div>
           <span class="badge" style="background: rgba(255,170,0,0.2); color: #ffaa00; border-color: rgba(255,170,0,0.4);" id="llmOptCountBadge">4 Optimizations</span>
         </div>
+        <div id="ollamaWarningBanner" style="display: none; margin-bottom: 12px;"></div>
         <p style="font-size: 11.5px; color: var(--text-dim); margin-bottom: 12px;">Synthesizes visual reach patterns, hand touches, put-backs, and POS transaction telemetry into automated retail improvement directives.</p>
         <div id="llmOptimizationsContainer" style="display: flex; flex-direction: column; gap: 10px;">
           <!-- Rendered dynamically -->
