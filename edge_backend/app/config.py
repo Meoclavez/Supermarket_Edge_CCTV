@@ -35,9 +35,10 @@ class Settings(BaseSettings):
     DVR_DIR: Path = get_default_dir("dvr")
     ARCHIVES_DIR: Path = get_default_dir("archives")
     DATA_DIR: Path = get_default_dir("data")
-    RECORDINGS_DIR: Path = get_default_dir("recordings")
     SQLITE_DB_PATH: Path = get_default_dir("storage") / "cctv_core.db"
     DATABASE_PATH: Path = get_default_dir("storage") / "cctv_core.db"
+    BACKUPS_DIR: Path = get_default_dir("backups")
+    OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     SHM_DIR: Path = Path(os.getenv("SHM_DIR", "/dev/shm" if os.path.exists("/dev/shm") else "/tmp"))
     
     # Storage Retention & Purging Policies

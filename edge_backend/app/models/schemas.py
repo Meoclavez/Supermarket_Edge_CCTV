@@ -572,3 +572,41 @@ class DecisionsResponse(BaseModel):
     decisions: List[AIDecisionRecommendation] = Field(default_factory=list)
     total: int = 0
 
+
+# ---------------- System Backup & Recovery ----------------
+
+class BackupItem(BaseModel):
+    filename: str
+    filepath: Optional[str] = None
+    size_bytes: int = 0
+    size_mb: float = 0.0
+    timestamp: str
+    created_at: Optional[str] = None
+    tag: str = "auto"
+    model_config = ConfigDict(from_attributes=True)
+
+
+class BackupListResponse(BaseModel):
+    backups: List[BackupItem] = Field(default_factory=list)
+    total: int = 0
+
+
+class BackupCreateRequest(BaseModel):
+    tag: str = "manual"
+
+
+class BackupCreateResponse(BaseModel):
+    status: str
+    filename: str
+    filepath: Optional[str] = None
+    size_bytes: int = 0
+    size_mb: float = 0.0
+    timestamp: str
+    tag: str
+
+
+class RestoreResponse(BaseModel):
+    status: str
+    message: str
+    filename: str
+

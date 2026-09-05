@@ -220,7 +220,7 @@ DEFAULT_CAMERAS = [
     CameraFeed(
         id="cam_aisle_12",
         name="CAM-16: Aisle 12 - Chilled Dairy & Eggs",
-        location="Aisle 12",
+        location="Dairy & Chilled Eggs",
         rtsp_url="rtsp://admin:Pearcedale3912@192.168.20.160:554/cam/realmonitor?channel=16&subtype=1",
         webrtc_url="http://localhost:8000/api/v1/webrtc/offer?camera_id=cam_aisle_12",
         status=CameraStatus.ONLINE,
