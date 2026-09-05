@@ -35,11 +35,15 @@ storage/clips/*
 storage/snapshots/*
 storage/dvr/*
 storage/archives/*
+storage/backups/*
+!storage/backups/.gitkeep
 edge_backend/storage/*.db*
 edge_backend/storage/clips/*
 edge_backend/storage/snapshots/*
 edge_backend/storage/dvr/*
 edge_backend/storage/archives/*
+edge_backend/storage/backups/*
+!edge_backend/storage/backups/.gitkeep
 *.log
 
 # TLS / Certificates (Secrets)

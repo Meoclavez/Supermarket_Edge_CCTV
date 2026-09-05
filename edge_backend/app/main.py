@@ -10,6 +10,7 @@ _EDGE_BACKEND_DIR = str(Path(__file__).resolve().parent.parent)
 if _EDGE_BACKEND_DIR not in sys.path:
     sys.path.insert(0, _EDGE_BACKEND_DIR)
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Response, Request
 from fastapi.responses import HTMLResponse, StreamingResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -18,13 +19,22 @@ import cv2
 import numpy as np
 
 from .config import settings
+from .database import init_db
 from .services.hardware_detector import hardware_profile
 from .routes import cameras, events, webrtc, system, zones, health, setup, dvr, analytics
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_db()
+    yield
+
 
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
-    description="Decentralized Edge AI CCTV with Studio & Multi-Cam Dashboard"
+    description="Decentralized Edge AI CCTV with Studio & Multi-Cam Dashboard",
+    lifespan=lifespan
 )
 
 app.add_middleware(
@@ -45,6 +55,7 @@ app.include_router(health.router)
 app.include_router(setup.router, prefix="/api/v1")
 app.include_router(dvr.router)
 app.include_router(analytics.router)
+app.include_router(analytics.system_router)
 
 # Mount Static Files
 STATIC_DIR = Path(__file__).resolve().parent / "static"
