@@ -1,6 +1,6 @@
 /**
  * 2D Interactive Supermarket Blueprint & Heatmap HUD Engine
- * HTML5 Canvas & Layered SVG Renderer
+ * HTML5 Canvas & Layered SVG Renderer with Camera FOV Cones & Drag-and-Drop Placement
  */
 
 class StoreFloorplanHUD {
@@ -20,6 +20,14 @@ class StoreFloorplanHUD {
     this.isDragging = false;
     this.dragStartX = 0;
     this.dragStartY = 0;
+    
+    // Camera Drag & Placement State
+    this.cameras = [];
+    this.draggedCamera = null;
+    this.isDraggingCamera = false;
+    this.hoveredCamera = null;
+    this.isAddingCamera = false;
+    this.showCameras = true;
     
     // Layer Toggles
     this.showHeatmap = true;
@@ -72,8 +80,20 @@ class StoreFloorplanHUD {
 
     this.initEvents();
     this.resizeCanvas();
+    this.fetchFloorplanCameras();
     this.startRenderLoop();
     this.selectZone('zone_produce');
+  }
+
+  async fetchFloorplanCameras() {
+    try {
+      const res = await fetch('/api/v1/analytics/floorplan');
+      if (!res.ok) return;
+      const data = await res.json();
+      this.cameras = data.cameras || [];
+    } catch (e) {
+      console.warn('Failed to load floorplan cameras:', e);
+    }
   }
 
   initShoppers(count) {
@@ -105,62 +125,211 @@ class StoreFloorplanHUD {
   initEvents() {
     window.addEventListener('resize', () => this.resizeCanvas());
 
-    // Mouse & Pointer events for Pan/Zoom/Click
+    // Mouse & Pointer events for Pan/Zoom/Click/Drag
     this.canvas.addEventListener('mousedown', (e) => {
-      this.isDragging = true;
-      this.dragStartX = e.clientX - this.offsetX;
-      this.dragStartY = e.clientY - this.offsetY;
+      const pt = this.screenToWorld(e.clientX, e.clientY);
+
+      // Handle Add Camera click mode
+      if (this.isAddingCamera) {
+        this.createNewCameraAt(pt.x, pt.y);
+        this.isAddingCamera = false;
+        const addBtn = document.getElementById('btnAddCameraTool');
+        if (addBtn) addBtn.classList.remove('btn-primary');
+        return;
+      }
+
+      // Check if clicking directly on a camera icon for dragging
+      const hitCam = this.cameras.find(c => {
+        const dx = pt.x - (c.floor_x || 100);
+        const dy = pt.y - (c.floor_y || 100);
+        return Math.sqrt(dx * dx + dy * dy) <= 18;
+      });
+
+      if (hitCam) {
+        this.draggedCamera = hitCam;
+        this.isDraggingCamera = true;
+      } else {
+        this.isDragging = true;
+        this.dragStartX = e.clientX - this.offsetX;
+        this.dragStartY = e.clientY - this.offsetY;
+      }
     });
 
     window.addEventListener('mousemove', (e) => {
-      if (this.isDragging) {
+      const pt = this.screenToWorld(e.clientX, e.clientY);
+
+      if (this.isDraggingCamera && this.draggedCamera) {
+        this.draggedCamera.floor_x = Math.round(pt.x);
+        this.draggedCamera.floor_y = Math.round(pt.y);
+      } else if (this.isDragging) {
         this.offsetX = e.clientX - this.dragStartX;
         this.offsetY = e.clientY - this.dragStartY;
       }
+
       this.checkHover(e);
     });
 
-    window.addEventListener('mouseup', () => {
+    window.addEventListener('mouseup', async () => {
+      if (this.isDraggingCamera && this.draggedCamera) {
+        const cam = this.draggedCamera;
+        this.isDraggingCamera = false;
+        this.draggedCamera = null;
+
+        // Persist new position via PATCH API
+        try {
+          await fetch(`/api/v1/cameras/${cam.camera_id}/position`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              floor_x: cam.floor_x,
+              floor_y: cam.floor_y,
+              azimuth_deg: cam.azimuth_deg || 0.0
+            })
+          });
+          if (typeof showToast === 'function') {
+            showToast(`📍 Repositioned ${cam.name} -> (${cam.floor_x}, ${cam.floor_y})`);
+          }
+        } catch (err) {
+          console.error('Failed to update camera position:', err);
+        }
+      }
       this.isDragging = false;
     });
 
-    this.canvas.addEventListener('click', (e) => {
+    // Double-click to configure camera
+    this.canvas.addEventListener('dblclick', (e) => {
       const pt = this.screenToWorld(e.clientX, e.clientY);
-      const clicked = this.zones.find(z => 
+      const hitCam = this.cameras.find(c => {
+        const dx = pt.x - (c.floor_x || 100);
+        const dy = pt.y - (c.floor_y || 100);
+        return Math.sqrt(dx * dx + dy * dy) <= 20;
+      });
+
+      if (hitCam) {
+        if (typeof openCameraConfigModal === 'function') {
+          openCameraConfigModal(hitCam.camera_id);
+        }
+      }
+    });
+
+    this.canvas.addEventListener('click', (e) => {
+      if (this.isDraggingCamera) return;
+      const pt = this.screenToWorld(e.clientX, e.clientY);
+
+      // Check zone selection
+      const clickedZone = this.zones.find(z => 
         pt.x >= z.x && pt.x <= z.x + z.w && pt.y >= z.y && pt.y <= z.y + z.h
       );
-      if (clicked) {
-        this.selectZone(clicked.id);
+      if (clickedZone) {
+        this.selectZone(clickedZone.id);
       }
     });
 
     // Touch Support for Mobile
     this.canvas.addEventListener('touchstart', (e) => {
       if (e.touches.length === 1) {
-        this.isDragging = true;
-        this.dragStartX = e.touches[0].clientX - this.offsetX;
-        this.dragStartY = e.touches[0].clientY - this.offsetY;
+        const pt = this.screenToWorld(e.touches[0].clientX, e.touches[0].clientY);
+        const hitCam = this.cameras.find(c => {
+          const dx = pt.x - (c.floor_x || 100);
+          const dy = pt.y - (c.floor_y || 100);
+          return Math.sqrt(dx * dx + dy * dy) <= 24;
+        });
+
+        if (hitCam) {
+          this.draggedCamera = hitCam;
+          this.isDraggingCamera = true;
+        } else {
+          this.isDragging = true;
+          this.dragStartX = e.touches[0].clientX - this.offsetX;
+          this.dragStartY = e.touches[0].clientY - this.offsetY;
+        }
       }
     }, { passive: true });
 
     this.canvas.addEventListener('touchmove', (e) => {
-      if (this.isDragging && e.touches.length === 1) {
-        this.offsetX = e.touches[0].clientX - this.dragStartX;
-        this.offsetY = e.touches[0].clientY - this.dragStartY;
+      if (e.touches.length === 1) {
+        const pt = this.screenToWorld(e.touches[0].clientX, e.touches[0].clientY);
+        if (this.isDraggingCamera && this.draggedCamera) {
+          this.draggedCamera.floor_x = Math.round(pt.x);
+          this.draggedCamera.floor_y = Math.round(pt.y);
+        } else if (this.isDragging) {
+          this.offsetX = e.touches[0].clientX - this.dragStartX;
+          this.offsetY = e.touches[0].clientY - this.dragStartY;
+        }
       }
     }, { passive: true });
 
-    this.canvas.addEventListener('touchend', (e) => {
-      this.isDragging = false;
-      if (e.changedTouches.length === 1) {
-        const t = e.changedTouches[0];
-        const pt = this.screenToWorld(t.clientX, t.clientY);
-        const clicked = this.zones.find(z => 
-          pt.x >= z.x && pt.x <= z.x + z.w && pt.y >= z.y && pt.y <= z.y + z.h
-        );
-        if (clicked) this.selectZone(clicked.id);
+    this.canvas.addEventListener('touchend', async (e) => {
+      if (this.isDraggingCamera && this.draggedCamera) {
+        const cam = this.draggedCamera;
+        this.isDraggingCamera = false;
+        this.draggedCamera = null;
+        try {
+          await fetch(`/api/v1/cameras/${cam.camera_id}/position`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              floor_x: cam.floor_x,
+              floor_y: cam.floor_y,
+              azimuth_deg: cam.azimuth_deg || 0.0
+            })
+          });
+          if (typeof showToast === 'function') {
+            showToast(`📍 Repositioned ${cam.name}`);
+          }
+        } catch (err) {}
       }
+      this.isDragging = false;
     });
+  }
+
+  async createNewCameraAt(worldX, worldY) {
+    const channelNum = this.cameras.length + 1;
+    const newId = `cam_custom_${channelNum}`;
+    const newCam = {
+      id: newId,
+      name: `CAM-${channelNum < 10 ? '0' + channelNum : channelNum}: New Zone Camera`,
+      location: 'Store Floor',
+      channel_number: channelNum,
+      department: 'GENERAL',
+      rtsp_url: `rtsp://admin:Pearcedale3912@192.168.20.160:554/cam/realmonitor?channel=${channelNum}&subtype=1`,
+      webrtc_url: `http://localhost:8000/api/v1/webrtc/offer?camera_id=${newId}`,
+      status: 'ONLINE',
+      fps: 25,
+      resolution: '1920x1080',
+      floor_x: Math.round(worldX),
+      floor_y: Math.round(worldY),
+      height_z: 3.2,
+      azimuth_deg: 0.0,
+      fov_deg: 85.0,
+      is_ai_enabled: true,
+      features: {
+        dwell_tracking: true,
+        shelf_interaction: true,
+        theft_detection: true,
+        fall_detection: true,
+        queue_monitoring: false
+      }
+    };
+
+    try {
+      const res = await fetch('/api/v1/cameras', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newCam)
+      });
+      if (res.ok) {
+        if (typeof showToast === 'function') {
+          showToast(`➕ Added Camera ${newCam.name}`);
+        }
+        await this.fetchFloorplanCameras();
+        if (typeof openCameraConfigModal === 'function') {
+          openCameraConfigModal(newId);
+        }
+      }
+    } catch (e) {
+      console.error('Failed to create camera:', e);
+    }
   }
 
   resizeCanvas() {
@@ -172,7 +341,6 @@ class StoreFloorplanHUD {
     this.heatCanvas.width = this.canvas.width;
     this.heatCanvas.height = this.canvas.height;
     
-    // Auto-fit initial scale to viewport
     const scaleX = this.canvas.width / this.worldWidth;
     const scaleY = this.canvas.height / this.worldHeight;
     this.scale = Math.min(scaleX, scaleY) * 0.95;
@@ -192,11 +360,30 @@ class StoreFloorplanHUD {
 
   checkHover(e) {
     const pt = this.screenToWorld(e.clientX, e.clientY);
-    const found = this.zones.find(z => 
+
+    // Check camera hover
+    const foundCam = this.cameras.find(c => {
+      const dx = pt.x - (c.floor_x || 100);
+      const dy = pt.y - (c.floor_y || 100);
+      return Math.sqrt(dx * dx + dy * dy) <= 18;
+    });
+    this.hoveredCamera = foundCam ? foundCam.camera_id : null;
+
+    // Check zone hover
+    const foundZone = this.zones.find(z => 
       pt.x >= z.x && pt.x <= z.x + z.w && pt.y >= z.y && pt.y <= z.y + z.h
     );
-    this.hoveredZoneId = found ? found.id : null;
-    this.canvas.style.cursor = found ? 'pointer' : (this.isDragging ? 'grabbing' : 'crosshair');
+    this.hoveredZoneId = foundZone ? foundZone.id : null;
+
+    if (this.isAddingCamera) {
+      this.canvas.style.cursor = 'copy';
+    } else if (foundCam) {
+      this.canvas.style.cursor = 'grab';
+    } else if (foundZone) {
+      this.canvas.style.cursor = 'pointer';
+    } else {
+      this.canvas.style.cursor = this.isDragging ? 'grabbing' : 'crosshair';
+    }
   }
 
   selectZone(zoneId) {
@@ -204,7 +391,6 @@ class StoreFloorplanHUD {
     const zone = this.zones.find(z => z.id === zoneId);
     if (!zone) return;
 
-    // Update Zone Inspector Panel in DOM
     const nameEl = document.getElementById('zoneInspectorName');
     const catEl = document.getElementById('zoneInspectorCat');
     const dwellEl = document.getElementById('zoneInspectorDwell');
@@ -243,7 +429,6 @@ class StoreFloorplanHUD {
         s.x += s.vx;
         s.y += s.vy;
 
-        // Bounce within store bounds
         if (s.x < 60 || s.x > this.worldWidth - 60) s.vx *= -1;
         if (s.y < 80 || s.y > this.worldHeight - 60) s.vy *= -1;
 
@@ -283,16 +468,19 @@ class StoreFloorplanHUD {
       this.drawShoppers(ctx);
     }
 
+    // 6. Draw Directional Camera FOV Cones & Icons
+    if (this.showCameras) {
+      this.drawCamerasAndFov(ctx);
+    }
+
     ctx.restore();
   }
 
   drawStoreBoundary(ctx) {
-    // Outer perimeter wall
     ctx.strokeStyle = 'rgba(0, 240, 255, 0.4)';
     ctx.lineWidth = 3;
     ctx.strokeRect(20, 40, this.worldWidth - 40, this.worldHeight - 60);
 
-    // Grid Floor
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.03)';
     ctx.lineWidth = 1;
     for (let x = 20; x < this.worldWidth; x += 40) {
@@ -302,7 +490,6 @@ class StoreFloorplanHUD {
       ctx.beginPath(); ctx.moveTo(20, y); ctx.lineTo(this.worldWidth - 20, y); ctx.stroke();
     }
 
-    // Main Store Label
     ctx.fillStyle = 'rgba(0, 240, 255, 0.6)';
     ctx.font = 'bold 13px "JetBrains Mono"';
     ctx.fillText('PEARCEDALE SUPERMARKET (VIC 3912) - 2D EDGE HUD BLUEPRINT', 30, 28);
@@ -313,21 +500,17 @@ class StoreFloorplanHUD {
       const isSelected = z.id === this.selectedZoneId;
       const isHovered = z.id === this.hoveredZoneId;
 
-      // Fixture Fill
       ctx.fillStyle = isSelected ? 'rgba(0, 240, 255, 0.25)' : (isHovered ? 'rgba(255, 255, 255, 0.12)' : 'rgba(16, 24, 38, 0.75)');
       ctx.fillRect(z.x, z.y, z.w, z.h);
 
-      // Fixture Border
       ctx.strokeStyle = isSelected ? 'var(--accent-cyan)' : (isHovered ? '#ffffff' : z.color);
       ctx.lineWidth = isSelected ? 2.5 : 1.5;
       ctx.strokeRect(z.x, z.y, z.w, z.h);
 
-      // Category Tag & Name
       ctx.fillStyle = isSelected ? '#ffffff' : 'rgba(240, 246, 252, 0.85)';
       ctx.font = 'bold 10.5px "Plus Jakarta Sans"';
       ctx.fillText(z.name, z.x + 6, z.y + 16, z.w - 12);
 
-      // Secondary metric label
       ctx.fillStyle = 'rgba(139, 148, 158, 0.9)';
       ctx.font = '9px "JetBrains Mono"';
       ctx.fillText(`Dwell: ${z.dwell} | ϕ: ${z.phi}`, z.x + 6, z.y + z.h - 8, z.w - 12);
@@ -372,15 +555,14 @@ class StoreFloorplanHUD {
     vectors.forEach(v => {
       ctx.beginPath();
       ctx.moveTo(v.from.x, v.from.y);
-      ctx.lineTo(v.to.x, v.to.y);
+      ctx.lineTo(v.from.y, v.to.y);
       ctx.stroke();
     });
     ctx.setLineDash([]);
   }
 
   drawShoppers(ctx) {
-    this.shoppers.forEach((s, idx) => {
-      // Shopper Outer Ring
+    this.shoppers.forEach((s) => {
       ctx.beginPath();
       ctx.arc(s.x, s.y, s.isDwelling ? 6 : 5, 0, Math.PI * 2);
       ctx.fillStyle = s.isDwelling ? '#ffaa00' : '#00ff9d';
@@ -389,7 +571,6 @@ class StoreFloorplanHUD {
       ctx.lineWidth = 1.5;
       ctx.stroke();
 
-      // Heading Vector Line
       if (!s.isDwelling) {
         ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
         ctx.lineWidth = 1.2;
@@ -398,6 +579,67 @@ class StoreFloorplanHUD {
         ctx.lineTo(s.x + s.vx * 8, s.y + s.vy * 8);
         ctx.stroke();
       }
+    });
+  }
+
+  drawCamerasAndFov(ctx) {
+    this.cameras.forEach(cam => {
+      const cx = cam.floor_x || 100;
+      const cy = cam.floor_y || 100;
+      const azimuth = (cam.azimuth_deg || 0) * (Math.PI / 180);
+      const fov = (cam.fov_deg || 85) * (Math.PI / 180);
+      const isHovered = this.hoveredCamera === cam.camera_id;
+      const radius = isHovered ? 85 : 70;
+
+      // 1. Draw Directional FOV Cone
+      const startAngle = azimuth - fov / 2;
+      const endAngle = azimuth + fov / 2;
+
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.arc(cx, cy, radius, startAngle, endAngle);
+      ctx.closePath();
+
+      const fovGrad = ctx.createRadialGradient(cx, cy, 5, cx, cy, radius);
+      fovGrad.addColorStop(0, isHovered ? 'rgba(0, 240, 255, 0.35)' : 'rgba(0, 240, 255, 0.18)');
+      fovGrad.addColorStop(1, 'rgba(0, 240, 255, 0.01)');
+      ctx.fillStyle = fovGrad;
+      ctx.fill();
+
+      ctx.strokeStyle = isHovered ? '#00f0ff' : 'rgba(0, 240, 255, 0.45)';
+      ctx.lineWidth = isHovered ? 1.8 : 1.0;
+      ctx.stroke();
+
+      // 2. Draw Centerline Aim
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(cx + Math.cos(azimuth) * radius, cy + Math.sin(azimuth) * radius);
+      ctx.strokeStyle = 'rgba(0, 255, 157, 0.6)';
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+
+      // 3. Draw Camera Mount Base Icon
+      ctx.beginPath();
+      ctx.arc(cx, cy, isHovered ? 9 : 7, 0, Math.PI * 2);
+      ctx.fillStyle = isHovered ? '#ffaa00' : '#00f0ff';
+      ctx.fill();
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      // 4. Camera Label Tag
+      ctx.fillStyle = 'rgba(10, 16, 28, 0.85)';
+      ctx.fillRect(cx - 24, cy - 22, 48, 14);
+      ctx.strokeStyle = 'rgba(0, 240, 255, 0.4)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(cx - 24, cy - 22, 48, 14);
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 9px "JetBrains Mono"';
+      ctx.textAlign = 'center';
+      const label = cam.name.split(':')[0] || `CAM-${cam.channel_number || '01'}`;
+      ctx.fillText(label, cx, cy - 12);
+      ctx.textAlign = 'start';
     });
   }
 
@@ -414,6 +656,7 @@ class StoreFloorplanHUD {
     if (layerName === 'heatmap') this.showHeatmap = isEnabled;
     if (layerName === 'shoppers') this.showShoppers = isEnabled;
     if (layerName === 'flow') this.showFlowVectors = isEnabled;
+    if (layerName === 'cameras') this.showCameras = isEnabled;
   }
 
   setIntensity(val) {
@@ -426,6 +669,21 @@ class StoreFloorplanHUD {
 
   resetView() {
     this.resizeCanvas();
+  }
+
+  toggleAddCameraMode() {
+    this.isAddingCamera = !this.isAddingCamera;
+    const addBtn = document.getElementById('btnAddCameraTool');
+    if (addBtn) {
+      if (this.isAddingCamera) {
+        addBtn.classList.add('btn-primary');
+        if (typeof showToast === 'function') {
+          showToast('🎯 Click anywhere on the floorplan to place a new camera.');
+        }
+      } else {
+        addBtn.classList.remove('btn-primary');
+      }
+    }
   }
 }
 

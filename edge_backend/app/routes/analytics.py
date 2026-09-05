@@ -342,30 +342,86 @@ async def get_analytics_overview(db: AsyncSession = Depends(get_db)):
 @router.get("/floorplan")
 async def get_floorplan_data(db: AsyncSession = Depends(get_db)):
     """Retrieve store blueprint layout, camera homography positions, active zones, and real-time shopper vectors."""
-    # Build cameras list with homography
-    cameras_list = [
-        {
-            "camera_id": "cam_entrance_main",
-            "name": "CAM-01: Main Entrance",
-            "position_2d": {"x": 100.0, "y": 750.0},
-            "fov_polygon": [{"x": 80.0, "y": 700.0}, {"x": 120.0, "y": 700.0}, {"x": 100.0, "y": 750.0}],
-            "homography_matrix": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
-        },
-        {
-            "camera_id": "cam_produce_front",
-            "name": "CAM-17: Fresh Produce",
-            "position_2d": {"x": 150.0, "y": 375.0},
-            "fov_polygon": [{"x": 100.0, "y": 300.0}, {"x": 200.0, "y": 300.0}, {"x": 150.0, "y": 375.0}],
-            "homography_matrix": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
-        },
-        {
-            "camera_id": "cam_pos_02",
-            "name": "CAM-22: POS Register 2",
-            "position_2d": {"x": 400.0, "y": 800.0},
-            "fov_polygon": [{"x": 350.0, "y": 750.0}, {"x": 450.0, "y": 750.0}, {"x": 400.0, "y": 800.0}],
-            "homography_matrix": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
-        }
-    ]
+    import math
+    # Query all cameras from database
+    stmt = select(CameraModel).order_by(CameraModel.channel_number.asc())
+    res = await db.execute(stmt)
+    db_cams = res.scalars().all()
+
+    cameras_list = []
+    if db_cams:
+        for c in db_cams:
+            fx = float(c.floor_x if c.floor_x is not None else 100.0)
+            fy = float(c.floor_y if c.floor_y is not None else 100.0)
+            azimuth = float(c.azimuth_deg if c.azimuth_deg is not None else 0.0)
+            fov = float(c.fov_deg if c.fov_deg is not None else 85.0)
+
+            rad_azimuth = math.radians(azimuth)
+            rad_half_fov = math.radians(fov / 2.0)
+            theta1 = rad_azimuth - rad_half_fov
+            theta2 = rad_azimuth + rad_half_fov
+            reach = 60.0
+
+            p0 = {"x": round(fx, 1), "y": round(fy, 1)}
+            p1 = {"x": round(fx + reach * math.sin(theta1), 1), "y": round(fy - reach * math.cos(theta1), 1)}
+            p2 = {"x": round(fx + reach * math.sin(theta2), 1), "y": round(fy - reach * math.cos(theta2), 1)}
+
+            cameras_list.append({
+                "camera_id": c.id,
+                "name": c.name,
+                "department": c.department or "GENERAL",
+                "channel_number": c.channel_number or 1,
+                "position_2d": {"x": round(fx, 1), "y": round(fy, 1)},
+                "floor_x": round(fx, 1),
+                "floor_y": round(fy, 1),
+                "height_z": c.floor_z or 3.2,
+                "azimuth_deg": round(azimuth, 1),
+                "fov_deg": round(fov, 1),
+                "fov_polygon": [p0, p1, p2],
+                "rtsp_url": c.rtsp_url,
+                "fps": c.fps,
+                "resolution": c.resolution,
+                "location": c.location,
+                "status": c.status,
+                "features": c.features or {}
+            })
+    else:
+        from .cameras import DEFAULT_CAMERAS
+        for cam in DEFAULT_CAMERAS:
+            fx = float(getattr(cam, "floor_x", 100.0) or 100.0)
+            fy = float(getattr(cam, "floor_y", 100.0) or 100.0)
+            azimuth = float(getattr(cam, "azimuth_deg", 0.0) or 0.0)
+            fov = float(getattr(cam, "fov_deg", 85.0) or 85.0)
+
+            rad_azimuth = math.radians(azimuth)
+            rad_half_fov = math.radians(fov / 2.0)
+            theta1 = rad_azimuth - rad_half_fov
+            theta2 = rad_azimuth + rad_half_fov
+            reach = 60.0
+
+            p0 = {"x": round(fx, 1), "y": round(fy, 1)}
+            p1 = {"x": round(fx + reach * math.sin(theta1), 1), "y": round(fy - reach * math.cos(theta1), 1)}
+            p2 = {"x": round(fx + reach * math.sin(theta2), 1), "y": round(fy - reach * math.cos(theta2), 1)}
+
+            cameras_list.append({
+                "camera_id": cam.id,
+                "name": cam.name,
+                "channel_number": getattr(cam, "channel_number", 1) or 1,
+                "department": getattr(cam, "department", "GENERAL") or "GENERAL",
+                "position_2d": {"x": round(fx, 1), "y": round(fy, 1)},
+                "floor_x": round(fx, 1),
+                "floor_y": round(fy, 1),
+                "height_z": getattr(cam, "floor_z", getattr(cam, "height_z", 3.2)) or 3.2,
+                "azimuth_deg": round(azimuth, 1),
+                "fov_deg": round(fov, 1),
+                "fov_polygon": [p0, p1, p2],
+                "rtsp_url": cam.rtsp_url,
+                "fps": cam.fps,
+                "resolution": cam.resolution,
+                "location": cam.location,
+                "status": cam.status if isinstance(cam.status, str) else (cam.status.value if hasattr(cam.status, "value") else "ONLINE"),
+                "features": cam.features.model_dump() if hasattr(cam.features, "model_dump") else (cam.features.dict() if hasattr(cam.features, "dict") else (cam.features or {}))
+            })
 
     active_shoppers = [
         {"id": "c1", "x": 0.15, "y": 0.35, "vx": 0.01, "vy": 0.02, "zone": "zone_produce", "dwell_sec": 45},

@@ -5,8 +5,9 @@ import time
 import os
 import sqlite3
 import asyncio
+from datetime import datetime, timedelta
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from sqlalchemy import event, text
+from sqlalchemy import event, text, select, func
 from sqlalchemy.pool import QueuePool
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from app.config import settings
@@ -91,7 +92,7 @@ async def init_db():
     from app.models.db_models import Base, CameraModel, AIDecisionRecommendationModel
     from app.routes.cameras import DEFAULT_CAMERAS
     from app.services.backup_service import backup_service
-    from sqlalchemy import select
+    from sqlalchemy import select, func
 
     logger.info("Initializing database schema...")
     def _run_migrations_sync(sync_conn):
@@ -144,6 +145,52 @@ async def init_db():
         except Exception as e:
             logger.debug(f"Table pos_transactions migration check skipped: {e}")
 
+        # 3. Ensure cameras columns
+        try:
+            res_cam = sync_conn.execute(text("PRAGMA table_info(cameras);")).fetchall()
+            cam_cols = {row[1] for row in res_cam}
+            needed_cam_cols = {
+                "channel_number": "INTEGER DEFAULT 1",
+                "department": "VARCHAR(64) DEFAULT 'GENERAL'",
+                "floor_x": "FLOAT DEFAULT 100.0",
+                "floor_y": "FLOAT DEFAULT 100.0",
+                "floor_z": "FLOAT DEFAULT 3.2",
+                "azimuth_deg": "FLOAT DEFAULT 0.0",
+                "fov_deg": "FLOAT DEFAULT 85.0",
+                "homography_matrix": "JSON",
+                "features": "JSON"
+            }
+            for col, col_type in needed_cam_cols.items():
+                if cam_cols and col not in cam_cols:
+                    try:
+                        sync_conn.execute(text(f"ALTER TABLE cameras ADD COLUMN {col} {col_type};"))
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.debug(f"Table cameras migration check skipped: {e}")
+
+        # 4. Ensure theft_incidents columns
+        try:
+            res_theft = sync_conn.execute(text("PRAGMA table_info(theft_incidents);")).fetchall()
+            theft_cols = {row[1] for row in res_theft}
+            needed_theft_cols = {
+                "camera_name": "VARCHAR(128) DEFAULT 'Camera'",
+                "shelf_zone_id": "VARCHAR(64)",
+                "evidence_summary": "VARCHAR(1024) DEFAULT ''",
+                "snapshot_path": "VARCHAR(512)",
+                "clip_path": "VARCHAR(512)",
+                "officer_notes": "VARCHAR(1024)",
+                "updated_at": "DATETIME"
+            }
+            for col, col_type in needed_theft_cols.items():
+                if theft_cols and col not in theft_cols:
+                    try:
+                        sync_conn.execute(text(f"ALTER TABLE theft_incidents ADD COLUMN {col} {col_type};"))
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.debug(f"Table theft_incidents migration check skipped: {e}")
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await conn.run_sync(_run_migrations_sync)
@@ -153,17 +200,37 @@ async def init_db():
         try:
             res = await session.execute(select(CameraModel))
             existing_cams = res.scalars().all()
-            existing_ids = {c.id for c in existing_cams}
-            missing_cams = [c for c in DEFAULT_CAMERAS if (c.id if hasattr(c, "id") else c["id"]) not in existing_ids]
-            if missing_cams:
-                logger.info(f"Syncing {len(missing_cams)} supermarket cameras into SQLite DB...")
-                valid_cols = set(CameraModel.__table__.columns.keys())
-                for c in missing_cams:
-                    c_data = c.model_dump() if hasattr(c, "model_dump") else (dict(c) if isinstance(c, dict) else c.__dict__)
-                    filtered = {k: (v.value if hasattr(v, "value") else v) for k, v in c_data.items() if k in valid_cols}
+            existing_dict = {c.id: c for c in existing_cams}
+            valid_cols = set(CameraModel.__table__.columns.keys())
+
+            for c in DEFAULT_CAMERAS:
+                c_id = c.id if hasattr(c, "id") else c["id"]
+                c_data = c.model_dump() if hasattr(c, "model_dump") else (dict(c) if isinstance(c, dict) else c.__dict__)
+                filtered = {k: (v.value if hasattr(v, "value") else v) for k, v in c_data.items() if k in valid_cols}
+
+                if c_id not in existing_dict:
                     session.add(CameraModel(**filtered))
-                await session.commit()
-                logger.info(f"All {len(DEFAULT_CAMERAS)} supermarket cameras synchronized in database.")
+                else:
+                    # Update department, floor coordinates, channel_number on existing records
+                    existing = existing_dict[c_id]
+                    if filtered.get("department"):
+                        existing.department = filtered["department"]
+                    if "channel_number" in filtered:
+                        existing.channel_number = filtered["channel_number"]
+                    if "floor_x" in filtered:
+                        existing.floor_x = filtered["floor_x"]
+                    if "floor_y" in filtered:
+                        existing.floor_y = filtered["floor_y"]
+                    if "floor_z" in filtered:
+                        existing.floor_z = filtered["floor_z"]
+                    if "azimuth_deg" in filtered:
+                        existing.azimuth_deg = filtered["azimuth_deg"]
+                    if "fov_deg" in filtered:
+                        existing.fov_deg = filtered["fov_deg"]
+                    if "homography_matrix" in filtered and filtered["homography_matrix"]:
+                        existing.homography_matrix = filtered["homography_matrix"]
+            await session.commit()
+            logger.info("All 32 supermarket cameras synchronized with floorplan coordinates and departments.")
         except Exception as e:
             logger.error(f"Failed to seed cameras: {e}")
             await session.rollback()
@@ -273,6 +340,63 @@ async def init_db():
                 logger.info("AI store recommendations successfully initialized.")
         except Exception as e:
             logger.error(f"Failed to initialize store recommendations: {e}")
+            await session.rollback()
+
+        # Check TheftIncidentModel
+        try:
+            from app.models.db_models import TheftIncidentModel
+            from datetime import timedelta
+            theft_res = await session.execute(select(func.count(TheftIncidentModel.id)))
+            theft_count = theft_res.scalar() or 0
+            if theft_count == 0:
+                logger.info("Initializing initial supermarket theft alerts...")
+                now_utc = datetime.utcnow()
+                initial_thefts = [
+                    TheftIncidentModel(
+                        id="theft_inc_liquor_01",
+                        timestamp=now_utc - timedelta(minutes=14),
+                        camera_id="cam_liquor_zone",
+                        camera_name="CAM-27: Liquor & Premium Spirits",
+                        department="LIQUOR",
+                        shelf_zone_id="shelf_spirits_01",
+                        theft_type="SHELF_SWEEPING",
+                        severity="CRITICAL",
+                        confidence=0.94,
+                        person_track_id="trk_8821",
+                        evidence_summary="Rapid shelf clearing: 6 bottles of Glenfiddich 18yr swept into duffle bag in 11 seconds.",
+                        status="ACTIVE",
+                        snapshot_path="/storage/snapshots/theft_liquor_01.jpg",
+                        clip_path="/storage/clips/theft_liquor_01.mp4",
+                        officer_notes="Suspect wearing dark hoodie near premium spirits cabinet.",
+                        created_at=now_utc - timedelta(minutes=14),
+                        updated_at=now_utc - timedelta(minutes=14)
+                    ),
+                    TheftIncidentModel(
+                        id="theft_inc_pharm_02",
+                        timestamp=now_utc - timedelta(minutes=32),
+                        camera_id="cam_aisle_09",
+                        camera_name="CAM-13: Aisle 9 - Health & Pharmacy",
+                        department="AISLE",
+                        shelf_zone_id="shelf_pharmacy_cosmetics",
+                        theft_type="CONCEALMENT",
+                        severity="HIGH",
+                        confidence=0.89,
+                        person_track_id="trk_9014",
+                        evidence_summary="Concealment detected: 3 premium skincare items concealed inside jacket.",
+                        status="ACTIVE",
+                        snapshot_path="/storage/snapshots/theft_pharm_02.jpg",
+                        clip_path="/storage/clips/theft_pharm_02.mp4",
+                        officer_notes="Loss prevention officer notified; suspect moving toward Aisle 10.",
+                        created_at=now_utc - timedelta(minutes=32),
+                        updated_at=now_utc - timedelta(minutes=32)
+                    )
+                ]
+                for th in initial_thefts:
+                    session.add(th)
+                await session.commit()
+                logger.info("Initial theft alerts successfully seeded.")
+        except Exception as e:
+            logger.error(f"Failed to initialize theft incidents: {e}")
             await session.rollback()
 
     # Trigger startup backup and prune old backups

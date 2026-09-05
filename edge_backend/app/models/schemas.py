@@ -138,6 +138,10 @@ class CameraFeatureConfig(BaseModel):
     intrusion_zones_enabled: bool = True
     privacy_masks_enabled: bool = True
     dvr_recording_24_7: bool = True
+    dwell_tracking: bool = True
+    shelf_interaction: bool = True
+    theft_detection: bool = True
+    queue_monitoring: bool = True
     sub_stream_fps: int = 5
     main_stream_fps: int = 25
 
@@ -212,6 +216,8 @@ class CameraFeed(BaseModel):
     id: str
     name: str
     location: str
+    channel_number: int = 1
+    department: str = "GENERAL"
     rtsp_url: str = ""
     webrtc_url: str = ""
     status: Any = "ONLINE"
@@ -219,13 +225,77 @@ class CameraFeed(BaseModel):
     resolution: str = "1920x1080"
     is_ai_enabled: bool = True
     ai_models: List[str] = Field(default_factory=lambda: ["yolov5n", "kinematic_pose"])
-    features: CameraFeatureConfig = Field(default_factory=CameraFeatureConfig)
+    features: Any = Field(default_factory=CameraFeatureConfig)
     dvr_enabled: bool = True
     dvr_retention_days: int = 7
     dvr_quota_gb: float = 100.0
+    floor_x: float = 100.0
+    floor_y: float = 100.0
+    floor_z: float = 3.2
+    height_z: Optional[float] = 3.2
+    azimuth_deg: float = 0.0
+    fov_deg: float = 85.0
+    homography_matrix: Optional[List[Any]] = None
     last_seen: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class CameraCreate(BaseModel):
+    id: str
+    name: str
+    location: str
+    rtsp_url: str
+    webrtc_url: Optional[str] = ""
+    status: str = "ONLINE"
+    fps: int = 25
+    resolution: str = "1920x1080"
+    is_ai_enabled: bool = True
+    ai_models: List[str] = Field(default_factory=lambda: ["yolov5n"])
+    channel_number: int = 1
+    department: str = "GENERAL"
+    floor_x: float = 100.0
+    floor_y: float = 100.0
+    floor_z: float = 3.2
+    azimuth_deg: float = 0.0
+    fov_deg: float = 85.0
+    homography_matrix: Optional[List[Any]] = None
+    features: Optional[Dict[str, Any]] = None
+    dvr_enabled: bool = True
+    dvr_retention_days: int = 7
+    dvr_quota_gb: float = 100.0
+
+
+class CameraUpdate(BaseModel):
+    name: Optional[str] = None
+    location: Optional[str] = None
+    rtsp_url: Optional[str] = None
+    webrtc_url: Optional[str] = None
+    status: Optional[str] = None
+    fps: Optional[int] = None
+    resolution: Optional[str] = None
+    is_ai_enabled: Optional[bool] = None
+    ai_models: Optional[List[str]] = None
+    channel_number: Optional[int] = None
+    department: Optional[str] = None
+    floor_x: Optional[float] = None
+    floor_y: Optional[float] = None
+    floor_z: Optional[float] = None
+    azimuth_deg: Optional[float] = None
+    fov_deg: Optional[float] = None
+    homography_matrix: Optional[List[Any]] = None
+    features: Optional[Dict[str, Any]] = None
+    dvr_enabled: Optional[bool] = None
+    dvr_retention_days: Optional[int] = None
+    dvr_quota_gb: Optional[float] = None
+
+
+class CameraPositionUpdate(BaseModel):
+    floor_x: float
+    floor_y: float
+    floor_z: Optional[float] = 3.2
+    azimuth_deg: float
+    fov_deg: float = 85.0
 
 
 class CameraListResponse(BaseModel):
@@ -609,4 +679,124 @@ class RestoreResponse(BaseModel):
     status: str
     message: str
     filename: str
+
+
+# ---------------- Theft & Loss Prevention ----------------
+
+class TheftType(str, Enum):
+    SHELF_SWEEPING = "SHELF_SWEEPING"
+    CONCEALMENT = "CONCEALMENT"
+    SWEETHEARTING = "SWEETHEARTING"
+    PUSHOUT_EXIT_BYPASS = "PUSHOUT_EXIT_BYPASS"
+
+
+class TheftIncidentStatus(str, Enum):
+    ACTIVE = "ACTIVE"
+    ACKNOWLEDGED = "ACKNOWLEDGED"
+    DISPATCHED = "DISPATCHED"
+    RESOLVED = "RESOLVED"
+    FALSE_ALARM = "FALSE_ALARM"
+
+
+class TheftIncidentBase(BaseModel):
+    theft_type: str
+    severity: str = "HIGH"
+    status: str = "ACTIVE"
+    department: str = "General"
+    camera_id: str
+    camera_name: str = "Camera"
+    shelf_zone_id: Optional[str] = None
+    confidence: float = 0.85
+    estimated_loss_value: float = 0.0
+    items_involved: List[Dict[str, Any]] = Field(default_factory=list)
+    evidence_snapshot_url: Optional[str] = None
+    evidence_clip_url: Optional[str] = None
+    snapshot_path: Optional[str] = None
+    clip_path: Optional[str] = None
+    evidence_summary: str = ""
+    officer_notes: Optional[str] = None
+    bounding_box: Optional[Dict[str, Any]] = None
+    wrist_trajectory: Optional[List[Dict[str, Any]]] = None
+    notes: Optional[str] = None
+    zone_id: Optional[str] = None
+
+
+class TheftIncidentCreate(TheftIncidentBase):
+    pass
+
+
+class TheftIncident(TheftIncidentBase):
+    id: str
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    person_track_id: Optional[str] = None
+    guard_id: Optional[str] = None
+    dispatch_details: Optional[Dict[str, Any]] = None
+    resolution: Optional[str] = None
+    resolved_at: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class TheftIncidentListResponse(BaseModel):
+    status: str = "success"
+    total: int
+    incidents: List[TheftIncident]
+
+
+class TheftActionRequest(BaseModel):
+    status: str  # ACTIVE, ACKNOWLEDGED, DISPATCHED, RESOLVED, FALSE_ALARM
+    officer_notes: Optional[str] = None
+
+
+class TheftSimulationRequest(BaseModel):
+    camera_id: str
+    theft_type: str = "SHELF_SWEEPING"
+    department: Optional[str] = None
+    shelf_zone_id: Optional[str] = None
+    severity: str = "HIGH"
+    confidence: float = 0.91
+    evidence_summary: Optional[str] = None
+
+
+class TheftStatsResponse(BaseModel):
+    total_active: int = 0
+    by_type: Dict[str, int] = Field(default_factory=dict)
+    by_department: Dict[str, int] = Field(default_factory=dict)
+    by_severity: Dict[str, int] = Field(default_factory=dict)
+    high_risk_zones: List[str] = Field(default_factory=list)
+
+
+class TheftStatisticsResponse(BaseModel):
+    active_incidents_count: int
+    today_incidents_count: int
+    prevented_loss_estimate: float
+    by_department: Dict[str, int]
+    by_theft_type: Dict[str, int]
+    generated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class TheftAcknowledgeRequest(BaseModel):
+    guard_id: str = "guard_01"
+
+
+class TheftDispatchRequest(BaseModel):
+    guard_unit: str = "Unit 1 - Floor Guard"
+    audio_deterrent: bool = True
+    announcement_type: Optional[str] = "CUSTOMER_ASSISTANCE_GREETING"
+
+
+class TheftResolveRequest(BaseModel):
+    resolution: str = "RECOVERED_GOODS"  # RECOVERED_GOODS, POLICE_DISPATCHED, SUSPECT_FLED, FALSE_ALARM
+    notes: Optional[str] = None
+
+
+class TheftSimulateRequest(BaseModel):
+    theft_type: str = "SHELF_SWEEPING"
+    camera_id: str = "cam_liquor_zone"
+    department: str = "Liquor & Spirits"
+    estimated_loss_value: Optional[float] = None
+
+
 
