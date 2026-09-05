@@ -313,7 +313,11 @@
   </div>
 
   <div class="card card-warning" style="margin-top:6px;">
-    <strong>Hardware Decoder Critical Mandate (Dual NVDEC):</strong> Decoding 32 concurrent RTSP video streams via software on the CPU consumes &gt;90% of a 16-core processor. An NVIDIA Ada Lovelace GPU with <strong>Dual 8th Gen NVDEC engines</strong> decodes over 100 streams of 720p/1080p in dedicated silicon at &lt;15% decoder utilization.
+    <strong>Hardware Decoder Architecture & Single NVDEC Throughput:</strong> Decoding 32 concurrent RTSP video streams via software on the CPU consumes &gt;90% of a 16-core processor. The RTX 4070 Ti Super (AD103) features <strong>1x 5th-Gen NVDEC hardware decoder</strong> (paired with Dual 8th-Gen NVENC encoders). A single 5th-Gen NVDEC engine decodes over <strong>3,800 FPS of 720p H.264/H.265</strong> (&gt;120 concurrent streams at 30 FPS). At 32 cameras &times; 3 FPS decimated = 96 FPS aggregate, the single NVDEC engine runs at &lt;3% capacity (&lt;25% load even at full 30 FPS).
+  </div>
+
+  <div class="card card-warning" style="margin-top:6px; border-color:#ef4444; background:#fef2f2;">
+    <strong style="color:#b91c1c;">CRITICAL PROCUREMENT WARNING (SUPER vs. NON-SUPER):</strong> Only procure the <strong>RTX 4070 Ti SUPER (16GB VRAM, AD103 die)</strong> or <strong>RTX 5070 Ti (16GB GDDR7, GB203 die)</strong>. The baseline non-Super <em>RTX 4070 Ti</em> has only 12GB VRAM on a 192-bit bus and is strictly disqualified as 12GB will trigger fatal Out-of-Memory (OOM) crashes during peak traffic.
   </div>
 
   <!-- ========================================================
@@ -338,15 +342,26 @@
     </thead>
     <tbody>
       <tr>
-        <td><strong>Dedicated GPU<br><span class="badge badge-blue">Crucial</span></strong></td>
+        <td><strong>Dedicated GPU<br><span class="badge badge-blue">Option A (Ada)</span></strong></td>
         <td>
           <strong>NVIDIA GeForce RTX 4070 Ti Super (16GB GDDR6X)</strong><br>
           <em>Models: ASUS TUF Gaming, MSI Ventus 3X, Gigabyte OC</em>
         </td>
         <td>
-          Features <strong>Dual 8th Gen NVDEC hardware video decoders</strong> capable of decoding 32+ streams simultaneously; 16GB VRAM prevents OOM; 700+ Tensor TOPS.
+          Features <strong>1x 5th-Gen NVDEC decoder</strong> (>3,800 FPS 720p decode capacity) + <strong>Dual 8th-Gen NVENC</strong>; 16GB VRAM on 256-bit bus prevents OOM; 706 Tensor TOPS.
         </td>
         <td><strong>$799 – $849</strong></td>
+      </tr>
+      <tr>
+        <td><strong>Dedicated GPU<br><span class="badge badge-purple">Option B (Blackwell)</span></strong></td>
+        <td>
+          <strong>NVIDIA GeForce RTX 5070 Ti (16GB GDDR7)</strong><br>
+          <em>(Blackwell GB203-300, 8,960 CUDA Cores)</em>
+        </td>
+        <td>
+          <strong>896 GB/s memory bandwidth (+33% over 4070 Ti Super)</strong>; 5th-Gen Tensor Cores with native FP4 precision; 1x 6th-Gen NVDEC + 2x 9th-Gen NVENC; 300W TDP (use 850W ATX 3.1 PSU).
+        </td>
+        <td><strong>$749 MSRP</strong></td>
       </tr>
       <tr>
         <td><strong>Host Processor (CPU)</strong></td>
@@ -395,13 +410,13 @@
       <tr>
         <td><strong>Power Supply (PSU)</strong></td>
         <td>
-          <strong>Corsair RM750e (750W, 80+ Gold, ATX 3.0)</strong><br>
-          <em>Native 12VHPWR PCIe 5.0 GPU cable</em>
+          <strong>Corsair RM750e (750W) or RM850e (850W) 80+ Gold</strong><br>
+          <em>Native 12V-2x6 / 12VHPWR PCIe 5.0 ATX 3.0/3.1</em>
         </td>
         <td>
-          System peak draw is 240W–280W. A 750W 80+ Gold unit operates in its peak 50% efficiency sweet spot (silent fan mode) and handles transient power spikes.
+          System peak draw is 250W–310W. 750W is ideal for 4070 Ti Super (285W TDP); 850W is recommended for RTX 5070 Ti (300W TDP) to ensure 50% efficiency sweet spot.
         </td>
-        <td><strong>$99 – $115</strong></td>
+        <td><strong>$99 – $129</strong></td>
       </tr>
       <tr>
         <td><strong>Case / Chassis</strong></td>
