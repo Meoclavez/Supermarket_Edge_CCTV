@@ -29,17 +29,18 @@ $$\begin{aligned}
 \end{aligned}$$
 * **Network Requirement:** A single 1 GbE or 2.5 GbE NIC easily absorbs this bandwidth (utilizing less than 7% of a 1 GbE interface, or <3% of a 2.5 GbE interface).
 
-### B. Hardware Video Decoding (NVDEC / QuickSync)
-* Continuous decoding of 32 concurrent 720p streams requires dedicated multi-stream hardware video decode engines.
+### B. Hardware Video Decoding (Single 5th-Gen NVDEC vs. Dual NVENC)
+* Continuous decoding of 32 concurrent 720p streams requires dedicated hardware video decode logic.
 * Software CPU decoding 32 streams would consume $\approx 80\text{–}100\%$ of a 16-core CPU.
-* In contrast, an **NVIDIA Ada Lovelace GPU with Dual NVDEC** decodes 32 streams of 720p at $<15\%$ decoder load.
+* **NVDEC Architecture Clarification:** The **RTX 4070 Ti Super (AD103)** features **1x NVDEC decoder (5th-Gen)** and **2x NVENC encoders (8th-Gen)**. (Dual NVDEC is only present on AD102 / RTX 4090).
+* **Single NVDEC Empirical Throughput:** A single 5th-Gen NVDEC engine decodes over **3,800 FPS of 720p H.264/H.265** (equivalent to >120 concurrent 720p streams at 30 FPS). At 32 cameras $\times$ 3 FPS decimated = **96 FPS aggregate**, the single NVDEC engine operates at **$<3\%$ compute capacity** (or $<25\%$ even if decoding 32 streams at full 30 FPS). Hence, single-decoder capacity provides immense headroom for 30+ cameras.
 
 ### C. Aggregate AI Inference Frame Rate
 $$\text{Aggregate AI FPS} = 32\text{ Cameras} \times 3.0\text{ FPS (Decimated)} = \mathbf{96\text{ FPS}}$$
 $$\text{Per-Batch Processing Budget} = \frac{1000\text{ ms}}{96\text{ FPS}} \approx \mathbf{10.4\text{ ms}}$$
-* TensorRT 10.x running batched YOLOv11s on an RTX 4070 Ti Super / RTX 4080 executes in **$\approx 1.8\text{ ms}$ to $3.0\text{ ms}$**, leaving over **$70\%$ compute headroom** for secondary keypoint pose estimation and Re-ID feature extraction.
+* TensorRT 10.x running batched YOLOv11s on an RTX 4070 Ti Super / RTX 5070 Ti executes in **$\approx 1.8\text{ ms}$ to $2.8\text{ ms}$**, leaving over **$70\%$ compute headroom** for secondary keypoint pose estimation and Re-ID feature extraction.
 
-### D. VRAM Allocation Model
+### D. VRAM Allocation Model & Critical "SUPER" Mandate
 $$V_{\text{total}} = V_{\text{frame\_buffers}} + V_{\text{models}} + V_{\text{cuda\_context}} + V_{\text{headroom}}$$
 
 $$\begin{aligned}
@@ -51,24 +52,29 @@ V_{\text{local\_llm\_headroom}} &\approx \mathbf{4.5\text{ GB to } 6.0\text{ GB}
 \mathbf{Total\ Minimum\ VRAM} &\approx \mathbf{11.5\text{ GB to } 13.0\text{ GB}} \implies \mathbf{16\text{ GB VRAM Minimum Required}}
 \end{aligned}$$
 
+> [!WARNING]
+> **CRITICAL PROCUREMENT MANDATE: RTX 4070 Ti SUPER vs. NON-SUPER**  
+> Do NOT purchase the baseline **RTX 4070 Ti (non-Super)**. It contains only **12GB VRAM** on a narrow 192-bit bus (AD104 die) and will encounter Out-of-Memory (OOM) fatal crashes during peak evening multi-camera tracking. **Only the RTX 4070 Ti SUPER (16GB VRAM, AD103 die, 256-bit bus) or RTX 5070 Ti (16GB GDDR7, GB203 die) satisfies this 16GB minimum requirement.**
+
 ---
 
 ## 3. Hardware Architecture Comparison Matrix (30+ Cameras)
 
-| Parameter | **Option A: Custom Edge Workstation** <br> *(Top Recommendation - Best Value & Power)* | **Option B: Enterprise 1U/2U Rack Server** <br> *(Best for Datacenter / Server Rack)* | **Option C: NVIDIA Jetson AGX Orin (64GB)** <br> *(Best for Compact / Fanless Space)* |
+| Parameter | **Option A: Custom Edge Workstation** <br> *(Top Recommendation - Best Value & Power)* | **Option B: Next-Gen Blackwell Build** <br> *(High-Bandwidth Upgrade)* | **Option C: Enterprise 1U/2U Rack Server** <br> *(Best for Datacenter / Server Rack)* |
 | :--- | :--- | :--- | :--- |
-| **Supported Cameras** | **30 – 48 Cameras** | **30 – 64+ Cameras** | **25 – 36 Cameras** |
-| **GPU Model** | **NVIDIA RTX 4070 Ti Super (16GB)** or **RTX 4080 Super (16GB)** | **NVIDIA RTX 4000 Ada (20GB)** or **NVIDIA L4 (24GB)** | Integrated Ampere GPU (64GB Unified) |
-| **GPU Architecture** | Ada Lovelace (AD103, 16GB GDDR6X) | Ada Lovelace Enterprise (Single-Slot, ECC) | Ampere (2048 CUDA Cores, 64 Tensor) |
-| **Video Decoders** | **Dual 8th Gen NVDEC** (Decodes >100 720p streams) | **Dual NVDEC + AV1 Decode** (Enterprise 24/7) | Hardware VPU (Up to 30x 1080p30) |
-| **AI Performance** | **44 TFLOPS (FP16) / 700+ TOPS** | **300+ TOPS (INT8) / 20GB ECC** | **275 TOPS (INT8)** |
-| **Host CPU** | **Intel Core i7-14700** (20 Cores / 28 Threads) | Intel Xeon E-2488 (8C/16T) or AMD EPYC 4004 | 12-core ARM Cortex-A78AE |
-| **System RAM** | **32 GB – 64 GB DDR5-5600MHz** | **64 GB DDR5 ECC** | 64 GB LPDDR5 (Unified Memory) |
-| **Storage** | 2TB PCIe 4.0 NVMe SSD (7,000+ MB/s) | Dual 1.92TB Enterprise NVMe (RAID-1) | 1TB M.2 PCIe NVMe |
-| **Power Consumption** | 65W Idle / 220W–280W Peak | 80W Idle / 180W–240W Peak | 15W Idle / 45W–60W Peak |
-| **Form Factor** | Micro-ATX / Compact Mid-Tower | 19" 1U/2U Rackmount Chassis | Industrial Rugged Fanless Box |
-| **Est. System Cost** | **$1,750 – $2,050 USD** | **$3,200 – $4,500 USD** | **$2,100 – $2,600 USD** |
-| **Recommendation** | ⭐⭐⭐⭐⭐ **(Best ROI, Upgradable, Standard x86)** | ⭐⭐⭐⭐☆ **(Best for Enterprise Server Rooms)** | ⭐⭐⭐⭐☆ **(Best for Fanless Environments)** |
+| **Supported Cameras** | **30 – 48 Cameras** | **30 – 64+ Cameras** | **30 – 64+ Cameras** |
+| **GPU Model** | **NVIDIA RTX 4070 Ti Super (16GB)** | **NVIDIA RTX 5070 Ti (16GB GDDR7)** | **NVIDIA RTX 4000 Ada (20GB)** or **L4 (24GB)** |
+| **GPU Architecture** | Ada Lovelace (AD103, 16GB GDDR6X) | Blackwell (GB203-300, 16GB GDDR7) | Ada Lovelace Enterprise (Single-Slot, ECC) |
+| **Video Decoders** | **1x 5th Gen NVDEC** (>3,800 FPS 720p decode) | **1x 6th Gen NVDEC** (AV1/HEVC upgraded VPU) | **1x NVDEC + AV1 Decode** (Enterprise 24/7) |
+| **Video Encoders** | **2x 8th Gen NVENC** (Dual AV1/HEVC encoders) | **2x 9th Gen NVENC** (Dual AV1 4:2:2 pro) | **2x 8th Gen NVENC** (Dual encoders) |
+| **Memory Bandwidth** | **672 GB/s** (256-bit GDDR6X) | **896 GB/s** (256-bit GDDR7 — +33% faster) | **360 GB/s** (160-bit GDDR6 ECC) |
+| **AI Performance** | **706 Tensor TOPS (FP16/INT8)** | **900+ Tensor TOPS (Native FP4/FP8)** | **300+ TOPS (INT8) / 20GB ECC** |
+| **Host CPU** | **Intel Core i7-14700** (20C/28T + UHD 770) | **Intel Core i7-14700** (20C/28T + UHD 770) | Intel Xeon E-2488 (8C/16T) or AMD EPYC |
+| **System RAM** | **32 GB – 64 GB DDR5-5600MHz** | **32 GB – 64 GB DDR5-6000MHz** | **64 GB DDR5 ECC** |
+| **Storage** | 2TB PCIe 4.0 NVMe SSD (7,000+ MB/s) | 2TB PCIe 4.0/5.0 NVMe SSD (7,400+ MB/s) | Dual 1.92TB Enterprise NVMe (RAID-1) |
+| **Power Consumption** | 65W Idle / 240W–280W Peak (750W PSU) | 70W Idle / 280W–320W Peak (850W ATX3.1 PSU) | 80W Idle / 180W–240W Peak |
+| **Est. System Cost** | **$1,799 – $2,025 USD** | **$1,850 – $2,100 USD** (MSRP $749 GPU) | **$3,200 – $4,500 USD** |
+| **Recommendation** | ⭐⭐⭐⭐⭐ **(Proven Stability, Standard x86)** | ⭐⭐⭐⭐⭐ **(Best Future-Proofing & Speed)** | ⭐⭐⭐⭐☆ **(Best for Enterprise Server Rooms)** |
 
 ---
 
@@ -112,9 +118,11 @@ This build uses standard, high-reliability commercial components optimized for 2
 
 ## 5. Architectural & Deployment Validation
 
-### 1. Dual NVDEC Hardware Decoding
-* Standard GeForce RTX 40-series cards feature unrestricted hardware decoding sessions (NVDEC).
-* The **RTX 4070 Ti Super** contains **Dual 8th Gen NVDEC engines**, allowing parallel decode of 30+ 720p/1080p H.264/H.265 streams with negligible CPU overhead (<10% CPU usage).
+### 1. Dedicated Hardware Video Decoding (Single NVDEC Architecture)
+* Standard GeForce RTX 40-series and 50-series cards feature unrestricted hardware decoding sessions (NVDEC).
+* The **RTX 4070 Ti Super (AD103)** contains **1x 5th-Gen NVDEC engine** (paired with **Dual 8th-Gen NVENC encoders**).
+* **Throughput Validation:** A single 5th-Gen NVDEC engine delivers **>3,800 FPS of 720p H.264/H.265 throughput**. For 32 cameras decimated to 3 FPS (96 aggregate FPS), the single decoder engine runs at **<3% compute load** (and <25% load even at full 30 FPS). It decodes 30+ streams with near-zero CPU overhead (<8% CPU load).
+* **Blackwell RTX 5070 Ti (GB203):** Features **1x 6th-Gen NVDEC engine** with upgraded AV1/HEVC decoding efficiency and higher silicon throughput.
 
 ### 2. Supermarket Network Topology & Isolation
 ```
