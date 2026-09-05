@@ -392,6 +392,58 @@ DEFAULT_CAMERAS = [
         ai_models=["yolov5n_forklift", "perimeter_intrusion"],
         features=CameraFeatureConfig(intrusion_zones_enabled=True, privacy_masks_enabled=True)
     ),
+    CameraFeed(
+        id="cam_aisle_13",
+        name="CAM-29: Aisle 13 - International Foods & Spices",
+        location="Aisles",
+        rtsp_url="rtsp://admin:Pearcedale3912@192.168.20.160:554/cam/realmonitor?channel=29&subtype=1",
+        webrtc_url="http://localhost:8000/api/v1/webrtc/offer?camera_id=cam_aisle_13",
+        status=CameraStatus.ONLINE,
+        fps=25,
+        resolution="1920x1080",
+        is_ai_enabled=True,
+        ai_models=["yolov5n_dwell"],
+        features=CameraFeatureConfig(tripwires_enabled=True, intrusion_zones_enabled=True)
+    ),
+    CameraFeed(
+        id="cam_aisle_14",
+        name="CAM-30: Aisle 14 - Pet Care & Bulk Household",
+        location="Aisles",
+        rtsp_url="rtsp://admin:Pearcedale3912@192.168.20.160:554/cam/realmonitor?channel=30&subtype=1",
+        webrtc_url="http://localhost:8000/api/v1/webrtc/offer?camera_id=cam_aisle_14",
+        status=CameraStatus.ONLINE,
+        fps=25,
+        resolution="1920x1080",
+        is_ai_enabled=True,
+        ai_models=["yolov5n_dwell"],
+        features=CameraFeatureConfig(tripwires_enabled=True, intrusion_zones_enabled=True)
+    ),
+    CameraFeed(
+        id="cam_cold_room",
+        name="CAM-31: Walk-in Cold Room & Dairy Staging",
+        location="Backroom / Cold Chain",
+        rtsp_url="rtsp://admin:Pearcedale3912@192.168.20.160:554/cam/realmonitor?channel=31&subtype=1",
+        webrtc_url="http://localhost:8000/api/v1/webrtc/offer?camera_id=cam_cold_room",
+        status=CameraStatus.ONLINE,
+        fps=25,
+        resolution="1920x1080",
+        is_ai_enabled=True,
+        ai_models=["yolov5n_cold_storage"],
+        features=CameraFeatureConfig(fall_detection=True, intrusion_zones_enabled=True)
+    ),
+    CameraFeed(
+        id="cam_dock_receiving",
+        name="CAM-32: Rear Receiving Dock & Compactor",
+        location="Backroom / Dock",
+        rtsp_url="rtsp://admin:Pearcedale3912@192.168.20.160:554/cam/realmonitor?channel=32&subtype=1",
+        webrtc_url="http://localhost:8000/api/v1/webrtc/offer?camera_id=cam_dock_receiving",
+        status=CameraStatus.ONLINE,
+        fps=25,
+        resolution="1920x1080",
+        is_ai_enabled=True,
+        ai_models=["perimeter_intrusion", "yolov5n_forklift"],
+        features=CameraFeatureConfig(intrusion_zones_enabled=True, privacy_masks_enabled=True)
+    ),
 ]
 
 CURRENT_ACTIVE_SOURCE = {"url": "synthetic", "name": "CAM-01: Main Entrance (Live)"}
