@@ -1,0 +1,31 @@
+
+Detection Accuracy (mAP 50-95): Mean Average Precision on COCO is 39.5 for Nano, 47.0 for Small, and 51.5 for Medium.
+
+
+
+The biggest bottleneck in 32-camera systems is usually video decoding, not AI inference. If the CPU had to decode 32 software H.264/H.265 video streams, even a 16-core CPU would hit 100% load.instead use a dedicated gpu or cpu with igpu
+
+
+Intel Core Ultra 7 265F does not have Intel Quick Sync Video.
+so must use dedicated gpu
+16 gb ram is ok, but limited for continous processing, needs testing.
+16gb vram is mandatory
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                 DEDICATED GPU VRAM ALLOCATION (32 CAMERAS)                  │
+├──────────────────────────────────────────┬──────────────────┬───────────────┤
+│ Workload Component                       │ Allocation (GB)  │ Memory Type   │
+├──────────────────────────────────────────┼──────────────────┼───────────────┤
+│ 1. Hardware Video Decoding (32 Streams)  │ 0.90 – 1.20 GB   │ NVDEC / VCN   │
+│ 2. Color Space & Frame Batch Staging     │ 0.80 – 1.10 GB   │ CUDA / VRAM   │
+│ 3. Multi-Model Vision Neural Networks    │ 2.75 – 3.00 GB   │ TensorRT FP16 │
+│ 4. CUDA Driver, cuDNN & Display Context  │ 2.20 – 2.50 GB   │ System VRAM   │
+├──────────────────────────────────────────┼──────────────────┼───────────────┤
+│ 🔹 BASE VISION SUB-TOTAL (Decoding + CV) │ 6.65 – 7.80 GB   │ ~7.2 GB Avg   │
+├──────────────────────────────────────────┼──────────────────┼───────────────┤
+│ 5. Local Market LLM (Ollama 8B Model)    │ 5.20 – 6.00 GB   │ Weights+KV    │
+│ 6. Dynamic Peak Operational Headroom     │ 1.50 – 1.80 GB   │ Burst Buffer  │
+├──────────────────────────────────────────┼──────────────────┼───────────────┤
+│ 🌟 TOTAL COMBINED VRAM FOOTPRINT         │ 13.35 – 15.60 GB │ 16 GB Mandate │
+└──────────────────────────────────────────┴──────────────────┴───────────────┘
+
