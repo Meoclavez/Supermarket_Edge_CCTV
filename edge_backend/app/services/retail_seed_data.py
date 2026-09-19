@@ -23,6 +23,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from pydantic import BaseModel, Field
 
+from ..config import settings
+
 from .retail_analytics_service import (
     CameraTracklet,
     DemographicsReport,
@@ -651,7 +653,7 @@ class SupermarketSeedDataManager:
     """Central manager for loading, seeding, and retrieving realistic supermarket simulation data."""
 
     def __init__(self, storage_path: Optional[Path] = None):
-        self.storage_path = storage_path or Path("/home/meoclavezz/Projects-1/Edge_AI_CCTV/storage/retail_simulation_dataset.json")
+        self.storage_path = storage_path or (settings.STORAGE_DIR / "retail_simulation_dataset.json")
         self._cached_dataset: Optional[Dict[str, Any]] = None
 
     def generate_full_dataset(self, total_customers: int = 500) -> Dict[str, Any]:

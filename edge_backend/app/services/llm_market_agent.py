@@ -262,11 +262,12 @@ class LLMMarketReasoningAgent:
             if resp.status == 200:
                 res_json = json.loads(resp.read().decode("utf-8"))
                 text = (res_json.get("response") or "").strip()
+                if text:
+                    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
                 if not text:
-                    # Check thinking if response is empty
+                    # Check thinking if response is empty or entirely thinking tags
                     thinking = (res_json.get("thinking") or "").strip()
                     if thinking:
-                        # Extract non-meta text if available
                         clean_think = re.sub(r"^(The user wants|Let me|I need to).*", "", thinking, flags=re.MULTILINE).strip()
                         if clean_think:
                             text = clean_think[:250]

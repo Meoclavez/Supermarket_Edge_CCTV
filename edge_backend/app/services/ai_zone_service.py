@@ -13,7 +13,7 @@ from ..config import settings
 from ..models.schemas import Point2D, TripwireDirection, ZoneConfig, ZoneType, MaskMode
 
 logger = logging.getLogger("AIZoneService")
-ZONES_CONFIG_FILE = Path("/home/meoclavezz/Projects-1/Edge_AI_CCTV/storage/zones_config.json")
+ZONES_CONFIG_FILE = settings.STORAGE_DIR / "zones_config.json"
 ZONES_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 

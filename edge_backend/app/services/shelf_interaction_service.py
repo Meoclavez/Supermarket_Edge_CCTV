@@ -17,10 +17,11 @@ from typing import Dict, List, Optional, Tuple, Any
 from pydantic import BaseModel, Field
 
 from app.services.ai_zone_service import PolygonGeometry
+from app.config import settings
 
 logger = logging.getLogger("ShelfInteractionService")
 
-STORAGE_PATH = Path("/home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/storage/shelf_products_config.json")
+STORAGE_PATH = settings.STORAGE_DIR / "shelf_products_config.json"
 STORAGE_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 

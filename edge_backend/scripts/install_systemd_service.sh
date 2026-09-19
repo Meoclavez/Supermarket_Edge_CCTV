@@ -6,9 +6,13 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 CURRENT_USER=$(whoami)
-PROJECT_DIR="/home/meoclavezz/Projects-1/Edge_AI_CCTV"
-VENV_PYTHON="/home/meoclavezz/.venv/bin/python"
+VENV_PYTHON="$PROJECT_DIR/.venv/bin/python"
+if [ ! -f "$VENV_PYTHON" ]; then
+    VENV_PYTHON=$(which python3)
+fi
 SERVICE_FILE="/etc/systemd/system/edge-cctv.service"
 
 echo "🛡️ Installing Edge AI CCTV Systemd Service for user: $CURRENT_USER"
@@ -39,7 +43,7 @@ TimeoutStopSec=10
 # Hardware Acceleration & Real-time Priority
 LimitNOFILE=65536
 Environment=PYTHONUNBUFFERED=1
-Environment=PATH=/home/meoclavezz/.venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=$(dirname "$VENV_PYTHON"):/usr/local/bin:/usr/bin:/bin
 
 [Install]
 WantedBy=multi-user.target
