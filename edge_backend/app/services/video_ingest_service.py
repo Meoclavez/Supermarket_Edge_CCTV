@@ -64,22 +64,6 @@ class ThreadedVideoIngestWorker:
                     logger.warning(f"Circuit OPEN for {self.camera_id}. Emitting CAMERA_OFFLINE & triggering auto-recovery search.")
                     ServiceHealthTracker.report_status("video_ingest", "degraded", f"Camera {self.camera_id} offline")
                     was_open = True
-                    # Trigger background dynamic IP auto-recovery scan
-                    try:
-                        import asyncio
-                        from app.services.camera_network_manager import camera_network_manager
-                        loop = None
-                        try:
-                            loop = asyncio.get_running_loop()
-                        except RuntimeError:
-                            pass
-                        if loop and loop.is_running():
-                            asyncio.run_coroutine_threadsafe(
-                                camera_network_manager.attempt_auto_recover(self.camera_id, self.rtsp_url),
-                                loop
-                            )
-                    except Exception as e:
-                        logger.debug(f"Auto-recovery dispatch note: {e}")
                 time.sleep(1.0)
                 continue
             

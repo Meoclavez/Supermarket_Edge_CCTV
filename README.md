@@ -70,10 +70,22 @@ Connects directly to a **cross-platform Flutter client (PC Web/Desktop, Android,
 
 ---
 
+## 🖥️ Store Dashboard & First-Run Setup
+
+The web dashboard at `http://<server-ip>:8000/dashboard` starts **empty**: no
+zones, rooms, cameras or metrics are pre-seeded, and nothing shown is
+simulated. The operator builds the store up in the **Blueprint** tab: sign in →
+Store size → draw rooms / walls / zones → Scan for cameras → Add → place the
+camera → Calibrate (4+ floor points, image ↔ plan) → people appear on the plan.
+`POST /api/v1/layout/reset` (`{"confirm":"RESET"}`) returns the install to that
+empty state. The full step-by-step is in [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
+
+---
+
 ## 📦 Project Structure
 
 ```
-Edge_AI_CCTV/
+Supermarket_Edge_CCTV/
 ├── .agents/
 │   ├── project_map.md                        # Complete project architecture & API index
 │   ├── system_architecture_spec.md           # Exhaustive hardware & algorithm specification
@@ -184,7 +196,7 @@ Requires=docker.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-WorkingDirectory=/home/meoclavezz/Projects-1/Edge_AI_CCTV/edge_backend
+WorkingDirectory=/opt/edge-cctv/edge_backend
 ExecStart=/usr/bin/docker compose up -d
 ExecStop=/usr/bin/docker compose down
 TimeoutStartSec=0
@@ -262,12 +274,13 @@ pytest tests/ -v
 # Test WebRTC ICE servers
 curl -s http://localhost:8000/api/v1/webrtc/ice-servers | jq .
 
-# Simulate critical fall event
+# Post a test fall event for a camera you have already added
+# (there are no built-in demo cameras; use an id from GET /api/v1/cameras)
 curl -X POST http://localhost:8000/api/v1/events/trigger \
   -H "Content-Type: application/json" \
-  -H "X-Edge-API-Key: edge_ai_vision_internal_secret" \
+  -H "X-Edge-API-Key: $INTERNAL_SERVICE_KEY" \
   -d '{
-    "camera_id": "cam_living_room",
+    "camera_id": "<camera_id>",
     "event_type": "FALL_DETECTED",
     "severity": "CRITICAL",
     "confidence": 0.96,

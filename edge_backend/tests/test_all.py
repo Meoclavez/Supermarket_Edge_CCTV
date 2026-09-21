@@ -12,7 +12,6 @@ from app.services.hardware_detector import HardwareDetector
 from app.services.feature_manager import FeatureManager
 from app.services.kinematic_fall_engine import KinematicFallEngine
 from app.services.ai_zone_service import PolygonGeometry, ai_zone_service
-from app.services.camera_network_manager import CameraScanner
 from app.models.schemas import Point2D, CameraFeatureConfig, EventType, EventSeverity
 
 class TestHardwareAndFeatures(unittest.TestCase):
@@ -61,11 +60,6 @@ class TestScannerAndAPIs(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
 
-    def test_camera_scanner(self):
-        sources = CameraScanner.discover_all()
-        self.assertGreater(len(sources), 0)
-        self.assertTrue(any(s["type"] == "SYNTHETIC" for s in sources))
-
     def test_dashboard_and_studio_html(self):
         res1 = self.client.get("/dashboard")
         self.assertEqual(res1.status_code, 200)
@@ -74,6 +68,13 @@ class TestScannerAndAPIs(unittest.TestCase):
         res2 = self.client.get("/dashboard/studio")
         self.assertEqual(res2.status_code, 200)
         self.assertIn("interactiveCanvas", res2.text)
+
+        # analytics.html was a duplicate of index.html and is gone; both
+        # analytics routes serve the one dashboard page.
+        for path in ("/dashboard/analytics", "/analytics"):
+            res3 = self.client.get(path)
+            self.assertEqual(res3.status_code, 200)
+            self.assertEqual(res3.text, res1.text)
 
     def test_zones_api_persistence(self):
         # Create tripwire
@@ -96,11 +97,26 @@ class TestScannerAndAPIs(unittest.TestCase):
         self.assertEqual(del_res.status_code, 200)
 
     def test_cameras_scan_endpoint(self):
+        """Scan reports what discovery actually found -- possibly nothing.
+
+        This used to assert at least one source, which only held because the
+        endpoint returned a canned list. It now performs real USB/ONVIF
+        discovery, so on a machine with no cameras attached zero is the correct
+        and honest answer.
+        """
         res = self.client.post("/api/v1/cameras/scan")
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertEqual(data["status"], "success")
-        self.assertGreater(len(data["sources"]), 0)
+        self.assertIsInstance(data["sources"], list)
+        self.assertGreaterEqual(data["count"], 0)
+        self.assertEqual(data["count"], len(data["sources"]))
+        for source in data["sources"]:
+            self.assertIn("id", source)
+            self.assertIn("transport", source)
+            self.assertIn("driver", source)
+            self.assertIn("reachable", source)
+            self.assertIsInstance(source["stream_urls"], list)
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,6 +16,41 @@ from app.models.schemas import (
 from app.services.theft_detection_service import theft_detection_service
 
 
+def insert_incident(**overrides) -> str:
+    """Write a TheftIncidentModel row directly.
+
+    The API no longer has a /simulate endpoint: an incident exists only because
+    a detector (or, in tests, this helper) wrote one. Nothing here is served
+    to a client as an observation.
+    """
+    import uuid
+
+    fields = dict(
+        id=f"theft_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:6]}",
+        theft_type="SHELF_SWEEPING",
+        severity="HIGH",
+        status=TheftIncidentStatus.ACTIVE.value,
+        department="Test Department",
+        camera_id="cam_test",
+        zone_id="zone_test",
+        timestamp=datetime.utcnow(),
+        person_track_id="track_test",
+        confidence=0.5,
+        estimated_loss_value=0.0,
+        items_involved=[{"sku": "TEST", "name": "test item", "price": 1.0, "qty": 1}],
+        notes="inserted by test",
+    )
+    fields.update(overrides)
+
+    async def _write():
+        async with async_session_factory() as session:
+            session.add(TheftIncidentModel(**fields))
+            await session.commit()
+
+    asyncio.run(_write())
+    return fields["id"]
+
+
 @pytest.fixture(scope="session", autouse=True)
 def init_test_database():
     """Ensure database schema is created and initialized."""
@@ -206,28 +241,15 @@ class TestTheftAPIIntegration:
     def setup_client(self):
         self.client = TestClient(app)
 
-    def test_simulate_theft_endpoint(self):
-        """Test POST /api/v1/theft/simulate creates a real DB record."""
-        payload = {
-            "theft_type": "SHELF_SWEEPING",
-            "camera_id": "cam_liquor_zone",
-            "department": "Liquor & Spirits",
-            "estimated_loss_value": 320.0,
-        }
-        res = self.client.post("/api/v1/theft/simulate", json=payload)
-        assert res.status_code == 200
-        data = res.json()
-        assert data["id"].startswith("theft_")
-        assert data["theft_type"] == "SHELF_SWEEPING"
-        assert data["department"] == "Liquor & Spirits"
-        assert data["estimated_loss_value"] == 320.0
-        assert data["status"] == TheftIncidentStatus.ACTIVE.value
-        assert len(data["items_involved"]) > 0
+    def test_simulate_endpoint_is_gone(self):
+        """POST /api/v1/theft/simulate no longer exists: incidents are never invented."""
+        res = self.client.post("/api/v1/theft/simulate", json={"theft_type": "SHELF_SWEEPING"})
+        assert res.status_code in (404, 405)
 
     def test_list_theft_incidents_endpoint(self):
         """Test GET /api/v1/theft/incidents with query filters."""
         # Ensure at least one incident exists
-        self.client.post("/api/v1/theft/simulate", json={"theft_type": "CONCEALMENT", "department": "Cosmetics"})
+        insert_incident(theft_type="CONCEALMENT", department="Cosmetics")
 
         res = self.client.get("/api/v1/theft/incidents?department=Cosmetics&limit=10")
         assert res.status_code == 200
@@ -239,6 +261,7 @@ class TestTheftAPIIntegration:
 
     def test_theft_statistics_endpoint(self):
         """Test GET /api/v1/theft/statistics."""
+        insert_incident(theft_type="CONCEALMENT", department="Cosmetics")
         res = self.client.get("/api/v1/theft/statistics")
         assert res.status_code == 200
         data = res.json()
@@ -250,16 +273,14 @@ class TestTheftAPIIntegration:
         assert data["active_incidents_count"] >= 1
 
     def test_theft_lifecycle_acknowledge_dispatch_resolve(self):
-        """Test complete incident workflow: simulate -> acknowledge -> dispatch -> resolve."""
-        # 1. Simulate incident
-        sim_res = self.client.post("/api/v1/theft/simulate", json={
-            "theft_type": "SWEETHEARTING",
-            "camera_id": "cam_checkout_02",
-            "department": "Front Checkouts",
-            "estimated_loss_value": 75.0,
-        })
-        assert sim_res.status_code == 200
-        incident_id = sim_res.json()["id"]
+        """Test complete incident workflow: insert -> acknowledge -> dispatch -> resolve."""
+        # 1. An incident written by a detector (stood in for by a direct insert)
+        incident_id = insert_incident(
+            theft_type="SWEETHEARTING",
+            camera_id="cam_checkout_02",
+            department="Front Checkouts",
+            estimated_loss_value=75.0,
+        )
 
         # 2. Acknowledge
         ack_res = self.client.post(f"/api/v1/theft/incidents/{incident_id}/acknowledge", json={"guard_id": "guard_mike_104"})

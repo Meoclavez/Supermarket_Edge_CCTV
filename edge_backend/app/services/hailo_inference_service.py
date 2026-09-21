@@ -199,7 +199,7 @@ class HailoInferenceService:
             logger.info("HailoRT platform library initialized.")
             self.device_available = True
         except Exception as e:
-            logger.warning(f"HailoRT driver not available or failed to load: {e}. Operating in high-precision simulated engine.")
+            logger.info(f"HailoRT not present ({e}); Hailo inference disabled. Person detection runs on the ONNX Runtime backend selected in inference_backend.py.")
             self.device_available = False
 
     @property
@@ -225,17 +225,17 @@ class HailoInferenceService:
         start_time = time.time()
 
         try:
-            # Simulate circuit breaker logic and inference
             if not getattr(self, "_circuit_breaker", None):
                 self._circuit_breaker = CircuitBreaker("hailo_inference", failure_threshold=3, recovery_timeout=10.0)
 
             if not self._circuit_breaker.can_execute():
-                logger.warning("Hailo circuit OPEN, falling back to CPU simulated mode.")
+                logger.warning("Hailo circuit OPEN; Hailo inference paused until the breaker recovers.")
                 ServiceHealthTracker.report_status("hailo_inference", "degraded", "Circuit OPEN, using CPU fallback")
                 # CPU Fallback would go here
             else:
                 try:
-                    # Simulated Hailo execution
+                    # No HEF pipeline is wired yet: this service emits no events
+                    # and never fabricates one. Detection comes from inference_backend.
                     pass
                     self._circuit_breaker.record_success()
                 except Exception as e:

@@ -1,0 +1,61 @@
+[Unit]
+Description=Edge AI CCTV - on-premise store analytics
+Documentation=file:///opt/edge-cctv/docs/DEPLOYMENT.md
+# Cameras are reached over the LAN, so do not start until the network is
+# actually configured; the pipeline retries per camera regardless, but this
+# avoids a burst of failed connections at every boot.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=edgecctv
+Group=edgecctv
+
+WorkingDirectory=/opt/edge-cctv/edge_backend
+EnvironmentFile=/opt/edge-cctv/edge_backend/.env
+
+ExecStart=/opt/edge-cctv/.venv/bin/uvicorn app.main:app \
+    --host 0.0.0.0 --port 8000 --workers 1
+
+# Single worker is deliberate: the camera workers, their frame buffers and the
+# in-memory fact buffer live in this process. A second worker would open a
+# second connection to every camera and double the decode load while
+# double-counting nothing useful.
+
+Restart=always
+RestartSec=5
+# A camera that fails repeatedly must not take the whole service into a
+# restart loop that systemd eventually gives up on.
+StartLimitIntervalSec=0
+
+# Recording and model loading are memory-hungry; fail loudly rather than
+# letting the OOM killer take an unrelated process.
+MemoryHigh=3G
+MemoryMax=4G
+
+# Hardening. The service needs its storage directory, the video devices and
+# the network, and nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/edge-cctv/storage
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+
+# USB/CSI cameras and GPU render nodes for hardware decode and inference.
+DeviceAllow=char-video4linux rw
+DeviceAllow=char-drm rw
+SupplementaryGroups=video render
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=edge-cctv
+
+[Install]
+WantedBy=multi-user.target

@@ -1,4 +1,10 @@
-"""Unit tests for Camera CRUD endpoints, position patching, department listing, and theft alert seeding."""
+"""Unit tests for Camera CRUD, position patching, department listing, and theft incidents.
+
+The floor plan is now a metric blueprint: a camera is placed at ``floor_x`` /
+``floor_y`` metres and drawn from its own azimuth and FOV. The old
+``position_2d`` pixel pair and the pre-computed ``fov_polygon`` triangle are
+gone. Theft incidents are no longer seeded either.
+"""
 
 import pytest
 import asyncio
@@ -7,8 +13,8 @@ from sqlalchemy import select, func
 
 from app.main import app
 from app.config import settings
-from app.database import async_session_factory, init_db
-from app.models.db_models import CameraModel, TheftIncidentModel
+from app.database import async_session_factory, engine, init_db
+from app.models.db_models import Base, CameraModel, TheftIncidentModel
 from app.services.auth_service import auth_service
 
 
@@ -104,16 +110,30 @@ def test_camera_crud_lifecycle(client, auth_headers):
     assert get_patched.status_code == 200
     assert get_patched.json()["floor_x"] == 512.0
 
-    # 6. Verify floorplan dynamic reflection
+    # 6. Verify floorplan dynamic reflection (metres, not a pixel pair)
     floorplan_res = client.get("/api/v1/analytics/floorplan", headers=auth_headers)
     assert floorplan_res.status_code == 200
     floor_data = floorplan_res.json()
-    assert "cameras" in floor_data
+    assert floor_data["units"] == "metres"
     matched = next((c for c in floor_data["cameras"] if c["camera_id"] == test_cam_id), None)
     assert matched is not None
-    assert matched["position_2d"]["x"] == 512.0
-    assert "fov_polygon" in matched
-    assert len(matched["fov_polygon"]) == 3
+
+    assert matched["floor_x"] == 512.0
+    assert matched["floor_y"] == 620.0
+    assert matched["floor_z"] == 3.0
+    assert matched["azimuth_deg"] == 225.0
+    assert matched["fov_deg"] == 80.0
+    assert matched["name"] == "CAM-99: Upgraded Aisle Rover v2"
+    assert matched["department"] == "LOGISTICS"
+
+    # The client draws the cone from azimuth + FOV; the server no longer ships
+    # a pre-baked triangle, and there is no pixel-space position any more.
+    assert "position_2d" not in matched
+    assert "fov_polygon" not in matched
+
+    # Without a homography this camera cannot place anyone on the floor, and
+    # the payload says so rather than implying coverage it does not have.
+    assert matched["has_homography"] is False
 
     # 7. Delete camera
     del_res = client.delete(f"/api/v1/cameras/{test_cam_id}", headers=auth_headers)
@@ -125,25 +145,53 @@ def test_camera_crud_lifecycle(client, auth_headers):
     assert get_deleted.status_code == 404
 
 
-def test_theft_incident_seeding():
-    """Verify TheftIncidentModel is seeded with active incidents during init_db."""
+def test_theft_incidents_not_seeded():
+    """The theft log starts empty and only fills from real detections.
+
+    This used to require two seeded incidents -- a LIQUOR "shelf sweeping" and
+    a PHARMACY "concealment" -- that no camera had ever observed. init_db seeds
+    nothing now; an incident has to be produced by the detector. The
+    /simulate endpoint that invented one on demand is gone.
+    """
     async def _check():
-        await init_db()
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
         async with async_session_factory() as session:
-            theft_count = (await session.execute(select(func.count(TheftIncidentModel.id)))).scalar()
-            assert theft_count >= 2
+            before = (await session.execute(
+                select(func.count()).select_from(TheftIncidentModel)
+            )).scalar()
 
-            # Check Liquor alert
-            stmt_liq = select(TheftIncidentModel).where(TheftIncidentModel.department == "LIQUOR")
-            liq_inc = (await session.execute(stmt_liq)).scalars().first()
-            assert liq_inc is not None
-            assert liq_inc.theft_type == "SHELF_SWEEPING"
-            assert liq_inc.status == "ACTIVE"
+        await init_db()
 
-            # Check Pharmacy alert
-            stmt_pharm = select(TheftIncidentModel).where(TheftIncidentModel.theft_type == "CONCEALMENT")
-            pharm_inc = (await session.execute(stmt_pharm)).scalars().first()
-            assert pharm_inc is not None
-            assert pharm_inc.confidence >= 0.85
+        async with async_session_factory() as session:
+            after = (await session.execute(
+                select(func.count()).select_from(TheftIncidentModel)
+            )).scalar()
+            assert after == before
+
+            # The two fabricated alerts are gone.
+            fabricated = (await session.execute(
+                select(TheftIncidentModel).where(
+                    TheftIncidentModel.theft_type.in_(["SHELF_SWEEPING", "CONCEALMENT"]),
+                    TheftIncidentModel.department.in_(["LIQUOR", "PHARMACY"]),
+                    TheftIncidentModel.person_track_id.is_(None),
+                )
+            )).scalars().all()
+            assert fabricated == []
 
     asyncio.run(_check())
+
+
+def test_theft_simulate_endpoint_removed(client, auth_headers):
+    """No route may invent an incident. Only a detector write creates one."""
+    async def _count():
+        async with async_session_factory() as session:
+            return (await session.execute(
+                select(func.count()).select_from(TheftIncidentModel)
+            )).scalar()
+
+    before = asyncio.run(_count())
+    res = client.post("/api/v1/theft/simulate", headers=auth_headers)
+    assert res.status_code in (404, 405), res.text
+    assert asyncio.run(_count()) == before

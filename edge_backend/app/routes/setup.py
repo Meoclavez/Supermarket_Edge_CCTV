@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -6,6 +8,7 @@ from typing import Dict, Any, Optional, List
 from app.database import get_db
 from app.services.setup_service import setup_service
 from app.services.auth_service import auth_service
+from app.config import settings
 
 router = APIRouter()
 
@@ -34,7 +37,8 @@ class TestCameraReq(BaseModel):
     url: str
 
 class ScanNetworkReq(BaseModel):
-    subnet: Optional[str] = "192.168.1.0/24"
+    # None = let discovery derive the subnet from the host's own interfaces.
+    subnet: Optional[str] = None
 
 async def verify_setup_or_admin_access(
     request: Request,
@@ -56,6 +60,33 @@ async def get_setup_status(session: AsyncSession = Depends(get_db)):
         "current_step": current_step,
         "hardware_report": hardware
     }
+
+@router.get("/auth/status")
+async def get_auth_status(request: Request, session: AsyncSession = Depends(get_db)):
+    """Whether an operator account exists, and whether this caller is signed in.
+
+    The dashboard needs this before it can decide between a first-run account
+    setup and an ordinary sign-in. It is deliberately unauthenticated, and
+    reveals only whether *an* account exists -- never who, or how many.
+    """
+    from sqlalchemy import func, select
+
+    from app.models.db_models import AdminUserModel
+
+    count = await session.scalar(select(func.count(AdminUserModel.id)))
+
+    authenticated = False
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        payload = auth_service.verify_token(auth_header.split(" ", 1)[1])
+        authenticated = bool(payload and payload.get("type") == "user_session")
+
+    return {
+        "admin_exists": bool(count),
+        "authenticated": authenticated,
+        "debug_bypass_active": settings.DEBUG,
+    }
+
 
 @router.post("/setup/admin")
 async def create_first_admin(req: AdminCreateReq, session: AsyncSession = Depends(get_db)):
@@ -87,9 +118,12 @@ async def scan_cameras(
     session: AsyncSession = Depends(get_db),
     has_access: bool = Depends(verify_setup_or_admin_access)
 ):
-    subnet = req.subnet if req and req.subnet else "192.168.1.0/24"
-    results = await setup_service.scan_rtsp_cameras(subnet)
-    return {"cameras": results}
+    """Discover cameras on USB and the network. Reports only devices that answered."""
+    from app.services.camera_discovery import camera_discovery_service
+
+    subnet = req.subnet if req and req.subnet else None
+    found = await camera_discovery_service.discover(subnet=subnet)
+    return {"cameras": [d.to_dict() for d in found], "count": len(found)}
 
 @router.post("/setup/test-camera")
 async def test_camera(
@@ -114,12 +148,19 @@ async def add_cameras(
     session: AsyncSession = Depends(get_db),
     has_access: bool = Depends(verify_setup_or_admin_access)
 ):
+    """Persist cameras entered during setup.
+
+    Status, fps and resolution are not written here: they are measured by the
+    pipeline worker once the stream is open. The previous version stored
+    ONLINE / 25 fps / 1920x1080 for every camera before a single frame had
+    been read, and started a second, independent RTSP reader per camera.
+    """
     from app.models.db_models import CameraModel
-    from app.services.video_ingest_service import video_ingest_service
+    from app.services.pipeline_supervisor import pipeline_supervisor
     import uuid
 
     added = []
-    for idx, c in enumerate(req.cameras):
+    for c in req.cameras:
         cam_id = f"cam_{uuid.uuid4().hex[:8]}"
         webrtc_url = f"{settings.EDGE_BASE_URL}/api/v1/webrtc/offer?camera_id={cam_id}"
 
@@ -129,22 +170,24 @@ async def add_cameras(
             location=c.location,
             rtsp_url=c.rtsp_url,
             webrtc_url=webrtc_url,
-            status="ONLINE",
-            fps=25,
-            resolution="1920x1080",
+            status="OFFLINE",
+            fps=0,
+            resolution="unknown",
             is_ai_enabled=True,
-            ai_models=["yolov8n", "yolov8n_pose"],
+            ai_models=[],
             dvr_enabled=True,
             dvr_retention_days=7,
             dvr_quota_gb=100.0,
         )
         session.add(db_cam)
         added.append(cam_id)
-        # Register and start video ingest worker
-        await video_ingest_service.register_and_start_camera(cam_id, c.rtsp_url)
 
     await session.commit()
     await setup_service.set_setup_step(session, 3)
+    try:
+        await pipeline_supervisor.reconcile_cameras()
+    except Exception as exc:  # the periodic reconcile loop will pick them up
+        logging.getLogger("Setup").warning("reconcile after add-cameras: %s", exc)
     return {"status": "success", "added_cameras": added}
 
 @router.post("/setup/network-config")

@@ -14,4 +14,11 @@ pyjwt>=2.8.0
 httpx[http2]>=0.27.0
 pytest>=8.1.1
 pytest-asyncio>=0.23.6
-passlib[bcrypt]>=1.7.4
+# bcrypt is used directly. passlib is deliberately NOT a dependency: its
+# backend probe hashes an over-length string, which bcrypt >= 4.1 rejects,
+# breaking every password hash and verify. passlib is unmaintained since 2020.
+bcrypt>=4.1.0
+# Person detection. Install onnxruntime-gpu instead on a machine with a
+# dedicated GPU; the backend probes providers at runtime and will pick up
+# TensorRT/CUDA automatically without any code change.
+onnxruntime>=1.17.0

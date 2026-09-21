@@ -4,11 +4,28 @@ import os
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-def get_default_dir(name: str) -> Path:
+def get_storage_root() -> Path:
+    """Resolve the writable root that holds the database and all media subdirs."""
     if os.path.exists("/app") and os.access("/app", os.W_OK):
-        p = Path(f"/app/{name}")
+        root = Path("/app")
     else:
-        p = Path(__file__).resolve().parent.parent.parent / "storage" / name
+        root = Path(__file__).resolve().parent.parent.parent / "storage"
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        root = Path("/tmp/cctv_storage")
+        root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def get_default_dir(name: str) -> Path:
+    """Resolve a media subdirectory under the storage root.
+
+    Note this must never be called with "storage": the root itself is
+    get_storage_root(). Doing so previously produced a nested storage/storage
+    directory that split the database away from the rest of the media tree.
+    """
+    p = get_storage_root() / name
     try:
         p.mkdir(parents=True, exist_ok=True)
     except Exception:
@@ -29,15 +46,45 @@ class Settings(BaseSettings):
     ALLOWED_CORS_ORIGINS: list[str] = ["*"]
     
     # Persistent Storage Paths
-    STORAGE_DIR: Path = get_default_dir("storage")
+    STORAGE_DIR: Path = get_storage_root()
     SNAPSHOTS_DIR: Path = get_default_dir("snapshots")
     CLIPS_DIR: Path = get_default_dir("clips")
     DVR_DIR: Path = get_default_dir("dvr")
     ARCHIVES_DIR: Path = get_default_dir("archives")
     DATA_DIR: Path = get_default_dir("data")
-    SQLITE_DB_PATH: Path = get_default_dir("storage") / "cctv_core.db"
-    DATABASE_PATH: Path = get_default_dir("storage") / "cctv_core.db"
+    SQLITE_DB_PATH: Path = get_storage_root() / "cctv_core.db"
+    DATABASE_PATH: Path = get_storage_root() / "cctv_core.db"
     BACKUPS_DIR: Path = get_default_dir("backups")
+    # Person detection. The model file is the only build-time choice; which
+    # accelerator runs it is probed at startup (see inference_backend.py).
+    PERSON_MODEL_PATH: Path = Path(
+        os.getenv("PERSON_MODEL_PATH", str(Path(__file__).resolve().parent.parent / "models" / "yolov5n.onnx"))
+    )
+    PERSON_CONF_THRESHOLD: float = float(os.getenv("PERSON_CONF_THRESHOLD", "0.50"))
+    # Geometry gates that reject implausible person boxes. A small model on an
+    # unusual camera angle will confidently label floor texture or shelving as
+    # a person; such boxes are almost always near-square or enormous, whereas a
+    # standing shopper is markedly taller than wide and occupies a modest part
+    # of the frame. Without these gates the pipeline records false positives as
+    # real shoppers, which is indistinguishable downstream from fabricated data.
+    PERSON_MIN_ASPECT_RATIO: float = float(os.getenv("PERSON_MIN_ASPECT_RATIO", "1.2"))
+    PERSON_MAX_FRAME_FRACTION: float = float(os.getenv("PERSON_MAX_FRAME_FRACTION", "0.35"))
+    PERSON_MIN_BOX_PIXELS: int = int(os.getenv("PERSON_MIN_BOX_PIXELS", "24"))
+    # Analytics runs on a decimated stream: detection every Nth frame is ample
+    # for footfall and dwell, and leaves decode budget for the other channels.
+    ANALYTICS_DETECT_EVERY_N_FRAMES: int = int(os.getenv("ANALYTICS_DETECT_EVERY_N_FRAMES", "5"))
+    TRACK_MAX_AGE_FRAMES: int = int(os.getenv("TRACK_MAX_AGE_FRAMES", "30"))
+    TRACK_MIN_HITS: int = int(os.getenv("TRACK_MIN_HITS", "3"))
+    # A person must linger this long inside a zone before it counts as dwell
+    # rather than a pass-through.
+    ZONE_DWELL_MIN_SECONDS: float = float(os.getenv("ZONE_DWELL_MIN_SECONDS", "3.0"))
+
+    # Store identity & default premises extent (metres) for a fresh blueprint.
+    STORE_ID: str = os.getenv("STORE_ID", "store_main")
+    STORE_NAME: str = os.getenv("STORE_NAME", "Store")
+    DEFAULT_STORE_WIDTH_M: float = float(os.getenv("DEFAULT_STORE_WIDTH_M", "50.0"))
+    DEFAULT_STORE_HEIGHT_M: float = float(os.getenv("DEFAULT_STORE_HEIGHT_M", "30.0"))
+
     OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     SHM_DIR: Path = Path(os.getenv("SHM_DIR", "/dev/shm" if os.path.exists("/dev/shm") else "/tmp"))
     

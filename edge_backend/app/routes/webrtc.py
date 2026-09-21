@@ -57,11 +57,12 @@ async def exchange_webrtc_offer(offer: WebRtcOffer):
             return WebRtcAnswer(camera_id=stream_name, sdp=answer_sdp, type="answer")
 
         except httpx.RequestError as exc:
-            # Mock fallback answer if go2rtc is offline in testing mode
-            mock_sdp = (
-                f"v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=EdgeCCTV_{stream_name}\r\n"
-                "t=0 0\r\na=sendrecv\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n"
-                "a=rtpmap:96 H264/90000\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"
-                "a=rtpmap:111 opus/48000/2\r\n"
+            # No gateway means no negotiation. This used to hand back a
+            # hand-written SDP "answer" that no peer could ever connect to.
+            raise HTTPException(
+                status_code=501,
+                detail=(
+                    "WebRTC signaling not available: go2rtc gateway is not reachable "
+                    f"at {GO2RTC_API_URL} ({exc.__class__.__name__}). Use the MJPEG /stream endpoint."
+                ),
             )
-            return WebRtcAnswer(camera_id=stream_name, sdp=mock_sdp, type="answer")

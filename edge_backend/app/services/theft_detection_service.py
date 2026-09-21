@@ -5,7 +5,7 @@ Implements:
 2. `detect_concealment`: Direct shelf-to-torso/pocket/bag kinematic trajectory without cart/basket deposit.
 3. `detect_sweethearting`: Cashier scanning bypass (item pass without matching POS barcode event).
 4. `detect_pushout_exit_bypass`: Unpaid cart exit bypass without valid checkout dwell.
-5. Incident Management: Acknowledge, Dispatch Guard/Audio Deterrent, Resolve, Statistics, and Live Simulation.
+5. Incident Management: Acknowledge, Dispatch Guard/Audio Deterrent, Resolve, Statistics.
 """
 
 from __future__ import annotations
@@ -501,85 +501,6 @@ class TheftDetectionService:
             await session.commit()
             await session.refresh(incident)
             logger.info(f"Theft incident {incident_id} marked as {status_val} ({resolution})")
-            return incident
-        finally:
-            if should_close and session:
-                await session.close()
-
-    async def simulate_theft_incident(
-        self,
-        theft_type: str,
-        camera_id: str = "cam_liquor_zone",
-        department: str = "Liquor & Spirits",
-        estimated_loss_value: Optional[float] = None,
-        db: Optional[AsyncSession] = None,
-    ) -> TheftIncidentModel:
-        """Simulate a high-fidelity theft incident and persist to database."""
-        session = db
-        should_close = False
-        if session is None:
-            session = async_session_factory()
-            should_close = True
-
-        try:
-            norm_type = theft_type.upper()
-            inc_id = f"theft_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:6]}"
-
-            # Default attributes based on theft type
-            if norm_type == TheftType.SHELF_SWEEPING.value:
-                loss_val = estimated_loss_value or 280.0
-                items = [
-                    {"sku": "LQR_WHISKY_01", "name": "Single Malt Scotch Whisky 700ml", "price": 85.0, "qty": 2},
-                    {"sku": "LQR_GIN_02", "name": "Artisan Botanical Gin 700ml", "price": 55.0, "qty": 2},
-                ]
-                severity = "CRITICAL"
-                notes = "Rapid bulk sweeping: 4 high-value liquor bottles removed within 3.2 seconds."
-            elif norm_type == TheftType.CONCEALMENT.value:
-                loss_val = estimated_loss_value or 95.0
-                items = [
-                    {"sku": "HLT_CREAM_09", "name": "Premium Anti-Aging Serum 50ml", "price": 95.0, "qty": 1},
-                ]
-                severity = "HIGH"
-                notes = "Concealment kinematics: Product moved directly from shelf ROI into jacket inner pocket without cart placement."
-            elif norm_type == TheftType.SWEETHEARTING.value:
-                loss_val = estimated_loss_value or 65.0
-                items = [
-                    {"sku": "MEA_STEAK_04", "name": "Wagyu Ribeye Steak 500g", "price": 65.0, "qty": 1},
-                ]
-                severity = "HIGH"
-                notes = "Cashier scan bypass: Cashier passed premium meat item around scanner without barcode scan event."
-            else:  # PUSHOUT_EXIT_BYPASS
-                loss_val = estimated_loss_value or 450.0
-                items = [
-                    {"sku": "CART_BULK_01", "name": "Full Shopping Cart (Baby formula & detergent)", "price": 450.0, "qty": 1},
-                ]
-                severity = "CRITICAL"
-                notes = "Pushout exit bypass: Full cart passed directly through exit threshold with 0.0s checkout dwell."
-
-            incident = TheftIncidentModel(
-                id=inc_id,
-                theft_type=norm_type,
-                severity=severity,
-                status=TheftIncidentStatus.ACTIVE.value,
-                department=department,
-                camera_id=camera_id,
-                zone_id=f"zone_{camera_id.replace('cam_', '')}",
-                timestamp=datetime.utcnow(),
-                person_track_id=f"track_{uuid.uuid4().hex[:4]}",
-                confidence=0.91,
-                estimated_loss_value=loss_val,
-                items_involved=items,
-                evidence_snapshot_url=f"/api/v1/cameras/{camera_id}/snapshot",
-                evidence_clip_url=f"/api/v1/dvr/{camera_id}/clip?t={int(datetime.utcnow().timestamp())}",
-                bounding_box={"x_min": 0.35, "y_min": 0.20, "x_max": 0.65, "y_max": 0.85},
-                wrist_trajectory=[{"x": 0.45, "y": 0.30}, {"x": 0.50, "y": 0.60}],
-                notes=notes,
-            )
-
-            session.add(incident)
-            await session.commit()
-            await session.refresh(incident)
-            logger.info(f"Simulated live theft incident: {inc_id} ({norm_type}, ${loss_val:.2f})")
             return incident
         finally:
             if should_close and session:

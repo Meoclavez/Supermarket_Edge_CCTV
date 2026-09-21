@@ -147,26 +147,41 @@ class CameraFeatureConfig(BaseModel):
 
 
 class HardwareProfile(BaseModel):
+    """Probed capabilities plus the inference backend the detector actually runs.
+
+    ``decoder_type`` is kept for compatibility and always equals
+    ``decoder_capability``: it says what decode hardware exists, not what is
+    in use. ``inference_backend`` / ``inference_provider`` come from
+    ``person_detector.status()`` and never from the presence of a GPU.
+    """
     decoder_type: str
+    decoder_capability: str
     inference_backend: str
+    inference_provider: str
+    inference_available: bool
+    inference_device: Optional[str] = None
+    inference_error: Optional[str] = None
     device_name: str
-    total_ram_gb: float
-    available_ram_gb: float
+    total_ram_gb: Optional[float] = None
+    available_ram_gb: Optional[float] = None
     ring_buffer_seconds: int
-    cpu_cores: int
+    cpu_cores: Optional[int] = None
     max_recommended_cameras: int
 
 
 class SystemStats(BaseModel):
-    cpu_usage_percent: float
+    """Every figure is measured at request time or null. No constants."""
+    cpu_usage_percent: Optional[float] = None
     gpu_usage_percent: Optional[float] = None
-    ram_used_gb: float
-    ram_total_gb: float
+    ram_used_gb: Optional[float] = None
+    ram_total_gb: Optional[float] = None
     active_cameras: int
+    cameras_total: int = 0
     active_features_count: int
     decoder: str
     inference_engine: str
-    shm_buffer_used_mb: float
+    inference_provider: Optional[str] = None
+    shm_buffer_used_mb: Optional[float] = None
     uptime_seconds: float
 
 
@@ -229,12 +244,15 @@ class CameraFeed(BaseModel):
     dvr_enabled: bool = True
     dvr_retention_days: int = 7
     dvr_quota_gb: float = 100.0
-    floor_x: float = 100.0
-    floor_y: float = 100.0
-    floor_z: float = 3.2
-    height_z: Optional[float] = 3.2
-    azimuth_deg: float = 0.0
-    fov_deg: float = 85.0
+    # Blueprint placement. All three are REAL-WORLD METRES (origin top-left,
+    # x right, y down), never pixels. Left as None when the camera has not
+    # been placed; the API then keeps the stored value instead of inventing one.
+    floor_x: Optional[float] = Field(None, description="Camera position on the floor plan, metres from the left edge")
+    floor_y: Optional[float] = Field(None, description="Camera position on the floor plan, metres from the top edge")
+    floor_z: Optional[float] = Field(None, description="Mounting height in metres")
+    height_z: Optional[float] = Field(None, description="Deprecated alias of floor_z (metres)")
+    azimuth_deg: Optional[float] = Field(None, description="Viewing direction, degrees clockwise from +x")
+    fov_deg: Optional[float] = Field(None, description="Horizontal field of view in degrees")
     homography_matrix: Optional[List[Any]] = None
     last_seen: Optional[datetime] = None
 
@@ -254,11 +272,12 @@ class CameraCreate(BaseModel):
     ai_models: List[str] = Field(default_factory=lambda: ["yolov5n"])
     channel_number: int = 1
     department: str = "GENERAL"
-    floor_x: float = 100.0
-    floor_y: float = 100.0
-    floor_z: float = 3.2
-    azimuth_deg: float = 0.0
-    fov_deg: float = 85.0
+    # Metres on the blueprint; None = not placed yet.
+    floor_x: Optional[float] = Field(None, description="metres from the left edge of the floor plan")
+    floor_y: Optional[float] = Field(None, description="metres from the top edge of the floor plan")
+    floor_z: Optional[float] = Field(None, description="mounting height, metres")
+    azimuth_deg: Optional[float] = None
+    fov_deg: Optional[float] = None
     homography_matrix: Optional[List[Any]] = None
     features: Optional[Dict[str, Any]] = None
     dvr_enabled: bool = True
@@ -291,11 +310,12 @@ class CameraUpdate(BaseModel):
 
 
 class CameraPositionUpdate(BaseModel):
-    floor_x: float
-    floor_y: float
-    floor_z: Optional[float] = 3.2
-    azimuth_deg: float
-    fov_deg: float = 85.0
+    """Camera placement on the blueprint. All lengths are metres, never pixels."""
+    floor_x: float = Field(..., description="metres from the left edge of the floor plan")
+    floor_y: float = Field(..., description="metres from the top edge of the floor plan")
+    floor_z: Optional[float] = Field(None, description="mounting height in metres; omit to keep the stored value")
+    azimuth_deg: float = Field(..., description="viewing direction, degrees clockwise from +x")
+    fov_deg: float = Field(..., description="horizontal field of view in degrees")
 
 
 class CameraListResponse(BaseModel):
@@ -564,8 +584,8 @@ class QueueMetric(BaseModel):
     register_id: str
     status: str = "OPEN"  # OPEN, BUSY, CLOSED
     current_queue_count: int = 0
-    avg_wait_time_sec: float = 0.0
-    service_rate_per_min: float = 1.2
+    avg_wait_time_sec: Optional[float] = None
+    service_rate_per_min: Optional[float] = None
     bottleneck_alert: bool = False
 
 
@@ -750,16 +770,6 @@ class TheftActionRequest(BaseModel):
     officer_notes: Optional[str] = None
 
 
-class TheftSimulationRequest(BaseModel):
-    camera_id: str
-    theft_type: str = "SHELF_SWEEPING"
-    department: Optional[str] = None
-    shelf_zone_id: Optional[str] = None
-    severity: str = "HIGH"
-    confidence: float = 0.91
-    evidence_summary: Optional[str] = None
-
-
 class TheftStatsResponse(BaseModel):
     total_active: int = 0
     by_type: Dict[str, int] = Field(default_factory=dict)
@@ -790,13 +800,5 @@ class TheftDispatchRequest(BaseModel):
 class TheftResolveRequest(BaseModel):
     resolution: str = "RECOVERED_GOODS"  # RECOVERED_GOODS, POLICE_DISPATCHED, SUSPECT_FLED, FALSE_ALARM
     notes: Optional[str] = None
-
-
-class TheftSimulateRequest(BaseModel):
-    theft_type: str = "SHELF_SWEEPING"
-    camera_id: str = "cam_liquor_zone"
-    department: str = "Liquor & Spirits"
-    estimated_loss_value: Optional[float] = None
-
 
 

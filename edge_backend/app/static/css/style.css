@@ -1285,3 +1285,280 @@ html, body {
   color: var(--text-main);
   cursor: pointer;
 }
+
+/* ===================================================================
+   Blueprint editor & device manager
+   =================================================================== */
+
+.blueprint-layout { display: grid; grid-template-columns: 1fr 340px; gap: 14px; height: calc(100vh - 190px); min-height: 520px; }
+.floorplan-wrapper { position: relative; border-radius: 14px; overflow: hidden; background: #0b0e14; border: 1px solid rgba(120,140,170,0.18); }
+#floorplanCanvas { width: 100%; height: 100%; display: block; }
+
+.blueprint-side { display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
+
+.floorplan-toolbar { position: absolute; top: 10px; left: 10px; right: 10px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  padding: 7px 9px; border-radius: 10px; background: rgba(13,17,23,0.88); backdrop-filter: blur(9px); border: 1px solid rgba(120,140,170,0.2); }
+.fp-sep { width: 1px; height: 18px; background: rgba(120,140,170,0.25); margin: 0 3px; }
+.fp-toggle { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-dim, #8b949e); cursor: pointer; user-select: none; }
+.fp-toggle input { accent-color: var(--accent-cyan, #00d4ff); }
+.fp-mode { font-size: 10.5px; color: var(--text-dim, #8b949e); font-family: ui-monospace, monospace; margin-left: auto; }
+.fp-mode b { color: var(--accent-cyan, #00d4ff); }
+
+.floorplan-legend { position: absolute; bottom: 10px; left: 10px; right: 10px; display: flex; flex-direction: column; gap: 3px; pointer-events: none; }
+.fp-stats { font-size: 10.5px; font-family: ui-monospace, monospace; color: #8b949e; background: rgba(13,17,23,0.8); padding: 4px 8px; border-radius: 6px; align-self: flex-start; }
+.fp-status { font-size: 11px; padding: 3px 8px; border-radius: 6px; align-self: flex-start; }
+.fp-info  { color: #8b949e; }
+.fp-ok    { color: #00ff9d; background: rgba(0,255,157,0.08); }
+.fp-warn  { color: #ffa500; background: rgba(255,165,0,0.08); }
+.fp-error { color: #ff5b6b; background: rgba(255,91,107,0.10); }
+
+/* An empty state is a first-class element here: it explains why there is no
+   number, instead of letting a zero imply a measurement that never happened. */
+.fp-empty { font-size: 11.5px; color: #6e7681; font-style: italic; padding: 10px 2px; line-height: 1.5; }
+.fp-dash { color: #4a5160; }
+
+.fp-zone-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.fp-zone-name { font-size: 14px; font-weight: 800; color: #fff; }
+.fp-zone-sub { font-size: 10.5px; color: #6e7681; font-family: ui-monospace, monospace; margin-bottom: 8px; }
+.fp-actions { display: flex; gap: 6px; margin-top: 10px; }
+
+.dev-list { display: flex; flex-direction: column; gap: 4px; max-height: 260px; overflow-y: auto; }
+.dev-section-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: #6e7681; margin: 12px 0 5px; }
+.dev-row { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid rgba(120,140,170,0.1); }
+.dev-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.dot-on { background: #00ff9d; box-shadow: 0 0 6px rgba(0,255,157,0.7); }
+.dot-off { background: #ff5b6b; }
+.dev-main { flex: 1; min-width: 0; }
+.dev-name { font-size: 12px; font-weight: 700; color: #e6edf3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dev-sub { font-size: 10px; color: #6e7681; font-family: ui-monospace, monospace; }
+.dev-actions { display: flex; gap: 4px; flex-shrink: 0; }
+.warn-text { color: #ffa500; }
+
+.btn-xs { padding: 3px 7px; font-size: 10px; border-radius: 5px; }
+.btn-danger { background: rgba(255,91,107,0.12); color: #ff5b6b; border-color: rgba(255,91,107,0.3); }
+.btn-danger:hover { background: rgba(255,91,107,0.2); }
+
+@media (max-width: 1024px) {
+  .blueprint-layout { grid-template-columns: 1fr; height: auto; }
+  .floorplan-wrapper { height: 60vh; }
+}
+
+/* A metric that was never measured reads as an em dash, visibly muted, so it
+   cannot be mistaken for a measured zero. */
+.metric-unobserved { color: #4a5160 !important; font-weight: 500 !important; }
+
+.data-state-banner { margin: 0 0 12px; padding: 9px 14px; border-radius: 9px; font-size: 12px;
+  color: #ffa500; background: rgba(255,165,0,0.08); border: 1px solid rgba(255,165,0,0.22); }
+
+/* ===================================================================
+   Shell, header and KPI strip.
+
+   These classes were referenced throughout the markup but had no rules,
+   so the dashboard rendered as a single unstyled column. Defined here.
+   =================================================================== */
+
+.dashboard-shell { max-width: 1800px; margin: 0 auto; padding: 16px 20px 40px; }
+
+.top-nav-header { display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+  padding: 12px 0 16px; border-bottom: 1px solid rgba(120,140,170,0.14); margin-bottom: 16px; }
+.brand-group { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.brand-logo-glow { font-size: 26px; line-height: 1; filter: drop-shadow(0 0 10px rgba(0,212,255,0.55)); }
+.brand-titles { min-width: 0; }
+.brand-title { font-size: 19px; font-weight: 800; letter-spacing: -0.01em; color: #fff; white-space: nowrap; }
+.brand-subtitle { font-size: 10.5px; color: var(--text-dim, #8b949e); text-transform: uppercase; letter-spacing: .07em; }
+.channel-pill { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 20px;
+  background: rgba(0,212,255,0.12); color: var(--accent-cyan, #00d4ff); font-size: 9.5px; font-weight: 700; }
+
+.hardware-telemetry-hud { display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  margin-left: auto; padding: 7px 14px; border-radius: 10px;
+  background: rgba(255,255,255,0.03); border: 1px solid rgba(120,140,170,0.14); }
+.telemetry-item { display: flex; flex-direction: column; gap: 1px; }
+.telemetry-label { font-size: 8.5px; text-transform: uppercase; letter-spacing: .07em; color: #6e7681; }
+.telemetry-val { font-size: 12px; font-weight: 700; color: #e6edf3; font-family: ui-monospace, monospace; }
+
+/* KPI strip: one row that wraps, never a stack of full-width bars. */
+.overview-strip { display: grid; gap: 10px; margin-bottom: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(175px, 1fr)); }
+.overview-strip .stat-box { display: flex; flex-direction: column; gap: 5px;
+  padding: 13px 15px; border-radius: 12px;
+  background: linear-gradient(145deg, rgba(255,255,255,0.045), rgba(255,255,255,0.015));
+  border: 1px solid rgba(120,140,170,0.15); }
+.overview-strip .stat-label { font-size: 9.5px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .07em; color: #6e7681; }
+.overview-strip .stat-val { font-size: 25px; font-weight: 800; line-height: 1.1;
+  font-family: ui-monospace, monospace; color: #fff; }
+
+.analytics-two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.friction-table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+.friction-table th { text-align: left; padding: 7px 9px; font-size: 9.5px; text-transform: uppercase;
+  letter-spacing: .05em; color: #6e7681; border-bottom: 1px solid rgba(120,140,170,0.16); }
+.friction-table td { padding: 8px 9px; border-bottom: 1px solid rgba(120,140,170,0.07); color: #c9d4e0; }
+
+.badge-danger { background: rgba(255,91,107,0.14); color: #ff5b6b; }
+.theft-banner { padding: 10px 14px; border-radius: 9px; margin-bottom: 12px; font-size: 12px;
+  background: rgba(255,91,107,0.09); border: 1px solid rgba(255,91,107,0.24); color: #ff8b96; }
+.digest-narrative { font-size: 13px; line-height: 1.65; color: #c9d4e0; }
+
+.fps-btn { padding: 3px 9px; font-size: 10px; font-weight: 700; border-radius: 6px; cursor: pointer;
+  background: rgba(255,255,255,0.04); border: 1px solid rgba(120,140,170,0.18); color: #8b949e; }
+.fps-btn:hover, .fps-btn.active { color: var(--accent-cyan, #00d4ff); border-color: rgba(0,212,255,0.4); }
+
+@media (max-width: 900px) {
+  .analytics-two-col { grid-template-columns: 1fr; }
+  .hardware-telemetry-hud { margin-left: 0; width: 100%; }
+}
+
+/* Conversion funnel rows */
+.funnel-stage-row { display: grid; grid-template-columns: 110px 1fr 70px; align-items: center; gap: 10px; }
+.funnel-stage-label { font-size: 11.5px; font-weight: 700; color: #c9d4e0; }
+.funnel-bar-track { height: 20px; border-radius: 5px; background: rgba(255,255,255,0.04); overflow: hidden; }
+.funnel-bar-fill { height: 100%; border-radius: 5px;
+  background: linear-gradient(90deg, var(--accent-cyan, #00d4ff), var(--accent-green, #00ff9d)); }
+.funnel-stage-val { font-size: 13px; font-weight: 800; font-family: ui-monospace, monospace;
+  color: #fff; text-align: right; }
+.panel-empty { padding: 20px 4px; }
+
+/* ===================================================================
+   Camera tiles.
+
+   These classes were referenced by the camera matrix but never defined, so
+   the feed images had no computed box at all. The image is given its natural
+   aspect ratio -- width:100% with height:auto -- so a 16:9, 4:3 or portrait
+   camera each renders its full sensor output uncropped, rather than being
+   forced into a fixed frame.
+   =================================================================== */
+
+.camera-card-header { display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 8px; padding: 10px 12px 8px; }
+.camera-title { font-size: 12.5px; font-weight: 700; color: #e6edf3; line-height: 1.3; }
+.cam-meta-text { font-size: 10px; color: #6e7681; font-family: ui-monospace, monospace; }
+
+.camera-video-container { position: relative; width: 100%; background: #05070b;
+  border-top: 1px solid rgba(120,140,170,0.1); border-bottom: 1px solid rgba(120,140,170,0.1);
+  line-height: 0; overflow: hidden; }
+
+/* height:auto is what preserves the camera's own capture ratio. Do not set a
+   fixed height or object-fit:cover here -- both crop the operator's view. */
+.camera-img { display: block; width: 100%; height: auto; background: #05070b; }
+
+.camera-overlay-top, .camera-overlay-bottom { position: absolute; left: 8px; right: 8px;
+  display: flex; gap: 6px; align-items: center; pointer-events: none; line-height: 1.4; }
+.camera-overlay-top { top: 8px; }
+.camera-overlay-bottom { bottom: 8px; }
+.cam-hud-badge { padding: 2px 7px; border-radius: 5px; font-size: 9.5px; font-weight: 700;
+  font-family: ui-monospace, monospace; color: #c9d4e0; background: rgba(5,7,11,0.72);
+  border: 1px solid rgba(120,140,170,0.22); }
+.cam-hud-live { color: #00ff9d; border-color: rgba(0,255,157,0.35); }
+.cam-hud-offline { color: #ff5b6b; border-color: rgba(255,91,107,0.35); }
+
+.camera-footer { display: flex; gap: 6px; padding: 9px 12px; }
+
+.action-card-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.action-meta { font-size: 10px; color: #6e7681; font-family: ui-monospace, monospace; }
+.action-footer, .action-btns { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.badge-warning { background: rgba(255,165,0,0.14); color: #ffa500; }
+
+/* Drawing banner: makes the active edit mode unmistakable and always offers
+   an explicit way out. Previously the only way to finish a polygon was an
+   undiscoverable Enter key or right-click. */
+.fp-draw-banner { position: absolute; top: 56px; left: 10px; right: 10px; z-index: 5;
+  display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 9px;
+  background: rgba(0,255,157,0.10); border: 1px solid rgba(0,255,157,0.35);
+  color: #00ff9d; font-size: 11.5px; font-weight: 600; }
+.fp-draw-count { font-family: ui-monospace, monospace; color: #c9d4e0; }
+.fp-draw-count b { color: #00ff9d; }
+.fp-draw-banner button { margin-left: 0; }
+.fp-draw-banner .btn:first-of-type { margin-left: auto; }
+
+/* Inline editing form in the side panel */
+.fp-field { display: flex; flex-direction: column; gap: 3px; margin-bottom: 8px; }
+.fp-field label { font-size: 9.5px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .06em; color: #6e7681; }
+.fp-field input, .fp-field select { padding: 6px 8px; border-radius: 6px; font-size: 12px;
+  background: rgba(255,255,255,0.05); border: 1px solid rgba(120,140,170,0.22);
+  color: #e6edf3; font-family: inherit; width: 100%; }
+.fp-field input:focus, .fp-field select:focus { outline: none; border-color: var(--accent-cyan, #00d4ff); }
+.fp-field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.fp-saved { font-size: 10.5px; color: #00ff9d; min-height: 14px; }
+
+.dev-form { padding: 4px 2px; }
+.dev-form-title { font-size: 12px; font-weight: 800; color: #fff; margin-bottom: 10px; }
+.fp-field input[type="color"] { padding: 2px; height: 30px; cursor: pointer; }
+
+/* Sign-in gate */
+.auth-gate { position: fixed; inset: 0; z-index: 9999; display: flex; align-items: center;
+  justify-content: center; background: rgba(5,7,11,0.93); backdrop-filter: blur(6px); padding: 20px; }
+.auth-card { width: 100%; max-width: 380px; padding: 28px; border-radius: 14px;
+  background: linear-gradient(160deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02));
+  border: 1px solid rgba(120,140,170,0.2); }
+.auth-brand { font-size: 10px; font-weight: 800; letter-spacing: .14em; color: var(--accent-cyan, #00d4ff); }
+.auth-title { font-size: 20px; font-weight: 800; color: #fff; margin-top: 6px; }
+.auth-sub { font-size: 11.5px; color: #8b949e; line-height: 1.55; margin: 6px 0 18px; }
+.auth-error { font-size: 11.5px; color: #ff5b6b; min-height: 16px; margin-bottom: 8px; }
+
+/* ===================================================================
+   Camera tiles: the container keeps a 16:9 box even before the first
+   MJPEG frame arrives, so a tile is never a zero-height strip, and the
+   frame is letterboxed (object-fit: contain) rather than cropped, so a
+   4:3 or portrait camera shows its full sensor output.
+   =================================================================== */
+.camera-video-container { aspect-ratio: 16 / 9; min-height: 120px; line-height: 0; }
+.camera-video-container .camera-img { width: 100%; height: 100%; object-fit: contain; }
+
+.channel-pill { cursor: pointer; border: 1px solid transparent; font-family: inherit; }
+.channel-pill.active { border-color: rgba(0,212,255,0.6); background: rgba(0,212,255,0.22); color: #fff; }
+
+.matrix-empty { grid-column: 1 / -1; padding: 40px 24px; text-align: center; border-radius: 12px;
+  border: 1px dashed rgba(120,140,170,0.3); background: rgba(255,255,255,0.02);
+  display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.matrix-empty-title { font-size: 16px; font-weight: 800; color: #fff; }
+.matrix-empty-text { font-size: 12px; color: #8b949e; max-width: 520px; line-height: 1.55; }
+
+.form-section-title { font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em;
+  color: #6e7681; margin: 14px 0 6px; padding-top: 10px; border-top: 1px solid rgba(120,140,170,0.14); }
+.form-status { font-size: 11px; color: #8b949e; min-height: 16px; margin-top: 8px; line-height: 1.45; }
+.form-status-error { color: #ff5b6b; }
+
+.incident-card { background: rgba(16, 22, 36, 0.85); border: 1px solid rgba(255,255,255,0.08);
+  border-radius: var(--radius-md, 10px); padding: 14px; display: flex; flex-direction: column; gap: 8px; }
+.incident-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
+.incident-foot { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;
+  border-top: 1px solid rgba(255,255,255,0.05); padding-top: 8px; margin-top: 4px; }
+
+.badge-primary { background: rgba(0,212,255,0.14); color: var(--accent-cyan, #00d4ff); }
+
+/* ===================================================================
+   Camera Studio page
+   =================================================================== */
+.btn-warning { background: rgba(255,170,0,0.16); border-color: rgba(255,170,0,0.5); color: #ffaa00; }
+.btn-warning:hover { background: rgba(255,170,0,0.28); }
+
+.studio-grid { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 14px; align-items: start; }
+@media (max-width: 1100px) { .studio-grid { grid-template-columns: 1fr; } }
+
+.video-card { background: var(--card-bg, rgba(255,255,255,0.03)); border: 1px solid var(--card-border, rgba(120,140,170,0.15));
+  border-radius: 14px; padding: 12px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.video-viewport { position: relative; width: 100%; aspect-ratio: 16 / 9; min-height: 240px; border-radius: 10px;
+  overflow: hidden; background: #05070b; }
+.video-viewport img { width: 100%; height: 100%; object-fit: contain; display: block; }
+#interactiveCanvas { position: absolute; top: 0; left: 0; cursor: crosshair; z-index: 10; }
+.viewport-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  text-align: center; padding: 24px; font-size: 12.5px; color: #8b949e; line-height: 1.55; z-index: 5;
+  background: rgba(5,7,11,0.9); }
+.studio-tools { background: rgba(0,0,0,0.35); padding: 12px; border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.08); display: flex; flex-direction: column; gap: 8px; }
+.capture-result { min-height: 0; }
+.capture-thumb { display: flex; flex-direction: column; gap: 4px; }
+.capture-thumb img { max-width: 240px; border-radius: 8px; border: 1px solid rgba(120,140,170,0.25); display: block; }
+
+.zone-item { background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px;
+  padding: 8px 10px; margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.zone-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.zone-name { font-size: 12px; font-weight: 700; color: #fff; }
+.zone-sub { font-size: 10px; color: var(--text-dim, #8b949e); font-family: var(--font-mono, ui-monospace, monospace); }
+
+.telemetry-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 6px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 12px; }
+.telemetry-row:last-child { border-bottom: none; }
+.telemetry-row .telemetry-label { font-size: 11px; text-transform: none; letter-spacing: 0; color: var(--text-dim, #8b949e); }
+.telemetry-row .telemetry-val { font-size: 12px; text-align: right; word-break: break-word; }

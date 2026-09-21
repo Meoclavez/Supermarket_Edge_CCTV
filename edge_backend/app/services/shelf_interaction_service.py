@@ -94,75 +94,21 @@ class ShelfInteractionService:
                 except Exception as e:
                     logger.error(f"Error reading {self.config_path}: {e}")
 
-            # Seed realistic default product zones if empty
-            self._seed_default_zones()
+            # A fresh install has no product zones. This used to seed four
+            # invented SKUs on cameras "cam_02/03/05" and write them to disk.
             self._save_zones()
 
     def _init_stats(self, zone_id: str):
+        """Counters start at zero; every increment corresponds to an observed event."""
         if zone_id not in self.zone_stats:
             self.zone_stats[zone_id] = {
-                "impressions": 1420,
-                "touches": 380,
-                "dwell_seconds_total": 4200.0,
-                "picks": 210,
-                "put_backs": 170,
-                "pos_sales": 185,
+                "impressions": 0,
+                "touches": 0,
+                "dwell_seconds_total": 0.0,
+                "picks": 0,
+                "put_backs": 0,
+                "pos_sales": 0,
             }
-
-    def _seed_default_zones(self):
-        defaults = [
-            ProductShelfZone(
-                id="shelf_cereal_01",
-                camera_id="cam_03",
-                name="Top Shelf - Organic Granola 500g",
-                points=[PointCoord(x=0.20, y=0.25), PointCoord(x=0.45, y=0.25), PointCoord(x=0.45, y=0.45), PointCoord(x=0.20, y=0.45)],
-                sku_id="SKU-ORG-GRA-500",
-                category="Breakfast & Cereals",
-                price=14.50,
-                facing_count=6,
-                shelf_tier="EYE_LEVEL",
-                study_metrics=StudyMetricsConfig(track_hand_reach=True, track_dwell_time=True, track_put_back_friction=True, track_pos_conversion=True, ab_test_mode=True)
-            ),
-            ProductShelfZone(
-                id="shelf_cereal_02",
-                camera_id="cam_03",
-                name="Bottom Shelf - Rolled Oats 1kg",
-                points=[PointCoord(x=0.20, y=0.65), PointCoord(x=0.45, y=0.65), PointCoord(x=0.45, y=0.85), PointCoord(x=0.20, y=0.85)],
-                sku_id="SKU-OAT-1KG",
-                category="Breakfast & Cereals",
-                price=4.20,
-                facing_count=8,
-                shelf_tier="BOTTOM",
-                study_metrics=StudyMetricsConfig(track_hand_reach=True, track_dwell_time=True, track_put_back_friction=True, track_pos_conversion=True, ab_test_mode=False)
-            ),
-            ProductShelfZone(
-                id="shelf_snacks_01",
-                camera_id="cam_05",
-                name="Endcap A - Kettle Artisan Sea Salt Chips",
-                points=[PointCoord(x=0.55, y=0.30), PointCoord(x=0.85, y=0.30), PointCoord(x=0.85, y=0.60), PointCoord(x=0.55, y=0.60)],
-                sku_id="SKU-CHIP-SALT-175",
-                category="Snacks & Confectionery",
-                price=4.50,
-                facing_count=10,
-                shelf_tier="ENDCAP",
-                study_metrics=StudyMetricsConfig(track_hand_reach=True, track_dwell_time=True, track_put_back_friction=True, track_pos_conversion=True, ab_test_mode=True)
-            ),
-            ProductShelfZone(
-                id="shelf_dairy_01",
-                camera_id="cam_02",
-                name="Reach Cooler - Full Cream Milk 2L",
-                points=[PointCoord(x=0.15, y=0.30), PointCoord(x=0.40, y=0.30), PointCoord(x=0.40, y=0.70), PointCoord(x=0.15, y=0.70)],
-                sku_id="SKU-DAIRY-MILK-2L",
-                category="Dairy & Chilled",
-                price=3.20,
-                facing_count=12,
-                shelf_tier="REACH",
-                study_metrics=StudyMetricsConfig(track_hand_reach=True, track_dwell_time=True, track_put_back_friction=True, track_pos_conversion=True, ab_test_mode=False)
-            ),
-        ]
-        for z in defaults:
-            self.zones[z.id] = z
-            self._init_stats(z.id)
 
     def _save_zones(self):
         try:
@@ -172,6 +118,18 @@ class ShelfInteractionService:
             logger.info(f"Saved {len(self.zones)} product shelf zones to {self.config_path}")
         except Exception as e:
             logger.error(f"Failed to save {self.config_path}: {e}")
+
+    def clear_all(self) -> int:
+        """Remove every product shelf zone and its counters (store reset)."""
+        with self.lock:
+            n = len(self.zones)
+            self.zones.clear()
+            for attr in ("stats", "_stats", "zone_stats", "interactions", "_interactions"):
+                store = getattr(self, attr, None)
+                if isinstance(store, dict):
+                    store.clear()
+            self._save_zones()
+            return n
 
     # ---------------- Zone CRUD ----------------
 
@@ -244,6 +202,7 @@ class ShelfInteractionService:
                 "last_seen": now,
                 "had_grab": False
             })
+            elapsed = max(0.0, now - state["last_seen"])
             state["last_seen"] = now
 
             for zone in relevant_zones:
@@ -281,7 +240,7 @@ class ShelfInteractionService:
                     else:
                         # 2. Dwell inspection
                         dwell = now - state["reach_start"]
-                        self.zone_stats[zone.id]["dwell_seconds_total"] += 0.1
+                        self.zone_stats[zone.id]["dwell_seconds_total"] += elapsed
                         if dwell >= 1.0 and not state["had_grab"]:
                             state["had_grab"] = True
                             evt = ShelfInteractionEvent(
@@ -331,25 +290,24 @@ class ShelfInteractionService:
             zone = self.zones.get(zone_id)
             if not zone:
                 return {}
-            s = self.zone_stats.get(zone_id, {
-                "impressions": 1000,
-                "touches": 250,
-                "dwell_seconds_total": 2500.0,
-                "picks": 140,
-                "put_backs": 110,
-                "pos_sales": 120
-            })
+            self._init_stats(zone_id)
+            s = self.zone_stats[zone_id]
 
-            touches = s.get("touches", 0)
-            picks = s.get("picks", 0)
-            put_backs = s.get("put_backs", 0)
-            sales = s.get("pos_sales", 0)
-            impressions = max(1, s.get("impressions", 1))
+            touches = int(s.get("touches", 0))
+            picks = int(s.get("picks", 0))
+            put_backs = int(s.get("put_backs", 0))
+            sales = int(s.get("pos_sales", 0))
+            impressions = int(s.get("impressions", 0))
 
-            attraction = round((touches / impressions) * 100.0, 2)
-            friction_idx = round((put_backs / max(1, touches)) * 100.0, 2)
-            conversion = round((sales / max(1, touches)) * 100.0, 2)
-            avg_dwell = round(s.get("dwell_seconds_total", 0.0) / max(1, touches), 1)
+            def ratio(num, den):
+                return round((num / den) * 100.0, 2) if den > 0 else None
+
+            # Rates exist only when their denominator was observed; nothing
+            # is divided by an assumed floor of 1.
+            attraction = ratio(touches, impressions)
+            friction_idx = ratio(put_backs, touches)
+            conversion = ratio(sales, touches)
+            avg_dwell = round(s.get("dwell_seconds_total", 0.0) / touches, 1) if touches > 0 else None
 
             return {
                 "zone_id": zone.id,

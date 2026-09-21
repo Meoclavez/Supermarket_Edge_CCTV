@@ -56,12 +56,16 @@ class CameraModel(Base):
     # Spatial, Floorplan & Channel Mapping
     channel_number: Mapped[int] = mapped_column(Integer, default=1)
     department: Mapped[str] = mapped_column(String(64), default="GENERAL")
-    floor_x: Mapped[float] = mapped_column(Float, default=100.0)
-    floor_y: Mapped[float] = mapped_column(Float, default=100.0)
+    floor_x: Mapped[float] = mapped_column(Float, default=0.0)  # metres
+    floor_y: Mapped[float] = mapped_column(Float, default=0.0)  # metres
     floor_z: Mapped[float] = mapped_column(Float, default=3.2)
     azimuth_deg: Mapped[float] = mapped_column(Float, default=0.0)
     fov_deg: Mapped[float] = mapped_column(Float, default=85.0)
     homography_matrix: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    # The operator's raw calibration input, kept so the UI can show and re-edit
+    # the point pairs the homography was solved from:
+    # {"image_points": [{x,y}], "floor_points": [{x,y}], "frame_width", "frame_height", "saved_at"}
+    calibration_points: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     features: Mapped[Optional[dict]] = mapped_column(JSON, default=dict)
 
     # Relationships
@@ -271,3 +275,123 @@ class TheftIncidentModel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+
+
+class StoreLayoutModel(Base):
+    """Physical extent of the premises. The single source of truth for blueprint geometry.
+
+    All blueprint coordinates in this system are real-world METRES with the origin
+    at the top-left of the floor plan, x increasing right and y increasing down.
+    Pixel coordinates exist only inside the renderer.
+    """
+    __tablename__ = "store_layouts"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    store_id: Mapped[str] = mapped_column(String(64), index=True, default="store_main")
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    width_m: Mapped[float] = mapped_column(Float, default=50.0)
+    height_m: Mapped[float] = mapped_column(Float, default=30.0)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    zones: Mapped[list["StoreZoneModel"]] = relationship(
+        "StoreZoneModel", back_populates="layout", cascade="all, delete-orphan"
+    )
+
+
+class StoreZoneModel(Base):
+    """An operator-drawn region of the store (aisle, department, checkout, shelf bay).
+
+    `polygon` is a JSON list of {"x": <metres>, "y": <metres>} vertices. Zone
+    records hold identity and geometry only -- never metrics. Footfall, dwell and
+    conversion for a zone are always derived from zone_visits at query time.
+    """
+    __tablename__ = "store_zones"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    layout_id: Mapped[str] = mapped_column(String(64), ForeignKey("store_layouts.id"), index=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    category: Mapped[str] = mapped_column(String(64), default="AISLE", index=True)
+    polygon: Mapped[list] = mapped_column(JSON, default=list)
+    color: Mapped[str] = mapped_column(String(16), default="#00d4ff")
+    # Zones of kind SHELF may carry a planogram SKU association.
+    sku_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    layout: Mapped["StoreLayoutModel"] = relationship("StoreLayoutModel", back_populates="zones")
+
+
+class StoreStructureModel(Base):
+    """A purely geometric element of the blueprint: room, wall, shelf, counter, door, obstacle.
+
+    Structures are what the operator draws so the plan looks like their store.
+    They carry no analytics meaning -- zones remain the regions tracks are
+    attributed to. ``polygon`` is a JSON list of {"x", "y"} vertices in metres;
+    for WALL and DOOR it is a polyline (>=2 points) with ``thickness_m``, for
+    every other kind a closed polygon (>=3 points).
+    """
+    __tablename__ = "store_structures"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    layout_id: Mapped[str] = mapped_column(String(64), ForeignKey("store_layouts.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(32), default="ROOM", index=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    polygon: Mapped[list] = mapped_column(JSON, default=list)
+    thickness_m: Mapped[float] = mapped_column(Float, default=0.2)
+    color: Mapped[str] = mapped_column(String(16), default="#8b93a7")
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    properties: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ZoneVisitModel(Base):
+    """One person's dwell inside one zone, produced by the live tracker.
+
+    This is the atomic fact the entire retail funnel is computed from:
+    pass-by, dwell, interaction and conversion all aggregate from these rows.
+    """
+    __tablename__ = "zone_visits"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    zone_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    track_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    camera_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    entered_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    exited_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    dwell_seconds: Mapped[float] = mapped_column(Float, default=0.0)
+    # True once the tracker observed a reach-to-shelf inside this visit.
+    interacted: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (Index("ix_zone_visits_zone_entered", "zone_id", "entered_at"),)
+
+
+class DiscoveredDeviceModel(Base):
+    """A camera-capable device found by a network or USB scan.
+
+    Persisted so the 'available cameras' picker survives a restart and so the
+    operator can see what was seen last scan without re-running discovery.
+    Being listed here does NOT make it an active camera -- the operator adopts
+    a device explicitly, which creates the corresponding cameras row.
+    """
+    __tablename__ = "discovered_devices"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    transport: Mapped[str] = mapped_column(String(16), default="rtsp")  # rtsp | usb | mjpeg
+    driver: Mapped[str] = mapped_column(String(32), default="generic")  # dahua | onvif | v4l2 | esp32
+    host: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    port: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    device_path: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    model_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    manufacturer: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    stream_urls: Mapped[list] = mapped_column(JSON, default=list)
+    channels: Mapped[int] = mapped_column(Integer, default=1)
+    requires_credentials: Mapped[bool] = mapped_column(Boolean, default=False)
+    reachable: Mapped[bool] = mapped_column(Boolean, default=True)
+    adopted_camera_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    first_seen: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_seen: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

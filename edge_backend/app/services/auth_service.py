@@ -1,4 +1,4 @@
-"""Authentication, token validation, and path traversal protection service."""
+"""Authentication: password hashing, JWT sessions and API access guards."""
 
 import re
 import time
@@ -10,6 +10,41 @@ from fastapi import HTTPException, Security, status, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, APIKeyQuery, APIKeyHeader
 
 from app.config import settings
+
+# --- password hashing -------------------------------------------------------
+#
+# Calls the bcrypt library directly rather than going through passlib.
+# passlib 1.7.4 detects its backend by hashing an over-length probe string;
+# bcrypt >= 4.1 refuses passwords longer than 72 bytes instead of silently
+# truncating, so that probe raises and every hash/verify fails. passlib has
+# had no release since 2020, so the dependency was dropped rather than pinned.
+
+
+def hash_password(password: str) -> str:
+    """Hash a password with bcrypt, returning the standard modular string."""
+    import bcrypt as _bcrypt
+
+    # bcrypt only considers the first 72 bytes; truncate explicitly so a long
+    # passphrase is accepted rather than rejected at the library boundary.
+    raw = password.encode("utf-8")[:72]
+    return _bcrypt.hashpw(raw, _bcrypt.gensalt()).decode("utf-8")
+
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    """Constant-time verify. Returns False on any malformed stored hash."""
+    import bcrypt as _bcrypt
+
+    if not password or not stored_hash:
+        return False
+    try:
+        return _bcrypt.checkpw(
+            password.encode("utf-8")[:72], stored_hash.encode("utf-8")
+        )
+    except (ValueError, TypeError):
+        return False
+
+"""Authentication, token validation, and path traversal protection service."""
+
 
 security_bearer = HTTPBearer(auto_error=False)
 query_token_scheme = APIKeyQuery(name="token", auto_error=False)
@@ -238,10 +273,21 @@ class AuthService:
         api_key: Optional[str] = Security(api_key_header),
         bearer: Optional[HTTPAuthorizationCredentials] = Depends(security_bearer)
     ) -> bool:
-        """General API access for mobile apps / dashboards."""
+        """General API access for mobile apps / dashboards.
+
+        Credentials are checked *before* the lockout is enforced, so a valid
+        token always works and clears the counter. Enforcing the lockout first
+        deadlocked the operator out of their own system: once tripped, even a
+        correct sign-in was refused until the window expired.
+
+        A request carrying **no** credential is not counted as a failed
+        attempt. A signed-out dashboard polls several endpoints every few
+        seconds, which would otherwise trip the 10-attempt lockout within
+        seconds of opening the page. Brute force requires presenting a
+        credential, so only an *invalid* one counts against the limit.
+        """
         ip = request.client.host if request.client else "unknown"
-        intrusion_detector.check_lockout(ip)
-        
+
         # Safely resolve API key from dependency or request header
         resolved_api_key = api_key if isinstance(api_key, str) else request.headers.get("X-Edge-API-Key")
         if resolved_api_key and secrets.compare_digest(resolved_api_key, settings.INTERNAL_SERVICE_KEY):
@@ -264,10 +310,16 @@ class AuthService:
 
         if settings.DEBUG:
             return True
-        intrusion_detector.record_failure(ip)
+
+        presented_credential = bool(resolved_api_key or raw_bearer)
+        if presented_credential:
+            # Something was offered and it was wrong: that is an attempt.
+            intrusion_detector.record_failure(ip)
+            intrusion_detector.check_lockout(ip)
+
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing or invalid authentication"
+            detail="Missing or invalid authentication",
         )
 
     @staticmethod
@@ -337,7 +389,6 @@ class AuthService:
         }
 
     async def create_admin_user(self, session, username, password, display_name, role="owner"):
-        from passlib.hash import bcrypt
         from app.models.db_models import AdminUserModel
         import uuid
         from sqlalchemy import select
@@ -347,7 +398,7 @@ class AuthService:
         if result.scalar_one_or_none():
             raise HTTPException(status_code=400, detail="User already exists")
 
-        hashed = bcrypt.hash(password)
+        hashed = hash_password(password)
         new_user = AdminUserModel(
             id=str(uuid.uuid4()),
             username=username,
@@ -360,7 +411,6 @@ class AuthService:
         return new_user
 
     async def authenticate_user(self, session, username, password):
-        from passlib.hash import bcrypt
         from app.models.db_models import AdminUserModel
         from sqlalchemy import select
 
@@ -368,7 +418,7 @@ class AuthService:
         result = await session.execute(stmt)
         user = result.scalar_one_or_none()
 
-        if not user or not bcrypt.verify(password, user.password_hash):
+        if not user or not verify_password(password, user.password_hash):
             return None
 
         # Create JWT access and refresh tokens
@@ -405,7 +455,6 @@ class AuthService:
         return jwt.encode(access_payload, self.secret, algorithm=self.algorithm)
 
     async def change_password(self, session, user_id, old_password, new_password):
-        from passlib.hash import bcrypt
         from app.models.db_models import AdminUserModel
         from sqlalchemy import select
         
@@ -413,10 +462,10 @@ class AuthService:
         result = await session.execute(stmt)
         user = result.scalar_one_or_none()
         
-        if not user or not bcrypt.verify(old_password, user.password_hash):
+        if not user or not verify_password(old_password, user.password_hash):
             raise HTTPException(status_code=403, detail="Invalid old password")
             
-        user.password_hash = bcrypt.hash(new_password)
+        user.password_hash = hash_password(new_password)
         await session.commit()
         return True
 

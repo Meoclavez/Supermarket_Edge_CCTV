@@ -233,10 +233,14 @@ def test_webrtc_offer_exchange(client, auth_headers):
         "type": "offer"
     }
     response = client.post("/api/v1/webrtc/offer", json=offer_payload, headers=auth_headers)
-    assert response.status_code == 200
+    # With a go2rtc gateway the answer is its real SDP; without one the route
+    # says so. It used to return a hand-written SDP no peer could connect to.
+    assert response.status_code in (200, 501), response.text
     data = response.json()
-    assert "sdp" in data
-    assert data["type"] == "answer"
+    if response.status_code == 200:
+        assert "sdp" in data and data["type"] == "answer"
+    else:
+        assert data["detail"].startswith("WebRTC signaling not available")
 
 
 def test_dvr_export_incident(client, auth_headers):

@@ -1,5 +1,6 @@
 """Edge AI CCTV Surveillance Core - FastAPI Application Entrypoint."""
 
+import asyncio
 import os
 import sys
 import time
@@ -18,16 +19,53 @@ from fastapi.middleware.cors import CORSMiddleware
 import cv2
 import numpy as np
 
+import logging
+
 from .config import settings
 from .database import init_db
-from .services.hardware_detector import hardware_profile
-from .routes import cameras, events, webrtc, system, zones, health, setup, dvr, analytics, theft
+from .routes import cameras, events, webrtc, system, zones, health, setup, dvr, analytics, theft, layout
+from .services.live_analytics_engine import live_engine
+from .services.pipeline_supervisor import pipeline_supervisor
+
+
+def _check_deployment_safety() -> list[str]:
+    """Refuse to start quietly with development defaults still in place.
+
+    Each of these makes the store's system trivially accessible, and each is
+    easy to leave unchanged when copying a working dev setup onto site
+    hardware, so they are named explicitly at startup rather than discovered
+    later.
+    """
+    problems: list[str] = []
+    if settings.DEBUG:
+        problems.append(
+            "DEBUG=true disables authentication on every API route. "
+            "Set DEBUG=false before putting this on a store network."
+        )
+    if "change_in_prod" in settings.JWT_SECRET or settings.JWT_SECRET.startswith("CHANGE_ME"):
+        problems.append(
+            "JWT_SECRET is still the shipped default, so anyone can mint a "
+            "valid session. Generate one with: "
+            'python3 -c "import secrets; print(secrets.token_urlsafe(64))"'
+        )
+    if settings.INTERNAL_SERVICE_KEY == "edge_ai_vision_internal_secret":
+        problems.append("INTERNAL_SERVICE_KEY is still the shipped default.")
+    return problems
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    for problem in _check_deployment_safety():
+        logging.getLogger("edge.security").warning(f"INSECURE CONFIGURATION: {problem}")
+
     await init_db()
-    yield
+    # Bring up the capture/detect/track pipeline. Without this the database
+    # never receives an observation and every metric would have to be faked.
+    await pipeline_supervisor.start()
+    try:
+        yield
+    finally:
+        await pipeline_supervisor.stop()
 
 
 app = FastAPI(
@@ -45,6 +83,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def add_no_cache_headers(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if path.startswith("/static/") or path in ("/dashboard", "/dashboard/studio", "/"):
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
 # Register API Routers
 app.include_router(cameras.router)
 app.include_router(zones.router)
@@ -57,6 +107,7 @@ app.include_router(dvr.router)
 app.include_router(analytics.router)
 app.include_router(analytics.system_router)
 app.include_router(theft.router)
+app.include_router(layout.router)
 
 # Mount Static Files
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -87,15 +138,13 @@ def dashboard_home_view():
 @app.get("/dashboard/analytics", response_class=HTMLResponse)
 @app.get("/analytics", response_class=HTMLResponse)
 def dashboard_analytics_view():
-    analytics_file = STATIC_DIR / "analytics.html"
-    if analytics_file.exists():
-        with open(analytics_file, "r") as f:
-            return HTMLResponse(content=f.read())
-    index_file = STATIC_DIR / "index.html"
-    if index_file.exists():
-        with open(index_file, "r") as f:
-            return HTMLResponse(content=f.read())
-    return HTMLResponse(content="<h1>Analytics Loading...</h1>")
+    """The analytics view is a tab of the single dashboard page.
+
+    ``static/analytics.html`` was a byte-for-byte copy of ``index.html`` and
+    has been removed; both routes serve the one page and the client opens the
+    analytics tab from the URL hash.
+    """
+    return dashboard_home_view()
 
 @app.get("/dashboard/studio", response_class=HTMLResponse)
 @app.get("/studio", response_class=HTMLResponse)
@@ -106,58 +155,91 @@ def dashboard_studio_view():
             return HTMLResponse(content=f.read())
     return HTMLResponse(content="<h1>Studio Loading...</h1>")
 
-# Live Stream generator for Studio MJPEG
+# Live MJPEG for the Studio canvas and the dashboard camera matrix.
+def _encode_jpeg(frame, quality: int = 80):
+    ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+    return buf.tobytes() if ok else None
+
+
+def _placeholder_frame(message: str, width: int = 960, height: int = 540) -> bytes:
+    """A plain slate stating why there is no picture.
+
+    Deliberately carries no bounding boxes, confidence scores or fake
+    telemetry: an operator must never be shown something that looks like a
+    live analysed feed when no camera is connected.
+    """
+    frame = np.zeros((height, width, 3), dtype=np.uint8)
+    frame[:] = (18, 20, 26)
+    cv2.putText(frame, "NO SIGNAL", (int(width / 2) - 110, int(height / 2) - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 1.1, (90, 96, 112), 2)
+    cv2.putText(frame, message[:64], (int(width / 2) - 200, int(height / 2) + 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (70, 76, 92), 1)
+    return _encode_jpeg(frame) or b""
+
+
 @app.get("/stream")
-def mjpeg_stream():
-    def iter_frames():
-        while True:
-            frame = np.zeros((540, 960, 3), dtype=np.uint8)
-            t = time.time()
-            cx = int(480 + 200 * np.sin(t * 1.5))
-            cy = int(270 + 120 * np.cos(t * 1.2))
-            
-            for y in range(0, 540, 50):
-                cv2.line(frame, (0, y), (960, y), (20, 24, 34), 1)
-            for x in range(0, 960, 50):
-                cv2.line(frame, (x, 0), (x, 540), (20, 24, 34), 1)
+async def mjpeg_stream(request: Request, camera_id: str | None = None, fps: int = 0, overlay: int = 0):
+    """Stream real frames captured by the live pipeline.
 
-            cv2.rectangle(frame, (cx - 30, cy - 70), (cx + 30, cy + 70), (0, 255, 157), 2)
-            cv2.putText(frame, "PERSON 0.94", (cx - 30, cy - 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 157), 1)
-            cv2.circle(frame, (cx, cy), 5, (0, 240, 255), -1)
+    This used to synthesise a bouncing "PERSON 0.94" rectangle with OpenCV and
+    serve it as a live AI feed for every camera at once. It now serves the
+    actual most-recent frame for the requested camera, or an explicit
+    no-signal slate when that camera is not delivering video.
 
-            cv2.putText(frame, f"LIVE AI FEED: {time.strftime('%H:%M:%S')}", (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 240, 255), 2)
-            cv2.putText(frame, f"DECODER: {hardware_profile.decoder_type.upper()}", (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 170, 0), 1)
+    ``overlay=1`` draws the tracker's current boxes and ids on each frame from
+    the worker's own snapshot -- no extra inference -- so what is shown is
+    exactly what is being counted. The default is the raw frame.
+    """
+    from .services.live_analytics_engine import render_overlay
 
-            ret, jpeg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
-            if ret:
-                yield (b"--frame\r\n"
-                       b"Content-Type: image/jpeg\r\n\r\n" + jpeg.tobytes() + b"\r\n")
-            time.sleep(0.04)
+    async def iter_frames():
+        delay = 1.0 / max(1, min(fps or 25, 30))
+        try:
+            while True:
+                cam = camera_id
+                if cam is None:
+                    # No camera named: show the first one that is actually online.
+                    online = [c for c, rt in live_engine.runtimes.items() if rt.status == "ONLINE"]
+                    cam = online[0] if online else None
 
-    return StreamingResponse(iter_frames(), media_type="multipart/x-mixed-replace; boundary=frame")
+                frame = live_engine.get_frame(cam) if cam else None
+                if frame is None:
+                    rt = live_engine.runtimes.get(cam) if cam else None
+                    reason = (rt.last_error or rt.status) if rt else "no camera configured"
+                    payload = _placeholder_frame(str(reason))
+                    await asyncio.sleep(0.5)
+                else:
+                    if overlay:
+                        rt = live_engine.runtimes.get(cam)
+                        if rt is not None:
+                            # get_frame() already returned a copy, so drawing here
+                            # never touches the frame the worker is analysing.
+                            frame = render_overlay(frame, rt)
+                    payload = _encode_jpeg(frame)
+                    # Dashboard tiles ask for a low frame rate: a wall of 32 feeds
+                    # re-encoding at full rate would spend the whole CPU budget on
+                    # JPEG for thumbnails nobody is inspecting frame by frame.
+                    await asyncio.sleep(delay)
 
-@app.get("/api/status")
-def studio_status():
-    return {
-        "fps": 25.0,
-        "latency_ms": 14.2,
-        "current_source": "Living Room (Synthetic Feed)",
-        "person_count": 1,
-        "total_tracks": 1,
-        "torso_angle": 82.5,
-        "descent_velocity": 12.0,
-        "aspect_ratio": 1.45,
-        "floor_proximity": 0.1,
-        "is_fall_active": False,
-        "events": [
-            {"time": time.strftime("%H:%M:%S"), "type": "SYSTEM", "message": "Zero-Cloud Edge AI Surveillance Online"}
-        ]
-    }
+                if payload:
+                    chunk = (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n"
+                        b"Content-Length: " + str(len(payload)).encode("ascii") + b"\r\n\r\n"
+                        + payload + b"\r\n"
+                    )
+                    yield chunk
+        except (asyncio.CancelledError, ConnectionResetError):
+            pass
 
-@app.post("/api/action/snapshot")
-def action_snapshot():
-    return {"status": "success", "message": "📸 Snapshot saved to storage/snapshots/"}
+    return StreamingResponse(
+        iter_frames(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate, pre-check=0, post-check=0, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "Connection": "close",
+        },
+    )
 
-@app.post("/api/action/clip")
-def action_clip():
-    return {"status": "success", "message": "🎥 15s incident clip saved to storage/clips/"}

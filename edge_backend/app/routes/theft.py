@@ -13,7 +13,6 @@ from app.models.schemas import (
     TheftAcknowledgeRequest,
     TheftDispatchRequest,
     TheftResolveRequest,
-    TheftSimulateRequest,
 )
 from app.services.theft_detection_service import theft_detection_service
 
@@ -124,28 +123,3 @@ async def resolve_theft_incident(
     if not incident:
         raise HTTPException(status_code=404, detail=f"Theft incident '{incident_id}' not found")
     return TheftIncident.model_validate(incident)
-
-
-@router.post("/simulate", response_model=TheftIncident)
-async def simulate_theft(
-    payload: Optional[TheftSimulateRequest] = Body(None),
-    db: AsyncSession = Depends(get_db),
-):
-    """Trigger a live simulation of a theft event with real SQLite database persistence."""
-    try:
-        theft_type = payload.theft_type if payload else "SHELF_SWEEPING"
-        camera_id = (payload.camera_id if payload else None) or "cam_liquor_zone"
-        department = (payload.department if payload else None) or "Liquor & Spirits"
-        estimated_loss_value = payload.estimated_loss_value if payload else None
-
-        incident = await theft_detection_service.simulate_theft_incident(
-            theft_type=theft_type,
-            camera_id=camera_id,
-            department=department,
-            estimated_loss_value=estimated_loss_value,
-            db=db,
-        )
-        return TheftIncident.model_validate(incident)
-    except Exception as e:
-        logger.error(f"Error simulating theft incident: {e}")
-        raise HTTPException(status_code=500, detail=str(e))

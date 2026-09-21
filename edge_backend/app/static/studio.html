@@ -2,266 +2,186 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Edge AI CCTV - Interactive Studio & Zone HUD Editor</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Edge AI CCTV - Camera Studio & Zone Editor</title>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;800&family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/css/style.css">
-  <style>
-    .studio-grid {
-      display: grid;
-      grid-template-columns: 1fr 420px;
-      gap: 14px;
-    }
-    @media (max-width: 1100px) {
-      .studio-grid { grid-template-columns: 1fr; }
-    }
-    .video-card {
-      background: var(--card-bg);
-      border: 1px solid var(--card-border);
-      border-radius: 14px;
-      padding: 12px;
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-    .video-viewport {
-      position: relative;
-      width: 100%;
-      border-radius: 10px;
-      overflow: hidden;
-      background: #000;
-      aspect-ratio: 16 / 9;
-    }
-    .video-viewport img {
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-      display: block;
-    }
-    #interactiveCanvas {
-      position: absolute;
-      top: 0; left: 0;
-      width: 100%; height: 100%;
-      cursor: crosshair;
-      z-index: 10;
-    }
-    .zone-item {
-      background: rgba(0,0,0,0.35);
-      border: 1px solid rgba(255,255,255,0.08);
-      border-radius: 8px;
-      padding: 8px 10px;
-      margin-bottom: 8px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-    }
-    .zone-info { display: flex; flex-direction: column; gap: 2px; }
-    .zone-name { font-size: 12px; font-weight: 700; color: #fff; }
-    .zone-sub { font-size: 10px; color: var(--text-dim); font-family: var(--font-mono); }
-    .telemetry-row {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 6px 0;
-      border-bottom: 1px solid rgba(255,255,255,0.05);
-      font-size: 12px;
-    }
-    .telemetry-row:last-child { border-bottom: none; }
-    .telemetry-label { color: var(--text-dim); }
-    .telemetry-val {
-      font-family: var(--font-mono);
-      font-weight: 700;
-      color: var(--accent-green);
-    }
-  </style>
+  <link rel="stylesheet" href="/static/css/style.css?v=2.1.2">
+  <script src="/static/js/auth.js?v=2.1.2"></script>
 </head>
 <body>
   <div class="app-container">
     <header class="header">
       <div class="logo-group">
-        <a href="/dashboard" class="btn btn-primary btn-sm">⬅ Multi-Cam Matrix</a>
-        <a href="/dashboard#floorplan" class="btn btn-sm">🗺️ Floorplan HUD</a>
-        <a href="/dashboard#analytics" class="btn btn-sm">📈 Retail Analytics</a>
+        <a href="/dashboard" class="btn btn-primary btn-sm">⬅ Camera Matrix</a>
+        <a href="/dashboard#floorplan" class="btn btn-sm">🗺️ Blueprint</a>
+        <a href="/dashboard#analytics" class="btn btn-sm">📈 Analytics</a>
         <div>
-          <div class="logo-title">CAMERA STUDIO & ZONE EDITOR</div>
-          <div class="logo-sub">Interactive Polygon & Tripwire Canvas Calibration</div>
+          <div class="logo-title">CAMERA STUDIO &amp; ZONE EDITOR</div>
+          <div class="logo-sub">Per-camera tripwires, restricted areas, privacy masks and product shelves</div>
         </div>
       </div>
       <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
-        <span class="badge" id="sourceBadge">Source: Detecting...</span>
-        <span class="badge" id="fpsBadge">25.0 FPS</span>
-        <span class="badge" id="latencyBadge">14.2 ms</span>
+        <span class="badge" id="sourceBadge">No camera selected</span>
+        <span class="badge" id="fpsBadge" title="Frames per second the pipeline is actually reading">&mdash; FPS</span>
+        <span class="badge" id="detectorBadge" title="Inference backend in use">&mdash;</span>
       </div>
     </header>
 
     <div class="controls-strip" id="cameraBar">
       <div style="display: flex; align-items: center; gap: 8px; overflow-x: auto; flex: 1;">
-        <span style="font-size: 11px; font-weight: 700; color: var(--accent-cyan); white-space: nowrap;">📷 Active Feed:</span>
+        <span style="font-size: 11px; font-weight: 700; color: var(--accent-cyan); white-space: nowrap;">📷 Camera:</span>
         <div id="cameraButtonsList" style="display: flex; gap: 6px;"></div>
       </div>
-      <button class="btn btn-primary btn-sm" onclick="rescanStudioCameras()">🔄 Scan Sources</button>
+      <button type="button" class="btn btn-sm" onclick="loadStudioSources()">🔄 Reload cameras</button>
+      <a href="/dashboard#floorplan" class="btn btn-primary btn-sm">🔍 Find &amp; adopt cameras</a>
     </div>
 
     <div class="studio-grid">
       <div class="video-card">
         <div class="video-viewport" id="viewportWrapper">
-          <img id="streamImg" src="/stream" alt="Live AI Vision Feed" />
+          <img id="streamImg" alt="Live camera feed with detector overlay" />
           <canvas id="interactiveCanvas"></canvas>
+          <div id="viewportEmpty" class="viewport-empty" style="display:none;"></div>
         </div>
 
-        <div style="background: rgba(0,0,0,0.35); padding: 12px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.08); display: flex; flex-direction: column; gap: 8px;">
+        <div class="studio-tools">
           <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-            <input type="text" id="zoneNameInput" placeholder="Zone Label (e.g. Aisle 3 Snacks Endcap / Tripwire)" style="flex: 1.5; background: #101624; color: #fff; padding: 8px 12px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.2); font-size: 12px;" />
-            <select id="zoneClassSelect" style="flex: 1; background: #101624; color: #fff; padding: 8px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.2); font-size: 12px;">
-              <option value="both">🧍+🛒 Shopper & Cart</option>
-              <option value="person">🧍 Human Only</option>
-              <option value="vehicle">🚗 Forklift / Vehicle</option>
-            </select>
+            <label for="zoneNameInput" class="sr-only" style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;">Zone label</label>
+            <input type="text" id="zoneNameInput" name="zoneName" class="form-input" placeholder="Label for the zone you are drawing" aria-label="Zone label" style="flex: 1.5;" />
+            <span id="drawModeLabel" class="badge" style="align-self:center;">mode: none</span>
           </div>
           <div style="display: flex; gap: 6px; flex-wrap: wrap;">
-            <button class="btn btn-primary btn-sm" style="flex: 1;" onclick="setDrawMode('TRIPWIRE')">⚡ Add Tripwire (2 Pts)</button>
-            <button class="btn btn-primary btn-sm" style="flex: 1;" onclick="setDrawMode('INTRUSION')">🛑 Add Restricted Area (3+ Pts)</button>
-            <button class="btn btn-primary btn-sm" style="flex: 1;" onclick="setDrawMode('EXCLUSION')">🌫️ Add Exclusion Mask (3+ Pts)</button>
-            <button class="btn btn-warning btn-sm" style="flex: 1.2; background: rgba(255,170,0,0.2); border-color: #ffaa00; color: #ffaa00;" onclick="setDrawMode('PRODUCT_SHELF')">🛒 Add Product Area (4+ Pts)</button>
-            <button class="btn btn-success btn-sm" style="flex: 0.8;" onclick="saveDrawnZone()">💾 Save Zone</button>
-            <button class="btn btn-danger btn-sm" style="flex: 0.6;" onclick="clearCanvasPoints()">✕ Cancel</button>
+            <button type="button" class="btn btn-primary btn-sm" style="flex: 1;" onclick="setDrawMode('TRIPWIRE')">⚡ Tripwire (2 pts)</button>
+            <button type="button" class="btn btn-primary btn-sm" style="flex: 1;" onclick="setDrawMode('INTRUSION')">🛑 Restricted area (3+ pts)</button>
+            <button type="button" class="btn btn-primary btn-sm" style="flex: 1;" onclick="setDrawMode('EXCLUSION')">🌫️ Privacy mask (3+ pts)</button>
+            <button type="button" class="btn btn-warning btn-sm" style="flex: 1.2;" onclick="setDrawMode('PRODUCT_SHELF')">🛒 Product shelf (4+ pts)</button>
+            <button type="button" class="btn btn-success btn-sm" style="flex: 0.8;" onclick="saveDrawnZone()">💾 Save</button>
+            <button type="button" class="btn btn-sm" style="flex: 0.6;" onclick="undoPoint()">Undo</button>
+            <button type="button" class="btn btn-danger btn-sm" style="flex: 0.6;" onclick="clearCanvasPoints()">✕ Cancel</button>
           </div>
+          <div id="drawStatus" class="form-status" aria-live="polite">Pick a tool, then click on the video to place points. Coordinates are stored relative to the camera frame.</div>
         </div>
 
-        <div style="display: flex; gap: 8px;">
-          <button class="btn btn-sm" style="flex: 1;" onclick="triggerSnapshot()">📸 Capture Snapshot</button>
-          <button class="btn btn-sm" style="flex: 1;" onclick="triggerClip()">🎥 Export 15s MP4 Incident Clip</button>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+          <button type="button" class="btn btn-sm" style="flex: 1;" id="btnSnapshot" onclick="triggerSnapshot()">📸 Save snapshot</button>
+          <button type="button" class="btn btn-sm" style="flex: 1;" id="btnClip" onclick="triggerClip()">🎥 Export incident clip</button>
         </div>
+        <div id="captureResult" class="capture-result"></div>
       </div>
 
       <div style="display: flex; flex-direction: column; gap: 12px;">
         <div class="glass-card">
-          <div class="card-title">
-            <span>🛒 Product Shelf Areas</span>
-          </div>
-          <div id="productShelfListContainer">
-            <div style="font-size: 11.5px; color: var(--text-dim);">No product shelf areas configured.</div>
-          </div>
-        </div>
-
-        <div class="glass-card">
-          <div class="card-title">
-            <span>⚡ Active Tripwires</span>
-            <button class="btn btn-danger btn-sm" onclick="clearAllZones()">Clear All</button>
-          </div>
-          <div id="tripwiresListContainer">
-            <div style="font-size: 11.5px; color: var(--text-dim);">No tripwires configured.</div>
+          <div class="card-title">📊 Pipeline telemetry</div>
+          <div id="telemetryPanel">
+            <div class="telemetry-row"><span class="telemetry-label">Status</span><span class="telemetry-val" id="tStatus">&mdash;</span></div>
+            <div class="telemetry-row"><span class="telemetry-label">Capture FPS</span><span class="telemetry-val" id="tFps">&mdash;</span></div>
+            <div class="telemetry-row"><span class="telemetry-label">Detections (last frame)</span><span class="telemetry-val" id="tDetections">&mdash;</span></div>
+            <div class="telemetry-row"><span class="telemetry-label">Live tracks</span><span class="telemetry-val" id="tTracks">&mdash;</span></div>
+            <div class="telemetry-row"><span class="telemetry-label">Frames read</span><span class="telemetry-val" id="tFrames">&mdash;</span></div>
+            <div class="telemetry-row"><span class="telemetry-label">Frame size</span><span class="telemetry-val" id="tFrameSize">&mdash;</span></div>
+            <div class="telemetry-row"><span class="telemetry-label">Newest frame age</span><span class="telemetry-val" id="tAge">&mdash;</span></div>
+            <div class="telemetry-row"><span class="telemetry-label">Floor calibration</span><span class="telemetry-val" id="tCalibrated">&mdash;</span></div>
+            <div class="telemetry-row"><span class="telemetry-label">Last error</span><span class="telemetry-val" id="tError" style="color: var(--accent-red);">&mdash;</span></div>
           </div>
         </div>
 
         <div class="glass-card">
-          <div class="card-title">
-            <span>🛑 Restricted Polygon Zones</span>
-          </div>
-          <div id="intrusionListContainer">
-            <div style="font-size: 11.5px; color: var(--text-dim);">No restricted areas configured.</div>
-          </div>
+          <div class="card-title"><span>🛒 Product shelf areas</span></div>
+          <div id="productShelfListContainer"><div class="fp-empty">Loading…</div></div>
         </div>
 
         <div class="glass-card">
           <div class="card-title">
-            <span>🌫️ Exclusion & Privacy Masks</span>
+            <span>⚡ Tripwires</span>
+            <span id="clearAllBlock">
+              <button type="button" class="btn btn-danger btn-sm" id="btnClearAllAsk" onclick="askClearAllZones()">Clear all</button>
+              <span id="clearAllConfirm" style="display:none; align-items:center; gap:6px;">
+                <span style="font-size:11px; color: var(--accent-red);">Delete every tripwire, area and mask on every camera?</span>
+                <button type="button" class="btn btn-danger btn-sm" onclick="confirmClearAllZones()">Yes, clear</button>
+                <button type="button" class="btn btn-sm" onclick="cancelClearAllZones()">Keep</button>
+              </span>
+            </span>
           </div>
-          <div id="exclusionListContainer">
-            <div style="font-size: 11.5px; color: var(--text-dim);">No exclusion masks configured.</div>
-          </div>
+          <div id="tripwiresListContainer"><div class="fp-empty">Loading…</div></div>
         </div>
 
         <div class="glass-card">
-          <div class="card-title">📊 Kinematic & AI Telemetry</div>
-          <div class="telemetry-row">
-            <span class="telemetry-label">Shoppers in View:</span>
-            <span class="telemetry-val" id="personCountVal">1</span>
-          </div>
-          <div class="telemetry-row">
-            <span class="telemetry-label">Active ByteTrack IDs:</span>
-            <span class="telemetry-val" id="totalTracksVal" style="color: var(--accent-orange);">1</span>
-          </div>
-          <div class="telemetry-row">
-            <span class="telemetry-label">Torso Angle (θ):</span>
-            <span class="telemetry-val" id="torsoAngleVal">82.5°</span>
-          </div>
-          <div class="telemetry-row">
-            <span class="telemetry-label">Elderly Fall Status:</span>
-            <span class="telemetry-val" id="fallStatusVal" style="color: var(--accent-green);">NORMAL</span>
-          </div>
+          <div class="card-title"><span>🛑 Restricted areas</span></div>
+          <div id="intrusionListContainer"><div class="fp-empty">Loading…</div></div>
+        </div>
+
+        <div class="glass-card">
+          <div class="card-title"><span>🌫️ Privacy &amp; exclusion masks</span></div>
+          <div id="exclusionListContainer"><div class="fp-empty">Loading…</div></div>
         </div>
       </div>
     </div>
   </div>
 
-  <!-- Product Shelf ROI Mapping Modal -->
-  <div id="productModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.75); z-index:9999; align-items:center; justify-content:center; backdrop-filter: blur(8px);">
-    <div style="background:#0f1422; border:1px solid rgba(255,170,0,0.4); border-radius:12px; width:90%; max-width:480px; padding:20px; box-shadow:0 12px 36px rgba(0,0,0,0.8); display:flex; flex-direction:column; gap:12px;">
-      <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid rgba(255,255,255,0.1); padding-bottom:8px;">
-        <h3 style="margin:0; font-size:15px; color:#ffaa00; display:flex; align-items:center; gap:8px;">🛒 Map Product & Study Options</h3>
-        <button onclick="closeProductModal()" style="background:none; border:none; color:#a0aec0; font-size:16px; cursor:pointer;">✕</button>
+  <!-- Product shelf mapping form (shown after a 4+ point polygon is drawn) -->
+  <div class="modal-overlay" id="productModal">
+    <div class="modal-card" style="max-width: 520px;">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <h3 style="margin:0; font-size:15px; color:#ffaa00;">🛒 Map product shelf area</h3>
+        <button type="button" class="btn btn-sm" onclick="closeProductModal()">✕ Close</button>
       </div>
-      <div>
-        <label style="font-size:11px; color:#a0aec0; display:block; margin-bottom:4px;">Product Display Name</label>
-        <input type="text" id="modalProductName" placeholder="e.g. Organic Almond Granola 500g" style="width:100%; background:#161d30; color:#fff; padding:8px; border-radius:6px; border:1px solid rgba(255,255,255,0.15); font-size:12px;" />
-      </div>
-      <div style="display:flex; gap:8px;">
-        <div style="flex:1;">
-          <label style="font-size:11px; color:#a0aec0; display:block; margin-bottom:4px;">SKU Identifier</label>
-          <input type="text" id="modalProductSku" placeholder="SKU-ORG-402" style="width:100%; background:#161d30; color:#fff; padding:8px; border-radius:6px; border:1px solid rgba(255,255,255,0.15); font-size:12px;" />
+      <form onsubmit="submitProductModal(event)" style="display:flex; flex-direction:column; gap:10px; margin-top:12px;">
+        <div class="form-group">
+          <label for="modalProductName">Product / display name</label>
+          <input type="text" id="modalProductName" name="productName" class="form-input" required />
         </div>
-        <div style="flex:1;">
-          <label style="font-size:11px; color:#a0aec0; display:block; margin-bottom:4px;">Category</label>
-          <select id="modalProductCategory" style="width:100%; background:#161d30; color:#fff; padding:8px; border-radius:6px; border:1px solid rgba(255,255,255,0.15); font-size:12px;">
-            <option value="Breakfast & Cereals">Breakfast & Cereals</option>
-            <option value="Snacks & Confectionery">Snacks & Confectionery</option>
-            <option value="Dairy & Chilled">Dairy & Chilled</option>
-            <option value="Beverages">Beverages</option>
-            <option value="Fresh Produce">Fresh Produce</option>
-            <option value="Bakery">Bakery</option>
+        <div class="form-grid-2col">
+          <div class="form-group">
+            <label for="modalProductSku">SKU identifier</label>
+            <input type="text" id="modalProductSku" name="productSku" class="form-input" required />
+          </div>
+          <div class="form-group">
+            <label for="modalProductCategory">Zone / category (from the blueprint)</label>
+            <input type="text" id="modalProductCategory" name="productCategory" class="form-input" list="layoutZoneNames" required placeholder="Pick a blueprint zone" />
+            <datalist id="layoutZoneNames"></datalist>
+          </div>
+        </div>
+        <div class="form-grid-2col">
+          <div class="form-group">
+            <label for="modalProductPrice">Price ($)</label>
+            <input type="number" step="0.01" min="0" id="modalProductPrice" name="productPrice" class="form-input" />
+          </div>
+          <div class="form-group">
+            <label for="modalProductFacing">Facing count</label>
+            <input type="number" min="1" id="modalProductFacing" name="productFacing" class="form-input" />
+          </div>
+        </div>
+        <div class="form-group">
+          <label for="modalProductTier">Shelf tier</label>
+          <select id="modalProductTier" name="productTier" class="form-select">
+            <option value="EYE_LEVEL">Eye level</option>
+            <option value="TOP">Top shelf</option>
+            <option value="REACH">Reach tier</option>
+            <option value="BOTTOM">Bottom shelf</option>
+            <option value="ENDCAP">Promo endcap</option>
           </select>
         </div>
-      </div>
-      <div style="display:flex; gap:8px;">
-        <div style="flex:1;">
-          <label style="font-size:11px; color:#a0aec0; display:block; margin-bottom:4px;">Price ($ AUD)</label>
-          <input type="number" step="0.05" id="modalProductPrice" value="12.50" style="width:100%; background:#161d30; color:#fff; padding:8px; border-radius:6px; border:1px solid rgba(255,255,255,0.15); font-size:12px;" />
+        <div class="form-group">
+          <label>Study metrics</label>
+          <div class="checkbox-group-grid">
+            <label class="checkbox-label" for="chkHandReach"><input type="checkbox" id="chkHandReach" name="chkHandReach" checked /> Hand reaches</label>
+            <label class="checkbox-label" for="chkDwellTime"><input type="checkbox" id="chkDwellTime" name="chkDwellTime" checked /> Dwell inspection</label>
+            <label class="checkbox-label" for="chkPutBack"><input type="checkbox" id="chkPutBack" name="chkPutBack" checked /> Put-back / friction</label>
+            <label class="checkbox-label" for="chkPosSales"><input type="checkbox" id="chkPosSales" name="chkPosSales" /> Correlate with POS</label>
+            <label class="checkbox-label" for="chkAbTest"><input type="checkbox" id="chkAbTest" name="chkAbTest" /> A/B placement test</label>
+          </div>
         </div>
-        <div style="flex:1;">
-          <label style="font-size:11px; color:#a0aec0; display:block; margin-bottom:4px;">Facing Count</label>
-          <input type="number" id="modalProductFacing" value="6" style="width:100%; background:#161d30; color:#fff; padding:8px; border-radius:6px; border:1px solid rgba(255,255,255,0.15); font-size:12px;" />
+        <div id="productModalStatus" class="form-status" aria-live="polite"></div>
+        <div style="display:flex; gap:8px;">
+          <button type="submit" class="btn btn-primary" style="flex:1;">💾 Save product area</button>
+          <button type="button" class="btn" style="flex:0.5;" onclick="closeProductModal()">Cancel</button>
         </div>
-        <div style="flex:1.2;">
-          <label style="font-size:11px; color:#a0aec0; display:block; margin-bottom:4px;">Shelf Placement Tier</label>
-          <select id="modalProductTier" style="width:100%; background:#161d30; color:#fff; padding:8px; border-radius:6px; border:1px solid rgba(255,255,255,0.15); font-size:12px;">
-            <option value="EYE_LEVEL">👁️ Eye-Level</option>
-            <option value="TOP">⬆️ Top Shelf</option>
-            <option value="REACH">✋ Reach Tier</option>
-            <option value="BOTTOM">⬇️ Bottom Shelf</option>
-            <option value="ENDCAP">⭐ Promo Endcap</option>
-          </select>
-        </div>
-      </div>
-      <div>
-        <label style="font-size:11px; color:#a0aec0; display:block; margin-bottom:6px;">Active Study Metrics & Service Options</label>
-        <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px; font-size:11px; color:#e2e8f0;">
-          <label style="display:flex; align-items:center; gap:6px; cursor:pointer;"><input type="checkbox" id="chkHandReach" checked /> ✋ Track Hand Reaches</label>
-          <label style="display:flex; align-items:center; gap:6px; cursor:pointer;"><input type="checkbox" id="chkDwellTime" checked /> ⏱️ Dwell Inspection</label>
-          <label style="display:flex; align-items:center; gap:6px; cursor:pointer;"><input type="checkbox" id="chkPutBack" checked /> 🔄 Put-Back / Friction</label>
-          <label style="display:flex; align-items:center; gap:6px; cursor:pointer;"><input type="checkbox" id="chkPosSales" checked /> 💳 Correlate with POS</label>
-          <label style="display:flex; align-items:center; gap:6px; cursor:pointer;"><input type="checkbox" id="chkAbTest" /> 🧪 A/B Placement Test</label>
-        </div>
-      </div>
-      <div style="display:flex; gap:8px; margin-top:8px;">
-        <button class="btn btn-primary" style="flex:1;" onclick="submitProductModal()">💾 Link & Save Product Area</button>
-        <button class="btn btn-danger" style="flex:0.5;" onclick="closeProductModal()">✕ Cancel</button>
-      </div>
+      </form>
     </div>
   </div>
 
   <div class="toast" id="toast">Notification</div>
 
-  <script src="/static/js/studio.js"></script>
+  <script src="/static/js/studio.js?v=2.1.2"></script>
 </body>
 </html>

@@ -230,12 +230,14 @@ class AIZoneService:
                 return True
             return False
 
-    def clear_all(self):
+    def clear_all(self) -> int:
         with self.lock:
+            n = len(self.tripwires) + len(self.intrusion_zones) + len(self.exclusion_masks)
             self.tripwires.clear()
             self.intrusion_zones.clear()
             self.exclusion_masks.clear()
             self._save_persistent_zones()
+            return n
 
     def get_all_zones(self, camera_id: Optional[str] = None) -> Dict[str, Any]:
         with self.lock:

@@ -1,26 +1,20 @@
-from typing import Dict
+"""Per-camera feature toggles.
+
+Starts empty. It used to pre-register two cameras ("cam_living_room",
+"cam_front_door") that no deployment had, which made the active-feature
+count non-zero on a box with no cameras at all.
+"""
+
 import threading
+from typing import Dict
+
 from ..models.schemas import CameraFeatureConfig
+
 
 class FeatureManager:
     def __init__(self):
         self._lock = threading.Lock()
         self._camera_features: Dict[str, CameraFeatureConfig] = {}
-        
-        self.set_camera_features("cam_living_room", CameraFeatureConfig(
-            motion_tracking=True,
-            fall_detection=True,
-            door_monitoring=False,
-            package_theft_tracking=False,
-            inactivity_alerts=True
-        ))
-        self.set_camera_features("cam_front_door", CameraFeatureConfig(
-            motion_tracking=True,
-            fall_detection=False,
-            door_monitoring=True,
-            package_theft_tracking=True,
-            inactivity_alerts=False
-        ))
 
     def get_camera_features(self, camera_id: str) -> CameraFeatureConfig:
         with self._lock:
@@ -29,6 +23,14 @@ class FeatureManager:
     def set_camera_features(self, camera_id: str, config: CameraFeatureConfig) -> None:
         with self._lock:
             self._camera_features[camera_id] = config
+
+    def remove_camera(self, camera_id: str) -> None:
+        with self._lock:
+            self._camera_features.pop(camera_id, None)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._camera_features.clear()
 
     def count_active_features(self) -> int:
         count = 0
@@ -40,5 +42,6 @@ class FeatureManager:
                 if cfg.inactivity_alerts: count += 1
                 if cfg.motion_tracking: count += 1
         return count
+
 
 feature_manager = FeatureManager()

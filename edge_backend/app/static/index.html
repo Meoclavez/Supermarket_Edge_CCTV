@@ -11,7 +11,9 @@
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;800&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   
   <!-- Cyber-Glassmorphism Stylesheet -->
-  <link rel="stylesheet" href="/static/css/style.css" />
+  <link rel="stylesheet" href="/static/css/style.css?v=2.1.2" />
+  <link rel="stylesheet" href="/static/css/floorplan.css?v=2.1.2" />
+  <script src="/static/js/auth.js?v=2.1.2"></script>
 
   <!-- Chart.js for High-Performance Canvas Graphs -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
@@ -24,48 +26,48 @@
         <span class="brand-logo-glow">👁️</span>
         <div class="brand-titles">
           <h1 class="brand-title">EDGE AI CCTV SURVEILLANCE</h1>
-          <span class="brand-subtitle">PEARCEDALE SUPERMARKET (VIC 3912) • 32 CHANNELS</span>
+          <span class="brand-subtitle" id="brandSubtitle">&mdash;</span>
         </div>
       </div>
 
       <div class="hardware-telemetry-hud">
         <div class="telemetry-item">
           <span class="telemetry-label">Decoder</span>
-          <span class="telemetry-val" id="telemetryDecoderBadge" style="color: var(--accent-cyan);">VA-API H.265</span>
+          <span class="telemetry-val" id="telemetryDecoderBadge" style="color: var(--accent-cyan);">&mdash;</span>
         </div>
         <div class="telemetry-item">
           <span class="telemetry-label">AI Engine</span>
-          <span class="telemetry-val" id="telemetryInferenceBadge" style="color: var(--accent-green);">TENSORRT / CPU</span>
+          <span class="telemetry-val" id="telemetryInferenceBadge" style="color: var(--accent-green);">&mdash;</span>
         </div>
         <div class="telemetry-item">
           <span class="telemetry-label">CPU / RAM</span>
-          <span class="telemetry-val" id="telemetryCpuVal">12.4%</span>
-          <span class="telemetry-val" id="telemetryRamVal" style="color: var(--text-dim); font-size: 10px;">3.8 / 16 GB</span>
+          <span class="telemetry-val" id="telemetryCpuVal">&mdash;</span>
+          <span class="telemetry-val" id="telemetryRamVal" style="color: var(--text-dim); font-size: 10px;">&mdash;</span>
         </div>
         <div class="telemetry-item">
           <span class="telemetry-label">Edge Uptime</span>
-          <span class="telemetry-val" id="telemetryUptimeVal">99.98%</span>
+          <span class="telemetry-val" id="telemetryUptimeVal">&mdash;</span>
         </div>
       </div>
 
       <div class="header-actions">
-        <button class="btn btn-sm" onclick="openScannerModal()">🔍 Scan Streams</button>
+        <button class="btn btn-sm" onclick="switchTab('floorplan')">🔍 Find cameras</button>
         <a href="/dashboard/studio" class="btn btn-primary btn-sm">🎨 Camera Studio</a>
       </div>
     </header>
 
     <!-- Top Floating Theft Warning Alert Banner -->
-    <div id="theftAlertBanner" class="theft-banner" style="margin-bottom: 12px;">
+    <div id="theftAlertBanner" class="theft-banner" style="margin-bottom: 12px; display: none;">
       <div class="theft-banner-left">
         <span class="theft-banner-icon">🚨</span>
         <div>
-          <div class="theft-banner-title" id="theftBannerHeadline">THEFT ALERT: Shelf Sweeping detected on CAM-27: Liquor & Spirits (LIQUOR)</div>
+          <div class="theft-banner-title" id="theftBannerHeadline"></div>
           <div class="theft-banner-meta">
-            <span id="theftBannerConfidence">Confidence: 94.2%</span>
+            <span id="theftBannerConfidence"></span>
             <span>•</span>
-            <span id="theftBannerTime">Time: Just Now</span>
+            <span id="theftBannerTime"></span>
             <span>•</span>
-            <span id="theftBannerDetails">Rapid bulk clearing of 5 whiskey bottles into dark bag</span>
+            <span id="theftBannerDetails"></span>
           </div>
         </div>
       </div>
@@ -76,31 +78,29 @@
       </div>
     </div>
 
-    <!-- Real-Time Supermarket Retail KPI Strip -->
+    <!-- Headline KPIs. Values are placeholders only until the first poll;
+         anything not observed renders as an em dash, never as zero. -->
+    <div id="dataStateBanner" class="data-state-banner" role="status" style="display:none;"></div>
     <section class="overview-strip">
       <div class="stat-box">
         <span class="stat-label">Store Footfall Today</span>
-        <span class="stat-val" id="kpiFootfallToday">3,420</span>
+        <span class="stat-val metric-unobserved" id="kpiFootfallToday">&mdash;</span>
       </div>
       <div class="stat-box">
-        <span class="stat-label">Active Shoppers Now</span>
-        <span class="stat-val" id="kpiActiveShoppers" style="color: var(--accent-green);">47</span>
+        <span class="stat-label">Shoppers In Store Now</span>
+        <span class="stat-val metric-unobserved" id="kpiActiveShoppers" style="color: var(--accent-green);">&mdash;</span>
       </div>
       <div class="stat-box">
         <span class="stat-label">Avg Store Dwell</span>
-        <span class="stat-val" id="kpiAvgDwell">18.4m</span>
+        <span class="stat-val metric-unobserved" id="kpiAvgDwell">&mdash;</span>
       </div>
       <div class="stat-box">
         <span class="stat-label">Conversion Rate</span>
-        <span class="stat-val" id="kpiConversion" style="color: var(--accent-cyan);">24.8%</span>
+        <span class="stat-val metric-unobserved" id="kpiConversion" style="color: var(--accent-cyan);">&mdash;</span>
       </div>
       <div class="stat-box">
-        <span class="stat-label">Lost Sales ϕ</span>
-        <span class="stat-val" id="kpiLostSalesPhi" style="color: var(--accent-orange);">ϕ 0.34</span>
-      </div>
-      <div class="stat-box">
-        <span class="stat-label">Avg Queue Wait</span>
-        <span class="stat-val" id="kpiAvgQueueWait">2.6m</span>
+        <span class="stat-label">Revenue Today</span>
+        <span class="stat-val metric-unobserved" id="kpiRevenue">&mdash;</span>
       </div>
     </section>
 
@@ -109,7 +109,7 @@
       <button class="tab-btn active" data-tab="matrix" onclick="switchTab('matrix')">
         <span>📹</span>
         <span>Live Camera Matrix</span>
-        <span class="tab-count" id="matrixCamCountBadge">32</span>
+        <span class="tab-count" id="matrixCamCountBadge">0</span>
       </button>
       <button class="tab-btn" data-tab="floorplan" onclick="switchTab('floorplan')">
         <span>🗺️</span>
@@ -122,7 +122,7 @@
       <button class="tab-btn" data-tab="actions" onclick="switchTab('actions')">
         <span>⚡</span>
         <span>AI Decision Action Center</span>
-        <span class="tab-count" id="tabActionCountBadge" style="background: var(--accent-red); color: #fff; border-color: transparent;">5</span>
+        <span class="tab-count" id="tabActionCountBadge">0</span>
       </button>
       <button class="tab-btn" data-tab="market_ai" onclick="switchTab('market_ai')">
         <span>🧠</span>
@@ -132,7 +132,7 @@
       <button class="tab-btn" data-tab="theft" onclick="switchTab('theft')">
         <span>🚨</span>
         <span>Loss Prevention & Theft AI</span>
-        <span class="tab-count" id="tabTheftCountBadge" style="background: var(--accent-red); color: #fff; border-color: transparent;">1</span>
+        <span class="tab-count" id="tabTheftCountBadge">0</span>
       </button>
       <button class="tab-btn" data-tab="digest" onclick="switchTab('digest')">
         <span>📑</span>
@@ -141,30 +141,26 @@
     </nav>
 
     <!-- ==========================================
-         TAB 1: Live Camera Matrix (32 Cameras)
+         TAB 1: Live Camera Matrix
          ========================================== -->
     <main id="tab-matrix" class="tab-view active">
       <div class="controls-strip">
         <div class="filter-group" id="cameraFilterChips">
-          <span style="font-size: 11px; font-weight: 700; color: var(--text-dim); margin-right: 4px;">Zone Filter:</span>
-          <button class="channel-pill active" data-filter="ALL" onclick="filterCameras('ALL')">All (32)</button>
-          <button class="channel-pill" data-filter="ENTRANCE" onclick="filterCameras('ENTRANCE')">Entrance & Foyer (4)</button>
-          <button class="channel-pill" data-filter="AISLE" onclick="filterCameras('AISLE')">Aisles 1-14 (14)</button>
-          <button class="channel-pill" data-filter="PRODUCE" onclick="filterCameras('PRODUCE')">Fresh Produce & Bakery (4)</button>
-          <button class="channel-pill" data-filter="POS" onclick="filterCameras('POS')">Checkouts & POS (6)</button>
-          <button class="channel-pill" data-filter="RESTRICTED" onclick="filterCameras('RESTRICTED')">High-Value & Dock (4)</button>
+          <span style="font-size: 11px; font-weight: 700; color: var(--text-dim); margin-right: 4px;">Area:</span>
+          <!-- Pills are built from the departments cameras are actually assigned to. -->
         </div>
 
         <div class="filter-group" id="fpsFilterChips">
           <span style="font-size: 11px; font-weight: 700; color: var(--text-dim); margin-right: 4px;">FPS Throttle:</span>
-          <button class="fps-btn" data-fps="1" onclick="setDecimationFPS(1)">1 FPS</button>
-          <button class="fps-btn" data-fps="5" onclick="setDecimationFPS(5)">5 FPS</button>
-          <button class="fps-btn" data-fps="15" onclick="setDecimationFPS(15)">15 FPS</button>
-          <button class="fps-btn active" data-fps="25" onclick="setDecimationFPS(25)">25 FPS Real-Time</button>
+          <button type="button" class="fps-btn" data-fps="1" onclick="setDecimationFPS(1)">1 FPS</button>
+          <button type="button" class="fps-btn active" data-fps="5" onclick="setDecimationFPS(5)">5 FPS</button>
+          <button type="button" class="fps-btn" data-fps="15" onclick="setDecimationFPS(15)">15 FPS</button>
+          <button type="button" class="fps-btn" data-fps="25" onclick="setDecimationFPS(25)">25 FPS</button>
         </div>
 
         <div>
-          <input type="text" class="search-input" placeholder="🔍 Search cameras..." oninput="filterCamerasBySearch(this.value)" />
+          <label for="cameraSearchInput" class="sr-only" style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;">Search cameras</label>
+          <input type="text" id="cameraSearchInput" name="cameraSearch" class="search-input" placeholder="🔍 Search cameras..." oninput="filterCamerasBySearch(this.value)" aria-label="Search cameras" autocomplete="off" />
         </div>
       </div>
 
@@ -175,75 +171,92 @@
          TAB 2: 2D Interactive Store Blueprint & Heatmap HUD
          ========================================== -->
     <section id="tab-floorplan" class="tab-view">
-      <div class="blueprint-layout">
-        <!-- Floorplan Canvas Viewport -->
-        <div class="floorplan-wrapper">
+      <div class="blueprint-layout" id="fpLayout">
+        <div class="floorplan-wrapper" id="fpWrapper">
           <canvas id="floorplanCanvas"></canvas>
 
-          <!-- Floating HUD Toolbar -->
-          <div class="floorplan-toolbar">
-            <button class="btn btn-sm" onclick="window.storeFloorplanHUD && window.storeFloorplanHUD.zoom(1.2)" title="Zoom In">➕</button>
-            <button class="btn btn-sm" onclick="window.storeFloorplanHUD && window.storeFloorplanHUD.zoom(0.8)" title="Zoom Out">➖</button>
-            <button class="btn btn-sm" onclick="window.storeFloorplanHUD && window.storeFloorplanHUD.resetView()" title="Reset View">🔄 Fit</button>
-            <button class="btn btn-sm btn-primary" id="toggleHeatmapBtn" onclick="this.classList.toggle('btn-primary'); window.storeFloorplanHUD && window.storeFloorplanHUD.toggleLayer('heatmap', this.classList.contains('btn-primary'))">🔥 Heatmap</button>
-            <button class="btn btn-sm btn-primary" id="toggleShoppersBtn" onclick="this.classList.toggle('btn-primary'); window.storeFloorplanHUD && window.storeFloorplanHUD.toggleLayer('shoppers', this.classList.contains('btn-primary'))">🟢 Shoppers</button>
-            <button class="btn btn-sm btn-primary" id="toggleCamerasBtn" onclick="this.classList.toggle('btn-primary'); window.storeFloorplanHUD && window.storeFloorplanHUD.toggleLayer('cameras', this.classList.contains('btn-primary'))">📹 Cameras</button>
-            <button class="btn btn-sm btn-primary" id="toggleFlowBtn" onclick="this.classList.toggle('btn-primary'); window.storeFloorplanHUD && window.storeFloorplanHUD.toggleLayer('flow', this.classList.contains('btn-primary'))">➡️ Flow</button>
-            <button class="btn btn-sm" id="btnAddCameraTool" onclick="window.storeFloorplanHUD && window.storeFloorplanHUD.toggleAddCameraMode()">➕ Add Camera</button>
-            <div style="display: flex; align-items: center; gap: 6px; padding: 0 6px;">
-              <span style="font-size: 10px; color: var(--text-dim);">Density:</span>
-              <input type="range" min="0.4" max="2.0" step="0.2" value="1.0" style="width: 70px; accent-color: var(--accent-cyan);" oninput="window.storeFloorplanHUD && window.storeFloorplanHUD.setIntensity(this.value)" />
+          <!-- Editor toolbar. Every control here writes to the database. -->
+          <div class="floorplan-toolbar" id="fpToolbar">
+            <div class="fp-tool-group">
+              <button class="btn btn-sm" onclick="blueprintEditor.zoom(1.2)" title="Zoom in">+</button>
+              <button class="btn btn-sm" onclick="blueprintEditor.zoom(0.8)" title="Zoom out">&minus;</button>
+              <button class="btn btn-sm" onclick="blueprintEditor.resetView()" title="Fit the whole store in view">Fit</button>
             </div>
+            <span class="fp-sep"></span>
+            <div class="fp-tool-group" id="fpTools">
+              <button class="btn btn-sm fp-tool active" data-tool="view" onclick="blueprintEditor.setTool('view')" title="Select, move shapes, drag vertices (V)">Select</button>
+              <button class="btn btn-sm fp-tool" data-tool="ROOM" onclick="blueprintEditor.startDraw('ROOM')" title="Draw a room outline (R)"><span class="fp-tool-swatch" style="background:#4a90d9"></span>Room</button>
+              <button class="btn btn-sm fp-tool" data-tool="WALL" onclick="blueprintEditor.startDraw('WALL')" title="Draw a wall polyline (W), hold Shift for straight segments"><span class="fp-tool-swatch" style="background:#c9d4e0"></span>Wall</button>
+              <button class="btn btn-sm fp-tool" data-tool="SHELF" onclick="blueprintEditor.startDraw('SHELF')" title="Draw a shelf, counter or obstacle (S)"><span class="fp-tool-swatch" style="background:#f472b6"></span>Shelf</button>
+              <button class="btn btn-sm fp-tool" data-tool="DOOR" onclick="blueprintEditor.startDraw('DOOR')" title="Draw a door opening (D)"><span class="fp-tool-swatch" style="background:#fbbf24"></span>Door</button>
+              <button class="btn btn-sm fp-tool btn-primary" data-tool="ZONE" onclick="blueprintEditor.startDrawZone()" title="Draw an analytics zone (Z)">Zone</button>
+              <button class="btn btn-sm" onclick="blueprintEditor.resizeStore()" title="Floor name and dimensions">Store size</button>
+            </div>
+            <span class="fp-sep"></span>
+            <label class="fp-toggle" for="fpSnap" title="Snap points to a 0.5 m grid"><input type="checkbox" id="fpSnap" name="fpSnap" checked onchange="blueprintEditor.toggleSnap(this.checked)"> Snap 0.5 m</label>
+            <span class="fp-mode">mode: <b id="fpMode">view</b></span>
           </div>
 
-          <!-- Floorplan Legend -->
+          <div class="fp-layerbar" id="fpLayerBar">
+            <label class="fp-toggle" for="layerStructures"><input type="checkbox" id="layerStructures" name="layerStructures" checked onchange="blueprintEditor.toggleLayer('structures', this.checked)"> Structures</label>
+            <label class="fp-toggle" for="layerZones"><input type="checkbox" id="layerZones" name="layerZones" checked onchange="blueprintEditor.toggleLayer('zones', this.checked)"> Zones</label>
+            <label class="fp-toggle" for="layerCameras"><input type="checkbox" id="layerCameras" name="layerCameras" checked onchange="blueprintEditor.toggleLayer('cameras', this.checked)"> Cameras</label>
+            <label class="fp-toggle" for="layerHeatmap"><input type="checkbox" id="layerHeatmap" name="layerHeatmap" checked onchange="blueprintEditor.toggleLayer('heatmap', this.checked)"> Heatmap</label>
+            <label class="fp-toggle" for="layerPersons"><input type="checkbox" id="layerPersons" name="layerPersons" checked onchange="blueprintEditor.toggleLayer('persons', this.checked)"> People</label>
+            <label class="fp-toggle" for="layerLabels"><input type="checkbox" id="layerLabels" name="layerLabels" checked onchange="blueprintEditor.toggleLayer('labels', this.checked)"> Labels</label>
+            <label class="fp-toggle" for="layerGrid"><input type="checkbox" id="layerGrid" name="layerGrid" checked onchange="blueprintEditor.toggleLayer('grid', this.checked)"> Grid</label>
+          </div>
+
+          <!-- Shown only while a shape is being drawn, so the mode is never
+               ambiguous and there is always a visible way to finish or abort. -->
+          <div id="fpDrawBanner" class="fp-draw-banner" style="display:none;">
+            <span id="fpDrawHint">Click on the plan to add corners.</span>
+            <span class="fp-draw-count"><b id="fpDrawCount">0</b> points</span>
+            <button class="btn btn-sm btn-primary" id="fpDrawFinish" onclick="blueprintEditor.finishPolygon()">Finish</button>
+            <button class="btn btn-sm" onclick="blueprintEditor.undoPoint()">Undo point</button>
+            <button class="btn btn-sm btn-danger" onclick="blueprintEditor.cancelDraw()">Cancel</button>
+          </div>
+
+          <!-- First-run hint, hidden as soon as anything has been configured. -->
+          <div id="fpHint" class="fp-hint-overlay" style="display:none;"></div>
+
+          <!-- One badge per camera: live track count and calibration state. -->
+          <div id="fpCamBadges" class="fp-cam-badges"></div>
+
           <div class="floorplan-legend">
-            <div class="legend-item"><span class="legend-dot" style="background: var(--accent-green);"></span> Moving Shopper</div>
-            <div class="legend-item"><span class="legend-dot" style="background: var(--accent-orange);"></span> Dwell > 20s</div>
-            <div class="legend-item"><span class="legend-dot" style="background: var(--accent-red);"></span> High Dwell / Theft Risk</div>
-            <div class="legend-item"><span class="legend-dot" style="background: var(--accent-cyan);"></span> Click Aisle / Drag Camera</div>
+            <div id="fpStats" class="fp-stats">Loading…</div>
+            <div id="fpLive" class="fp-live fp-live-idle">live map: waiting for the pipeline</div>
+            <div id="fpStatus" class="fp-status"></div>
           </div>
         </div>
 
-        <!-- Zone Inspector Side Panel -->
-        <div class="glass-card zone-inspector-card">
-          <div class="card-title">
-            <span>📍 Shelf Zone Inspector</span>
-            <span class="badge badge-purple" id="zoneInspectorCat">FRESH</span>
-          </div>
+        <!-- Calibration workspace (calibration.js). Opens as a second column
+             next to the plan so image and plan points can be paired visually. -->
+        <div class="glass-card fp-cal-panel" id="fpCalibrationPanel"></div>
 
-          <div style="font-size: 15px; font-weight: 800; color: #fff;" id="zoneInspectorName">Fresh Produce & Organics</div>
-          <div style="font-size: 11px; color: var(--text-dim);">Click any shelf zone or aisle on the blueprint to view real-time dwell and conversion metrics. Double-click any camera to calibrate its FOV angle & position.</div>
+        <div class="blueprint-side">
+          <!-- Fresh-state guide: only rendered while nothing is configured. -->
+          <div class="glass-card fp-setup-card" id="fpSetupPanel" style="display:none;"></div>
 
-          <div class="metric-pill-grid">
-            <div class="metric-pill">
-              <span class="metric-pill-label">Avg Dwell Time</span>
-              <span class="metric-pill-val" id="zoneInspectorDwell">78s</span>
-            </div>
-            <div class="metric-pill">
-              <span class="metric-pill-label">Hourly Footfall</span>
-              <span class="metric-pill-val" id="zoneInspectorFootfall">310 / hr</span>
-            </div>
-            <div class="metric-pill">
-              <span class="metric-pill-label">Conversion %</span>
-              <span class="metric-pill-val" id="zoneInspectorConv" style="color: var(--accent-green);">64%</span>
-            </div>
-            <div class="metric-pill">
-              <span class="metric-pill-label">Lost Sales Index ϕ</span>
-              <span class="metric-pill-val" id="zoneInspectorPhi" style="color: var(--accent-orange);">ϕ 0.38</span>
+          <!-- Inspector: the selected zone, structure, camera or store settings. -->
+          <div class="glass-card zone-inspector-card">
+            <div class="card-title"><span id="fpInspectorTitle">Inspector</span></div>
+            <div id="zoneInspectorBody">
+              <div class="fp-empty">Select a zone, structure or camera on the plan to edit it.</div>
             </div>
           </div>
 
-          <div style="font-size: 11.5px; font-weight: 700; color: #fff; margin-top: 6px;">
-            <span>Stock Velocity: </span>
-            <span id="zoneInspectorStock" style="color: var(--accent-cyan); font-family: var(--font-mono);">420 units/day</span>
-          </div>
-
-          <div style="margin-top: 10px;">
-            <div style="font-size: 11px; font-weight: 700; color: var(--text-dim); margin-bottom: 6px;">Covering Edge AI Cameras:</div>
-            <div id="zoneInspectorCams" style="display: flex; gap: 6px; flex-wrap: wrap;">
-              <span class="badge">CAM-17</span>
-              <span class="badge">CAM-18</span>
+          <!-- Device manager: scan, adopt, place, calibrate, remove. -->
+          <div class="glass-card" id="deviceManagerCard">
+            <div class="card-title">
+              <span>Cameras &amp; devices</span>
+              <button class="btn btn-sm btn-primary" onclick="deviceManager.scan()" id="btnScanDevices">Scan for cameras</button>
+            </div>
+            <div id="deviceScanStatus" class="fp-status"></div>
+            <div id="activeCameraList" class="dev-list"></div>
+            <div class="dev-section-title">Discovered, not yet added</div>
+            <div id="discoveredList" class="dev-list">
+              <div class="fp-empty">Run a scan to find cameras on this network.</div>
             </div>
           </div>
         </div>
@@ -268,7 +281,7 @@
         <div class="glass-card">
           <div class="card-title">
             <span>🎯 5-Stage Shopper Conversion Funnel</span>
-            <span class="badge">CONVERSION RATE: 24.8%</span>
+            <span class="badge metric-unobserved" id="funnelConvBadge">CONVERSION: &mdash;</span>
           </div>
           <div id="funnelStagesList" style="display: flex; flex-direction: column; gap: 8px; margin-top: 10px;"></div>
         </div>
@@ -315,7 +328,7 @@
       <div class="glass-card">
         <div class="card-title" style="display: flex; justify-content: space-between; align-items: center;">
           <span>⚡ Automated AI Operational Directives</span>
-          <span class="badge badge-danger">5 OPEN ACTIONS</span>
+          <span class="badge metric-unobserved" id="actionsOpenBadge">&mdash;</span>
         </div>
         <div id="actionCardsList" style="display: flex; flex-direction: column; gap: 10px; margin-top: 10px;"></div>
       </div>
@@ -325,7 +338,7 @@
          TAB 5: ML Market Intelligence & Suggestions
          ========================================== -->
     <section id="tab-market_ai" class="tab-view">
-      <div class="analytics-two-col" style="margin-bottom: 14px;">
+      <div style="margin-bottom: 14px;">
         <div class="glass-card">
           <div class="card-title">
             <span>⚡ Automated Market Synthesis</span>
@@ -344,47 +357,19 @@
       <div class="overview-strip" style="margin-bottom: 14px;">
         <div class="stat-box">
           <span class="stat-label">Active Shoplifting Alerts</span>
-          <span class="stat-val" id="kpiTheftActiveAlerts" style="color: var(--accent-red);">1</span>
+          <span class="metric-unobserved stat-val" id="kpiTheftActiveAlerts" style="color: var(--accent-red);">&mdash;</span>
         </div>
         <div class="stat-box">
           <span class="stat-label">Theft Incidents Today</span>
-          <span class="stat-val" id="kpiTheftAttemptsToday">4</span>
+          <span class="metric-unobserved stat-val" id="kpiTheftAttemptsToday">&mdash;</span>
         </div>
         <div class="stat-box">
           <span class="stat-label">Prevented Loss Value</span>
-          <span class="stat-val" id="kpiTheftPreventedLoss" style="color: var(--accent-green);">$1,011.50 AUD</span>
+          <span class="metric-unobserved stat-val" id="kpiTheftPreventedLoss" style="color: var(--accent-green);">&mdash;</span>
         </div>
         <div class="stat-box">
           <span class="stat-label">Top High-Risk Dept</span>
-          <span class="stat-val" id="kpiTheftHighRiskDept" style="color: #ffaa00; font-size: 13px;">LIQUOR (Spirits)</span>
-        </div>
-      </div>
-
-      <!-- Quick Action Shoplifting Simulator Card -->
-      <div class="glass-card" style="margin-bottom: 14px;">
-        <div class="card-title">
-          <span>🧪 Real-Time Shoplifting Scenario Simulator</span>
-          <span class="badge badge-danger">TEST VISION ENGINES</span>
-        </div>
-        <p style="font-size: 11.5px; color: var(--text-dim); margin-bottom: 10px;">Trigger simulated shoplifting vision events to evaluate instant audio alarms, floating warning banners, and guard dispatch integration.</p>
-        
-        <div class="simulation-grid">
-          <button class="simulate-card-btn" onclick="simulateTheft('shelf_sweeping')">
-            <div class="sim-title">🍾 Shelf Sweeping</div>
-            <div class="sim-desc">Rapid bulk clearing of 5 whiskey bottles in Liquor Section.</div>
-          </button>
-          <button class="simulate-card-btn" onclick="simulateTheft('pocket_concealment')">
-            <div class="sim-title">🧥 Pocket Concealment</div>
-            <div class="sim-desc">Concealing cosmetics/serums into jacket inner pocket in Pharmacy.</div>
-          </button>
-          <button class="simulate-card-btn" onclick="simulateTheft('sweethearting')">
-            <div class="sim-title">🛒 Sweethearting</div>
-            <div class="sim-desc">Barcode pass-around scan bypass on organic beef at POS 2.</div>
-          </button>
-          <button class="simulate-card-btn" onclick="simulateTheft('cart_pushout')">
-            <div class="sim-title">🚪 Cart Pushout</div>
-            <div class="sim-desc">Unpaid full trolley pushout through South Exit anti-theft gates.</div>
-          </button>
+          <span class="metric-unobserved stat-val" id="kpiTheftHighRiskDept" style="color: #ffaa00; font-size: 13px;">&mdash;</span>
         </div>
       </div>
 
@@ -404,7 +389,7 @@
     <section id="tab-digest" class="tab-view">
       <div class="glass-card">
         <div class="card-title" style="display: flex; justify-content: space-between; align-items: center;">
-          <span>📑 Pearcedale Supermarket Executive Briefing</span>
+          <span>📑 <span id="digestStoreName">Store</span> Executive Briefing</span>
           <button class="btn btn-primary btn-sm" onclick="printDailyDigest()">🖨️ Export PDF / Print</button>
         </div>
         <div class="digest-narrative" id="digestNarrative" style="font-size: 13px; line-height: 1.6; color: #cbd5e1; margin-top: 12px;"></div>
@@ -412,133 +397,117 @@
     </section>
   </div>
 
-  <!-- Camera Configuration Modal -->
+  <!-- Camera Configuration Modal.
+       Identity, stream and AI settings go to PUT /api/v1/cameras/{id};
+       placement (metres on the blueprint) goes to PATCH /api/v1/layout/cameras/{id}/placement. -->
   <div class="modal-overlay" id="modalCameraConfig">
-    <div class="modal-card" style="max-width: 650px;">
+    <div class="modal-card" style="max-width: 680px;">
       <div style="display: flex; justify-content: space-between; align-items: center;">
-        <h3 style="font-size: 15px; font-weight: 800; color: var(--accent-cyan);" id="cameraModalTitle">📷 Configure Camera HUD & Placement</h3>
-        <button class="btn btn-danger btn-sm" onclick="closeCameraConfigModal()">✕ Close</button>
+        <h3 style="font-size: 15px; font-weight: 800; color: var(--accent-cyan);" id="cameraModalTitle">📷 Configure camera</h3>
+        <button type="button" class="btn btn-sm" onclick="closeCameraConfigModal()">✕ Close</button>
       </div>
-      
+
       <form id="formCameraConfig" onsubmit="handleCameraConfigSubmit(event)" style="margin-top: 12px;">
-        <input type="hidden" id="configCameraId" />
-        
+        <input type="hidden" id="configCameraId" name="cameraId" />
+
         <div class="form-grid-2col">
           <div class="form-group">
-            <label>Camera Name</label>
-            <input type="text" class="form-input" id="configCameraName" required />
+            <label for="configCameraName">Camera name</label>
+            <input type="text" class="form-input" id="configCameraName" name="cameraName" required />
           </div>
           <div class="form-group">
-            <label>Channel Number</label>
-            <input type="number" min="1" max="64" class="form-input" id="configChannelNumber" required />
+            <label for="configChannelNumber">Channel number</label>
+            <input type="number" min="1" max="64" class="form-input" id="configChannelNumber" name="channelNumber" required />
           </div>
         </div>
 
         <div class="form-grid-2col" style="margin-top: 8px;">
           <div class="form-group">
-            <label>Department Tag</label>
-            <select class="form-select" id="configDepartment">
-              <option value="ENTRANCE">ENTRANCE</option>
-              <option value="AISLE">AISLE</option>
-              <option value="PRODUCE">PRODUCE</option>
-              <option value="BAKERY">BAKERY</option>
-              <option value="CHECKOUT">CHECKOUT</option>
-              <option value="LIQUOR">LIQUOR</option>
-              <option value="DAIRY">DAIRY</option>
-              <option value="LOGISTICS">LOGISTICS</option>
-              <option value="GENERAL">GENERAL</option>
-            </select>
+            <label for="configDepartment">Department</label>
+            <!-- Options are the zone categories from GET /api/v1/layout plus any
+                 department already in use; nothing is invented client-side. -->
+            <select class="form-select" id="configDepartment" name="department"></select>
           </div>
           <div class="form-group">
-            <label>Location Description</label>
-            <input type="text" class="form-input" id="configLocation" />
+            <label for="configLocation">Location description</label>
+            <input type="text" class="form-input" id="configLocation" name="location" />
           </div>
         </div>
 
         <div class="form-group" style="margin-top: 8px;">
-          <label>RTSP Stream URL</label>
-          <input type="text" class="form-input" id="configRtspUrl" />
+          <label for="configRtspUrl">Stream source (RTSP URL or /dev/video path)</label>
+          <input type="text" class="form-input" id="configRtspUrl" name="rtspUrl" />
         </div>
 
         <div class="form-grid-2col" style="margin-top: 8px;">
           <div class="form-group">
-            <label>Floorplan X (px)</label>
-            <input type="number" step="1" class="form-input" id="configFloorX" required />
+            <label for="configFps">Capture FPS</label>
+            <input type="number" min="1" max="60" class="form-input" id="configFps" name="fps" />
           </div>
           <div class="form-group">
-            <label>Floorplan Y (px)</label>
-            <input type="number" step="1" class="form-input" id="configFloorY" required />
+            <label for="configResolution">Resolution (WxH)</label>
+            <input type="text" class="form-input" id="configResolution" name="resolution" pattern="\d+x\d+" />
           </div>
         </div>
 
+        <div class="form-section-title">Placement on the blueprint (metres, origin top-left)</div>
+        <div class="form-grid-2col">
+          <div class="form-group">
+            <label for="configFloorX">Floor X (m)</label>
+            <input type="number" step="0.05" min="0" class="form-input" id="configFloorX" name="floorX" required />
+          </div>
+          <div class="form-group">
+            <label for="configFloorY">Floor Y (m)</label>
+            <input type="number" step="0.05" min="0" class="form-input" id="configFloorY" name="floorY" required />
+          </div>
+        </div>
         <div class="form-grid-2col" style="margin-top: 8px;">
           <div class="form-group">
-            <label>Mounting Height Z (meters)</label>
-            <input type="number" step="0.1" class="form-input" id="configHeightZ" value="3.2" />
+            <label for="configFloorZ">Mounting height Z (m)</label>
+            <input type="number" step="0.1" min="0" class="form-input" id="configFloorZ" name="floorZ" />
           </div>
           <div class="form-group">
-            <label>FOV Angle (degrees)</label>
-            <input type="number" step="1" class="form-input" id="configFovDeg" value="85" />
+            <label for="configFovDeg">Field of view (degrees)</label>
+            <input type="number" step="1" min="1" max="180" class="form-input" id="configFovDeg" name="fovDeg" />
           </div>
         </div>
-
         <div class="form-group" style="margin-top: 8px;">
           <div style="display: flex; justify-content: space-between;">
-            <label>Azimuth Orientation Angle (0-360°)</label>
+            <label for="configAzimuthSlider">Azimuth (0-360°, 0 = facing +x)</label>
             <span id="configAzimuthVal" style="font-family: var(--font-mono); color: var(--accent-cyan); font-size: 11px;">0°</span>
           </div>
-          <input type="range" min="0" max="360" step="5" value="0" id="configAzimuthSlider" style="width: 100%; accent-color: var(--accent-cyan);" oninput="document.getElementById('configAzimuthVal').textContent = this.value + '°'" />
-        </div>
-
-        <div class="form-grid-2col" style="margin-top: 8px;">
-          <div class="form-group">
-            <label>Stream FPS</label>
-            <input type="number" min="1" max="60" class="form-input" id="configFps" value="25" />
-          </div>
-          <div class="form-group">
-            <label>Resolution</label>
-            <input type="text" class="form-input" id="configResolution" value="1920x1080" />
-          </div>
+          <input type="range" min="0" max="360" step="1" value="0" id="configAzimuthSlider" name="azimuthDeg" style="width: 100%; accent-color: var(--accent-cyan);" oninput="document.getElementById('configAzimuthVal').textContent = this.value + '°'" />
         </div>
 
         <div class="form-group" style="margin-top: 10px;">
-          <label>AI Feature Vision Engines</label>
+          <label>AI features on this camera</label>
           <div class="checkbox-group-grid">
-            <label class="checkbox-label"><input type="checkbox" id="featDwellTracking" /> Dwell Tracking</label>
-            <label class="checkbox-label"><input type="checkbox" id="featShelfInteraction" /> Shelf Interaction</label>
-            <label class="checkbox-label"><input type="checkbox" id="featTheftDetection" /> Theft Detection</label>
-            <label class="checkbox-label"><input type="checkbox" id="featFallDetection" /> Fall Detection</label>
-            <label class="checkbox-label"><input type="checkbox" id="featQueueMonitoring" /> Queue Monitoring</label>
+            <label class="checkbox-label" for="featDwellTracking"><input type="checkbox" id="featDwellTracking" name="featDwellTracking" /> Dwell tracking</label>
+            <label class="checkbox-label" for="featShelfInteraction"><input type="checkbox" id="featShelfInteraction" name="featShelfInteraction" /> Shelf interaction</label>
+            <label class="checkbox-label" for="featTheftDetection"><input type="checkbox" id="featTheftDetection" name="featTheftDetection" /> Theft detection</label>
+            <label class="checkbox-label" for="featFallDetection"><input type="checkbox" id="featFallDetection" name="featFallDetection" /> Fall detection</label>
+            <label class="checkbox-label" for="featQueueMonitoring"><input type="checkbox" id="featQueueMonitoring" name="featQueueMonitoring" /> Queue monitoring</label>
           </div>
         </div>
 
-        <div style="display: flex; justify-content: space-between; gap: 8px; margin-top: 14px;">
-          <button type="button" class="btn btn-danger" onclick="handleDeleteCurrentCamera()">🗑️ Delete Camera</button>
+        <div id="cameraConfigStatus" class="form-status" aria-live="polite"></div>
+
+        <div style="display: flex; justify-content: space-between; gap: 8px; margin-top: 14px; flex-wrap: wrap;">
+          <!-- Two-step inline delete: the first click reveals the confirmation row. -->
+          <div id="cameraDeleteBlock">
+            <button type="button" class="btn btn-danger" id="btnCameraDeleteAsk" onclick="askDeleteCurrentCamera()">🗑️ Remove camera</button>
+            <span id="cameraDeleteConfirm" style="display:none; align-items:center; gap:6px;">
+              <span style="font-size: 11.5px; color: var(--accent-red);">Remove this camera and stop its pipeline?</span>
+              <button type="button" class="btn btn-danger btn-sm" onclick="confirmDeleteCurrentCamera()">Yes, remove</button>
+              <button type="button" class="btn btn-sm" onclick="cancelDeleteCurrentCamera()">Keep</button>
+            </span>
+          </div>
           <div style="display: flex; gap: 8px;">
             <button type="button" class="btn" onclick="closeCameraConfigModal()">Cancel</button>
-            <button type="submit" class="btn btn-primary">💾 Save Changes</button>
+            <button type="submit" class="btn btn-primary" id="btnCameraSave">💾 Save</button>
           </div>
         </div>
       </form>
-    </div>
-  </div>
-
-  <!-- Camera Discovery Scanner Modal -->
-  <div class="modal-overlay" id="scannerModal">
-    <div class="modal-card">
-      <div style="display: flex; justify-content: space-between; align-items: center;">
-        <h3 style="font-size: 15px; font-weight: 800; color: var(--accent-cyan);">🔍 Dynamic Camera Discovery Scanner</h3>
-        <button class="btn btn-danger btn-sm" onclick="closeScannerModal()">✕ Close</button>
-      </div>
-      <p style="font-size: 12px; color: var(--text-dim);">Scanning local subnet RTSP streams (Dahua 554, go2rtc 8554), mDNS devices, and USB /dev/video*...</p>
-      
-      <div id="discoveredSourcesList" style="max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; margin-top: 8px;">
-        <div style="padding: 12px; font-size: 12px; color: var(--text-dim); text-align: center;">Click "Start Discovery Scan" below...</div>
-      </div>
-
-      <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px;">
-        <button class="btn btn-primary" onclick="executeNetworkScan()">⚡ Start Discovery Scan</button>
-      </div>
     </div>
   </div>
 
@@ -546,7 +515,9 @@
   <div class="toast" id="toast">Notification</div>
 
   <!-- Scripts -->
-  <script src="/static/js/floorplan.js"></script>
-  <script src="/static/js/analytics.js"></script>
+  <script src="/static/js/floorplan.js?v=2.1.2"></script>
+  <script src="/static/js/devices.js?v=2.1.2"></script>
+  <script src="/static/js/calibration.js?v=2.1.2"></script>
+  <script src="/static/js/analytics.js?v=2.1.2"></script>
 </body>
 </html>
