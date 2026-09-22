@@ -1486,14 +1486,79 @@ html, body {
 .fp-field input[type="color"] { padding: 2px; height: 30px; cursor: pointer; }
 
 /* Sign-in gate */
-.auth-gate { position: fixed; inset: 0; z-index: 9999; display: flex; align-items: center;
-  justify-content: center; background: rgba(5,7,11,0.93); backdrop-filter: blur(6px); padding: 20px; }
-.auth-card { width: 100%; max-width: 380px; padding: 28px; border-radius: 14px;
-  background: linear-gradient(160deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02));
-  border: 1px solid rgba(120,140,170,0.2); }
+.auth-gate {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(5, 7, 11, 0.94);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  padding: 20px;
+}
+.auth-card {
+  position: relative;
+  z-index: 10001;
+  width: 100%;
+  max-width: 400px;
+  padding: 28px;
+  border-radius: 14px;
+  background: linear-gradient(160deg, rgba(16, 23, 38, 0.96), rgba(9, 13, 22, 0.98));
+  border: 1px solid rgba(0, 212, 255, 0.22);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.7), 0 0 24px rgba(0, 212, 255, 0.12);
+  pointer-events: auto;
+}
+.auth-card input {
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+  pointer-events: auto;
+}
 .auth-brand { font-size: 10px; font-weight: 800; letter-spacing: .14em; color: var(--accent-cyan, #00d4ff); }
 .auth-title { font-size: 20px; font-weight: 800; color: #fff; margin-top: 6px; }
 .auth-sub { font-size: 11.5px; color: #8b949e; line-height: 1.55; margin: 6px 0 18px; }
+.auth-input-group {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+.auth-input-group input {
+  width: 100%;
+  padding-right: 36px;
+}
+.auth-eye-btn {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: transparent;
+  border: none;
+  color: #8b949e;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s ease, background 0.15s ease;
+  z-index: 2;
+  user-select: none;
+}
+.auth-eye-btn:hover {
+  color: var(--accent-cyan, #00d4ff);
+  background: rgba(255, 255, 255, 0.08);
+}
+.auth-helper-note {
+  font-size: 10.5px;
+  color: #6e7681;
+  margin: 4px 0 8px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
 .auth-error { font-size: 11.5px; color: #ff5b6b; min-height: 16px; margin-bottom: 8px; }
 
 /* ===================================================================

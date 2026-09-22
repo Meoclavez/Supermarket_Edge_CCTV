@@ -53,6 +53,9 @@
 
   // --- gate UI -------------------------------------------------------------
 
+  const EYE_OPEN_ICON = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>`;
+  const EYE_CLOSED_ICON = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>`;
+
   function gateMarkup(adminExists) {
     const first = !adminExists;
     return `
@@ -62,18 +65,41 @@
         <div class="auth-sub">${first
           ? 'This is the first run. Choose the credentials that will control this store’s system.'
           : 'Enter your operator credentials to view the store dashboard.'}</div>
-        <form id="authForm" autocomplete="on">
+        <form id="authForm" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
           ${first ? `
           <div class="fp-field"><label for="auDisplay">Your name</label>
-            <input id="auDisplay" name="displayName" type="text" required value="Store Manager"></div>` : ''}
+            <input id="auDisplay" name="op_display" type="text" required value="Store Manager"
+                   autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true"></div>` : ''}
           <div class="fp-field"><label for="auUser">Username</label>
-            <input id="auUser" name="username" type="text" required autocomplete="username" value=""></div>
-          <div class="fp-field"><label for="auPass">Password</label>
-            <input id="auPass" name="password" type="password" required
-                   autocomplete="${first ? 'new-password' : 'current-password'}"></div>
+            <input id="auUser" name="op_user" type="text" required
+                   autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+                   data-lpignore="true" value="${first ? 'admin' : ''}" placeholder="e.g. admin"></div>
+          <div class="fp-field">
+            <label for="auPass">Password</label>
+            <div class="auth-input-group">
+              <input id="auPass" name="op_key" type="password" required
+                     autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+                     data-lpignore="true" data-1p-ignore="true" data-form-type="other"
+                     placeholder="${first ? 'At least 8 characters' : 'Enter password'}">
+              <button type="button" class="auth-eye-btn" data-target="auPass" title="Show password" tabindex="-1">
+                ${EYE_OPEN_ICON}
+              </button>
+            </div>
+          </div>
           ${first ? `
-          <div class="fp-field"><label for="auPass2">Confirm password</label>
-            <input id="auPass2" name="confirmPassword" type="password" required autocomplete="new-password"></div>` : ''}
+          <div class="fp-field">
+            <label for="auPass2">Confirm password</label>
+            <div class="auth-input-group">
+              <input id="auPass2" name="op_key_confirm" type="password" required
+                     autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+                     data-lpignore="true" data-1p-ignore="true" data-form-type="other"
+                     placeholder="Re-enter password">
+              <button type="button" class="auth-eye-btn" data-target="auPass2" title="Show password" tabindex="-1">
+                ${EYE_OPEN_ICON}
+              </button>
+            </div>
+          </div>` : ''}
+          <div class="auth-helper-note">💡 Click 👁️ to view password while typing</div>
           <div class="auth-error" id="authError"></div>
           <button class="btn btn-primary" type="submit" id="authSubmit" style="width:100%">
             ${first ? 'Create account' : 'Sign in'}
@@ -107,30 +133,57 @@
     const form = gate.querySelector('#authForm');
     const err = gate.querySelector('#authError');
 
+    // Password visibility toggles
+    gate.querySelectorAll('.auth-eye-btn').forEach((btn) => {
+      btn.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const targetId = btn.getAttribute('data-target');
+        const input = gate.querySelector('#' + targetId);
+        if (!input) return;
+        const isPassword = input.type === 'password';
+        input.type = isPassword ? 'text' : 'password';
+        btn.innerHTML = isPassword ? EYE_CLOSED_ICON : EYE_OPEN_ICON;
+        btn.title = isPassword ? 'Hide password' : 'Show password';
+        input.focus();
+      });
+    });
+
+    // Auto-focus the first appropriate field
+    setTimeout(() => {
+      const target = gate.querySelector('#auUser') || gate.querySelector('#auPass');
+      if (target) {
+        target.focus();
+      }
+    }, 80);
+
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       err.textContent = '';
       const btn = gate.querySelector('#authSubmit');
       btn.disabled = true;
 
-      const username = gate.querySelector('#auUser').value.trim();
-      const password = gate.querySelector('#auPass').value;
+      const username = (gate.querySelector('#auUser').value || '').trim();
+      const password = gate.querySelector('#auPass').value || '';
 
       try {
         if (!adminExists) {
-          const confirm = gate.querySelector('#auPass2').value;
+          const confirm = (gate.querySelector('#auPass2') ? gate.querySelector('#auPass2').value : '') || '';
           if (password !== confirm) throw new Error('Passwords do not match.');
-          if (password.length < 8) throw new Error('Use at least 8 characters.');
+          if (password.length < 8) throw new Error('Password must be at least 8 characters.');
           const r = await nativeFetch('/api/v1/setup/admin', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               username, password,
-              display_name: gate.querySelector('#auDisplay').value.trim() || username,
+              display_name: (gate.querySelector('#auDisplay') ? gate.querySelector('#auDisplay').value.trim() : '') || username,
               role: 'owner',
             }),
           });
-          if (!r.ok) throw new Error((await r.json()).detail || 'Could not create the account.');
+          if (!r.ok) {
+            const errData = await r.json().catch(() => ({}));
+            throw new Error(errData.detail || 'Could not create the account.');
+          }
         }
 
         const r = await nativeFetch('/api/v1/auth/login', {
@@ -138,7 +191,10 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ username, password }),
         });
-        if (!r.ok) throw new Error((await r.json()).detail || 'Sign-in failed.');
+        if (!r.ok) {
+          const errData = await r.json().catch(() => ({}));
+          throw new Error(errData.detail || 'Sign-in failed. Please check credentials.');
+        }
         const data = await r.json();
         if (!data.access_token) throw new Error('No session token was returned.');
 
