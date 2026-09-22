@@ -34,6 +34,7 @@ from typing import Optional
 import numpy as np
 
 from app.config import settings
+from app.services.camera_drivers import alternate_stream_url, redact_url
 from app.services.inference_backend import person_detector
 from app.services.store_layout_service import point_in_polygon
 from app.services.tracking_service import CentroidTracker, Track, floor_projector
@@ -148,10 +149,10 @@ class CameraWorker(threading.Thread):
 
     # ------------------------------------------------------------------ capture
 
-    def _open(self):
+    def _open(self, source_url: Optional[str] = None):
         import cv2
 
-        src = self.rt.source
+        src = source_url or self.rt.source
         # A bare /dev/videoN path and an RTSP URL both go through VideoCapture,
         # but network streams need a latency-bounded transport or frames pile
         # up in the decoder until the feed is minutes behind real time.
@@ -180,15 +181,34 @@ class CameraWorker(threading.Thread):
         while not self._stop.is_set():
             cap = None
             try:
-                cap = self._open()
+                cap = self._open(self.rt.source)
+                active_source = self.rt.source
+
+                # Automatic fallback: if primary stream fails, try alternate quality (e.g. subtype=1 <-> subtype=0)
                 if not cap or not cap.isOpened():
-                    raise RuntimeError(f"cannot open source {self.rt.source}")
+                    alt = alternate_stream_url(self.rt.source)
+                    if alt:
+                        logger.info(
+                            f"Camera {self.rt.camera_id} primary stream failed. "
+                            f"Attempting fallback to alternate stream: {redact_url(alt)}"
+                        )
+                        if cap is not None:
+                            try:
+                                cap.release()
+                            except Exception:
+                                pass
+                        cap = self._open(alt)
+                        if cap and cap.isOpened():
+                            active_source = alt
+
+                if not cap or not cap.isOpened():
+                    raise RuntimeError(f"Cannot open RTSP source {redact_url(self.rt.source)}")
 
                 self.rt.status = "ONLINE"
                 self.rt.last_error = None
                 self.rt.connected_at = time.time()
                 backoff = 1.0
-                logger.info(f"Camera {self.rt.camera_id} connected")
+                logger.info(f"Camera {self.rt.camera_id} connected (source: {redact_url(active_source)})")
 
                 last_tick = time.time()
                 frames_in_window = 0
@@ -196,7 +216,7 @@ class CameraWorker(threading.Thread):
                 while not self._stop.is_set():
                     ok, frame = cap.read()
                     if not ok or frame is None:
-                        raise RuntimeError("stream ended or read failed")
+                        raise RuntimeError("Stream ended or frame read failed")
 
                     self.rt.frames_read += 1
                     self.rt.last_frame_at = time.time()
@@ -204,9 +224,7 @@ class CameraWorker(threading.Thread):
                     frames_in_window += 1
                     self._frame_index += 1
                     # Feed the pre-event ring buffer so incident clips and
-                    # the clip export action are cut from real footage. It
-                    # JPEG-encodes on push, so it is fed at the analysis
-                    # cadence rather than every decoded frame.
+                    # the clip export action are cut from real footage.
                     if self._frame_index % settings.ANALYTICS_DETECT_EVERY_N_FRAMES == 0:
                         self._push_clip_buffer(frame)
 
@@ -220,17 +238,16 @@ class CameraWorker(threading.Thread):
                         self._analyse(frame, now)
 
             except Exception as e:
+                clean_err = redact_url(str(e))
                 self.rt.status = "OFFLINE"
-                self.rt.last_error = str(e)
+                self.rt.last_error = clean_err
                 # A camera that drops out contributes nothing until it returns.
-                # Its in-flight tracks are closed so their dwell is not left
-                # accumulating against a feed that is no longer arriving.
                 for t in self.tracker.flush_all():
                     self.engine.close_track(t, reason="camera_offline")
                 self.rt.set_tracks([])
                 self.rt.live_track_count = 0
                 self.rt.detections_last = 0
-                logger.warning(f"Camera {self.rt.camera_id} error: {e}; retrying in {backoff:.0f}s")
+                logger.warning(f"Camera {self.rt.camera_id} error: {clean_err}; retrying in {backoff:.0f}s")
             finally:
                 if cap is not None:
                     try:

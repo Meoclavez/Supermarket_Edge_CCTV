@@ -88,26 +88,45 @@ class SystemSetupService:
 
     @staticmethod
     async def test_rtsp_url(url: str) -> Dict[str, Any]:
-        import cv2
-        cap = cv2.VideoCapture(url)
-        if not cap.isOpened():
-            return {"success": False, "error": "Could not connect to RTSP stream"}
-        
-        ret, frame = cap.read()
-        if not ret:
+        import asyncio
+        import os
+        from app.services.camera_drivers import redact_url
+
+        def _probe() -> Dict[str, Any]:
+            import cv2
+
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|stimeout;3000000"
+            cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+            if not cap.isOpened():
+                return {
+                    "success": False,
+                    "error": f"Could not connect to stream {redact_url(url)}. Verify IP, port, and authentication.",
+                    "error_code": "CONNECT_FAILED",
+                }
+
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                cap.release()
+                return {
+                    "success": False,
+                    "error": f"Stream opened but failed to read video frame. Channel may be inactive or signal lost.",
+                    "error_code": "NO_SIGNAL",
+                }
+
+            h, w = frame.shape[:2]
+            fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
             cap.release()
-            return {"success": False, "error": "Could not read frame"}
-            
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        cap.release()
-        
-        return {
-            "success": True,
-            "resolution": f"{width}x{height}",
-            "fps": fps
-        }
+
+            return {
+                "success": True,
+                "resolution": f"{w}x{h}",
+                "width": int(w),
+                "height": int(h),
+                "fps": round(fps, 1),
+                "url": redact_url(url),
+            }
+
+        return await asyncio.to_thread(_probe)
 
     @staticmethod
     def generate_secure_secrets():

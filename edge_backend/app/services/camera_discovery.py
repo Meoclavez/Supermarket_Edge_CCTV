@@ -27,13 +27,15 @@ from app.services.camera_drivers import (
     build_stream_urls,
     driver_for_hint,
 )
+from app.services.nvr_credential_service import nvr_credential_service
 
 logger = logging.getLogger(__name__)
 
 # Ports worth probing. 554 is RTSP; 80/8000 carry the ONVIF and web services
-# that let us identify the vendor; 81 is the ESP32-CAM stream port.
+# that let us identify the vendor; 81 is the ESP32-CAM stream port; 37777 is Dahua private.
 RTSP_PORTS = (554, 8554)
 HTTP_PORTS = (80, 8000, 81)
+DAHUA_PRIVATE_PORT = 37777
 
 WS_DISCOVERY_ADDR = ("239.255.255.250", 3702)
 
@@ -371,14 +373,31 @@ async def scan_subnet(
                 banner = await rtsp_options(host, port)
                 if banner is None:
                     continue
-                # Port 554 answered RTSP. Try HTTP for a better vendor hint.
+                # Port 554 answered RTSP. Check for Dahua private port 37777 or HTTP for vendor hint.
+                is_dahua = await _tcp_open(host, DAHUA_PRIVATE_PORT, timeout * 0.5)
                 hint = banner
-                for hp in HTTP_PORTS:
-                    if await _tcp_open(host, hp, timeout * 0.5):
-                        if page := await http_banner(host, hp):
-                            hint = f"{banner} {page[:512]}"
-                        break
-                driver = driver_for_hint(hint)
+                if is_dahua:
+                    driver = "dahua"
+                    model_name = f"Dahua NVR/Camera ({banner[:80]})"
+                else:
+                    for hp in HTTP_PORTS:
+                        if await _tcp_open(host, hp, timeout * 0.5):
+                            if page := await http_banner(host, hp):
+                                hint = f"{banner} {page[:512]}"
+                            break
+                    driver = driver_for_hint(hint)
+                    model_name = banner[:120]
+
+                # If we have saved credentials for this host/driver, pre-inject them
+                saved_user, saved_pass = nvr_credential_service.get_auth_for_host(host)
+                streams = build_stream_urls(
+                    driver,
+                    host,
+                    username=saved_user if saved_pass else None,
+                    password=saved_pass if saved_pass else None,
+                    port=port,
+                )
+
                 found.append(
                     DeviceProfile(
                         id=f"rtsp:{host}:{port}",
@@ -386,10 +405,11 @@ async def scan_subnet(
                         driver=driver,
                         host=host,
                         port=port,
-                        model_name=banner[:120],
+                        model_name=model_name,
                         manufacturer=driver.upper(),
+                        channels=16 if driver == "dahua" else 1,
                         requires_credentials=True,
-                        streams=build_stream_urls(driver, host, port=port),
+                        streams=streams,
                     )
                 )
                 return

@@ -119,18 +119,33 @@ class DahuaDriver(CameraDriver):
         base = f"rtsp://{auth}{host}:{port}/cam/realmonitor"
         return [
             StreamProfile(
+                url=f"{base}?channel={channel}&subtype=1",
+                channel=channel,
+                quality="sub",
+                label=f"Dahua ch{channel} sub (AI recommended)",
+            ),
+            StreamProfile(
                 url=f"{base}?channel={channel}&subtype=0",
                 channel=channel,
                 quality="main",
                 label=f"Dahua ch{channel} main",
             ),
-            StreamProfile(
-                url=f"{base}?channel={channel}&subtype=1",
-                channel=channel,
-                quality="sub",
-                label=f"Dahua ch{channel} sub",
-            ),
         ]
+
+    def build_nvr_channels(
+        self,
+        host: str,
+        *,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        channels: int = 16,
+        port: int = RTSP_PORT,
+    ) -> list[StreamProfile]:
+        """Generate stream profiles for all channels on a Dahua NVR/DVR."""
+        profiles: list[StreamProfile] = []
+        for ch in range(1, channels + 1):
+            profiles.extend(self.build_urls(host, username=username, password=password, channel=ch, port=port))
+        return profiles
 
 
 class HikvisionDriver(CameraDriver):
@@ -251,3 +266,27 @@ def build_stream_urls(
 def redact_url(url: str) -> str:
     """Strip credentials from a stream URL before it reaches a log or the UI."""
     return re.sub(r"://[^/@]+@", "://***@", url or "")
+
+
+def alternate_stream_url(url: str) -> Optional[str]:
+    """If a Dahua or Hikvision stream fails, return its alternate stream quality.
+
+    For Dahua:
+      subtype=1 (substream) -> subtype=0 (mainstream)
+      subtype=0 (mainstream) -> subtype=1 (substream)
+    For Hikvision:
+      channel01 -> channel02, channel02 -> channel01
+    """
+    if not url:
+        return None
+    if "/cam/realmonitor" in url:
+        if "subtype=1" in url:
+            return url.replace("subtype=1", "subtype=0")
+        elif "subtype=0" in url:
+            return url.replace("subtype=0", "subtype=1")
+    elif "/Streaming/Channels/" in url:
+        if re.search(r"(\d+)02\b", url):
+            return re.sub(r"(\d+)02\b", r"\g<1>01", url)
+        elif re.search(r"(\d+)01\b", url):
+            return re.sub(r"(\d+)01\b", r"\g<1>02", url)
+    return None

@@ -250,13 +250,76 @@
           <div class="glass-card" id="deviceManagerCard">
             <div class="card-title">
               <span>Cameras &amp; devices</span>
-              <button class="btn btn-sm btn-primary" onclick="deviceManager.scan()" id="btnScanDevices">Scan for cameras</button>
+              <div style="display: flex; gap: 6px;">
+                <button class="btn btn-sm btn-secondary" onclick="deviceManager.toggleDahuaPanel()" id="btnToggleDahua" title="Configure Dahua NVR and scan channels">📹 Dahua NVR</button>
+                <button class="btn btn-sm btn-primary" onclick="deviceManager.scan()" id="btnScanDevices">Scan network</button>
+              </div>
             </div>
+
+            <!-- Dahua NVR Multi-Channel Setup Panel -->
+            <div id="dahuaNvrPanel" style="display: none; padding: 12px; margin-bottom: 12px; border-radius: 10px; background: rgba(0,212,255,0.04); border: 1px solid rgba(0,212,255,0.25);">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <div style="font-size: 12.5px; font-weight: 800; color: #00d4ff;">📹 Dahua NVR / Multi-Channel Scanner</div>
+                <button class="btn btn-xs" onclick="deviceManager.toggleDahuaPanel()">✕ Close</button>
+              </div>
+              <div style="font-size: 11px; color: #8b949e; margin-bottom: 10px; line-height: 1.4;">
+                Connect CCTV cameras through Dahua NVR / XVR / DVR via RTSP. Credentials persist on disk.
+              </div>
+              <div class="fp-field-row">
+                <div class="fp-field" style="flex: 2;">
+                  <label for="nvrHost">Dahua NVR IP / Host</label>
+                  <input id="nvrHost" type="text" placeholder="e.g. 192.168.1.108" autocomplete="off">
+                </div>
+                <div class="fp-field" style="flex: 1;">
+                  <label for="nvrPort">RTSP Port</label>
+                  <input id="nvrPort" type="number" value="554">
+                </div>
+              </div>
+              <div class="fp-field-row">
+                <div class="fp-field" style="flex: 1;">
+                  <label for="nvrUser">Username</label>
+                  <input id="nvrUser" type="text" value="admin" autocomplete="off">
+                </div>
+                <div class="fp-field" style="flex: 1; position: relative;">
+                  <label for="nvrPass">Password <span id="nvrPassStatus" style="font-size: 9.5px; color: #00ff9d;"></span></label>
+                  <div style="display: flex; align-items: center;">
+                    <input id="nvrPass" type="password" placeholder="NVR Password" style="flex: 1; padding-right: 32px;" autocomplete="new-password">
+                    <button type="button" class="btn btn-xs" style="margin-left: -30px; background: transparent; border: none; color: #8b949e; cursor: pointer;" onclick="deviceManager.togglePassVis('nvrPass')">👁</button>
+                  </div>
+                </div>
+              </div>
+              <div class="fp-field-row">
+                <div class="fp-field" style="flex: 1;">
+                  <label for="nvrChannels">Scan Channels</label>
+                  <select id="nvrChannels">
+                    <option value="4">4 Channels</option>
+                    <option value="8">8 Channels</option>
+                    <option value="16" selected>16 Channels</option>
+                    <option value="32">32 Channels</option>
+                    <option value="64">64 Channels</option>
+                  </select>
+                </div>
+                <div class="fp-field" style="flex: 1;">
+                  <label for="nvrQuality">Stream Mode</label>
+                  <select id="nvrQuality">
+                    <option value="sub" selected>Substream (AI Recommended)</option>
+                    <option value="main">Mainstream (High Res)</option>
+                  </select>
+                </div>
+              </div>
+              <div style="display: flex; gap: 8px; margin-top: 10px;">
+                <button class="btn btn-sm btn-primary" id="btnProbeNvr" onclick="deviceManager.probeNvr()">🔍 Scan NVR Channels</button>
+                <button class="btn btn-sm" id="btnSaveNvrCreds" onclick="deviceManager.saveNvrCreds()">💾 Save Credentials</button>
+              </div>
+              <div id="dahuaProbeStatus" class="fp-status" style="margin-top: 8px;"></div>
+              <div id="dahuaChannelsList" style="margin-top: 10px; max-height: 220px; overflow-y: auto;"></div>
+            </div>
+
             <div id="deviceScanStatus" class="fp-status"></div>
             <div id="activeCameraList" class="dev-list"></div>
             <div class="dev-section-title">Discovered, not yet added</div>
             <div id="discoveredList" class="dev-list">
-              <div class="fp-empty">Run a scan to find cameras on this network.</div>
+              <div class="fp-empty">Run a scan or configure Dahua NVR to add cameras.</div>
             </div>
           </div>
         </div>

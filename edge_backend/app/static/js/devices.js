@@ -307,7 +307,243 @@
         status(`Could not remove camera: ${e.message}`, 'error');
       }
     },
-  };
+
+    // ---------------------------------------------------- Dahua NVR Support
+    dahuaConfig: null,
+
+    toggleDahuaPanel() {
+      const panel = el('dahuaNvrPanel');
+      if (!panel) return;
+      const isHidden = panel.style.display === 'none';
+      panel.style.display = isHidden ? 'block' : 'none';
+      if (isHidden) {
+        this.loadNvrConfig();
+      }
+    },
+
+    togglePassVis(inputId) {
+      const input = el(inputId);
+      if (!input) return;
+      input.type = input.type === 'password' ? 'text' : 'password';
+    },
+
+    async loadNvrConfig() {
+      try {
+        const res = await fetch('/api/v1/dahua/credentials');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!data.credentials) return;
+        this.dahuaConfig = data.credentials;
+
+        const u = el('nvrUser');
+        if (u && !u.value) u.value = data.credentials.default_username || 'admin';
+        const p = el('nvrPort');
+        if (p && !p.value) p.value = data.credentials.default_port || 554;
+        const ch = el('nvrChannels');
+        if (ch) ch.value = data.credentials.default_channels || 16;
+
+        const passStatus = el('nvrPassStatus');
+        const passInput = el('nvrPass');
+        if (data.credentials.has_password) {
+          if (passStatus) passStatus.textContent = '✓ Saved on disk';
+          if (passInput) passInput.placeholder = '•••••••• (Saved on disk)';
+        }
+
+        // Auto-fill host if saved NVR exists
+        const hostInput = el('nvrHost');
+        if (hostInput && !hostInput.value && data.credentials.nvrs) {
+          const hosts = Object.keys(data.credentials.nvrs);
+          if (hosts.length > 0) hostInput.value = hosts[0];
+        }
+      } catch (_) { /* transient */ }
+    },
+
+    async saveNvrCreds() {
+      const host = (el('nvrHost')?.value || '').trim();
+      const port = parseInt(el('nvrPort')?.value, 10) || 554;
+      const username = (el('nvrUser')?.value || 'admin').trim();
+      const password = el('nvrPass')?.value || '';
+      const channels = parseInt(el('nvrChannels')?.value, 10) || 16;
+
+      const stat = el('dahuaProbeStatus');
+      if (stat) {
+        stat.textContent = 'Saving credentials to disk…';
+        stat.className = 'fp-status fp-info';
+      }
+
+      try {
+        const res = await fetch('/api/v1/dahua/credentials', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ host, port, username, password, default_channels: channels }),
+        });
+        if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
+        const data = await res.json();
+        if (stat) {
+          stat.textContent = '✓ NVR credentials saved to disk (persisted across restarts)';
+          stat.className = 'fp-status fp-ok';
+        }
+        await this.loadNvrConfig();
+      } catch (e) {
+        if (stat) {
+          stat.textContent = `Failed to save credentials: ${e.message}`;
+          stat.className = 'fp-status fp-error';
+        }
+      }
+    },
+
+    async probeNvr() {
+      const host = (el('nvrHost')?.value || '').trim();
+      if (!host) {
+        alert('Please enter the Dahua NVR IP address (e.g. 192.168.1.108)');
+        el('nvrHost')?.focus();
+        return;
+      }
+      const port = parseInt(el('nvrPort')?.value, 10) || 554;
+      const username = (el('nvrUser')?.value || 'admin').trim();
+      const password = el('nvrPass')?.value || '';
+      const maxChannels = parseInt(el('nvrChannels')?.value, 10) || 16;
+      const quality = el('nvrQuality')?.value || 'sub';
+
+      const btn = el('btnProbeNvr');
+      if (btn) { btn.disabled = true; btn.textContent = 'Probing channels…'; }
+
+      const stat = el('dahuaProbeStatus');
+      if (stat) {
+        stat.textContent = `Connecting to ${host}:${port} and scanning channels 1..${maxChannels}…`;
+        stat.className = 'fp-status fp-info';
+      }
+
+      const listHost = el('dahuaChannelsList');
+      if (listHost) listHost.innerHTML = '<div style="font-size:11px; color:#8b949e; padding:8px;">Probing RTSP streams, please wait…</div>';
+
+      try {
+        const res = await fetch('/api/v1/dahua/probe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            host, port, username, password, max_channels: maxChannels, save_credentials: true,
+          }),
+        });
+
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || res.statusText);
+
+        const probe = data.probe || {};
+        if (!probe.reachable) {
+          if (stat) {
+            stat.textContent = `❌ ${probe.error || 'NVR is unreachable on port ' + port}`;
+            stat.className = 'fp-status fp-error';
+          }
+          if (listHost) listHost.innerHTML = '<div class="fp-empty">No response from NVR. Check IP and network connection.</div>';
+          return;
+        }
+
+        if (!probe.authenticated) {
+          if (stat) {
+            stat.textContent = `🔒 Authentication failed (401). Invalid username or password for ${host}`;
+            stat.className = 'fp-status fp-error';
+          }
+          if (listHost) listHost.innerHTML = '<div class="fp-empty">Please verify NVR password and click Scan again.</div>';
+          return;
+        }
+
+        const activeCount = probe.active_channels_count || 0;
+        if (stat) {
+          stat.textContent = `✓ Found ${activeCount} active camera feed(s) across ${probe.channel_count_scanned} channels on Dahua NVR.`;
+          stat.className = activeCount > 0 ? 'fp-status fp-ok' : 'fp-status fp-warn';
+        }
+
+        this.renderDahuaChannels(host, port, username, password, probe.channels || [], quality);
+      } catch (e) {
+        if (stat) {
+          stat.textContent = `Probe failed: ${e.message}`;
+          stat.className = 'fp-status fp-error';
+        }
+        if (listHost) listHost.innerHTML = '';
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = '🔍 Scan NVR Channels'; }
+      }
+    },
+
+    renderDahuaChannels(host, port, username, password, channels, defaultQuality) {
+      const listHost = el('dahuaChannelsList');
+      if (!listHost) return;
+
+      if (!channels.length) {
+        listHost.innerHTML = '<div class="fp-empty">No channels found.</div>';
+        return;
+      }
+
+      let html = `
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+          <span style="font-size: 11px; font-weight: 700; color: #e6edf3;">Channels on ${esc(host)}:</span>
+          <button class="btn btn-xs btn-primary" id="btnAdoptDahuaBatch">Adopt Selected</button>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 4px;">
+      `;
+
+      channels.forEach((c) => {
+        const isActive = c.active;
+        html += `
+          <div class="dev-row" style="padding: 5px 8px; ${isActive ? 'border-color: rgba(0,255,157,0.3); background: rgba(0,255,157,0.03);' : 'opacity: 0.6;'}">
+            <input type="checkbox" class="dahua-ch-cb" data-channel="${c.channel}" ${isActive ? 'checked' : ''} style="cursor: pointer;">
+            <div class="dev-main">
+              <div class="dev-name" style="font-size: 11px;">Channel ${c.channel}: Dahua NVR Ch ${c.channel}</div>
+              <div class="dev-sub" style="font-size: 9.5px;">
+                ${isActive ? `<span style="color:#00ff9d; font-weight:bold;">● LIVE</span> · ${c.resolution || '720p'} · ${c.fps || 25} FPS` : '<span style="color:#8b949e;">○ No Signal</span>'}
+              </div>
+            </div>
+            <div class="dev-actions">
+              <span class="dev-tag ${isActive ? 'ok' : ''}">${isActive ? (c.preferred_subtype === 1 ? 'Substream' : 'Mainstream') : 'Offline'}</span>
+            </div>
+          </div>
+        `;
+      });
+
+      html += '</div>';
+      listHost.innerHTML = html;
+
+      const adoptBtn = listHost.querySelector('#btnAdoptDahuaBatch');
+      if (adoptBtn) {
+        adoptBtn.addEventListener('click', async () => {
+          const checked = Array.from(listHost.querySelectorAll('.dahua-ch-cb:checked')).map((cb) => ({
+            channel: parseInt(cb.dataset.channel, 10),
+            name: `Dahua NVR Ch ${cb.dataset.channel}`,
+            department: 'GENERAL',
+            quality: defaultQuality,
+          }));
+
+          if (!checked.length) {
+            alert('Please select at least one channel to adopt.');
+            return;
+          }
+
+          adoptBtn.disabled = true;
+          adoptBtn.textContent = 'Adopting…';
+
+          try {
+            const res = await fetch('/api/v1/dahua/adopt', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                host, port, username, password, channels: checked,
+              }),
+            });
+            if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
+            const data = await res.json();
+            status(`Successfully adopted ${data.adopted_count} Dahua NVR channel(s) onto blueprint!`, 'ok');
+            if (window.blueprintEditor) await window.blueprintEditor.load();
+            await this.refresh();
+            this.toggleDahuaPanel();
+          } catch (e) {
+            alert(`Failed to adopt channels: ${e.message}`);
+            adoptBtn.disabled = false;
+            adoptBtn.textContent = 'Adopt Selected';
+          }
+        });
+      }
+    },
 
   window.deviceManager = deviceManager;
   function initDevices() {

@@ -23,7 +23,7 @@ import logging
 
 from .config import settings
 from .database import init_db
-from .routes import cameras, events, webrtc, system, zones, health, setup, dvr, analytics, theft, layout
+from .routes import cameras, events, webrtc, system, zones, health, setup, dvr, analytics, theft, layout, dahua
 from .services.live_analytics_engine import live_engine
 from .services.pipeline_supervisor import pipeline_supervisor
 
@@ -108,6 +108,7 @@ app.include_router(analytics.router)
 app.include_router(analytics.system_router)
 app.include_router(theft.router)
 app.include_router(layout.router)
+app.include_router(dahua.router)
 
 # Mount Static Files
 STATIC_DIR = Path(__file__).resolve().parent / "static"
