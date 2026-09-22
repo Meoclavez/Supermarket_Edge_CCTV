@@ -41,7 +41,18 @@ function escapeHtml(v) {
 
 function isNum(v) { return typeof v === 'number' && Number.isFinite(v); }
 
+function canPoll() {
+  if (window.edgeAuth && typeof window.edgeAuth.isAuthenticated === 'function') {
+    return window.edgeAuth.isAuthenticated();
+  }
+  const gate = document.getElementById('authGate');
+  return !(gate && gate.style.display !== 'none');
+}
+
 async function getJSON(url, fallback = null) {
+  if (!canPoll() && !url.includes('/auth/') && !url.includes('/setup/')) {
+    return fallback;
+  }
   try {
     const res = await fetch(url);
     if (!res.ok) return fallback;
@@ -426,6 +437,7 @@ function updateMatrixHud(pipe) {
  * JPEG encode on the edge box.
  */
 function attachCameraStreams() {
+  if (!canPoll()) return;
   const matrix = el('tab-matrix');
   const matrixVisible = !document.hidden && !!matrix && matrix.classList.contains('active');
 

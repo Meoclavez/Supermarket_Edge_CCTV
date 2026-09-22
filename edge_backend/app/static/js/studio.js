@@ -43,7 +43,16 @@ function escapeHtml(v) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 function getUrlParameter(name) { return new URLSearchParams(window.location.search).get(name); }
+function canPoll() {
+  if (window.edgeAuth && typeof window.edgeAuth.isAuthenticated === 'function') {
+    return window.edgeAuth.isAuthenticated();
+  }
+  const gate = document.getElementById('authGate');
+  return !(gate && gate.style.display !== 'none');
+}
+
 async function getJSON(url, fallback = null) {
+  if (!canPoll() && !url.includes('/auth/') && !url.includes('/setup/')) return fallback;
   try { const r = await fetch(url); return r.ok ? await r.json() : fallback; } catch (e) { return fallback; }
 }
 function showToast(msg) {

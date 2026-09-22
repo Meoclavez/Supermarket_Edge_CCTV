@@ -37,10 +37,12 @@
     },
 
     async refresh() {
+      if (window.edgeAuth && typeof window.edgeAuth.isAuthenticated === 'function' && !window.edgeAuth.isAuthenticated()) return;
       await Promise.all([this.refreshCameras(), this.refreshDevices()]);
     },
 
     async refreshCameras() {
+      if (window.edgeAuth && typeof window.edgeAuth.isAuthenticated === 'function' && !window.edgeAuth.isAuthenticated()) return;
       try {
         const res = await fetch(API);
         if (!res.ok) return;

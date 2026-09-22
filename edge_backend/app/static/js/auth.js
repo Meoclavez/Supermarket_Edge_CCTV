@@ -28,12 +28,27 @@
   // --- authenticated fetch -------------------------------------------------
 
   const nativeFetch = window.fetch.bind(window);
+  let isGateRendering = false;
 
   window.fetch = async function (input, init) {
     const url = typeof input === 'string' ? input : (input && input.url) || '';
     const isApi = url.startsWith('/api/');
-    const opts = Object.assign({}, init);
+    const isAuthOrSetup = url.includes('/auth/') || url.includes('/setup/');
     const token = getToken();
+    const gate = document.getElementById('authGate');
+    const isGateActive = gate && gate.style.display !== 'none';
+
+    // If an unauthenticated background script attempts to poll the backend while
+    // the auth gate is displayed, do NOT send network requests that will flood the
+    // server and generate 401 terminal logs. Short-circuit immediately.
+    if (isApi && !isAuthOrSetup && !token && isGateActive) {
+      return new Response(JSON.stringify({ detail: 'Authentication required' }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    const opts = Object.assign({}, init);
 
     if (isApi && token) {
       opts.headers = new Headers(opts.headers || (typeof input !== 'string' ? input.headers : undefined) || {});
@@ -44,7 +59,7 @@
 
     // A 401 means the session ended or never existed. Re-open the gate rather
     // than letting every panel silently render an empty state.
-    if (res.status === 401 && isApi && !url.includes('/auth/')) {
+    if (res.status === 401 && isApi && !isAuthOrSetup) {
       setToken(null);
       showGate();
     }
@@ -118,13 +133,33 @@
     }
     gate.style.display = 'flex';
 
+    // CRITICAL: If the form is already rendered in the DOM, NEVER re-render!
+    // Re-rendering wipes out any characters the user has typed into the password inputs!
+    if (gate.querySelector('#authForm') || isGateRendering) {
+      return;
+    }
+
+    isGateRendering = true;
+
     if (adminExists === undefined) {
       nativeFetch('/api/v1/auth/status')
         .then((r) => r.json())
-        .then((s) => renderGate(gate, s.admin_exists))
-        .catch(() => renderGate(gate, true));
+        .then((s) => {
+          if (!gate.querySelector('#authForm')) {
+            renderGate(gate, s.admin_exists);
+          }
+        })
+        .catch(() => {
+          if (!gate.querySelector('#authForm')) {
+            renderGate(gate, true);
+          }
+        })
+        .finally(() => {
+          isGateRendering = false;
+        });
     } else {
       renderGate(gate, adminExists);
+      isGateRendering = false;
     }
   }
 
@@ -212,6 +247,15 @@
   window.edgeAuth = {
     signOut() { setToken(null); window.location.reload(); },
     token: getToken,
+    isAuthenticated() {
+      const gate = document.getElementById('authGate');
+      if (gate && gate.style.display !== 'none') return false;
+      return !!getToken();
+    },
+    isGateOpen() {
+      const gate = document.getElementById('authGate');
+      return !!(gate && gate.style.display !== 'none');
+    },
   };
 
   // --- boot ----------------------------------------------------------------

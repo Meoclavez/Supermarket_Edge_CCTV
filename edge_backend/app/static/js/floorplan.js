@@ -158,6 +158,9 @@
     // ------------------------------------------------------------------ data
 
     async load() {
+      if (window.edgeAuth && typeof window.edgeAuth.isAuthenticated === 'function' && !window.edgeAuth.isAuthenticated()) {
+        return;
+      }
       try {
         const res = await fetch(API);
         if (!res.ok) throw new Error(`layout request failed: ${res.status}`);
@@ -208,6 +211,7 @@
 
     async refreshMetrics() {
       if (!this.isVisible() || !this.layout) return;
+      if (window.edgeAuth && typeof window.edgeAuth.isAuthenticated === 'function' && !window.edgeAuth.isAuthenticated()) return;
       try {
         const [fpRes, hmRes] = await Promise.all([
           fetch('/api/v1/analytics/floorplan'),
@@ -236,6 +240,7 @@
      */
     async refreshLive() {
       if (!this.isVisible() || this.liveSupported === false && Date.now() - this.lastLiveAt < 15000) return;
+      if (window.edgeAuth && typeof window.edgeAuth.isAuthenticated === 'function' && !window.edgeAuth.isAuthenticated()) return;
       try {
         const res = await fetch(`${API}/live`);
         if (res.status === 404) {
