@@ -117,7 +117,8 @@ if (streamImg) {
     streamImg._retryTimer = setTimeout(() => {
       if (activeCameraId) {
         setViewportEmpty('');
-        streamImg.src = `/stream?camera_id=${encodeURIComponent(activeCameraId)}&overlay=1&_t=${Date.now()}`;
+        const sUrl = `/stream?camera_id=${encodeURIComponent(activeCameraId)}&overlay=1&_t=${Date.now()}`;
+        streamImg.src = window.edgeAuth && window.edgeAuth.authUrl ? window.edgeAuth.authUrl(sUrl) : sUrl;
       }
     }, 1500);
   });
@@ -417,7 +418,8 @@ function selectCamera(cameraId) {
   }
   if (streamImg) {
     setViewportEmpty('');
-    streamImg.src = `/stream?camera_id=${encodeURIComponent(cameraId)}&overlay=1`;
+    const sUrl = `/stream?camera_id=${encodeURIComponent(cameraId)}&overlay=1`;
+    streamImg.src = window.edgeAuth && window.edgeAuth.authUrl ? window.edgeAuth.authUrl(sUrl) : sUrl;
   }
   drawnPoints = [];
   loadZonesList();

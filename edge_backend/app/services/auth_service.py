@@ -271,7 +271,8 @@ class AuthService:
         self,
         request: Request,
         api_key: Optional[str] = Security(api_key_header),
-        bearer: Optional[HTTPAuthorizationCredentials] = Depends(security_bearer)
+        bearer: Optional[HTTPAuthorizationCredentials] = Depends(security_bearer),
+        token: Optional[str] = Depends(query_token_scheme),
     ) -> bool:
         """General API access for mobile apps / dashboards.
 
@@ -294,12 +295,16 @@ class AuthService:
             intrusion_detector.record_success(ip, "api_key")
             return True
 
-        # Safely resolve bearer token from dependency or Authorization header
+        # Safely resolve bearer token from dependency, Authorization header, query param, or cookie
         raw_bearer = bearer.credentials if isinstance(bearer, HTTPAuthorizationCredentials) else None
         if not raw_bearer:
             auth_header = request.headers.get("Authorization", "")
             if auth_header.startswith("Bearer "):
                 raw_bearer = auth_header.split(" ", 1)[1]
+        if not raw_bearer:
+            raw_bearer = token or request.query_params.get("token")
+        if not raw_bearer:
+            raw_bearer = request.cookies.get("edge_cctv_token")
 
         if raw_bearer:
             payload = self.verify_token(raw_bearer)

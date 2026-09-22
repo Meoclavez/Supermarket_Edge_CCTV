@@ -322,7 +322,8 @@ function setDecimationFPS(fps) {
 }
 
 function streamUrl(cameraId) {
-  return `/stream?camera_id=${encodeURIComponent(cameraId)}&fps=${currentDecimationFPS}&overlay=1`;
+  const base = `/stream?camera_id=${encodeURIComponent(cameraId)}&fps=${currentDecimationFPS}&overlay=1`;
+  return window.edgeAuth && window.edgeAuth.authUrl ? window.edgeAuth.authUrl(base) : base;
 }
 
 function renderCameraGrid() {

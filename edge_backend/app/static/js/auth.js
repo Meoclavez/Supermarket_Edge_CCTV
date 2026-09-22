@@ -22,7 +22,15 @@
     try { return localStorage.getItem(TOKEN_KEY); } catch (_) { return null; }
   }
   function setToken(t) {
-    try { t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY); } catch (_) {}
+    try {
+      if (t) {
+        localStorage.setItem(TOKEN_KEY, t);
+        document.cookie = `${TOKEN_KEY}=${encodeURIComponent(t)}; path=/; SameSite=Lax; max-age=604800`;
+      } else {
+        localStorage.removeItem(TOKEN_KEY);
+        document.cookie = `${TOKEN_KEY}=; path=/; max-age=0`;
+      }
+    } catch (_) {}
   }
 
   // --- authenticated fetch -------------------------------------------------
@@ -256,13 +264,23 @@
       const gate = document.getElementById('authGate');
       return !!(gate && gate.style.display !== 'none');
     },
+    authUrl(url) {
+      const t = getToken();
+      if (!t) return url;
+      const sep = url.includes('?') ? '&' : '?';
+      return `${url}${sep}token=${encodeURIComponent(t)}`;
+    },
   };
 
   // --- boot ----------------------------------------------------------------
   async function initAuth() {
     try {
+      const currentToken = getToken();
+      if (currentToken) {
+        try { document.cookie = `${TOKEN_KEY}=${encodeURIComponent(currentToken)}; path=/; SameSite=Lax; max-age=604800`; } catch (_) {}
+      }
       const res = await nativeFetch('/api/v1/auth/status', {
-        headers: getToken() ? { Authorization: `Bearer ${getToken()}` } : {},
+        headers: currentToken ? { Authorization: `Bearer ${currentToken}` } : {},
       });
       const s = await res.json();
 
