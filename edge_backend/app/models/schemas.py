@@ -144,6 +144,9 @@ class HardwareProfile(BaseModel):
     """
     decoder_type: str
     decoder_capability: str
+    # What camera capture really decodes with, and why (see hardware_detector).
+    decoder_in_use: str = "cpu"
+    decoder_note: Optional[str] = None
     inference_backend: str
     inference_provider: str
     inference_available: bool

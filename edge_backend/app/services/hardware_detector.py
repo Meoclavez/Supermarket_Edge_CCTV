@@ -5,6 +5,9 @@ Two different questions are answered here and must not be confused:
 * ``decoder_type`` / ``decoder_capability`` -- what video-decode hardware the
   box *has* (probed from nvidia-smi, /dev/dri, vainfo). This is a capability,
   not a statement that any stream is currently decoded on it.
+* ``decoder_in_use`` / ``decoder_note`` -- what camera capture actually decodes
+  with. Capture opens streams through OpenCV's FFmpeg backend without asking
+  for hardware acceleration, so this is ``cpu`` whatever the box has.
 * ``inference_backend`` / ``inference_provider`` -- what the person detector
   *actually initialised*. This is read from ``person_detector.status()`` and is
   never inferred from the presence of a GPU; a box with an NVIDIA card whose
@@ -14,7 +17,9 @@ Nothing here has a fabricated fallback: when RAM cannot be read it is
 reported as unknown (``None``), not as a plausible number.
 """
 
+import functools
 import os
+import re
 import shutil
 import subprocess
 from typing import Optional, Tuple
@@ -141,6 +146,32 @@ def _probe_decoder() -> Tuple[str, str]:
     return "cpu", "CPU (no hardware decoder detected)"
 
 
+@functools.lru_cache(maxsize=1)
+def _opencv_has_vaapi() -> Optional[bool]:
+    try:
+        import cv2
+
+        m = re.search(r"^\s*VA:\s*(\S+)", cv2.getBuildInformation(), re.M)
+        return None if m is None else m.group(1).upper() == "YES"
+    except Exception:
+        return None
+
+
+def _decoder_in_use(capability: str) -> Tuple[str, str]:
+    """(decoder_in_use, note): how camera streams are really decoded.
+
+    The capture worker (live_analytics_engine) opens every stream with
+    ``cv2.VideoCapture(src, cv2.CAP_FFMPEG)`` and requests no hardware
+    acceleration, so frames are decoded by FFmpeg on the CPU.
+    """
+    note = "camera streams are decoded in software (FFmpeg via OpenCV) on the CPU"
+    if capability != "cpu":
+        why = ("this OpenCV build has no VA-API support" if _opencv_has_vaapi() is False
+               else "capture does not request hardware decoding")
+        note += f"; {capability} decode hardware is present but not used ({why})"
+    return "cpu", note
+
+
 def _inference_status() -> dict:
     """What the detector actually runs, read lazily on every call.
 
@@ -164,6 +195,7 @@ class HardwareDetector:
         cpu_cores = os.cpu_count()
 
         decoder, device_name = _probe_decoder()
+        decoder_in_use, decoder_note = _decoder_in_use(decoder)
         infer = _inference_status()
 
         # Ring-buffer / camera-count sizing is a recommendation derived from
@@ -178,6 +210,8 @@ class HardwareDetector:
         return HardwareProfile(
             decoder_type=decoder,
             decoder_capability=decoder,
+            decoder_in_use=decoder_in_use,
+            decoder_note=decoder_note,
             inference_backend=infer.get("backend", "unavailable"),
             inference_provider=infer.get("provider", "none"),
             inference_available=bool(infer.get("available", False)),

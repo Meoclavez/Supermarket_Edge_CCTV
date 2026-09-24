@@ -5,6 +5,7 @@ constants standing in for an unmeasured figure.
 """
 
 import os
+import threading
 import time
 from typing import Optional
 
@@ -29,11 +30,45 @@ router = APIRouter(
 START_TIME = time.time()
 
 
+_cpu_lock = threading.Lock()
+_cpu_prev: Optional[tuple[float, float, float]] = None   # (monotonic, busy s, total s)
+_cpu_value: Optional[float] = None
+CPU_MIN_WINDOW_S = 1.0     # readings closer together than this reuse the last value
+CPU_STALE_S = 60.0         # older baseline: measure a fresh short window instead
+
+
+def _cpu_busy_total(psutil) -> tuple[float, float]:
+    t = psutil.cpu_times()
+    # Linux counts guest time inside user time as well; drop it like psutil does.
+    total = sum(t) - getattr(t, "guest", 0.0) - getattr(t, "guest_nice", 0.0)
+    return total - t.idle - getattr(t, "iowait", 0.0), total
+
+
 def _cpu_percent() -> Optional[float]:
+    """Machine-wide CPU busy % since the previous reading.
+
+    Not psutil.cpu_percent(interval=None): psutil keeps that baseline per
+    calling thread, and sync routes run on a pool of threads, so each thread's
+    first call returned 0.0, which the dashboard showed as a real reading.
+    """
+    global _cpu_prev, _cpu_value
     try:
         import psutil
 
-        return float(psutil.cpu_percent(interval=None))
+        with _cpu_lock:
+            now = time.monotonic()
+            if _cpu_prev is not None and _cpu_value is not None and now - _cpu_prev[0] < CPU_MIN_WINDOW_S:
+                return _cpu_value
+            if _cpu_prev is None or now - _cpu_prev[0] > CPU_STALE_S:
+                _cpu_prev = (now, *_cpu_busy_total(psutil))
+                time.sleep(0.25)
+            busy, total = _cpu_busy_total(psutil)
+            _, busy0, total0 = _cpu_prev
+            if total > total0:
+                _cpu_value = round(min(100.0, max(0.0, 100.0 * (busy - busy0) / (total - total0))), 1)
+                _cpu_prev = (time.monotonic(), busy, total)
+            if _cpu_value is not None:
+                return _cpu_value
     except Exception:
         pass
     try:

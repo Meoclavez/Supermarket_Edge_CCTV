@@ -351,8 +351,11 @@ async function loadSystemHealth() {
   try {
     await Promise.all([
       getJSON('/api/v1/system/hardware', {}).then((hw) => {
-        const decoder = hw.decoder_capability || hw.decoder_type;
-        set('telemetryDecoderBadge', decoder ? String(decoder).toUpperCase() : DASH);
+        // What capture really decodes with, not merely the hardware present.
+        const inUse = hw.decoder_in_use;
+        set('telemetryDecoderBadge', inUse === 'cpu' ? 'SOFTWARE (CPU)' : (inUse ? String(inUse).toUpperCase() : DASH));
+        const badge = el('telemetryDecoderBadge');
+        if (badge) badge.title = hw.decoder_note || '';
       }),
       getJSON('/api/v1/system/stats', {}).then((stats) => {
         set('telemetryCpuVal', isNum(stats.cpu_usage_percent) ? `${stats.cpu_usage_percent.toFixed(1)} % busy` : DASH);
