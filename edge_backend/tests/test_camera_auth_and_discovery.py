@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import re
 import socket
 import sqlite3
@@ -46,9 +47,14 @@ def _md5(s: str) -> str:
 class FakeRtspCamera:
     """Answers OPTIONS/DESCRIBE with Dahua-style Digest auth; counts failed logins."""
 
-    def __init__(self, password: str = GOOD_PW, http: bool = False):
+    def __init__(self, password: str = GOOD_PW, http: bool = False,
+                 per_connection_nonce: bool = False, close_after_challenge: bool = False):
         self.password = password
         self.http = http
+        # Real Dahua firmware ties the nonce to the TCP connection, so a
+        # client must answer the challenge on the connection that received it.
+        self.per_connection_nonce = per_connection_nonce
+        self.close_after_challenge = close_after_challenge
         self.failed_logins = 0
         self.good_logins = 0
         self.requests = 0
@@ -73,6 +79,7 @@ class FakeRtspCamera:
     def _handle(self, conn):
         conn.settimeout(3)
         buf = b""
+        nonce = os.urandom(8).hex() if self.per_connection_nonce else self.nonce
         try:
             while True:
                 while b"\r\n\r\n" not in buf:
@@ -82,13 +89,16 @@ class FakeRtspCamera:
                     buf += chunk
                 head, buf = buf.split(b"\r\n\r\n", 1)
                 self.requests += 1
-                conn.sendall(self._reply(head.decode()))
+                reply = self._reply(head.decode(), nonce)
+                conn.sendall(reply)
+                if self.close_after_challenge and reply.startswith(b"RTSP/1.0 401"):
+                    return
         except OSError:
             pass
         finally:
             conn.close()
 
-    def _reply(self, head: str) -> bytes:
+    def _reply(self, head: str, nonce: str) -> bytes:
         if self.http:  # a printer's web server
             return b"HTTP/1.1 400 Bad Request\r\nServer: debut/1.30\r\nContent-Length: 0\r\n\r\n"
         lines = head.split("\r\n")
@@ -96,12 +106,12 @@ class FakeRtspCamera:
         cseq = next((l.split(":", 1)[1].strip() for l in lines if l.lower().startswith("cseq:")), "0")
         auth = next((l.split(":", 1)[1].strip() for l in lines if l.lower().startswith("authorization:")), None)
         challenge = (f"RTSP/1.0 401 Unauthorized\r\nCSeq: {cseq}\r\n"
-                     f'WWW-Authenticate: Digest realm="{REALM}", nonce="{self.nonce}"\r\n'
+                     f'WWW-Authenticate: Digest realm="{REALM}", nonce="{nonce}"\r\n'
                      "Content-Length: 12\r\n\r\nUnauthorized").encode()
         if auth is None:
             return challenge
         p = dict(re.findall(r'(\w+)="([^"]*)"', auth))
-        expected = _md5(f"{_md5(f'{p.get('username')}:{REALM}:{self.password}')}:{self.nonce}:{_md5(f'{method}:{p.get('uri')}')}")
+        expected = _md5(f"{_md5(f'{p.get('username')}:{REALM}:{self.password}')}:{nonce}:{_md5(f'{method}:{p.get('uri')}')}")
         if p.get("username") == USER and p.get("response") == expected and p.get("uri") == uri:
             self.good_logins += 1
             return f"RTSP/1.0 200 OK\r\nCSeq: {cseq}\r\nServer: Rtsp Server/3.0\r\nContent-Length: 0\r\n\r\n".encode()
@@ -189,6 +199,56 @@ def _drive(worker, max_sleeps):
     return waits
 
 
+def test_probe_answers_on_the_same_connection_for_per_connection_nonces():
+    """Dahua ties the nonce to the connection: the right password must pass."""
+    cam = FakeRtspCamera(per_connection_nonce=True)
+    try:
+        res = rtsp_probe.probe_rtsp(cam.url(), 3)
+        assert res.outcome == rtsp_probe.OK, res
+        assert cam.good_logins == 1 and cam.failed_logins == 0
+        assert rtsp_probe.probe_rtsp(cam.url(pw="wrong"), 3).outcome == rtsp_probe.AUTH_FAILED
+    finally:
+        cam.close()
+
+
+def test_probe_re_challenges_when_the_server_closes_after_401():
+    cam = FakeRtspCamera(close_after_challenge=True)
+    try:
+        res = rtsp_probe.probe_rtsp(cam.url(), 3)
+        assert res.outcome == rtsp_probe.OK, res
+        assert cam.good_logins == 1 and cam.failed_logins == 0
+    finally:
+        cam.close()
+
+
+def test_stream_that_opens_overrides_a_probe_auth_failure(camera, monkeypatch):
+    """If FFmpeg opens the stream with the same credentials, the camera streams."""
+    w = _worker(camera.url(pw="wrong"))
+
+    class _Cap:
+        reads = 0
+
+        def isOpened(self):
+            return True
+
+        def read(self):
+            _Cap.reads += 1
+            w._stop.set()
+            return False, None
+
+        def set(self, *a):
+            pass
+
+        def release(self):
+            pass
+
+    monkeypatch.setattr(w, "_open", lambda *a, **k: _Cap())
+    w._sleep = lambda s: True
+    w.run()
+    assert _Cap.reads == 1                       # it streamed instead of pausing
+    assert w.rt.status != "AUTH_FAILED"
+
+
 def _worker(url, cam_id="cam_auth_unit"):
     return lae.CameraWorker(lae.CameraRuntime(camera_id=cam_id, name="t", source=url), lae.LiveAnalyticsEngine())
 
@@ -215,8 +275,11 @@ def test_wrong_password_sets_auth_failed_and_stops_rapid_retries(camera, monkeyp
     assert status == "AUTH_FAILED"
     assert "rejected the username/password" in err and "wrong" not in err
     assert retry_in >= 1790
-    assert opened == []                  # OpenCV/FFmpeg never tried: no extra failed logins
-    assert camera.failed_logins == 4     # one per attempt, spread over > 1.5 h (well under a 5-try lockout)
+    # FFmpeg gets one confirming try per attempt (so a probe quirk can never
+    # block a working camera); with the probe that is at most two failed
+    # logins per attempt, spread over > 1.5 h (well under a 5-try lockout).
+    assert len(opened) == 4
+    assert camera.failed_logins == 4     # the probe's; the stubbed _open never reaches the camera
 
 
 def test_unreachable_camera_uses_capped_exponential_backoff(monkeypatch):
@@ -288,7 +351,7 @@ def test_new_credentials_restart_the_worker_immediately(camera, monkeypatch):
         while engine.runtimes["cam_auth_new"].status != "AUTH_FAILED" and time.monotonic() < deadline:
             time.sleep(0.05)
         assert engine.runtimes["cam_auth_new"].status == "AUTH_FAILED"
-        assert not opened.is_set()
+        opened.clear()                  # FFmpeg's one confirming try on the wrong password
         engine.start_camera("cam_auth_new", "t", camera.url())      # what reconcile does on a source change
         assert opened.wait(5)
         assert camera.good_logins == 1

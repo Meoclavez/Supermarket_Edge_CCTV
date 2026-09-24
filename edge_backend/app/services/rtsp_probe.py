@@ -7,7 +7,9 @@ cable and retried both every 30 s. Dahua (and most NVR/IP camera firmware)
 locks an account after about five failed logins, so that retry loop kept the
 account locked indefinitely, for the operator as well.
 
-This module sends at most two RTSP requests (each on its own short TCP connection):
+This module sends at most two RTSP requests on one short TCP connection (a
+second connection only if the camera closes after its challenge; Dahua ties
+the Digest nonce to the connection, so answering elsewhere always fails):
 
 1. ``DESCRIBE <url>`` without credentials, which a camera that needs a login
    answers with ``401`` and a ``WWW-Authenticate`` challenge (Digest or Basic).
@@ -188,6 +190,17 @@ class _Conn:
             data += chunk
             if len(data) > MAX_HEADER_BYTES:
                 break
+        # Drain the body too, so the next request on this connection reads
+        # its own reply rather than the tail of this one.
+        head, sep, body = data.partition(b"\r\n\r\n")
+        m = re.search(rb"(?im)^content-length:\s*(\d+)", head)
+        want = min(int(m.group(1)), MAX_HEADER_BYTES) if (sep and m) else 0
+        while len(body) < want:
+            self.sock.settimeout(self._remaining())
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                break
+            body += chunk
         return data
 
     def close(self) -> None:
@@ -262,10 +275,19 @@ def probe_rtsp(url: str, timeout_s: float = 5.0, method: str = "DESCRIBE") -> Rt
                                    f"camera asked for an unsupported login scheme ({scheme or 'none'})")
 
         try:
-            # A fresh connection: the 401 may carry a body we did not read,
-            # and some servers close after a challenge anyway.
-            conn.open()
-            raw = conn.request(_request(method, uri, 2, auth))
+            # Answer on the same connection, as FFmpeg does: Dahua devices tie
+            # the nonce to the connection, so replaying it on a new one gets a
+            # 401 even with the right password.
+            raw = b""
+            try:
+                raw = conn.request(_request(method, uri, 2, auth))
+            except OSError:
+                pass
+            if _parse_headers(raw)[0] is None:
+                # The server closed after its challenge, so its nonce cannot be
+                # connection-bound: answer it on a new connection.
+                conn.open()
+                raw = conn.request(_request(method, uri, 2, auth))
         except socket.timeout:
             return RtspProbeResult(TIMEOUT, 401, server, realm, "no reply to the authenticated request")
         except OSError as exc:

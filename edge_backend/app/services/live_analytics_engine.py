@@ -445,9 +445,28 @@ class CameraWorker(threading.Thread):
             auth_paused = False
             wait = backoff
             try:
-                self._preflight(self.rt.source)
+                try:
+                    self._preflight(self.rt.source)
+                except CameraAuthError:
+                    # The handshake is our own RTSP client; FFmpeg is what
+                    # actually streams. Before pausing a camera for a bad
+                    # password, let FFmpeg try once, so a quirk in the probe can
+                    # never block a camera that works (at most one more failed
+                    # login per attempt, still well under a lockout).
+                    cap = self._open(self.rt.source)
+                    if not cap or not cap.isOpened():
+                        if cap is not None:
+                            try:
+                                cap.release()
+                            except Exception:
+                                pass
+                        cap = None
+                        raise
+                    logger.warning(f"Camera {self.rt.camera_id}: the RTSP login check reported a rejected "
+                                   f"login, but the stream opened with the same credentials; streaming")
                 self._auth_failures = 0
-                cap = self._open(self.rt.source)
+                if cap is None:
+                    cap = self._open(self.rt.source)
                 active_source = self.rt.source
 
                 # Automatic fallback: if primary stream fails, try alternate quality (e.g. subtype=1 <-> subtype=0)
