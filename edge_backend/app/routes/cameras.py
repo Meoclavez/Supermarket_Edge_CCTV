@@ -16,7 +16,6 @@ from typing import Dict, Optional
 from urllib.parse import urlsplit
 
 import cv2
-import numpy as np
 from fastapi import APIRouter, Body, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -39,6 +38,7 @@ from ..services.clip_recorder import clip_recorder_service
 from ..services.feature_manager import feature_manager
 from ..services.inference_backend import person_detector
 from ..services.live_analytics_engine import _draw_skeleton, live_engine
+from ..services.no_signal_slate import render_no_signal
 from ..services.privacy_mask import apply_privacy_masks, ignore_polygons, outside_ignore_regions
 
 logger = logging.getLogger("Cameras")
@@ -539,10 +539,7 @@ def get_camera_snapshot(camera_id: str, annotate: bool = True):
         else:
             reason = rt.last_error or f"Camera status: {rt.status}"
 
-        slate = np.zeros((480, 854, 3), dtype=np.uint8)
-        slate[:] = (18, 20, 26)
-        cv2.putText(slate, "NO SIGNAL", (300, 230), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (90, 96, 112), 2)
-        cv2.putText(slate, str(reason)[:70], (60, 275), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (70, 76, 92), 1)
+        slate = render_no_signal(str(reason), 854, 480)
         ok, jpeg = cv2.imencode(".jpg", slate, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
         return Response(
             content=jpeg.tobytes() if ok else b"",

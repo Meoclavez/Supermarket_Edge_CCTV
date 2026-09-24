@@ -17,7 +17,6 @@ from fastapi.responses import HTMLResponse, StreamingResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 import cv2
-import numpy as np
 
 import logging
 
@@ -32,6 +31,7 @@ from .database import init_db
 from .routes import cameras, events, webrtc, system, zones, health, setup, dvr, analytics, theft, layout, dahua
 from .services.auth_service import auth_service
 from .services.live_analytics_engine import live_engine
+from .services.no_signal_slate import render_no_signal
 from .services.pipeline_supervisor import pipeline_supervisor
 
 
@@ -322,13 +322,7 @@ def _placeholder_frame(message: str, width: int = 960, height: int = 540) -> byt
     telemetry: an operator must never be shown something that looks like a
     live analysed feed when no camera is connected.
     """
-    frame = np.zeros((height, width, 3), dtype=np.uint8)
-    frame[:] = (18, 20, 26)
-    cv2.putText(frame, "NO SIGNAL", (int(width / 2) - 110, int(height / 2) - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 1.1, (90, 96, 112), 2)
-    cv2.putText(frame, message[:64], (int(width / 2) - 200, int(height / 2) + 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (70, 76, 92), 1)
-    return _encode_jpeg(frame) or b""
+    return _encode_jpeg(render_no_signal(message, width, height)) or b""
 
 
 @app.get("/stream")

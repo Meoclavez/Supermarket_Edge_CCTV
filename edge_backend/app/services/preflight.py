@@ -7,7 +7,9 @@
   are (they share one import package), which execution providers it offers,
   and whether a GPU is present while inference can only run on the CPU;
 * the model files against ``models/manifest.json`` (size + sha256);
-* that the storage directories are writable.
+* that the storage directories are writable;
+* ``.env`` keys this version does not read, and model settings that name
+  files which do not exist.
 
 It returns ``{"ok", "errors", "warnings", "checks", ...}``. Every error and
 warning carries the exact command that fixes it. Fixing is the job of
@@ -768,6 +770,93 @@ def evaluate_live_status(status: dict, accel: dict[str, Any]) -> list:
 # Entry points
 # --------------------------------------------------------------------------- #
 
+# .env keys earlier releases read and this one does not. Settings accepts
+# unknown keys silently (extra="allow"), so without this a stale line such as
+# PERSON_MODEL_PATH=./models/yolov5n.onnx looks like it selects a model.
+RETIRED_ENV_KEYS = {
+    "PERSON_MODEL_PATH": "not read: the pose model is chosen per accelerator from POSE_MODEL_LADDER_GPU/_CPU "
+                         "(then POSE_MODEL_GPU/_CPU); set POSE_MODEL_PATH only to pin one file",
+}
+# Read by the launcher, bootstrap or native libraries rather than Settings.
+_EXTERNAL_ENV_PREFIXES = ("EDGE_", "ORT_", "MIGRAPHX_", "HIP_", "ROCM_", "HSA_", "AMD_", "MIOPEN_", "CUDA_",
+                          "OMP_", "PYTHON", "XDG_", "UV_", "PIP_")
+
+
+def _read_env_keys(path: Path) -> list[str]:
+    keys = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key = line.split("=", 1)[0].strip()
+        if key.startswith("export "):
+            key = key[len("export "):].strip()
+        if key:
+            keys.append(key)
+    return keys
+
+
+def _model_file(value: str, relative_to_models: bool) -> Path:
+    p = Path(value)
+    if p.is_absolute():
+        return p
+    return (MODELS_DIR / p) if relative_to_models else (EDGE_BACKEND_DIR / p)
+
+
+def check_env() -> tuple[dict, list, list]:
+    """Stale .env keys and model settings that point at files which do not exist."""
+    warnings: list = []
+    info: dict[str, Any] = {"env_file": None, "unused_keys": [], "missing_models": []}
+    try:
+        from app.config import Settings, settings  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001
+        return info, [], [_issue("config", f"cannot load app.config ({type(exc).__name__}: {exc})", None)]
+
+    env_file = Path(str(Settings.model_config.get("env_file") or EDGE_BACKEND_DIR / ".env"))
+    if env_file.is_file():
+        info["env_file"] = str(env_file)
+        try:
+            keys = _read_env_keys(env_file)
+        except OSError as exc:
+            keys = []
+            warnings.append(_issue("config", f"cannot read {env_file} ({exc.strerror or type(exc).__name__})", None))
+        known = set(Settings.model_fields)
+        for key in dict.fromkeys(keys):
+            if key in RETIRED_ENV_KEYS:
+                info["unused_keys"].append(key)
+                warnings.append(_issue("config", f"{env_file.name}: {key} is {RETIRED_ENV_KEYS[key]}",
+                                       f"delete the {key}= line from {env_file}"))
+            elif key not in known and not key.startswith(_EXTERNAL_ENV_PREFIXES):
+                info["unused_keys"].append(key)
+                warnings.append(_issue("config", f"{env_file.name}: {key} is not a setting this version reads "
+                                                 "(typo or retired key); it has no effect",
+                                       f"check the spelling against .env.example, or delete the {key}= line"))
+
+    # Model files the configuration names. Pose names resolve under MODELS_DIR
+    # like the engine does; POSE_MODEL_PATH / OBJECT_MODEL_PATH are opened as
+    # given (relative to edge_backend/, the service's working directory).
+    named: list[tuple[str, str, bool]] = []
+    for key in ("POSE_MODEL_GPU", "POSE_MODEL_CPU", "POSE_REFINER_MODEL"):
+        named.append((key, getattr(settings, key, "") or "", True))
+    for key in ("POSE_MODEL_LADDER_GPU", "POSE_MODEL_LADDER_CPU"):
+        for name in (getattr(settings, key, "") or "").split(","):
+            named.append((key, name.strip(), True))
+    for key in ("POSE_MODEL_PATH", "OBJECT_MODEL_PATH"):
+        named.append((key, getattr(settings, key, "") or "", False))
+    for key, value, under_models in named:
+        if not value:
+            continue
+        path = _model_file(value, under_models)
+        if not path.is_file():
+            info["missing_models"].append({"setting": key, "value": value})
+            if key == "POSE_REFINER_MODEL" and str(getattr(settings, "POSE_REFINER", "auto") or "").strip().lower() \
+                    in ("off", "0", "false", "no", ""):
+                continue
+            warnings.append(_issue("config", f"{key}={value} names a model file that does not exist ({path})",
+                                   f"use one of the files in {MODELS_DIR} (see models/manifest.json)"))
+    return info, [], warnings
+
+
 def run_preflight(session_probe: bool = False) -> dict:
     """Run every check. Never installs, deletes or writes anything."""
     global _last_result
@@ -796,6 +885,11 @@ def run_preflight(session_probe: bool = False) -> dict:
 
     storage, e, w = check_storage()
     checks["storage"] = storage
+    errors += e
+    warnings += w
+
+    env_info, e, w = check_env()
+    checks["config"] = env_info
     errors += e
     warnings += w
 

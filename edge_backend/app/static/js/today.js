@@ -31,6 +31,31 @@
   };
 
   // ---------------------------------------------------------------- KPIs
+  /** Short reason a camera is not sending pictures, from its worker status and error. */
+  function problemKind(c) {
+    const err = String(c.last_error || '');
+    if (c.status === 'AUTH_FAILED') return /none is saved/i.test(err) ? 'no password saved' : 'wrong password';
+    if (c.status === 'DISABLED') return 'switched off';
+    if (c.status === 'STARTING') return 'starting';
+    if (/stream ended|frame read failed/i.test(err)) return 'picture stopped';
+    return "can't connect";
+  }
+
+  /**
+   * "3 wrong password, 1 can't connect": every camera counted under its own
+   * reason (most common first), never all of them under the first one's error.
+   */
+  function problemSummary(off) {
+    const counts = new Map();
+    off.forEach((c) => { const k = problemKind(c); counts.set(k, (counts.get(k) || 0) + 1); });
+    return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${n} ${k}`).join(', ');
+  }
+
+  /** One line per camera for a tooltip: its name and its own error. */
+  function problemDetail(off) {
+    return off.map((c) => `${c.name || c.camera_id}: ${c.last_error || problemKind(c)}`).join('\n');
+  }
+
   function renderCameras(pipe) {
     const note = el('kpiCamerasNote');
     if (!pipe) { setMetric('kpiCameras', null); if (note) note.textContent = 'Camera status unavailable.'; return; }
@@ -47,10 +72,11 @@
     if (!note) return;
     if (!off.length) {
       note.textContent = 'All cameras sending pictures';
+      note.title = '';
     } else {
-      const first = off[0];
-      note.innerHTML = `${off.length} not working${first.last_error ? `: ${escapeHtml(String(first.last_error).slice(0, 60))}` : ''}
+      note.innerHTML = `${off.length} not working: ${escapeHtml(problemSummary(off))}
         <button type="button" class="link-btn" onclick="switchTab('cameras')">Fix →</button>`;
+      note.title = problemDetail(off);
     }
   }
 
@@ -114,8 +140,8 @@
       html = 'No cameras yet. Add one to start counting shoppers.' +
         ' <button type="button" class="btn btn-sm btn-primary" onclick="openDeviceManager()">Add cameras</button>';
     } else if (pipe && pipe.cameras_total && pipe.cameras_online === 0) {
-      const errs = (pipe.cameras || []).map((k) => k.last_error).filter(Boolean);
-      html = `None of your ${pipe.cameras_total} camera(s) is sending pictures${errs.length ? ': ' + escapeHtml(errs[0]) : ''}.` +
+      const off = pipe.cameras || [];
+      html = `None of your ${pipe.cameras_total} camera(s) is sending pictures${off.length ? ': ' + escapeHtml(problemSummary(off)) : ''}.` +
         ' <button type="button" class="btn btn-sm" onclick="switchTab(\'cameras\')">Check cameras</button>';
     } else if (overview && c.cameras_total && !c.cameras_calibrated) {
       html = 'People are counted, but no camera is placed on the store map yet, so the map and heatmap stay empty.' +

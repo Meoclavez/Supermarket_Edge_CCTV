@@ -254,7 +254,7 @@ function switchTab(id) {
     }, 60);
   }
   if (view === 'insights' && sub === 'footfall') setTimeout(initOrUpdateCharts, 50);
-  if (view === 'settings') setTimeout(loadSettingsCards, 50);
+  if (view === 'settings') loadSettingsCards();
 
   // Streams are only kept open while the camera matrix is the visible view.
   attachCameraStreams();
@@ -334,18 +334,35 @@ async function fetchSystemTelemetry() {
       : DASH);
     updateMatrixHud(pipe);
   }
+}
 
-  if (currentView === 'settings') {
-    const [hw, stats] = await Promise.all([
-      getJSON('/api/v1/system/hardware', {}),
-      getJSON('/api/v1/system/stats', {}),
+let systemHealthLoading = false;
+
+/**
+ * Settings > System health. Called when the view opens and every 3 s while it
+ * is open. It does not wait for the pipeline request, and each
+ * response is shown as soon as it arrives, so the card fills on the first
+ * open rather than on a later tick. A request still in flight is not repeated.
+ */
+async function loadSystemHealth() {
+  if (currentView !== 'settings' || systemHealthLoading) return;
+  systemHealthLoading = true;
+  const set = (id, text) => { const n = el(id); if (n) n.textContent = text; };
+  try {
+    await Promise.all([
+      getJSON('/api/v1/system/hardware', {}).then((hw) => {
+        const decoder = hw.decoder_capability || hw.decoder_type;
+        set('telemetryDecoderBadge', decoder ? String(decoder).toUpperCase() : DASH);
+      }),
+      getJSON('/api/v1/system/stats', {}).then((stats) => {
+        set('telemetryCpuVal', isNum(stats.cpu_usage_percent) ? `${stats.cpu_usage_percent.toFixed(1)} % busy` : DASH);
+        set('telemetryRamVal', (isNum(stats.ram_used_gb) && isNum(stats.ram_total_gb))
+          ? `${stats.ram_used_gb.toFixed(1)} of ${stats.ram_total_gb.toFixed(0)} GB` : DASH);
+        set('telemetryUptimeVal', isNum(stats.uptime_seconds) ? formatDuration(stats.uptime_seconds) : DASH);
+      }),
     ]);
-    const decoder = hw.decoder_capability || hw.decoder_type;
-    set('telemetryDecoderBadge', decoder ? String(decoder).toUpperCase() : DASH);
-    set('telemetryCpuVal', isNum(stats.cpu_usage_percent) ? `${stats.cpu_usage_percent.toFixed(1)} % busy` : DASH);
-    set('telemetryRamVal', (isNum(stats.ram_used_gb) && isNum(stats.ram_total_gb))
-      ? `${stats.ram_used_gb.toFixed(1)} of ${stats.ram_total_gb.toFixed(0)} GB` : DASH);
-    set('telemetryUptimeVal', isNum(stats.uptime_seconds) ? formatDuration(stats.uptime_seconds) : DASH);
+  } finally {
+    systemHealthLoading = false;
   }
 }
 
@@ -408,7 +425,7 @@ window.addEventListener('edge:theme', syncAppearance);
 
 function loadSettingsCards() {
   loadPosCard();
-  fetchSystemTelemetry();
+  loadSystemHealth();
   syncAppearance();
 }
 
@@ -614,6 +631,7 @@ function updateMatrixHud(pipe) {
       else if (!c.has_frame) age.textContent = c.last_error ? `no picture: ${c.last_error}` : 'no picture';
       else if (isNum(c.seconds_since_frame)) age.textContent = c.seconds_since_frame > 5 ? `picture ${c.seconds_since_frame.toFixed(0)} s old` : '';
       else age.textContent = '';
+      age.title = age.textContent || 'Age of the newest picture';
     }
     const live = document.querySelector(`[data-live-for="${CSS.escape(id)}"]`);
     if (live) {
@@ -632,7 +650,22 @@ function updateMatrixHud(pipe) {
     }
     const retry = document.querySelector(`[data-reconnect-for="${CSS.escape(id)}"]`);
     if (retry) retry.hidden = c.status === 'ONLINE';
+    setResolutionBadge(id, c);
   });
+}
+
+/**
+ * The tile's picture size, as measured from the camera's real frames by the
+ * pipeline. The stream <img> cannot be measured instead: while there is no
+ * picture it shows the server's NO SIGNAL slate, whose own size is not the
+ * camera's.
+ */
+function setResolutionBadge(id, c) {
+  const badge = document.querySelector(`[data-res-for="${CSS.escape(id)}"]`);
+  if (!badge) return;
+  const measured = c && c.has_frame && isNum(c.frame_width) && isNum(c.frame_height);
+  badge.textContent = measured ? `${c.frame_width}x${c.frame_height}` : DASH;
+  badge.title = measured ? 'Picture size the camera is sending' : 'Picture size: not measured, no picture received';
 }
 
 /**
@@ -655,8 +688,8 @@ function attachCameraStreams() {
     }
     if (!img.getAttribute('src')) {
       img.onload = () => {
-        const badge = document.querySelector(`[data-res-for="${CSS.escape(id)}"]`);
-        if (badge && img.naturalWidth) badge.textContent = `${img.naturalWidth}x${img.naturalHeight}`;
+        const live = ((pipelineSnapshot && pipelineSnapshot.cameras) || []).find((c) => c.camera_id === id);
+        setResolutionBadge(id, live);
       };
       img.onerror = () => {
         const badge = document.querySelector(`[data-res-for="${CSS.escape(id)}"]`);
@@ -1057,6 +1090,15 @@ async function openCameraConfigModal(cameraId) {
   // pre-filling a value the input's own min="1" rejects (which blocked Save).
   safeSet('configFps', isNum(cam.fps) && cam.fps > 0 ? cam.fps : '');
   safeSet('configResolution', cam.resolution || '');
+  // The field is the value saved with the camera, which nothing measures; say
+  // what the camera is really sending next to it.
+  const liveRes = ((pipelineSnapshot && pipelineSnapshot.cameras) || []).find((c) => c.camera_id === cameraId);
+  const measuredRes = el('configResolutionMeasured');
+  if (measuredRes) {
+    measuredRes.textContent = liveRes && liveRes.has_frame && isNum(liveRes.frame_width) && isNum(liveRes.frame_height)
+      ? `The camera is sending ${liveRes.frame_width}x${liveRes.frame_height}.`
+      : 'Not measured: no picture received from this camera yet.';
+  }
 
   const num = (v) => (isNum(v) ? v : '');
   safeSet('configFloorX', num(placed.floor_x ?? cam.floor_x));
@@ -1369,7 +1411,8 @@ function initAnalytics() {
   refreshBrand();
   loadCamerasMatrix();
 
-  setInterval(fetchSystemTelemetry, 3000);      // header count, per-tile HUD, Settings health
+  setInterval(fetchSystemTelemetry, 3000);      // header count, per-tile HUD
+  setInterval(loadSystemHealth, 3000);          // Settings health, only while that view is open
   setInterval(loadCamerasMatrix, 5000);         // picks up added / removed cameras
   setInterval(attachCameraStreams, 2000);
   setInterval(fitMapHeight, 1000);              // the theft banner can appear or go at any time

@@ -1637,7 +1637,9 @@ html, body {
 .dev-main { flex: 1; min-width: 0; }
 .dev-name { font-size: 12px; font-weight: 700; color: var(--text-soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dev-sub { font-size: 10px; color: var(--text-faint); font-family: ui-monospace, monospace; }
-.dev-actions { display: flex; gap: 4px; flex-shrink: 0; }
+/* Actions wrap onto more lines instead of widening the row: a camera row with
+   Reconnect has six buttons, wider than the side panel's device list. */
+.dev-actions { display: flex; flex-wrap: wrap; gap: 4px; flex-shrink: 0; max-width: 100%; }
 .warn-text { color: var(--amber); }
 
 .btn-xs { padding: 3px 7px; font-size: 10px; border-radius: 5px; }
@@ -1755,6 +1757,11 @@ html, body {
 .cam-hud-badge { padding: 2px 7px; border-radius: 5px; font-size: 9.5px; font-weight: 700;
   font-family: ui-monospace, monospace; color: #c9d4e0; background: rgba(5,7,11,0.72);
   border: 1px solid rgba(120,140,170,0.22); }
+/* A long reason (an RTSP URL has no spaces) moves to its own line and is cut
+   with an ellipsis inside the tile; the full text is in the badge's title. */
+.camera-overlay-top, .camera-overlay-bottom { flex-wrap: wrap; }
+.camera-overlay-top .cam-hud-badge, .camera-overlay-bottom .cam-hud-badge { max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cam-hud-live { color: #00ff9d; border-color: rgba(0,255,157,0.35); }
 .cam-hud-offline { color: #ff5b6b; border-color: rgba(255,91,107,0.35); }
 
@@ -2072,7 +2079,7 @@ html, body {
 .camera-footer .btn[hidden] { display: none; }
 .dev-add-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
 .dev-add-title { font-size: 12.5px; font-weight: 800; color: var(--accent-cyan); }
-.dev-hint { font-size: 10.5px; color: var(--text-dim); line-height: 1.4; }
+.dev-hint { font-size: 10.5px; color: var(--text-dim); line-height: 1.4; overflow-wrap: anywhere; }
 .dev-add-panel .fp-field-row[hidden] { display: none; }
 .dev-add-panel .fp-field input[aria-invalid="true"] { border-color: var(--rose); box-shadow: 0 0 0 1px rgba(var(--rose-rgb), 0.35); }
 .dev-pass-wrap { display: flex; align-items: center; gap: 6px; }
