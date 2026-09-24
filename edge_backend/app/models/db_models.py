@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import String, Float, Boolean, DateTime, Integer, JSON, ForeignKey, BigInteger, Index
+from sqlalchemy import String, Float, Boolean, DateTime, Integer, JSON, ForeignKey, BigInteger, Index, Text, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -67,6 +67,11 @@ class CameraModel(Base):
     # {"image_points": [{x,y}], "floor_points": [{x,y}], "frame_width", "frame_height", "saved_at"}
     calibration_points: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     features: Mapped[Optional[dict]] = mapped_column(JSON, default=dict)
+    # What the camera is for (services/camera_roles.py ROLE_PRESETS); None =
+    # no role, which behaves exactly as before roles existed (m0012).
+    role: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    # Checkout-lane cameras: the POS register_id this lane rings sales on (m0012).
+    pos_register_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
     # Relationships
     events: Mapped[list["SecurityEventModel"]] = relationship(
@@ -266,6 +271,27 @@ class AIDecisionRecommendationModel(Base):
     status: Mapped[str] = mapped_column(String(32), default="PENDING")  # PENDING, REVIEWED, APPLIED, DISMISSED
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # m0014: the metrics the rule cited, and which engine produced the row.
+    evidence: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    source: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+
+
+class AnalysisRunModel(Base):
+    """One business-analysis run (m0014): what it saw and what it found.
+
+    Written only by POST endpoints and the scheduler
+    (services/recommendations_service.py); GET endpoints read the latest row.
+    """
+    __tablename__ = "analysis_runs"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    run_trigger: Mapped[str] = mapped_column(String(16), nullable=False)   # manual | schedule | market
+    requested_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    generated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)  # naive UTC
+    findings_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    narrated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    inputs_summary: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    result: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
 
 class TheftIncidentModel(Base):
@@ -303,6 +329,13 @@ class TheftIncidentModel(Base):
     dispatch_details: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     resolution: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # m0014: reviewer-entered recovered value, and who recorded the outcome /
+    # marked staff sent. resolved_by NULL on a resolved row = resolved before
+    # outcomes were required (possibly the old RECOVERED_GOODS default).
+    recovered_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    resolved_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    dispatched_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    dispatched_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -509,3 +542,70 @@ class TripwireEventModel(Base):
     counts_footfall: Mapped[bool] = mapped_column(Boolean, default=True)
 
     __table_args__ = (Index("ix_tripwire_events_tripwire_ts", "tripwire_id", "ts"),)
+
+
+class QueueVisitModel(Base):
+    """One person standing in a Camera Studio checkout / queue area (migration m0012).
+
+    Areas are image-space polygons (``ai_zone_service`` ``queue_zones``), so
+    uncalibrated lane cameras measure queues too. Written by
+    services/tripwire_engine.py when the person leaves the area after at least
+    ZONE_DWELL_MIN_SECONDS, while the camera's ``people_counting`` flag is on.
+    ``area_kind`` is ``queue`` (waiting line: wait time) or ``checkout`` (the
+    lane / till: time at the lane). Name and kind are copied at visit time.
+    """
+    __tablename__ = "queue_visits"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    area_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    area_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    area_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    camera_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    track_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    entered_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    exited_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    dwell_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=datetime.utcnow, nullable=True)
+
+    __table_args__ = (Index("ix_queue_visits_area_entered", "area_id", "entered_at"),)
+
+
+class HeatmapSnapshotModel(Base):
+    """One recorded heatmap grid for a store-local hour or day (migration m0013).
+
+    Written by services/heatmap_history.py. ``space`` is ``floor`` (metres,
+    ``camera_id`` NULL) or ``image`` (one camera's normalised frame);
+    ``kind`` is presence | dwell | interaction; ``bucket_minutes`` is 60 or
+    1440. ``cells`` uses ``encoding`` ``zlib-u16le-v1`` (base64 of zlib'd
+    little-endian uint16, row-major, value = uint16 x ``scale``).
+    ``uptime_seconds`` NULL means the measuring time is unknown.
+    """
+    __tablename__ = "heatmap_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    space: Mapped[str] = mapped_column(String(8), nullable=False)
+    camera_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    bucket_start: Mapped[datetime] = mapped_column(DateTime, nullable=False)   # naive UTC
+    bucket_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
+    grid_w: Mapped[int] = mapped_column(Integer, nullable=False)
+    grid_h: Mapped[int] = mapped_column(Integer, nullable=False)
+    width_m: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    height_m: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    encoding: Mapped[str] = mapped_column(String(24), nullable=False)
+    scale: Mapped[float] = mapped_column(Float, nullable=False)
+    cells: Mapped[str] = mapped_column(Text, nullable=False)
+    total_samples: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_value: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    peak_value: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    uptime_seconds: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    complete: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="live")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ux_heatmap_snapshots_key", "space", text("COALESCE(camera_id, '')"), "kind",
+              "bucket_start", "bucket_minutes", unique=True),
+        Index("ix_heatmap_snapshots_bucket", "bucket_minutes", "bucket_start"),
+    )

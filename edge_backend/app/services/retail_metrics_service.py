@@ -81,6 +81,129 @@ def _track_is_real():
     )
 
 
+# ------------------------------------------------------------------ heatmap binning
+# Shared by the live endpoint (RetailMetricsService.heatmap) and the recorded
+# history (services/heatmap_history.py), so a recorded bucket is the live
+# heatmap of the same window by construction.
+
+HEATMAP_KINDS = ("presence", "dwell", "interaction")
+# Gaps longer than this between two trajectory points of one track are
+# not credited as dwell: the person was not observed in between.
+HEATMAP_DWELL_MAX_GAP_SEC = 5.0
+PRESENCE_WEIGHTINGS = ("samples", "tracks")
+
+
+async def staff_only_camera_ids(db: AsyncSession) -> list[str]:
+    """Cameras excluded from customer heatmaps: roles that never count customers (stockroom).
+
+    Uses services/camera_roles.py (NON_FOOTFALL_ROLES); no role = included,
+    exactly as before roles existed.
+    """
+    try:
+        from app.services.camera_roles import non_footfall_camera_ids
+
+        return list(await non_footfall_camera_ids(db))
+    except Exception as e:  # unmigrated DB / roles unavailable: no exclusions
+        logger.debug(f"camera roles unavailable for heatmaps: {e}")
+        return []
+
+
+def heatmap_unit(kind: str, presence_weighting: str = "samples") -> str:
+    if kind == "dwell":
+        return "seconds"
+    if kind == "interaction":
+        return "interactions"
+    return "visitors" if presence_weighting == "tracks" else "observations"
+
+
+def _cell(x: float, y: float, width: float, height: float, grid_w: int, grid_h: int) -> Optional[tuple[int, int]]:
+    """(row, col) of a point, or None outside [0, width] x [0, height]."""
+    if not (0 <= x <= width and 0 <= y <= height):
+        return None
+    gx = min(int(x / max(width, 1e-6) * grid_w), grid_w - 1)
+    gy = min(int(y / max(height, 1e-6) * grid_h), grid_h - 1)
+    return gy, gx
+
+
+def bin_heatmap_points(points, width: float, height: float, grid_w: int, grid_h: int) -> tuple[list[list[float]], int]:
+    """Count (x, y) points per cell (shelf-interaction positions). None coordinates are skipped."""
+    grid = [[0.0] * grid_w for _ in range(grid_h)]
+    samples = 0
+    for x, y in points:
+        if x is None or y is None:
+            continue
+        c = _cell(float(x), float(y), width, height, grid_w, grid_h)
+        if c is not None:
+            grid[c[0]][c[1]] += 1.0
+            samples += 1
+    return grid, samples
+
+
+def bin_heatmap_paths(
+    paths,
+    kind: str,
+    width: float,
+    height: float,
+    grid_w: int,
+    grid_h: int,
+    *,
+    xkey: str = "x",
+    ykey: str = "y",
+    window: Optional[tuple[float, float]] = None,
+    presence_weighting: str = "samples",
+    max_gap: float = HEATMAP_DWELL_MAX_GAP_SEC,
+) -> tuple[list[list[float]], int]:
+    """Bin trajectory points into a ``grid_h`` x ``grid_w`` grid. Returns (grid, samples).
+
+    ``paths`` yields ``(points, untimed_in_window)``: ``points`` is a track's
+    ``trajectory_points`` (dicts with ``xkey``/``ykey`` and epoch ``t``);
+    points lacking the keys are ignored (floor space skips image-only points
+    and vice versa). With ``window`` = (t_from, t_to) epoch seconds only points
+    with ``t_from <= t < t_to`` count; untimed legacy points count when
+    ``untimed_in_window``. ``samples`` = points binned.
+
+    presence/samples: +1 per point. presence/tracks: +1 per (track, cell).
+    dwell: + seconds to the track's next point (gaps over ``max_gap`` and
+    non-increasing times are not credited).
+    """
+    grid = [[0.0] * grid_w for _ in range(grid_h)]
+    samples = 0
+    for points, untimed_in_window in paths:
+        pts = []
+        for p in points or []:
+            try:
+                pts.append((float(p[xkey]), float(p[ykey]), p.get("t")))
+            except (KeyError, TypeError, ValueError, AttributeError):
+                continue
+        seen: set = set()
+        for i, (x, y, t) in enumerate(pts):
+            if window is not None:
+                if t is None:
+                    if not untimed_in_window:
+                        continue
+                elif not (window[0] <= float(t) < window[1]):
+                    continue
+            if kind == "dwell":
+                if i + 1 >= len(pts) or t is None or pts[i + 1][2] is None:
+                    continue
+                dt = float(pts[i + 1][2]) - float(t)
+                if dt <= 0 or dt > max_gap:
+                    continue
+                weight = dt
+            else:
+                weight = 1.0
+            c = _cell(x, y, width, height, grid_w, grid_h)
+            if c is None:
+                continue
+            samples += 1
+            if kind == "presence" and presence_weighting == "tracks":
+                if c in seen:
+                    continue
+                seen.add(c)
+            grid[c[0]][c[1]] += weight
+    return grid, samples
+
+
 @dataclass
 class ZoneMetrics:
     """What was actually observed in one zone over a window."""
@@ -150,14 +273,19 @@ class RetailMetricsService:
         3. **Raw tracks** -- a store with no zones drawn still sees people.
 
         ``footfall_source`` reports which one produced the figure.
+
+        Camera roles (services/camera_roles.py): lines on door cameras are
+        preferred over other lines, and stockroom cameras never count in any
+        of the three sources. Cameras without a role behave as before.
         """
         entries = await self._tripwire_entries(db, start, end)
         if entries is not None:
             return entries
+        excluded = await self._non_footfall_cameras(db)
         count = await db.scalar(
             select(func.count(func.distinct(ZoneVisitModel.track_id))).where(
                 and_(ZoneVisitModel.entered_at >= start, ZoneVisitModel.entered_at < end,
-                     _visit_is_real())
+                     _visit_is_real(), ZoneVisitModel.camera_id.notin_(excluded))
             )
         )
         if count:
@@ -168,10 +296,17 @@ class RetailMetricsService:
         track_count = await db.scalar(
             select(func.count(func.distinct(CustomerTrackModel.track_id))).where(
                 and_(CustomerTrackModel.start_time >= start, CustomerTrackModel.start_time < end,
-                     _track_is_real())
+                     _track_is_real(), CustomerTrackModel.camera_id.notin_(excluded))
             )
         )
         return int(track_count) if track_count else None
+
+    @staticmethod
+    async def _non_footfall_cameras(db: AsyncSession) -> list[str]:
+        """Camera ids whose role never counts customer footfall (stockroom)."""
+        from app.services.camera_roles import non_footfall_camera_ids
+
+        return await non_footfall_camera_ids(db)
 
     @staticmethod
     async def _tripwire_entries(db: AsyncSession, start: datetime, end: datetime) -> Optional[int]:
@@ -187,12 +322,14 @@ class RetailMetricsService:
         """Which signal ``footfall`` used for this window: tripwire | zone_visits | tracks | None."""
         if await self._tripwire_entries(db, start, end) is not None:
             return "tripwire"
+        excluded = await self._non_footfall_cameras(db)
         if await db.scalar(select(func.count(ZoneVisitModel.id)).where(
-                and_(ZoneVisitModel.entered_at >= start, ZoneVisitModel.entered_at < end, _visit_is_real()))):
+                and_(ZoneVisitModel.entered_at >= start, ZoneVisitModel.entered_at < end, _visit_is_real(),
+                     ZoneVisitModel.camera_id.notin_(excluded)))):
             return "zone_visits"
         if await db.scalar(select(func.count(CustomerTrackModel.id)).where(
                 and_(CustomerTrackModel.start_time >= start, CustomerTrackModel.start_time < end,
-                     _track_is_real()))):
+                     _track_is_real(), CustomerTrackModel.camera_id.notin_(excluded)))):
             return "tracks"
         return None
 
@@ -381,10 +518,8 @@ class RetailMetricsService:
 
     # -------------------------------------------------------------- heatmap
 
-    HEATMAP_KINDS = ("presence", "dwell", "interaction")
-    # Gaps longer than this between two trajectory points of one track are
-    # not credited as dwell: the person was not observed in between.
-    HEATMAP_DWELL_MAX_GAP_SEC = 5.0
+    HEATMAP_KINDS = HEATMAP_KINDS
+    HEATMAP_DWELL_MAX_GAP_SEC = HEATMAP_DWELL_MAX_GAP_SEC
 
     async def heatmap(
         self,
@@ -397,18 +532,27 @@ class RetailMetricsService:
         grid_w: int = 50,
         grid_h: int = 30,
         kind: str = "presence",
+        presence_weighting: str = "samples",
     ) -> dict:
         """Floor density built from real observations.
 
         ``kind``:
 
-        * ``presence``    -- one count per recorded floor point (where people were).
+        * ``presence``    -- where people were. ``presence_weighting="samples"``
+          (default): one count per recorded floor point; ``"tracks"``: each
+          track counts once per cell it entered (visitors per cell, as the
+          recorded history stores it), so someone standing still for an
+          hour is one visitor, not thousands of samples.
         * ``dwell``       -- seconds spent per cell: each trajectory point is
           weighted by the time to the track's next point (gaps over
           ``HEATMAP_DWELL_MAX_GAP_SEC`` are not credited).
         * ``interaction`` -- shelf interactions from the pose pipeline, binned
           at the shopper's floor position when the reach started. Only
           interactions seen by a calibrated camera have a floor position.
+
+        Tracks are selected by ``start_time`` in the window. The binning is
+        the shared ``bin_heatmap_paths`` / ``bin_heatmap_points`` also used by
+        the recorded history (services/heatmap_history.py).
 
         The matrix is normalised to 0-1 for rendering; ``peak_value`` and
         ``unit`` give the absolute scale. With nothing observed the matrix is
@@ -417,17 +561,10 @@ class RetailMetricsService:
         kind = (kind or "presence").lower()
         if kind not in self.HEATMAP_KINDS:
             raise ValueError(f"unknown heatmap kind '{kind}'; expected one of {', '.join(self.HEATMAP_KINDS)}")
-
-        grid = [[0.0] * grid_w for _ in range(grid_h)]
-        samples = 0
-
-        def drop(x: float, y: float, weight: float) -> bool:
-            if not (0 <= x <= width_m and 0 <= y <= height_m):
-                return False
-            gx = min(int(x / max(width_m, 1e-6) * grid_w), grid_w - 1)
-            gy = min(int(y / max(height_m, 1e-6) * grid_h), grid_h - 1)
-            grid[gy][gx] += weight
-            return True
+        if presence_weighting not in PRESENCE_WEIGHTINGS:
+            raise ValueError(f"unknown presence weighting '{presence_weighting}'")
+        # Customer heatmaps: staff-only cameras (stockroom role) never contribute.
+        staff_cams = await staff_only_camera_ids(db)
 
         if kind == "interaction":
             rows = (
@@ -436,17 +573,13 @@ class RetailMetricsService:
                         and_(
                             ShelfInteractionModel.timestamp >= start,
                             ShelfInteractionModel.timestamp < end,
+                            ShelfInteractionModel.camera_id.notin_(staff_cams),
                         )
                     )
                 )
             ).all()
-            unplaced = 0
-            for fx, fy in rows:
-                if fx is None or fy is None:
-                    unplaced += 1
-                    continue
-                if drop(float(fx), float(fy), 1.0):
-                    samples += 1
+            unplaced = sum(1 for fx, fy in rows if fx is None or fy is None)
+            grid, samples = bin_heatmap_points(rows, width_m, height_m, grid_w, grid_h)
             unit = "interactions"
             empty_msg = (
                 f"{unplaced} shelf interaction(s) recorded today, but none from a calibrated camera, "
@@ -462,32 +595,20 @@ class RetailMetricsService:
                         and_(
                             CustomerTrackModel.start_time >= start,
                             CustomerTrackModel.start_time < end,
+                            CustomerTrackModel.camera_id.notin_(staff_cams),
                         )
                     )
                 )
             ).scalars().all()
-            for points in rows:
-                pts = []
-                for p in points or []:
-                    try:
-                        pts.append((float(p["x"]), float(p["y"]), p.get("t")))
-                    except (KeyError, TypeError, ValueError, AttributeError):
-                        continue
-                for i, (x, y, t) in enumerate(pts):
-                    if kind == "dwell":
-                        if i + 1 >= len(pts) or t is None or pts[i + 1][2] is None:
-                            continue
-                        dt = float(pts[i + 1][2]) - float(t)
-                        if dt <= 0 or dt > self.HEATMAP_DWELL_MAX_GAP_SEC:
-                            continue
-                        weight = dt
-                    else:
-                        weight = 1.0
-                    if drop(x, y, weight):
-                        samples += 1
-            unit = "seconds" if kind == "dwell" else "observations"
+            grid, samples = bin_heatmap_paths(
+                ((points, True) for points in rows), kind, width_m, height_m, grid_w, grid_h,
+                presence_weighting=presence_weighting,
+            )
+            unit = heatmap_unit(kind, presence_weighting)
             empty_msg = "No trajectories recorded. Calibrate a camera to place people on the floor plan."
             extra = {}
+        if kind == "presence":
+            extra["presence_weighting"] = presence_weighting
 
         if not samples:
             return {
@@ -521,32 +642,147 @@ class RetailMetricsService:
     async def checkout_queues(
         self, db: AsyncSession, layout_id: str, start: datetime, end: datetime
     ) -> list[dict]:
-        """Queue state per checkout zone, from live occupancy and past dwell."""
+        """Queue state per checkout lane, from live occupancy and past dwell.
+
+        Two sources, reported side by side (``source``):
+
+        * ``floor_zone``  -- blueprint CHECKOUT zones, fed by calibrated cameras
+          through ``zone_visits``;
+        * ``camera_area`` -- Studio checkout / queue areas on a camera (image
+          space, no calibration needed), fed through ``queue_visits``.
+          ``kind`` is ``checkout`` (time at the lane) or ``queue`` (wait).
+
+        A lane is linked to a POS register through its checkout camera's
+        ``pos_register_id``; ``pos_transactions`` counts that register's
+        distinct transactions in the window, and ``conversion_pct`` is
+        transactions per customer seen at the lane (an estimate: fragmented
+        tracks inflate the customer count). Unlinked lanes report null.
+        """
         metrics = await self.zone_metrics(db, layout_id, start, end)
+        cams = {c.id: c for c in (await db.execute(select(CameraModel))).scalars().all()}
+        pos = await self._pos_by_register(db, start, end)
+        congested = float(settings.QUEUE_CONGESTED_WAIT_SEC)
         lanes = []
-        for m in metrics:
-            if m.category != "CHECKOUT":
-                continue
+        floor = [m for m in metrics if m.category == "CHECKOUT"]
+        zone_cams: dict[str, set] = {}
+        if floor:
+            rows = (await db.execute(
+                select(ZoneVisitModel.zone_id, ZoneVisitModel.camera_id).distinct().where(and_(
+                    ZoneVisitModel.zone_id.in_([m.zone_id for m in floor]),
+                    ZoneVisitModel.entered_at >= start, ZoneVisitModel.entered_at < end))
+            )).all()
+            for zid, cid in rows:
+                zone_cams.setdefault(zid, set()).add(cid)
+        for m in floor:
             wait = m.avg_dwell_seconds
             if m.occupancy_now == 0:
                 status = "IDLE" if m.visits else "NO DATA"
-            elif wait and wait > 270:
+            elif wait and wait > congested:
                 status = "CONGESTED"
             else:
                 status = "OPEN"
+            registers = sorted({cams[c].pos_register_id for c in zone_cams.get(m.zone_id, ())
+                                if c in cams and cams[c].role == "checkout" and cams[c].pos_register_id})
             lanes.append(
                 {
                     "zone_id": m.zone_id,
                     "name": m.name,
+                    "source": "floor_zone",
+                    "kind": "checkout",
+                    "camera_ids": sorted(zone_cams.get(m.zone_id, ())),
                     "queue_length_now": m.occupancy_now,
                     "avg_wait_seconds": wait,
                     "avg_wait_minutes": round(wait / 60.0, 1) if wait else None,
                     "served_today": m.unique_visitors,
                     "status": status,
                     "observed": m.visits > 0,
+                    **self._lane_pos(registers, pos, m.unique_visitors),
                 }
             )
+        lanes.extend(await self._camera_area_lanes(db, cams, pos, start, end, congested))
         return lanes
+
+    @staticmethod
+    async def _pos_by_register(db: AsyncSession, start: datetime, end: datetime) -> dict:
+        rows = (await db.execute(
+            select(POSTransactionModel.register_id,
+                   func.count(func.distinct(POSTransactionModel.transaction_id)),
+                   func.sum(POSTransactionModel.amount))
+            .where(and_(POSTransactionModel.timestamp >= start, POSTransactionModel.timestamp < end))
+            .group_by(POSTransactionModel.register_id))).all()
+        return {str(r): (int(n or 0), float(a or 0.0)) for r, n, a in rows if r}
+
+    @staticmethod
+    def _lane_pos(registers: list, pos: dict, served: Optional[int]) -> dict:
+        if not registers:
+            return {"register_ids": [], "pos_transactions": None, "pos_revenue": None, "conversion_pct": None}
+        txns = sum(pos.get(r, (0, 0.0))[0] for r in registers)
+        revenue = sum(pos.get(r, (0, 0.0))[1] for r in registers)
+        return {
+            "register_ids": registers,
+            "pos_transactions": txns if txns else None,
+            "pos_revenue": round(revenue, 2) if txns else None,
+            "conversion_pct": round(txns / served * 100.0, 1) if txns and served else None,
+        }
+
+    async def _camera_area_lanes(self, db: AsyncSession, cams: dict, pos: dict, start: datetime,
+                                 end: datetime, congested: float) -> list[dict]:
+        from app.models.db_models import QueueVisitModel
+        from app.services.ai_zone_service import ai_zone_service
+        from app.services.tripwire_engine import tripwire_engine
+
+        try:
+            areas = [a for a in ai_zone_service.get_all_zones().get("queue_zones", []) if a.get("enabled", True)]
+        except Exception:
+            areas = []
+        if not areas:
+            return []
+        agg = {}
+        try:
+            rows = (await db.execute(
+                select(QueueVisitModel.area_id, func.count(QueueVisitModel.id),
+                       func.count(func.distinct(QueueVisitModel.track_id)),
+                       func.avg(QueueVisitModel.dwell_seconds))
+                .where(and_(QueueVisitModel.entered_at >= start, QueueVisitModel.entered_at < end,
+                            QueueVisitModel.area_id.in_([a["id"] for a in areas])))
+                .group_by(QueueVisitModel.area_id))).all()
+            agg = {r[0]: r for r in rows}
+        except Exception as e:  # unmigrated DB
+            logger.debug(f"queue_visits unavailable: {e}")
+        live = tripwire_engine.queue_occupancy()
+        out = []
+        for a in areas:
+            _, visits, uniques, avg = agg.get(a["id"], (a["id"], 0, 0, None))
+            visits, uniques = int(visits or 0), int(uniques or 0)
+            wait = round(float(avg), 1) if avg else None
+            now = live.get(a["id"])
+            if now is None:
+                status = "NOT RUNNING"
+            elif now == 0:
+                status = "IDLE"
+            elif wait and wait > congested:
+                status = "CONGESTED"
+            else:
+                status = "OPEN"
+            cam = cams.get(a.get("camera_id"))
+            reg = cam.pos_register_id if cam is not None and cam.role == "checkout" else None
+            out.append({
+                "zone_id": a["id"],
+                "name": a.get("name") or a["id"],
+                "source": "camera_area",
+                "kind": str(a.get("kind") or "queue"),
+                "camera_id": a.get("camera_id"),
+                "camera_ids": [a.get("camera_id")] if a.get("camera_id") else [],
+                "queue_length_now": now,
+                "avg_wait_seconds": wait,
+                "avg_wait_minutes": round(wait / 60.0, 1) if wait else None,
+                "served_today": uniques,
+                "status": status,
+                "observed": visits > 0,
+                # A queue area measures waiting, not purchases: POS figures go on the lane.
+                **self._lane_pos([reg] if reg and str(a.get("kind")) == "checkout" else [], pos, uniques),
+            })
+        return out
 
     # ------------------------------------------------------------- coverage
 

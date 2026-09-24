@@ -50,7 +50,7 @@ class TestScannerAndAPIs(unittest.TestCase):
     def test_dashboard_and_studio_html(self):
         res1 = self.client.get("/dashboard")
         self.assertEqual(res1.status_code, 200)
-        self.assertIn("EDGE AI CCTV", res1.text)
+        self.assertIn("Edge AI CCTV", res1.text)
 
         res2 = self.client.get("/dashboard/studio")
         self.assertEqual(res2.status_code, 200)

@@ -1,0 +1,41 @@
+/* Studio drawing tools: tool rows, checkout / queue area form and list,
+   deep-link return link. Colours only via style.css variables so the light
+   and dark themes both work. */
+
+.studio-tool-row { display: flex; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.studio-tool-row > .btn { min-width: 0; min-height: 32px; white-space: normal; text-align: center; }
+.studio-tool-btn[aria-pressed="true"] { outline: 2px solid var(--accent-cyan); outline-offset: 1px; }
+
+.qa-tool-btn { background: var(--accent-purple-dim); border-color: var(--accent-purple); color: var(--accent-purple); }
+.qa-tool-btn:hover { background: var(--accent-purple-dim); border-color: var(--accent-purple); filter: brightness(1.15); }
+.qa-tool-btn[aria-pressed="true"] { outline-color: var(--accent-purple); }
+
+.studio-tool-help { font-size: 11.5px; line-height: 1.45; color: var(--text-dim); min-width: 0; overflow-wrap: anywhere; }
+
+/* Checkout / queue form (shares .rule-form layout). */
+.qa-form { border-color: var(--accent-purple); min-width: 0; }
+.qa-form .rule-form-title { color: var(--accent-purple); }
+.qa-explain { font-size: 11.5px; line-height: 1.45; color: var(--text-main); overflow-wrap: anywhere; }
+.qa-form .rule-form-grid { grid-template-columns: repeat(auto-fit, minmax(min(190px, 100%), 1fr)); }
+.qa-form .form-input, .qa-form .form-select { min-width: 0; width: 100%; background: var(--input-bg); }
+
+/* Saved checkout / queue rows. */
+.qa-row { flex-wrap: wrap; border-color: var(--accent-purple-dim); }
+.qa-row .zone-info { flex: 1 1 160px; min-width: 0; }
+.qa-row .zone-name { overflow-wrap: anywhere; }
+.qa-row .rule-actions, .qa-row .rule-confirm { flex-wrap: wrap; }
+.qa-row .btn { min-height: 32px; }
+.qa-row-off { opacity: 0.7; }
+.qa-kind-badge { display: inline-block; padding: 1px 7px; margin-right: 4px; border-radius: 999px; font-size: 9.5px;
+  font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase; vertical-align: middle;
+  border: 1px solid var(--accent-purple); color: var(--accent-purple); background: var(--accent-purple-dim); }
+.qa-kind-queue { border-color: var(--accent-orange); color: var(--accent-orange); background: var(--accent-orange-dim); }
+.qa-row-status { flex-basis: 100%; margin-top: 2px; }
+
+/* Return link to the dashboard setup checklist (?from=checklist). */
+.studio-back-checklist { font-weight: 800; }
+.studio-status-link { font-weight: 700; color: var(--accent-cyan); text-decoration: underline; }
+.studio-saved-checklist { display: inline; color: var(--text-main); }
+.qa-toggle { white-space: nowrap; }
+.qa-toggle[aria-pressed="false"] { border-color: var(--accent-green); color: var(--accent-green); }
+.qa-kind-checkout { border-color: var(--accent-purple); }

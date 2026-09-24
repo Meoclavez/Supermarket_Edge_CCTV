@@ -585,6 +585,7 @@ class AuthService:
 
         if not target_resolved.is_file():
             raise HTTPException(status_code=404, detail="Requested file not found")
+        return target_resolved
 
     async def create_admin_user(self, session, username, password, display_name, role="owner"):
         from app.models.db_models import AdminUserModel

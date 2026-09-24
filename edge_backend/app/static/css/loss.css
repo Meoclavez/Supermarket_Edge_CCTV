@@ -1,0 +1,116 @@
+/* ===================================================================
+   Loss prevention (js/loss.js): KPIs, review queue, outcome forms,
+   false-alarm table and the evidence viewer. Colours come only from the
+   theme tokens in style.css, so light and dark both work.
+   =================================================================== */
+
+.loss-kpis { margin-bottom: 0; }
+.loss-kpi-note { font-size: 10.5px; color: var(--text-dim); line-height: 1.4; }
+
+.loss-intro { margin: 0 0 10px; font-size: 11.5px; color: var(--text-dim); line-height: 1.5; }
+
+.loss-legacy { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 0 0 10px; padding: 8px 12px;
+  border-radius: 9px; font-size: 12px; color: var(--amber); background: rgba(var(--amber-rgb), 0.08);
+  border: 1px solid rgba(var(--amber-rgb), 0.25); }
+.loss-legacy[hidden] { display: none; }
+.loss-legacy span { flex: 1 1 240px; min-width: 0; }
+
+/* Filter chips */
+.loss-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.loss-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 4px 12px; border-radius: 20px;
+  font: 700 11.5px var(--font-sans); cursor: pointer; color: var(--text-dim);
+  background: rgba(var(--tint-rgb), 0.04); border: 1px solid var(--control-border, rgba(var(--slate-rgb), 0.25)); }
+.loss-chip:hover { color: var(--text-main); border-color: var(--accent-cyan); }
+.loss-chip.active { color: var(--accent-cyan); background: var(--accent-cyan-dim); border-color: var(--accent-cyan); }
+.loss-chip-n { font-family: var(--font-mono); font-size: 10.5px; padding: 0 6px; border-radius: 10px; background: rgba(var(--tint-rgb), 0.08); }
+
+/* List */
+.loss-list { display: flex; flex-direction: column; gap: 10px; }
+.loss-day { font-size: 10.5px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; color: var(--text-faint);
+  margin-top: 6px; padding-bottom: 3px; border-bottom: 1px solid rgba(var(--slate-rgb), 0.15); }
+.loss-card { min-width: 0; overflow-wrap: anywhere; }
+.loss-card-open { border-left: 3px solid var(--rose); }
+.loss-flash { animation: lossFlash 2s ease-out; }
+@keyframes lossFlash {
+  0% { box-shadow: 0 0 0 3px rgba(var(--info-rgb), 0.75); }
+  100% { box-shadow: 0 0 0 0 rgba(var(--info-rgb), 0); }
+}
+
+.loss-head-main { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.loss-head-side { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.loss-rule { font-size: 14px; font-weight: 800; color: var(--text-strong); }
+.loss-small-badge { font-size: 10px; padding: 3px 8px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.loss-conf { font-family: var(--font-mono); font-size: 11px; color: var(--accent-orange); }
+
+.loss-body { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; margin-top: 8px; }
+.loss-thumb-link { flex: 0 0 auto; display: block; max-width: 100%; }
+.loss-thumb-link .evidence-thumb { max-width: 100%; }
+.loss-evidence { flex: 1 1 240px; min-width: 0; }
+.loss-evidence-label { font-size: 10.5px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .04em; }
+.loss-evidence-list { margin: 4px 0 0 16px; padding: 0; font-size: 11.5px; color: var(--text-steps); line-height: 1.45; }
+.loss-tech { margin-top: 6px; font-size: 11px; color: var(--text-dim); }
+.loss-tech summary { cursor: pointer; min-height: 24px; display: inline-flex; align-items: center; }
+.loss-tech summary:hover { color: var(--text-main); }
+.loss-tech-body { margin-top: 4px; font-family: var(--font-mono); font-size: 10.5px; line-height: 1.5; overflow-wrap: anywhere; }
+
+.loss-dispatch, .loss-outcome, .loss-outcome-notes { margin-top: 8px; font-size: 11.5px; line-height: 1.5; color: var(--text-2); }
+.loss-dispatch { padding: 6px 10px; border-radius: 8px; background: rgba(var(--tint-rgb), 0.03); border: 1px solid rgba(var(--slate-rgb), 0.15); }
+.loss-outcome { padding: 6px 10px; border-radius: 8px; background: rgba(var(--green-rgb), 0.06); border: 1px solid rgba(var(--green-rgb), 0.2); }
+.loss-outcome-legacy { color: var(--amber); background: rgba(var(--amber-rgb), 0.07); border-color: rgba(var(--amber-rgb), 0.25); }
+.loss-outcome-notes { color: var(--text-dim); margin-top: 4px; }
+.loss-alert-ok { color: var(--ok); font-weight: 700; }
+.loss-alert-warn { color: var(--amber); font-weight: 700; }
+.loss-alert-bad { color: var(--rose); font-weight: 700; }
+
+.loss-meta { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dim); min-width: 0; }
+.loss-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* Inline outcome and staff-sent forms */
+.loss-form-slot:empty { display: none; }
+.loss-form { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; padding: 12px; border-radius: 10px;
+  background: rgba(var(--info-rgb), 0.05); border: 1px solid rgba(var(--info-rgb), 0.3); }
+.loss-form-title { font-size: 12.5px; font-weight: 800; color: var(--text-strong); }
+.loss-outcomes { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 6px; }
+.loss-outcome-opt { display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 6px 10px; border-radius: 8px; cursor: pointer;
+  font-size: 12px; color: var(--text-main); background: rgba(var(--tint-rgb), 0.03); border: 1px solid rgba(var(--slate-rgb), 0.2); }
+.loss-outcome-opt:hover { border-color: var(--accent-cyan); }
+.loss-outcome-opt:has(input:checked) { border-color: var(--accent-cyan); background: var(--accent-cyan-dim); }
+.loss-outcome-opt input { accent-color: var(--accent-cyan); flex: 0 0 auto; }
+.loss-outcome-false span { color: var(--text-dim); }
+.loss-form-row { display: flex; flex-wrap: wrap; gap: 10px; }
+.loss-field { display: flex; flex-direction: column; gap: 4px; flex: 1 1 180px; min-width: 0; font-size: 10.5px; font-weight: 700;
+  color: var(--text-dim); text-transform: uppercase; letter-spacing: .04em; }
+.loss-field[hidden] { display: none; }
+.loss-field-grow { flex: 2 1 240px; }
+.loss-value-field { flex: 1 1 160px; }
+.loss-field .form-input { width: 100%; text-transform: none; letter-spacing: 0; font-weight: 500; font-family: var(--font-sans); }
+.loss-field textarea.form-input { resize: vertical; min-height: 44px; }
+.loss-check { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-main); min-height: 28px; cursor: pointer; }
+.loss-check input { accent-color: var(--accent-cyan); }
+.loss-form-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.loss-form-status { margin-top: 0; min-height: 0; flex: 1 1 200px; }
+
+/* False alarms by rule */
+.loss-table-wrap { overflow-x: auto; }
+.loss-rule-table td:not(:first-child), .loss-rule-table th:not(:first-child) { text-align: right; white-space: nowrap; }
+.loss-rate { font-family: var(--font-mono); font-weight: 700; color: var(--text-strong); }
+.loss-rate-high { color: var(--rose); }
+
+/* Evidence viewer: inline full-screen overlay */
+.loss-viewer { position: fixed; inset: 0; z-index: 1000; background: var(--lightbox-scrim); align-items: center; justify-content: center; padding: 16px; }
+.loss-viewer-inner { display: flex; flex-direction: column; gap: 8px; max-width: 96vw; max-height: 94vh; min-width: 0; }
+.loss-viewer-bar { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+.loss-viewer-caption { color: var(--lightbox-text); font-size: 12px; min-width: 0; overflow-wrap: anywhere; }
+.loss-viewer-actions { display: flex; gap: 6px; }
+.loss-viewer-img { display: block; max-width: 96vw; max-height: 86vh; object-fit: contain; background: var(--media-bg); border-radius: 6px; }
+
+@media (max-width: 600px) {
+  .loss-body .evidence-thumb, .loss-thumb-link { width: 100%; }
+  .loss-outcomes { grid-template-columns: 1fr; }
+  .loss-actions .btn { flex: 1 1 auto; }
+}
+
+@media (pointer: coarse) {
+  .loss-chip, .loss-outcome-opt, .loss-check, .loss-tech summary { min-height: 40px; }
+  .loss-actions .btn, .loss-form-actions .btn { min-height: 40px; }
+}

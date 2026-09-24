@@ -548,6 +548,7 @@ class StoreLayoutService:
                     "camera_id": cam.id,
                     "name": cam.name,
                     "department": cam.department,
+                    "role": getattr(cam, "role", None),
                     "channel_number": cam.channel_number,
                     "status": rt.status if rt is not None else "OFFLINE",
                     "fps_actual": round(rt.fps, 1) if rt is not None else None,

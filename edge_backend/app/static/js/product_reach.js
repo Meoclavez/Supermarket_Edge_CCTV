@@ -114,7 +114,8 @@
     }, REFRESH_MS);
   }
 
-  window.addEventListener('edge:tab', (e) => onTab(e.detail && e.detail.tab));
+  // Insights > Shoppers & footfall (the old 'analytics' tab).
+  window.addEventListener('edge:tab', (e) => onTab(e.detail && (e.detail.tab === 'insights' && e.detail.sub === 'footfall' ? 'analytics' : e.detail.tab)));
   window.productReach = { load, render };
   const boot = () => { if (tabActive() && !timer) onTab('analytics'); };
   // Start only after auth.js has checked the stored token (edgeAuth.onReady).

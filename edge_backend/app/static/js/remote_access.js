@@ -191,6 +191,11 @@
       ? `<span class="badge badge-green" id="raVerified">Verified ${esc(fmtTime(s.verified_at))}</span>`
       : '<span class="badge badge-warning" id="raVerified">Not verified</span>';
 
+    // Verifying is only meaningful once the tunnel is up (P3-1).
+    const canVerify = !!s.hostname && (!isTunnel || proc === 'connected');
+    const verifyTitle = !s.hostname ? 'Enter a hostname first'
+      : (canVerify ? 'Check that the public hostname reaches this device' : 'Start remote access first; verify once it shows Connected');
+
     host.innerHTML = `
       <div class="card-title"><span>Remote access — online dashboard</span></div>
       <div class="ra-hint">Publish this dashboard at <b>https://</b> on your own domain. It is online only while
@@ -202,7 +207,7 @@
         ${s.enabled && s.public_url ? `<a class="ra-link" id="raPublicUrl" href="${esc(s.public_url)}" target="_blank" rel="noopener">${esc(s.public_url)}</a>` : ''}
         <span class="ra-spacer"></span>
         ${verifiedBadge}
-        <button type="button" class="btn btn-sm" id="raVerifyBtn" ${s.hostname ? '' : 'disabled'}>Verify now</button>
+        <button type="button" class="btn btn-sm" id="raVerifyBtn" ${canVerify ? '' : 'disabled'} title="${esc(verifyTitle)}">Verify now</button>
       </div>
       <div class="form-status form-status-error" id="raProcessError">${esc(s.last_error || '')}</div>
       <div class="form-status ${s.verified ? '' : 'form-status-error'}" id="raVerifyStatus">${s.verified ? '' : esc(s.verify_error || '')}</div>

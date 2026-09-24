@@ -53,6 +53,15 @@ inside for ``min_dwell_seconds`` (brief exits up to
 active, and each (area, track) pair then waits ``cooldown_seconds`` before it
 can alert again.
 
+Checkout / queue areas
+----------------------
+Studio ``queue_zones`` (camera roles): a lane (``kind: checkout``) or a
+waiting line (``kind: queue``). The same foot-point test; a person's visit
+ends once the foot point has been outside for ``QUEUE_AREA_EXIT_GRACE_SEC``
+(or the track is gone that long). Visits of at least ``ZONE_DWELL_MIN_SECONDS``
+are written to ``queue_visits``; the number of people inside right now is
+kept in memory (``queue_occupancy``). Only while ``people_counting`` is on.
+
 Feature flags and privacy
 -------------------------
 Crossings are recorded (``tripwire_events``) only while the camera's
@@ -331,6 +340,39 @@ class AreaTrackState:
     seen_at: float = 0.0
 
 
+@dataclass
+class QueueTrackState:
+    """One track against one checkout / queue area."""
+
+    entered_at: Optional[float] = None
+    last_inside_at: Optional[float] = None
+    seen_at: float = 0.0
+
+
+def step_queue(state: QueueTrackState, inside: bool, now: float,
+               grace: Optional[float] = None) -> Optional[tuple[float, float]]:
+    """Advance one track against one queue area.
+
+    Returns ``(entered_at, last_inside_at)`` when a visit ends: the foot point
+    has been outside (or unseen) for longer than ``grace``. Brief exits within
+    the grace period continue the same visit.
+    """
+    grace = settings.QUEUE_AREA_EXIT_GRACE_SEC if grace is None else grace
+    state.seen_at = now
+    if inside:
+        if state.entered_at is None:
+            state.entered_at = now
+        state.last_inside_at = now
+        return None
+    if state.entered_at is not None and state.last_inside_at is not None \
+            and now - state.last_inside_at > grace:
+        visit = (state.entered_at, state.last_inside_at)
+        state.entered_at = None
+        state.last_inside_at = None
+        return visit
+    return None
+
+
 def step_area(state: AreaTrackState, inside: bool, active: bool, now: float,
               min_dwell: float, cooldown: float,
               grace: Optional[float] = None) -> bool:
@@ -387,6 +429,8 @@ class PendingAlert:
 class CameraRuleState:
     wires: dict = field(default_factory=dict)     # (tw_id, track_id) -> WireTrackState
     areas: dict = field(default_factory=dict)     # (area_id, track_id) -> AreaTrackState
+    queues: dict = field(default_factory=dict)    # (queue_area_id, track_id) -> QueueTrackState
+    queue_now: dict = field(default_factory=dict)  # queue_area_id -> (people inside, evaluated at)
     last_prune: float = 0.0
 
 
@@ -402,6 +446,7 @@ class TripwireEngine:
         self._cams: dict[str, CameraRuleState] = {}
         self._lock = threading.Lock()
         self._pending_events: list[dict] = []
+        self._pending_queue_visits: list[dict] = []
         self._events_lock = threading.Lock()
         self._alerts: list[PendingAlert] = []
         self._alerts_lock = threading.Lock()
@@ -413,7 +458,7 @@ class TripwireEngine:
         # Tests may inject an async callable(event_type, severity, title, body, data).
         self.dispatcher_override: Optional[AsyncDispatch] = None
         self.stats = {"crossings": 0, "alerts": 0, "alerts_delivered": 0, "alert_errors": 0,
-                      "events_persisted": 0}
+                      "events_persisted": 0, "queue_visits": 0, "queue_visits_persisted": 0}
         self.last_delivery: Optional[dict] = None
 
     # ------------------------------------------------------------ config
@@ -432,6 +477,17 @@ class TripwireEngine:
         areas = [a for a in data.get("intrusion_zones", []) if a.get("enabled", True)
                  and len(a.get("points") or []) >= 3]
         return wires, areas
+
+    @staticmethod
+    def _queue_areas_for(camera_id: str) -> list[dict]:
+        try:
+            from app.services.ai_zone_service import ai_zone_service
+
+            data = ai_zone_service.get_all_zones(camera_id)
+        except Exception:
+            return []
+        return [q for q in data.get("queue_zones", []) or [] if q.get("enabled", True)
+                and len(q.get("points") or []) >= 3]
 
     def bind_loop(self, loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
         if loop is None:
@@ -460,10 +516,14 @@ class TripwireEngine:
         if not frame_w or not frame_h:
             return out
         wires, areas = self._rules_for(camera_id)
+        queues = self._queue_areas_for(camera_id) if counting else []
         tracks = list(tracks)
         with self._lock:
             cs = self._cams.setdefault(camera_id, CameraRuleState())
-            if not wires and not areas:
+            if not queues:
+                cs.queues.clear()
+                cs.queue_now.clear()
+            if not wires and not areas and not queues:
                 cs.wires.clear()
                 cs.areas.clear()
                 return out
@@ -473,6 +533,8 @@ class TripwireEngine:
             for area in areas:
                 self._eval_area(cs, camera_id, camera_name, area, tracks, frame_w, frame_h, now,
                                 frame, out)
+            for qa in queues:
+                self._eval_queue(cs, camera_id, qa, tracks, frame_w, frame_h, now, out)
             if now - cs.last_prune > 5.0:
                 cs.last_prune = now
                 cutoff = now - self.STATE_TTL_SEC
@@ -483,6 +545,76 @@ class TripwireEngine:
                             if k[0] in wire_ids and (k[1] in live_ids or v.seen_at >= cutoff)}
                 cs.areas = {k: v for k, v in cs.areas.items()
                             if k[0] in area_ids and (k[1] in live_ids or v.seen_at >= cutoff)}
+                queue_ids = {q["id"] for q in queues}
+                cs.queues = {k: v for k, v in cs.queues.items() if k[0] in queue_ids}
+                cs.queue_now = {k: v for k, v in cs.queue_now.items() if k in queue_ids}
+        return out
+
+    def _eval_queue(self, cs, camera_id, qa, tracks, fw, fh, now, out):
+        try:
+            poly = [(float(p["x"]), float(p["y"])) for p in qa.get("points") or []]
+        except Exception:
+            return
+        present: set[str] = set()
+        inside_now = 0
+        for tr in tracks:
+            x1, y1, x2, y2 = (float(v) for v in tr.bbox)
+            nx, ny = ((x1 + x2) / 2.0) / fw, y2 / fh
+            key = (qa["id"], str(tr.track_id))
+            present.add(key[1])
+            st = cs.queues.get(key)
+            if st is None:
+                st = cs.queues[key] = QueueTrackState()
+            inside = point_in_polygon(nx, ny, poly)
+            inside_now += 1 if inside else 0
+            ended = step_queue(st, inside, now)
+            if ended is not None:
+                self._emit_queue_visit(qa, camera_id, key[1], ended, out)
+        # Tracks that are gone: their visit ends once the grace period passes.
+        for key, st in list(cs.queues.items()):
+            if key[0] != qa["id"] or key[1] in present:
+                continue
+            ended = step_queue(st, False, now)
+            if ended is not None:
+                self._emit_queue_visit(qa, camera_id, key[1], ended, out)
+            if st.entered_at is None:
+                cs.queues.pop(key, None)
+        cs.queue_now[qa["id"]] = (inside_now, now)
+
+    def _emit_queue_visit(self, qa, camera_id, track_id, ended, out):
+        entered, left = ended
+        dwell = max(0.0, left - entered)
+        if dwell < float(settings.ZONE_DWELL_MIN_SECONDS):
+            return      # walked through the lane: not a visit
+        visit = {
+            "id": f"qv_{uuid.uuid4().hex[:14]}",
+            "area_id": qa["id"],
+            "area_kind": str(qa.get("kind") or "queue"),
+            "area_name": qa.get("name") or qa["id"],
+            "camera_id": camera_id,
+            "track_id": track_id,
+            "entered_at": utc_from_ts(entered),
+            "exited_at": utc_from_ts(left),
+            "dwell_seconds": round(dwell, 2),
+        }
+        out.setdefault("queue_visits", []).append(visit)
+        self.stats["queue_visits"] += 1
+        with self._events_lock:
+            self._pending_queue_visits.append(visit)
+
+    def queue_occupancy(self, max_age_sec: float = 10.0, now: Optional[float] = None) -> dict:
+        """People inside each checkout / queue area now: ``{area_id: count}``.
+
+        Only areas evaluated in the last ``max_age_sec`` (a stopped camera's
+        lane is not reported as empty; it is absent).
+        """
+        now = time.time() if now is None else now
+        out: dict = {}
+        with self._lock:
+            for cs in self._cams.values():
+                for area_id, (n, at) in cs.queue_now.items():
+                    if now - at <= max_age_sec:
+                        out[area_id] = n
         return out
 
     def _eval_wire(self, cs, camera_id, camera_name, tw, tracks, fw, fh, now, frame, counting, out):
@@ -611,6 +743,11 @@ class TripwireEngine:
         with self._events_lock:
             events, self._pending_events = self._pending_events, []
         return events
+
+    def drain_queue_visits(self) -> list[dict]:
+        with self._events_lock:
+            visits, self._pending_queue_visits = self._pending_queue_visits, []
+        return visits
 
     # ------------------------------------------------------------ alert writer
 
@@ -754,7 +891,35 @@ tripwire_engine = TripwireEngine()
 # =========================================================================
 
 async def flush_tripwire_events(session_factory=None) -> int:
-    """Move buffered crossings into ``tripwire_events``. Returns rows written."""
+    """Move buffered crossings (and queue-area visits) to the database. Returns rows written."""
+    written = await flush_queue_visits(session_factory)
+    return written + await _flush_crossings(session_factory)
+
+
+async def flush_queue_visits(session_factory=None) -> int:
+    """Move finished checkout / queue area visits into ``queue_visits``."""
+    visits = tripwire_engine.drain_queue_visits()
+    if not visits:
+        return 0
+    from app.models.db_models import QueueVisitModel
+
+    if session_factory is None:
+        from app.database import async_session_factory as session_factory
+    try:
+        async with session_factory() as db:
+            for v in visits:
+                db.add(QueueVisitModel(**v))
+            await db.commit()
+    except Exception as e:
+        logger.error(f"Failed to persist {len(visits)} queue visit(s): {e}")
+        with tripwire_engine._events_lock:
+            tripwire_engine._pending_queue_visits[:0] = visits[-5000:]
+        return 0
+    tripwire_engine.stats["queue_visits_persisted"] += len(visits)
+    return len(visits)
+
+
+async def _flush_crossings(session_factory=None) -> int:
     events = tripwire_engine.drain_events()
     if not events:
         return 0
@@ -852,7 +1017,19 @@ async def tripwire_footfall(db, start: datetime, end: datetime, bucket: str = "h
     lines = sorted(per.values(), key=lambda r: (r.get("name") or "", r["tripwire_id"]))
     for r in lines:
         r["net"] = (r["in"] - r["out"]) if r["observed"] else None
+    # Camera roles: stockroom lines are never customer footfall; when any
+    # door camera (entrance / exit / entrance_exit) recorded crossings, only
+    # door lines make the totals, so a line across an aisle is not taken for
+    # the store's doors. No roles = every footfall-counting line, as before.
+    door_cams, excluded_cams = await _footfall_camera_sets(db)
+    for r in lines:
+        r["camera_role"] = door_cams.get(r.get("camera_id")) or excluded_cams.get(r.get("camera_id"))
+        if r.get("camera_id") in excluded_cams:
+            r["counts_footfall"] = False
+            r["excluded_reason"] = "stockroom camera: never customer footfall"
     counted = [r for r in lines if r["observed"] and r["counts_footfall"]]
+    if any(r.get("camera_id") in door_cams for r in counted):
+        counted = [r for r in counted if r.get("camera_id") in door_cams]
     total_in = sum(r["in"] for r in counted) if counted else None
     total_out = sum(r["out"] for r in counted) if counted else None
     return {
@@ -863,6 +1040,7 @@ async def tripwire_footfall(db, start: datetime, end: datetime, bucket: str = "h
         "totals": {"in": total_in, "out": total_out,
                    "net": (total_in - total_out) if counted else None},
         "observed": bool(counted),
+        "counted_tripwires": [r["tripwire_id"] for r in counted],
         "net_occupancy_estimate": max(0, total_in - total_out) if counted else None,
         "estimate_note": ("Entries minus exits on footfall-counting lines since the start of the "
                           "window. An estimate: every missed or doubled crossing shifts it, and "
@@ -870,15 +1048,33 @@ async def tripwire_footfall(db, start: datetime, end: datetime, bucket: str = "h
     }
 
 
+async def _footfall_camera_sets(db) -> tuple[dict, dict]:
+    """(door cameras, excluded cameras) as ``{camera_id: role}`` from camera roles."""
+    from app.services.camera_roles import NON_FOOTFALL_ROLES, PRIMARY_FOOTFALL_ROLES, camera_roles_map
+
+    roles = await camera_roles_map(db)
+    return ({c: r for c, r in roles.items() if r in PRIMARY_FOOTFALL_ROLES},
+            {c: r for c, r in roles.items() if r in NON_FOOTFALL_ROLES})
+
+
 async def tripwire_entries(db, start: datetime, end: datetime) -> Optional[int]:
     """Entries ('in' crossings) on footfall-counting tripwires, or None if none recorded.
 
-    ``start``/``end`` are naive UTC, like the stored ``ts``.
+    ``start``/``end`` are naive UTC, like the stored ``ts``. Camera roles:
+    crossings on stockroom cameras never count; when door cameras (entrance,
+    exit, entrance_exit) recorded entries in the window, only theirs count.
     """
     from sqlalchemy import and_, func, select
 
     from app.models.db_models import TripwireEventModel as T
 
-    n = await db.scalar(select(func.count(T.id)).where(and_(
-        T.ts >= start, T.ts < end, T.direction == "in", T.counts_footfall.is_(True))))
+    door_cams, excluded_cams = await _footfall_camera_sets(db)
+    cond = and_(T.ts >= start, T.ts < end, T.direction == "in", T.counts_footfall.is_(True))
+    if excluded_cams:
+        cond = and_(cond, T.camera_id.notin_(list(excluded_cams)))
+    if door_cams:
+        n = await db.scalar(select(func.count(T.id)).where(and_(cond, T.camera_id.in_(list(door_cams)))))
+        if n:
+            return int(n)
+    n = await db.scalar(select(func.count(T.id)).where(cond))
     return int(n) if n else None

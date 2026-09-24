@@ -309,16 +309,19 @@ class TestTheftAPIIntegration:
         assert ack_res.json()["status"] == TheftIncidentStatus.ACKNOWLEDGED.value
         assert ack_res.json()["guard_id"] == "guard_mike_104"
 
-        # 3. Dispatch security & audio greeting deterrent
+        # 3. Mark staff sent. The typed name is recorded; the old audio
+        # deterrent fields are ignored because nothing can play audio.
         dsp_res = self.client.post(f"/api/v1/theft/incidents/{incident_id}/dispatch", json={
             "guard_unit": "Mobile Response Unit 2",
             "audio_deterrent": True,
             "announcement_type": "CUSTOMER_ASSISTANCE_GREETING",
+            "notify_phones": False,
         })
         assert dsp_res.status_code == 200
         assert dsp_res.json()["status"] == TheftIncidentStatus.DISPATCHED.value
-        assert dsp_res.json()["dispatch_details"]["guard_unit"] == "Mobile Response Unit 2"
-        assert dsp_res.json()["dispatch_details"]["audio_deterrent_triggered"] is True
+        assert dsp_res.json()["dispatch_details"]["staff_sent"] == "Mobile Response Unit 2"
+        assert "audio_deterrent_triggered" not in dsp_res.json()["dispatch_details"]
+        assert dsp_res.json()["dispatched_by"]
 
         # 4. Resolve incident
         rsv_res = self.client.post(f"/api/v1/theft/incidents/{incident_id}/resolve", json={

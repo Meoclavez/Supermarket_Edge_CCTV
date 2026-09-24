@@ -10,6 +10,10 @@ All geometry is image coordinates normalised 0..1 to the camera's own frame.
   person stays ``min_dwell_seconds`` inside while the schedule says the area
   is restricted.
 * Privacy masks (``/api/zones/exclusion``): see services/privacy_mask.py.
+* Checkout / queue areas (``/api/zones/queue``): a checkout-lane camera's
+  lane (``kind: checkout``) or waiting line (``kind: queue``). Each person's
+  time inside is recorded in ``queue_visits`` and reported by
+  ``GET /api/v1/analytics/queues`` (camera roles, m0012).
 
 Everything is validated; bad input is a 422, never stored. Evaluation lives in
 services/tripwire_engine.py.
@@ -271,6 +275,47 @@ def _mask_record(data: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+# ------------------------------------------------------- checkout / queue areas
+
+class QueueAreaReq(BaseModel):
+    """A checkout lane (``checkout``) or waiting line (``queue``) on one camera."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: Optional[str] = Field(None, max_length=64, pattern=r"^[A-Za-z0-9_.:-]+$")
+    name: str = Field("Checkout", min_length=1, max_length=80)
+    camera_id: str = Field(min_length=1, max_length=64)
+    kind: Literal["checkout", "queue"] = "checkout"
+    points: List[NormPoint] = Field(min_length=3, max_length=64)
+    enabled: bool = True
+
+    _norm_kind = field_validator("kind", mode="before")(_lower)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def _strip_name(cls, v):
+        return v.strip() if isinstance(v, str) else v
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy(cls, data):
+        if isinstance(data, dict):
+            data = dict(data)
+            if "points" not in data and isinstance(data.get("polygon_points"), list):
+                data["points"] = data["polygon_points"]
+            if not data.get("name"):
+                data.pop("name", None)
+        return data
+
+
+class QueueAreaUpdateReq(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: Optional[str] = None
+    kind: Optional[str] = None
+    points: Optional[List[Dict[str, Any]]] = None
+    enabled: Optional[bool] = None
+
+
 # ------------------------------------------------------------------ helpers
 
 def _errors(e: ValidationError) -> list:
@@ -295,6 +340,16 @@ def _area_record(payload: Dict[str, Any]) -> Dict[str, Any]:
     except ValidationError as e:
         raise HTTPException(status_code=422, detail=_errors(e))
     return req.record()
+
+
+def _queue_record(payload: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        req = QueueAreaReq.model_validate(payload)
+    except ValidationError as e:
+        raise HTTPException(status_code=422, detail=_errors(e))
+    out = req.model_dump(exclude={"points"}, exclude_none=True)
+    out["points"] = [{"x": round(p.x, 4), "y": round(p.y, 4)} for p in req.points]
+    return out
 
 
 def _with_legacy_geometry(z: Dict[str, Any]) -> Dict[str, Any]:
@@ -333,6 +388,10 @@ def get_camera_zones(camera_id: str):
         z = _with_legacy_geometry(ex)
         z["zone_type"] = "EXCLUSION"
         combined.append(z)
+    for qz in zones_data.get("queue_zones", []):
+        z = _with_legacy_geometry(qz)
+        z["zone_type"] = "QUEUE_AREA"
+        combined.append(z)
     return combined
 
 
@@ -346,6 +405,10 @@ def create_camera_zone(camera_id: str, payload: Dict[str, Any]):
         return ai_zone_service.add_tripwire(_tripwire_record(payload))
     if z_type in ("INTRUSION", "RESTRICTED_ZONE", "RESTRICTED_AREA"):
         return ai_zone_service.add_intrusion(_area_record(payload))
+    if z_type in ("QUEUE_AREA", "CHECKOUT", "QUEUE"):
+        if "kind" not in payload and z_type in ("CHECKOUT", "QUEUE"):
+            payload["kind"] = z_type.lower()
+        return ai_zone_service.add_queue_zone(_queue_record(payload))
     payload["id"] = payload.get("id") or f"zone_{z_type.lower()}_{camera_id}"
     if "points" not in payload and isinstance(payload.get("polygon_points"), list):
         payload["points"] = payload["polygon_points"]
@@ -363,7 +426,8 @@ def create_camera_zone(camera_id: str, payload: Dict[str, Any]):
 def delete_camera_zone(camera_id: str, zone_id: str):
     if ai_zone_service.delete_tripwire(zone_id) or \
        ai_zone_service.delete_intrusion(zone_id) or \
-       ai_zone_service.delete_exclusion(zone_id):
+       ai_zone_service.delete_exclusion(zone_id) or \
+       ai_zone_service.delete_queue_zone(zone_id):
         return {"status": "success", "message": f"Deleted zone {zone_id}"}
     raise HTTPException(status_code=404, detail="Zone not found")
 
@@ -449,12 +513,38 @@ def delete_exclusion(ex_id: str):
     raise HTTPException(status_code=404, detail="Exclusion mask not found")
 
 
-_CLEAR_KINDS = {"tripwires", "intrusion_zones", "exclusion_masks"}
+@router.post("/api/zones/queue")
+def create_or_update_queue_area(payload: Dict[str, Any]):
+    """Draw a checkout lane (``kind: checkout``) or waiting line (``kind: queue``) on a camera."""
+    saved = ai_zone_service.add_queue_zone(_queue_record(payload))
+    return {"status": "success", "queue_area": saved}
+
+
+@router.patch("/api/zones/queue/{qz_id}")
+def update_queue_area(qz_id: str, req: QueueAreaUpdateReq):
+    current = ai_zone_service.get_queue_zone(qz_id)
+    if current is None:
+        raise HTTPException(status_code=404, detail="Queue area not found")
+    changes = req.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(status_code=422, detail="Nothing to update")
+    saved = ai_zone_service.update_queue_zone(qz_id, _queue_record({**current, **changes, "id": qz_id}))
+    return {"status": "success", "queue_area": saved}
+
+
+@router.delete("/api/zones/queue/{qz_id}")
+def delete_queue_area(qz_id: str):
+    if ai_zone_service.delete_queue_zone(qz_id):
+        return {"status": "success", "message": f"Deleted queue area {qz_id}"}
+    raise HTTPException(status_code=404, detail="Queue area not found")
+
+
+_CLEAR_KINDS = {"tripwires", "intrusion_zones", "exclusion_masks", "queue_zones"}
 
 
 @router.post("/api/zones/clear")
 def clear_all_zones(kinds: Optional[str] = Query(None, description="Comma-separated subset of "
-                                                 "tripwires,intrusion_zones,exclusion_masks; default all")):
+                                                 "tripwires,intrusion_zones,exclusion_masks,queue_zones; default all")):
     wanted = None
     if kinds:
         wanted = [k.strip() for k in kinds.split(",") if k.strip()]

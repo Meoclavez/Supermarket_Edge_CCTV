@@ -129,9 +129,10 @@
         <div class="fp-cal-head">
           <div>
             <div class="fp-cal-title" id="fpCalTitle">Calibrate ${esc(cam.name || cam.camera_id)}</div>
-            <div class="fp-cal-sub">Pair at least ${MIN_PAIRS} floor points. Choose marks that are on the floor itself (tile corners, shelf feet, door thresholds), spread across the view.</div>
+            <div class="fp-cal-sub"><b>Calibration lets the system put the people this camera sees onto the store map.</b>
+              Mark at least ${MIN_PAIRS} spots on the floor in the camera picture, and the same spots on the map. Use marks on the floor itself (tile corners, shelf feet, door thresholds), spread across the view.</div>
           </div>
-          <button class="btn btn-sm" id="fpCalClose" title="Close without changing anything">Close</button>
+          <button class="btn btn-sm btn-primary" id="fpCalClose" title="Back to the map with the side panel (saved points stay saved)">Done</button>
         </div>
         <div class="fp-cal-steps" id="fpCalSteps"></div>
         <div id="fpCalSignalWarning"></div>
@@ -140,9 +141,9 @@
           <canvas id="fpCalCanvas"></canvas>
           <div class="fp-cal-framesize" id="fpCalFrameSize">${this.frameW && this.frameH ? `${this.frameW}×${this.frameH} px` : 'frame size: waiting for first frame'}</div>
         </div>
-        <div class="fp-cal-pairs" id="fpCalPairs"></div>
+        <div class="fp-actions" id="fpCalActions"></div>
         <div id="fpCalResultWrap"></div>
-        <div class="fp-actions" id="fpCalActions"></div>`;
+        <div class="fp-cal-pairs" id="fpCalPairs"></div>`;
 
       panel.querySelector('#fpCalClose')?.addEventListener('click', () => this.close());
 
@@ -190,9 +191,9 @@
       const stepsEl = panel.querySelector('#fpCalSteps');
       if (stepsEl) {
         stepsEl.innerHTML = `
-          <span class="fp-cal-step ${step === 1 ? 'active' : ''}">1 · Click a floor point on the image</span>
-          <span class="fp-cal-step ${step === 2 ? 'active' : ''}">2 · Click the same point on the plan</span>
-          <span class="fp-cal-step ${n >= MIN_PAIRS ? 'active' : ''}">3 · Solve &amp; save (${n}/${MIN_PAIRS})</span>`;
+          <span class="fp-cal-step ${step === 1 ? 'active' : ''}">1 · Click a floor spot in the camera picture</span>
+          <span class="fp-cal-step ${step === 2 ? 'active' : ''}">2 · Click the same spot on the map</span>
+          <span class="fp-cal-step ${n >= MIN_PAIRS ? 'active' : ''}">3 · Save calibration (${Math.min(n, MIN_PAIRS)} of ${MIN_PAIRS} points)</span>`;
       }
 
       const warnEl = panel.querySelector('#fpCalSignalWarning');
@@ -273,9 +274,9 @@
       const clearTitle = this.hasHomography ? 'Remove stored calibration from camera' : 'Discard draft points';
 
       actionsEl.innerHTML = `
-        <button class="btn btn-sm btn-primary" id="fpCalSolve" ${canSolve ? '' : 'disabled'}>Solve &amp; save</button>
-        <button class="btn btn-sm" id="fpCalTest" ${canTest ? '' : 'disabled'} title="Project the image points through the stored calibration and compare">Check reprojection</button>
-        <button class="btn btn-sm" id="fpCalUndo" ${canUndo ? '' : 'disabled'}>${this.pending ? 'Cancel this point' : 'Remove last pair'}</button>
+        <button class="btn btn-sm btn-primary" id="fpCalSolve" ${canSolve ? '' : 'disabled'} title="${canSolve ? 'Compute and store the calibration' : `Needs ${MIN_PAIRS} points marked in both the picture and the map`}">Save calibration</button>
+        <button class="btn btn-sm" id="fpCalTest" ${canTest ? '' : 'disabled'} title="Check how far each point lands from where you clicked on the map">Test accuracy</button>
+        <button class="btn btn-sm" id="fpCalUndo" ${canUndo ? '' : 'disabled'}>${this.pending ? 'Cancel this point' : 'Undo last point'}</button>
         <button class="btn btn-sm btn-danger" id="fpCalClear" ${canClear ? '' : 'disabled'} title="${clearTitle}">${clearText}</button>`;
 
       actionsEl.querySelector('#fpCalSolve')?.addEventListener('click', () => this.solve());
@@ -286,26 +287,26 @@
 
     renderPairs() {
       if (!this.pairs.length && !this.pending) {
-        return '<div class="fp-empty">No point pairs yet. Click a floor mark on the image to start.</div>';
+        return '<div class="fp-empty">No points yet. Click a floor mark in the camera picture to start.</div>';
       }
       const rows = this.pairs.map((p, i) => {
         const rp = this.reprojected && this.reprojected[i];
         let err = '';
         if (this.reprojected) {
-          err = rp ? `<span class="${Math.hypot(rp.x - p.floor.x, rp.y - p.floor.y) > 0.5 ? 'fp-cal-err' : ''}">Δ ${fmt(Math.hypot(rp.x - p.floor.x, rp.y - p.floor.y))} m</span>` : '<span class="fp-cal-err">no projection</span>';
+          err = rp ? accuracyTag(Math.hypot(rp.x - p.floor.x, rp.y - p.floor.y)) : '<span class="fp-cal-err">not on the map</span>';
         }
-        return `<div class="fp-cal-pair">
+        return `<div class="fp-cal-pair" title="Picture ${Math.round(p.image.x)}, ${Math.round(p.image.y)} px · map ${fmt(p.floor.x, 2)}, ${fmt(p.floor.y, 2)} m">
           <span class="fp-cal-n" style="background:${this.color()}">${i + 1}</span>
-          <span>img ${Math.round(p.image.x)}, ${Math.round(p.image.y)} px</span>
-          <span>plan ${fmt(p.floor.x, 2)}, ${fmt(p.floor.y, 2)} m ${err}</span>
-          <button class="btn btn-xs btn-danger" data-del="${i}" title="Remove this pair">×</button>
+          <span>Point ${i + 1}: camera ✓</span>
+          <span>map ✓ ${err}</span>
+          <button class="btn btn-xs btn-danger fp-cal-del" data-del="${i}" title="Remove this point" aria-label="Remove point ${i + 1}">×</button>
         </div>`;
       });
       if (this.pending) {
         rows.push(`<div class="fp-cal-pair pending">
           <span class="fp-cal-n" style="background:${this.color()}">${this.pairs.length + 1}</span>
-          <span>img ${Math.round(this.pending.x)}, ${Math.round(this.pending.y)} px</span>
-          <span>now click this point on the plan…</span>
+          <span>Point ${this.pairs.length + 1}: camera ✓</span>
+          <span>now click the same spot on the map…</span>
           <span></span>
         </div>`);
       }
@@ -428,7 +429,7 @@
         if (!res.ok) throw new Error(await errorDetail(res));
         const data = await res.json();
         this.hasHomography = !!data.calibrated;
-        this._lastResult = { kind: 'ok', text: `Calibration saved from ${this.pairs.length} pairs. Checking reprojection…` };
+        this._lastResult = { kind: 'ok', text: `Calibration saved from ${this.pairs.length} points. Testing accuracy…` };
         this.render();
         await this.refreshCamera();
         await this.test();
@@ -458,9 +459,9 @@
         const mean = errs.length ? errs.reduce((a, b) => a + b, 0) / errs.length : null;
         const worst = errs.length ? Math.max(...errs) : null;
         this._lastResult = {
-          kind: worst !== null && worst > 1 ? 'err' : 'ok',
+          kind: worst !== null && worst > 1 ? 'err' : (worst !== null && worst > 0.5 ? 'warn' : 'ok'),
           text: errs.length
-            ? `Reprojection: mean error ${fmt(mean)} m, worst ${fmt(worst)} m over ${errs.length} points. Orange crosses on the plan show where each image point lands; the numbered dots are where you clicked.${worst > 1 ? ' A point is more than a metre off — check that pair or add more spread-out points.' : ''}`
+            ? `Accuracy about ${cm(mean)} on average (${qualityWord(mean)}), worst point ${cm(worst)}. Orange crosses on the map show where each point lands; the numbered dots are where you clicked.${worst > 1 ? ' One point is more than a metre off: undo it or add more spread-out points.' : ''}`
             : 'The server returned no projected points.',
         };
         this.render();
@@ -523,6 +524,15 @@
       if (window.deviceManager) window.deviceManager.refreshCameras();
     },
   };
+
+  const cm = (m) => (typeof m === 'number' && isFinite(m) ? (m < 1 ? `${Math.round(m * 100)} cm` : `${m.toFixed(1)} m`) : '—');
+  const qualityWord = (m) => (m <= 0.25 ? 'good' : m <= 0.5 ? 'fair' : 'poor');
+  /** Per-point error as a traffic light: green <= 25 cm, amber <= 50 cm, red above. */
+  function accuracyTag(m) {
+    const q = qualityWord(m);
+    const cls = { good: 'fp-cal-acc-good', fair: 'fp-cal-acc-fair', poor: 'fp-cal-acc-poor' }[q];
+    return `<span class="fp-cal-acc ${cls}" title="${q}">● ${cm(m)} off</span>`;
+  }
 
   async function errorDetail(res) {
     try {

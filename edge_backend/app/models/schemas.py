@@ -3,7 +3,7 @@
 from enum import Enum
 from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, AliasChoices, field_validator, model_validator
 
 
 # ---------------- Enums ----------------
@@ -247,6 +247,10 @@ class CameraFeed(BaseModel):
     fov_deg: Optional[float] = Field(None, description="Horizontal field of view in degrees")
     homography_matrix: Optional[List[Any]] = None
     last_seen: Optional[datetime] = None
+    # What the camera is for (services/camera_roles.py ROLE_PRESETS); None = no role.
+    role: Optional[str] = Field(None, description="Camera role id, e.g. entrance, checkout, aisle")
+    # Checkout-lane cameras: the POS register_id this lane rings sales on.
+    pos_register_id: Optional[str] = Field(None, max_length=64)
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -771,27 +775,110 @@ class TheftStatsResponse(BaseModel):
     high_risk_zones: List[str] = Field(default_factory=list)
 
 
+class TheftOutcome(str, Enum):
+    """What the reviewer found. Required to close an incident; never defaulted."""
+
+    RECOVERED_GOODS = "RECOVERED_GOODS"            # theft confirmed, goods recovered
+    THEFT_NOT_RECOVERED = "THEFT_NOT_RECOVERED"    # theft confirmed, goods not recovered
+    CUSTOMER_PAID = "CUSTOMER_PAID"                # approached, customer paid for the items
+    POLICE_REPORTED = "POLICE_REPORTED"            # reported to police
+    SUSPECT_FLED = "SUSPECT_FLED"                  # person left before staff reached them
+    NO_ACTION = "NO_ACTION"                        # customer was fine, nothing to do
+    FALSE_ALARM = "FALSE_ALARM"                    # the rule fired on normal behaviour
+
+
+# Older clients (mobile app) send these names.
+THEFT_OUTCOME_ALIASES = {"POLICE_DISPATCHED": "POLICE_REPORTED"}
+
+THEFT_OUTCOME_LABELS = {
+    "RECOVERED_GOODS": "Theft confirmed, goods recovered",
+    "THEFT_NOT_RECOVERED": "Theft confirmed, goods not recovered",
+    "CUSTOMER_PAID": "Customer paid",
+    "POLICE_REPORTED": "Reported to police",
+    "SUSPECT_FLED": "Person left before staff arrived",
+    "NO_ACTION": "Customer was fine, no action",
+    "FALSE_ALARM": "False alarm",
+}
+
+# Outcomes where the flagged behaviour was real and staff acted on it: their
+# item value counts as "value actioned". FALSE_ALARM and NO_ACTION never do.
+THEFT_ACTIONED_OUTCOMES = ("RECOVERED_GOODS", "THEFT_NOT_RECOVERED", "CUSTOMER_PAID",
+                           "POLICE_REPORTED", "SUSPECT_FLED")
+# Outcomes where a recovered value makes sense.
+THEFT_RECOVERY_OUTCOMES = ("RECOVERED_GOODS", "CUSTOMER_PAID")
+
+
+class TheftRuleOutcomeStats(BaseModel):
+    rule: str
+    label: Optional[str] = None
+    reviewed: int                       # incidents with a recorded outcome
+    false_alarms: int
+    false_alarm_rate: Optional[float]   # 0..1, null when nothing was reviewed
+
+
 class TheftStatisticsResponse(BaseModel):
     active_incidents_count: int
     today_incidents_count: int
+    # Kept for older clients: equals value_actioned (false alarms excluded).
     prevented_loss_estimate: float
     by_department: Dict[str, int]
     by_theft_type: Dict[str, int]
     generated_at: datetime = Field(default_factory=datetime.utcnow)
+    # Estimated item value of incidents whose recorded outcome is in
+    # THEFT_ACTIONED_OUTCOMES. Excludes false alarms, "no action", incidents
+    # still open (value_pending_outcome) and unverified legacy resolutions.
+    value_actioned: float = 0.0
+    value_pending_outcome: float = 0.0
+    # Sum of reviewer-entered recovered values; null when none was entered.
+    value_recovered: Optional[float] = None
+    outcomes: Dict[str, int] = Field(default_factory=dict)
+    reviewed_count: int = 0
+    false_alarm_count: int = 0
+    false_alarm_rate: Optional[float] = None
+    false_alarm_rate_by_rule: List[TheftRuleOutcomeStats] = Field(default_factory=list)
+    # Resolved before outcomes were required (may carry the old default).
+    unverified_legacy_resolutions: int = 0
 
 
 class TheftAcknowledgeRequest(BaseModel):
-    guard_id: str = "guard_01"
+    # Who acknowledged. When omitted the signed-in operator is recorded.
+    guard_id: Optional[str] = Field(None, max_length=64)
 
 
 class TheftDispatchRequest(BaseModel):
-    guard_unit: str = "Unit 1 - Floor Guard"
-    audio_deterrent: bool = True
-    announcement_type: Optional[str] = "CUSTOMER_ASSISTANCE_GREETING"
+    """Mark that staff were sent. Nothing is invented: no default unit, no deterrent."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    # Who was sent, as typed by the operator (optional). ``guard_unit`` is the old name.
+    staff_name: Optional[str] = Field(None, max_length=128,
+                                      validation_alias=AliasChoices("staff_name", "guard_unit"))
+    note: Optional[str] = Field(None, max_length=500)
+    notify_phones: bool = True
 
 
 class TheftResolveRequest(BaseModel):
-    resolution: str = "RECOVERED_GOODS"  # RECOVERED_GOODS, POLICE_DISPATCHED, SUSPECT_FLED, FALSE_ALARM
-    notes: Optional[str] = None
+    """Close an incident with what the reviewer found. ``outcome`` is required."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    # ``resolution`` is the old name (mobile app).
+    outcome: TheftOutcome = Field(validation_alias=AliasChoices("outcome", "resolution"))
+    notes: Optional[str] = Field(None, max_length=1000)
+    recovered_value: Optional[float] = Field(None, ge=0, le=1_000_000)
+
+    @field_validator("outcome", mode="before")
+    @classmethod
+    def _normalise_outcome(cls, v):
+        if isinstance(v, str):
+            v = v.strip().upper()
+            v = THEFT_OUTCOME_ALIASES.get(v, v)
+        return v
+
+    @model_validator(mode="after")
+    def _recovered_value_needs_recovery(self):
+        if self.recovered_value is not None and self.outcome.value not in THEFT_RECOVERY_OUTCOMES:
+            raise ValueError("recovered_value is only accepted with RECOVERED_GOODS or CUSTOMER_PAID")
+        return self
 
 

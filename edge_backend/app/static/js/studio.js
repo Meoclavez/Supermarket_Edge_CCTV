@@ -4,7 +4,11 @@
  * One camera at a time: its live MJPEG feed with the tracker's real boxes
  * (/stream?camera_id=..&overlay=1), the pipeline's telemetry for that camera,
  * snapshot / clip export, and the per-camera zone editor (tripwires,
- * restricted areas, privacy masks and product shelves).
+ * restricted areas, checkout / queue areas, privacy masks and product shelves).
+ *
+ * Deep links: ?camera_id= (alias ?camera=) picks the camera, ?tool=
+ * tripwire|restricted|mask|product|checkout (+ ?kind=checkout|queue) opens
+ * that tool, and ?from=checklist shows a way back to the setup checklist.
  *
  * Zone coordinates are stored normalised (0..1) against the camera's own
  * frame. The feed is displayed with object-fit: contain, so a click has to
@@ -24,8 +28,8 @@ let currentMode = 'NONE';
 let drawnPoints = [];
 let activeCameraId = null;
 let studioCameras = [];
-let savedZonesForCamera = { tripwires: [], intrusion_zones: [], exclusion_masks: [], products: [] };
-// Tripwire / restricted area being edited in place: { kind: 'TRIPWIRE'|'INTRUSION', id }.
+let savedZonesForCamera = { tripwires: [], intrusion_zones: [], exclusion_masks: [], products: [], queue_zones: [] };
+// Tripwire / restricted area / queue area being edited in place: { kind: 'TRIPWIRE'|'INTRUSION'|'QUEUE', id }.
 let editingRule = null;
 let telemetryTimer = null;
 
@@ -34,7 +38,21 @@ const MODE_STYLE = {
   INTRUSION: { stroke: '#ff5b6b', fill: 'rgba(255, 91, 107, 0.22)', min: 3, max: Infinity, label: 'restricted area' },
   EXCLUSION: { stroke: '#a0aec0', fill: 'rgba(160, 174, 192, 0.35)', min: 3, max: Infinity, label: 'privacy mask' },
   PRODUCT_SHELF: { stroke: '#ffd700', fill: 'rgba(255, 215, 0, 0.22)', min: 4, max: Infinity, label: 'product shelf' },
+  QUEUE: { stroke: '#c084fc', fill: 'rgba(192, 132, 252, 0.22)', min: 3, max: Infinity, label: 'checkout / queue area' },
 };
+
+// URL ?tool= value <-> draw mode, and the plain-language line under the tool buttons.
+const TOOL_MODES = { tripwire: 'TRIPWIRE', restricted: 'INTRUSION', mask: 'EXCLUSION', product: 'PRODUCT_SHELF', checkout: 'QUEUE' };
+const QUEUE_HELP = 'Draw around where customers stand at a till (Checkout lane) or wait in line (Queue line). The system times how long people stay there; it works without calibrating the camera.';
+const TOOL_HELP = {
+  NONE: 'Choose a tool above to see what it does.',
+  TRIPWIRE: 'Draw a line across a doorway; people crossing it are counted in or out.',
+  INTRUSION: 'Draw around a staff-only area; people inside during its restricted hours raise an alert.',
+  EXCLUSION: 'Hide part of the picture (privacy) or tell the AI to ignore it.',
+  PRODUCT_SHELF: 'Draw around a shelf to count hand reaches into it.',
+  QUEUE: QUEUE_HELP,
+};
+const QUEUE_KIND_LABEL = { checkout: 'Checkout lane', queue: 'Queue line' };
 
 // Privacy-mask modes, as applied by services/privacy_mask.py on the server.
 const MASK_MODES = {
@@ -107,6 +125,35 @@ function setDrawStatus(msg, isError) {
   s.classList.toggle('form-status-error', !!isError);
 }
 
+// ------------------------------------------------------------ setup checklist return (?from=checklist)
+function fromChecklist() { return getUrlParameter('from') === 'checklist'; }
+function checklistCameraId() { return activeCameraId || getUrlParameter('camera_id') || getUrlParameter('camera') || ''; }
+function checklistUrl() { return `/dashboard?checklist=${encodeURIComponent(checklistCameraId())}#cameras`; }
+function syncChecklistLink() {
+  const a = el('backToChecklist');
+  if (!a) return;
+  const on = fromChecklist();
+  a.style.display = on ? '' : 'none';
+  if (on) a.href = checklistUrl();
+}
+// Success line for any saved tool; adds the way back when opened from the checklist.
+function announceSaved(msg) {
+  setDrawStatus(msg, false);
+  if (!fromChecklist()) return;
+  const s = el('drawStatus');
+  if (!s) return;
+  const line = document.createElement('span');
+  line.className = 'studio-saved-checklist';
+  line.append(' Saved. ');
+  const a = document.createElement('a');
+  a.href = checklistUrl();
+  a.className = 'studio-status-link';
+  a.id = 'savedBackToChecklist';
+  a.textContent = 'Back to the checklist';
+  line.append(a, ' to see it ticked off.');
+  s.appendChild(line);
+}
+
 // ------------------------------------------------------------ viewport geometry
 /**
  * The box the image content actually occupies inside the viewport, after
@@ -173,7 +220,7 @@ function setViewportEmpty(message) {
 
 if (canvas) {
   canvas.addEventListener('click', (e) => {
-    if (currentMode === 'NONE') { setDrawStatus('Pick a tool first (tripwire, restricted area, privacy mask or product shelf).', true); return; }
+    if (currentMode === 'NONE') { setDrawStatus('Pick a tool first (tripwire, restricted area, checkout / queue area, privacy mask or product shelf).', true); return; }
     if (!activeCameraId) { setDrawStatus('Select a camera first.', true); return; }
     const rect = canvas.getBoundingClientRect();
     const nx = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
@@ -237,10 +284,20 @@ function setDrawMode(mode) {
   if (row) row.style.display = mode === 'EXCLUSION' ? 'flex' : 'none';
   if (mode === 'EXCLUSION') onMaskModeChange();
   showRuleForm(mode);
+  syncToolChrome(mode);
   drawOverlay();
   const label = el('drawModeLabel');
-  if (label) label.textContent = `mode: ${MODE_STYLE[mode].label}`;
+  if (label) label.textContent = `Drawing: ${MODE_STYLE[mode].label}`;
   setDrawStatus(`Click ${MODE_STYLE[mode].min === MODE_STYLE[mode].max ? MODE_STYLE[mode].min : `${MODE_STYLE[mode].min}+`} point(s) on the video for the ${MODE_STYLE[mode].label}.`, false);
+}
+
+// Tool explanation line and which tool button shows as pressed.
+function syncToolChrome(mode) {
+  const help = el('toolHelp');
+  if (help) help.textContent = TOOL_HELP[mode] || TOOL_HELP.NONE;
+  document.querySelectorAll('.studio-tool-btn[data-tool]').forEach((b) => {
+    b.setAttribute('aria-pressed', TOOL_MODES[b.getAttribute('data-tool')] === mode ? 'true' : 'false');
+  });
 }
 
 function undoPoint() {
@@ -255,9 +312,10 @@ function clearCanvasPoints() {
   showRuleForm('NONE');
   if (el('maskModeRow')) el('maskModeRow').style.display = 'none';
   currentMode = 'NONE';
+  syncToolChrome('NONE');
   drawOverlay();
   const label = el('drawModeLabel');
-  if (label) label.textContent = 'mode: none';
+  if (label) label.textContent = 'Choose a tool';
   setDrawStatus('Drawing cancelled.', false);
 }
 
@@ -359,6 +417,7 @@ async function submitProductModal(event) {
     closeProductModal();
     if (!editing) clearCanvasPoints();
     showToast(editing ? `Updated product area: ${name} (${sku})` : `Mapped product area: ${name} (${sku})`);
+    announceSaved(editing ? `Updated product area "${name}".` : `Saved product area "${name}".`);
     loadZonesList();
   } catch (err) {
     status.textContent = `Save failed: ${err.message}`;
@@ -379,6 +438,7 @@ async function saveDrawnZone() {
   if (!activeCameraId) { setDrawStatus('Select a camera first.', true); return; }
   if (currentMode === 'NONE') { setDrawStatus('Pick a tool first.', true); return; }
   if (currentMode === 'TRIPWIRE' || currentMode === 'INTRUSION') { await saveRule(); return; }
+  if (currentMode === 'QUEUE') { await saveQueueArea(); return; }
   const style = MODE_STYLE[currentMode];
   if (drawnPoints.length < style.min) {
     setDrawStatus(`A ${style.label} needs at least ${style.min} points; ${drawnPoints.length} placed.`, true);
@@ -397,6 +457,7 @@ async function saveDrawnZone() {
     showToast(`Saved ${style.label}: ${name}`);
     el('zoneNameInput').value = '';
     clearCanvasPoints();
+    announceSaved(`Saved ${style.label} "${name}".`);
     loadZonesList();
   } catch (err) {
     setDrawStatus(`Save failed: ${err.message}`, true);
@@ -514,7 +575,9 @@ async function loadZonesList() {
   const exclusion = ((data && data.exclusion_masks) || []).filter(forCam);
   const tripwires = ((data && data.tripwires) || []).filter(forCam);
   const intrusion = ((data && data.intrusion_zones) || []).filter(forCam);
+  const queueZones = ((data && data.queue_zones) || []).filter(forCam);
   renderRuleLists(data === null, tripwires, intrusion);
+  renderQueueList(data === null, queueZones);
 
   const fill = (id, items, emptyMsg, render) => {
     const c = el(id);
@@ -547,7 +610,7 @@ async function loadZonesList() {
     exContainer.dataset.sig = data === null ? '' : exSig;
   }
 
-  savedZonesForCamera = { tripwires, intrusion_zones: intrusion, exclusion_masks: exclusion, products };
+  savedZonesForCamera = { tripwires, intrusion_zones: intrusion, exclusion_masks: exclusion, products, queue_zones: queueZones };
   drawOverlay();
 }
 
@@ -594,6 +657,15 @@ function drawLabel(text, x, y, colour) {
 }
 
 function drawSavedRules() {
+  (savedZonesForCamera.queue_zones || []).forEach((z) => {
+    const editing = editingRule && editingRule.kind === 'QUEUE' && editingRule.id === z.id;
+    const on = z.enabled !== false;
+    drawPolyline(z.points || [], editing ? '#ffffff' : (on ? 'rgba(192,132,252,0.9)' : 'rgba(192,132,252,0.4)'),
+      'rgba(192,132,252,0.10)', true, editing ? 3 : 1.8);
+    const p = (z.points || [])[0];
+    const kind = QUEUE_KIND_LABEL[z.kind] || 'Checkout lane';
+    if (p) drawLabel(`🧾 ${z.name || kind} · ${kind.toLowerCase()}${on ? '' : ' (off)'}`, p.x * canvas.width + 4, p.y * canvas.height + 14, '#d8b4fe');
+  });
   savedZonesForCamera.intrusion_zones.forEach((z) => {
     const editing = editingRule && editingRule.id === z.id;
     const on = z.enabled !== false;
@@ -614,13 +686,16 @@ function drawSavedRules() {
 }
 
 function showRuleForm(mode) {
-  const tw = el('tripwireFormRow'), ra = el('restrictedFormRow');
+  const tw = el('tripwireFormRow'), ra = el('restrictedFormRow'), qa = el('queueFormRow');
   if (tw) tw.style.display = mode === 'TRIPWIRE' ? 'flex' : 'none';
   if (ra) ra.style.display = mode === 'INTRUSION' ? 'flex' : 'none';
+  if (qa) qa.style.display = mode === 'QUEUE' ? 'flex' : 'none';
   if (mode === 'TRIPWIRE' && !editingRule) fillTripwireForm(null);
   if (mode === 'INTRUSION' && !editingRule) fillRestrictedForm(null);
+  if (mode === 'QUEUE' && !editingRule) fillQueueForm(null);
   setRuleStatus('tripwireFormStatus', '');
   setRuleStatus('restrictedFormStatus', '');
+  setRuleStatus('queueFormStatus', '');
 }
 
 function setRuleStatus(id, msg, isError) {
@@ -788,7 +863,7 @@ async function saveRule() {
     showToast(`Saved ${style.label}: ${saved && saved.name}`);
     el('zoneNameInput').value = '';
     clearCanvasPoints();
-    setDrawStatus(`Saved ${style.label} "${saved && saved.name}".`, false);
+    announceSaved(`Saved ${style.label} "${saved && saved.name}".`);
     await loadZonesList();
   } catch (err) {
     setRuleStatus(statusId, `Not saved: ${err.message}`, true);
@@ -796,18 +871,24 @@ async function saveRule() {
 }
 
 function editRule(kind, id) {
-  const list = kind === 'TRIPWIRE' ? savedZonesForCamera.tripwires : savedZonesForCamera.intrusion_zones;
+  const list = kind === 'TRIPWIRE' ? savedZonesForCamera.tripwires
+    : (kind === 'QUEUE' ? (savedZonesForCamera.queue_zones || []) : savedZonesForCamera.intrusion_zones);
   const rule = list.find((r) => r.id === id);
   if (!rule) { showToast('That rule no longer exists.'); loadZonesList(); return; }
   setDrawMode(kind);
   editingRule = { kind, id };
-  el('zoneNameInput').value = rule.name || '';
-  if (kind === 'TRIPWIRE') fillTripwireForm(rule); else fillRestrictedForm(rule);
+  if (kind === 'QUEUE') {
+    fillQueueForm(rule);
+    el('zoneNameInput').value = '';
+  } else {
+    el('zoneNameInput').value = rule.name || '';
+    if (kind === 'TRIPWIRE') fillTripwireForm(rule); else fillRestrictedForm(rule);
+  }
   const label = el('drawModeLabel');
-  if (label) label.textContent = `mode: editing ${MODE_STYLE[kind].label}`;
+  if (label) label.textContent = `Editing: ${MODE_STYLE[kind].label}`;
   setDrawStatus(`Editing "${rule.name || id}". Change its settings and press Save; click new points on the video only if you want to move it.`, false);
   drawOverlay();
-  const form = el(kind === 'TRIPWIRE' ? 'tripwireFormRow' : 'restrictedFormRow');
+  const form = el(kind === 'TRIPWIRE' ? 'tripwireFormRow' : (kind === 'QUEUE' ? 'queueFormRow' : 'restrictedFormRow'));
   if (form && form.scrollIntoView) form.scrollIntoView({ block: 'nearest' });
 }
 
@@ -821,10 +902,35 @@ function cancelDeleteRule(btn) {
   row.querySelector('.rule-confirm').style.display = 'none';
   row.querySelector('.rule-actions').style.display = 'inline-flex';
 }
-async function confirmDeleteRule(kind, id) {
+const RULE_DELETE = {
+  TRIPWIRE: { path: 'tripwire', label: 'Tripwire' },
+  INTRUSION: { path: 'intrusion', label: 'Restricted area' },
+  QUEUE: { path: 'queue', label: 'Checkout / queue area' },
+};
+async function confirmDeleteRule(kind, id, btn) {
   if (editingRule && editingRule.id === id) clearCanvasPoints();
-  await deleteZoneAt(`/api/zones/${kind === 'TRIPWIRE' ? 'tripwire' : 'intrusion'}/${encodeURIComponent(id)}`,
-    kind === 'TRIPWIRE' ? 'Tripwire' : 'Restricted area');
+  const k = RULE_DELETE[kind] || RULE_DELETE.INTRUSION;
+  const row = btn ? btn.closest('.zone-item') : document.querySelector(`.zone-item[data-rule-id="${CSS.escape(id)}"]`);
+  const yes = btn || (row && row.querySelector('.rule-delete-yes'));
+  if (yes) { yes.disabled = true; yes.textContent = 'Deleting…'; }
+  let ok = false;
+  let msg;
+  try {
+    const res = await fetch(`/api/zones/${k.path}/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    ok = res.ok;
+    msg = ok ? `${k.label} removed.` : `Failed to remove ${k.label} (HTTP ${res.status})`;
+  } catch (e) { msg = `Failed to remove ${k.label}: ${e.message}`; }
+  showToast(msg);
+  // Close the confirmation first: the list refresh skips a list with one open.
+  if (row) {
+    const confirmBox = row.querySelector('.rule-confirm');
+    const actions = row.querySelector('.rule-actions');
+    if (confirmBox) confirmBox.style.display = 'none';
+    if (actions) actions.style.display = 'inline-flex';
+  }
+  if (yes) { yes.disabled = false; yes.textContent = 'Delete'; }
+  if (!ok && kind === 'QUEUE') queueRowNote = { id, msg, err: true, until: Date.now() + 8000 };
+  await loadZonesList();
 }
 
 function scheduleSummary(z) {
@@ -876,6 +982,143 @@ function renderRuleLists(unavailable, tripwires, intrusion) {
       (z.timezone ? ` · ${escapeHtml(z.timezone)}` : '')));
 }
 
+// ------------------------------------------------------------ checkout / queue areas
+// /api/zones/queue: {id, name, camera_id, kind: checkout|queue, points (3+), enabled}.
+
+function fillQueueForm(area) {
+  const kind = area && area.kind === 'queue' ? 'queue' : 'checkout';
+  el('queueFormTitle').textContent = area ? `Editing ${QUEUE_KIND_LABEL[kind].toLowerCase()}: ${area.name || area.id}` : 'New checkout / queue area';
+  el('qaName').value = area ? (area.name || '') : '';
+  el('qaKind').value = kind;
+  const btn = el('btnSaveQueue');
+  btn.textContent = area ? '💾 Save changes' : '💾 Save area';
+  btn.dataset.label = btn.textContent;
+}
+
+async function saveQueueArea() {
+  const statusId = 'queueFormStatus';
+  const editing = editingRule && editingRule.kind === 'QUEUE' ? editingRule : null;
+  const n = drawnPoints.length;
+  if (!editing && n < 3) {
+    setRuleStatus(statusId, `Click at least three points on the picture around the area first (${n} placed).`, true);
+    return;
+  }
+  if (editing && n > 0 && n < 3) {
+    setRuleStatus(statusId, `To move the area click at least three points (${n} placed), or press Cancel to keep its shape.`, true);
+    return;
+  }
+  const kind = el('qaKind').value === 'queue' ? 'queue' : 'checkout';
+  const name = el('qaName').value.trim() || QUEUE_KIND_LABEL[kind];
+  const body = { name, kind };
+  if (n >= 3) body.points = drawnPoints;
+  const btn = el('btnSaveQueue');
+  const idle = btn.dataset.label || btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  setRuleStatus(statusId, 'Saving…');
+  try {
+    let data;
+    if (editing) {
+      data = await sendRule('PATCH', `/api/zones/queue/${encodeURIComponent(editing.id)}`, body);
+    } else {
+      Object.assign(body, { camera_id: activeCameraId, enabled: true });
+      data = await sendRule('POST', '/api/zones/queue', body);
+    }
+    const saved = (data && data.queue_area) || body;
+    const what = (QUEUE_KIND_LABEL[saved.kind] || 'Checkout lane').toLowerCase();
+    showToast(`Saved ${what}: ${saved.name}`);
+    clearCanvasPoints();
+    announceSaved(`Saved ${what} "${saved.name}".`);
+    await loadZonesList();
+  } catch (err) {
+    setRuleStatus(statusId, `Not saved: ${err.message}`, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = idle;
+  }
+}
+
+// Inline result shown on a row after enable/disable; survives the list rebuild briefly.
+let queueRowNote = null;
+
+async function toggleQueueArea(id, btn) {
+  const area = (savedZonesForCamera.queue_zones || []).find((z) => z.id === id);
+  if (!area) { showToast('That area no longer exists.'); loadZonesList(); return; }
+  const enabled = area.enabled === false;
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+  try {
+    const data = await sendRule('PATCH', `/api/zones/queue/${encodeURIComponent(id)}`, { enabled });
+    Object.assign(area, (data && data.queue_area) || { enabled });
+    queueRowNote = { id, msg: enabled ? 'Turned on: timing people here.' : 'Turned off: not timing people here.', err: false, until: Date.now() + 8000 };
+  } catch (e) {
+    queueRowNote = { id, msg: `Not changed: ${e.message}`, err: true, until: Date.now() + 8000 };
+  }
+  renderQueueList(false, savedZonesForCamera.queue_zones || []);
+  drawOverlay();
+}
+
+function queueRow(z) {
+  const id = escapeHtml(z.id);
+  const kind = z.kind === 'queue' ? 'queue' : 'checkout';
+  const on = z.enabled !== false;
+  const note = queueRowNote && queueRowNote.id === z.id && Date.now() < queueRowNote.until ? queueRowNote : null;
+  const sub = `${kind === 'queue' ? 'waiting time' : 'time at the till'} · ${(z.points || []).length} points · ${on ? 'on' : 'off'}`;
+  return `
+    <div class="zone-item qa-row${on ? '' : ' qa-row-off'}" data-rule-id="${id}" data-queue-id="${id}" data-kind="${kind}" data-enabled="${on}">
+      <div class="zone-info">
+        <span class="zone-name"><span class="qa-kind-badge qa-kind-${kind}">${kind === 'queue' ? 'Queue' : 'Checkout'}</span>${escapeHtml(z.name || z.id)}${on ? '' : ' <span class="badge">off</span>'}</span>
+        <span class="zone-sub">${sub}</span>
+      </div>
+      <span class="rule-actions">
+        <button type="button" class="btn btn-sm qa-toggle" aria-pressed="${on}" onclick="toggleQueueArea('${id}', this)" title="${on ? 'Stop timing people in this area' : 'Start timing people in this area'}">${on ? 'Turn off' : 'Turn on'}</button>
+        <button type="button" class="btn btn-sm rule-edit" onclick="editRule('QUEUE', '${id}')" title="Edit name, kind or shape">✎ Edit</button>
+        <button type="button" class="btn btn-danger btn-sm rule-delete" onclick="askDeleteRule(this)" title="Delete">🗑️</button>
+      </span>
+      <span class="rule-confirm" style="display:none;">
+        <span class="zone-sub">Delete?</span>
+        <button type="button" class="btn btn-danger btn-sm rule-delete-yes" onclick="confirmDeleteRule('QUEUE', '${id}', this)">Delete</button>
+        <button type="button" class="btn btn-sm rule-delete-no" onclick="cancelDeleteRule(this)">Keep</button>
+      </span>
+      ${note ? `<div class="qa-row-status form-status${note.err ? ' form-status-error' : ''}" aria-live="polite">${escapeHtml(note.msg)}</div>` : ''}
+    </div>`;
+}
+
+function renderQueueList(unavailable, items) {
+  const c = el('queueAreasListContainer');
+  if (!c) return;
+  // Do not rebuild under an open delete confirmation or when nothing changed.
+  if (c.querySelector('.rule-confirm[style*="inline-flex"]')) return;
+  const note = queueRowNote && Date.now() < queueRowNote.until ? queueRowNote : null;
+  const sig = unavailable ? 'x' : JSON.stringify([items, note]);
+  if (c.dataset.sig === sig) return;
+  c.dataset.sig = sig;
+  if (unavailable) { c.innerHTML = '<div class="fp-empty">Zones unavailable: the zone service did not respond.</div>'; return; }
+  c.innerHTML = items.length ? items.map(queueRow).join('')
+    : '<div class="fp-empty">No checkout or queue areas on this camera. Draw one with the Checkout / queue area tool.</div>';
+}
+
+// ------------------------------------------------------------ deep links (?tool=&kind=)
+let deepLinkApplied = false;
+function applyDeepLinkTool() {
+  if (deepLinkApplied) return;
+  const tool = String(getUrlParameter('tool') || '').toLowerCase();
+  if (!tool) return;
+  const mode = TOOL_MODES[tool];
+  deepLinkApplied = true;
+  if (!mode) { setDrawStatus(`Unknown tool "${tool}" in the link; pick a tool below.`, true); return; }
+  setDrawMode(mode);
+  let label = MODE_STYLE[mode].label;
+  if (mode === 'QUEUE') {
+    const kind = String(getUrlParameter('kind') || '').toLowerCase() === 'queue' ? 'queue' : 'checkout';
+    el('qaKind').value = kind;
+    label = QUEUE_KIND_LABEL[kind].toLowerCase();
+  }
+  setDrawStatus(`Draw the ${label} on the picture, then Save.`, false);
+  document.body.setAttribute('data-deeplink-tool', tool);
+  const target = el('studioTools');
+  if (target && target.scrollIntoView) target.scrollIntoView({ behavior: 'instant', block: 'center' });
+}
+
 // ------------------------------------------------------------ cameras & stream
 function selectCamera(cameraId) {
   activeCameraId = cameraId;
@@ -889,6 +1132,7 @@ function selectCamera(cameraId) {
     url.searchParams.set('camera_id', cameraId);
     history.replaceState(null, '', url.toString());
   }
+  syncChecklistLink();
   if (streamImg) {
     setViewportEmpty('');
     const sUrl = `/stream?camera_id=${encodeURIComponent(cameraId)}&overlay=1`;
@@ -929,11 +1173,14 @@ async function loadStudioSources() {
     list.appendChild(btn);
   });
 
-  const wanted = getUrlParameter('camera_id');
+  const wanted = getUrlParameter('camera_id') || getUrlParameter('camera');
   const pick = studioCameras.find((c) => c.id === wanted) || studioCameras.find((c) => c.id === activeCameraId) || studioCameras[0];
   if (wanted && !studioCameras.some((c) => c.id === wanted)) showToast(`Camera "${wanted}" not found; showing ${pick.name}.`);
   if (pick.id !== activeCameraId) selectCamera(pick.id);
   else document.querySelectorAll('#cameraButtonsList .btn').forEach((b) => b.classList.toggle('btn-primary', b.getAttribute('data-camera-id') === activeCameraId));
+  // Tool from the link: only needs the camera chosen, not a loaded frame
+  // (points are normalised, and the canvas re-sizes when the first frame arrives).
+  applyDeepLinkTool();
 }
 
 // ------------------------------------------------------------ telemetry
@@ -1007,9 +1254,11 @@ async function triggerSnapshot() {
       out.innerHTML = `<div class="fp-empty">Snapshot not saved (HTTP ${res.status}): ${escapeHtml(body.detail || 'no detail')}</div>`;
       return;
     }
+    // body.url carries its own short-lived access token (images cannot send a header).
+    const shotUrl = body.url;
     out.innerHTML = `
       <div class="capture-thumb">
-        <a href="${escapeHtml(body.url)}" target="_blank" rel="noopener"><img src="${escapeHtml(body.url)}" alt="Saved snapshot ${escapeHtml(body.filename)}" /></a>
+        <a href="${escapeHtml(shotUrl)}" target="_blank" rel="noopener"><img src="${escapeHtml(shotUrl)}" alt="Saved snapshot ${escapeHtml(body.filename)}" /></a>
         <div class="zone-sub">Saved ${escapeHtml(body.filename)}</div>
       </div>`;
     showToast('Snapshot saved.');
@@ -1080,7 +1329,9 @@ async function runStudioSelfTest() {
     check('telemetry error shown honestly', true, el('tError').textContent);
     // Click mapping: a synthetic click at the canvas centre lands at (0.5, 0.5).
     setDrawMode('EXCLUSION');
-    canvas.dispatchEvent(new MouseEvent('click', { clientX: cr.left + cr.width / 2, clientY: cr.top + cr.height / 2, bubbles: true }));
+    // Re-measure: switching tools shows/hides form rows, which can move the canvas.
+    const cr2 = canvas.getBoundingClientRect();
+    canvas.dispatchEvent(new MouseEvent('click', { clientX: cr2.left + cr2.width / 2, clientY: cr2.top + cr2.height / 2, bubbles: true }));
     check('click maps to normalised centre', drawnPoints.length === 1 && Math.abs(drawnPoints[0].x - 0.5) < 0.01 && Math.abs(drawnPoints[0].y - 0.5) < 0.01, JSON.stringify(drawnPoints));
     clearCanvasPoints();
     await triggerSnapshot();
@@ -1090,7 +1341,14 @@ async function runStudioSelfTest() {
   } else {
     check('empty viewport state shown', el('viewportEmpty').style.display !== 'none');
   }
-  check('zone lists rendered', ['exclusionListContainer', 'productShelfListContainer', 'tripwiresListContainer', 'intrusionListContainer'].every((id) => el(id).textContent.trim() && el(id).textContent.trim() !== 'Loading…'));
+  check('zone lists rendered', ['exclusionListContainer', 'productShelfListContainer', 'tripwiresListContainer', 'intrusionListContainer', 'queueAreasListContainer'].every((id) => el(id).textContent.trim() && el(id).textContent.trim() !== 'Loading…'));
+  check('queue tool button exists', !!el('btnToolQueue') && el('btnToolQueue').getBoundingClientRect().height >= 32);
+  check('queue form fields exist', !!el('queueFormRow') && !!el('qaName') && !!el('btnSaveQueue')
+    && !!el('qaKind') && ['checkout', 'queue'].every((v) => [...el('qaKind').options].some((o) => o.value === v)));
+  const prevMode = currentMode;
+  setDrawMode('QUEUE');
+  check('queue form shown by the tool', el('queueFormRow').style.display === 'flex' && el('toolHelp').textContent === QUEUE_HELP);
+  if (prevMode === 'NONE') clearCanvasPoints(); else setDrawMode(prevMode);
   askClearAllZones();
   check('inline clear-all confirm shown', el('clearAllConfirm').style.display !== 'none');
   cancelClearAllZones();
@@ -1104,6 +1362,7 @@ async function runStudioSelfTest() {
 
 function initStudio() {
   if (getUrlParameter('__selftest') === '1') runStudioSelfTest();
+  syncChecklistLink();
   resizeCanvas();
   populateZoneNames();
   loadStudioSources();

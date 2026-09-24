@@ -33,7 +33,7 @@ from ..models.schemas import (
     MuteCameraRequest,
 )
 from ..services.auth_service import auth_service
-from ..services import camera_source
+from ..services import camera_roles, camera_source
 from ..services.camera_discovery import camera_discovery_service
 from ..services.clip_recorder import clip_recorder_service
 from ..services.feature_manager import feature_manager
@@ -81,6 +81,8 @@ def _model_to_feed(c: CameraModel) -> CameraFeed:
         fov_deg=c.fov_deg,
         homography_matrix=c.homography_matrix,
         last_seen=c.last_seen,
+        role=c.role if c.role in camera_roles.ROLE_PRESETS else None,
+        pos_register_id=c.pos_register_id,
     )
 
 
@@ -189,6 +191,24 @@ class TestConnectionRequest(BaseModel):
     username: Optional[str] = None
     password: Optional[str] = None
     timeout_s: float = Field(camera_source.DEFAULT_TIMEOUT_S, ge=1.0, le=camera_source.MAX_TIMEOUT_S)
+    # The role the operator intends for this camera (validated, echoed with its
+    # mounting tip so the add form can show it next to the preview).
+    role: Optional[str] = None
+
+
+def _role_or_422(value) -> Optional[str]:
+    try:
+        return camera_roles.normalise_role(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+
+
+def _sent_feature_keys(features) -> set:
+    if isinstance(features, CameraFeatureConfig):
+        return set(features.model_fields_set)
+    if isinstance(features, dict):
+        return set(features.keys())
+    return set()
 
 
 async def _normalised_source(source_type, url, username, password, timeout_s=camera_source.DEFAULT_TIMEOUT_S):
@@ -212,11 +232,16 @@ async def test_camera_connection(req: TestConnectionRequest):
     that is valid but does not deliver video is ``success: false`` with the
     reason, so the form can show it inline.
     """
+    role = _role_or_422(req.role)
     try:
         src = camera_source.normalize_source(req.source_type, req.url, req.username, req.password)
     except camera_source.SourceError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
-    return await camera_source.test_connection(src, req.timeout_s)
+    result = await camera_source.test_connection(src, req.timeout_s)
+    if role and isinstance(result, dict):
+        p = camera_roles.ROLE_PRESETS[role]
+        result = {**result, "role": role, "role_label": p.label, "mounting_tip": p.mounting_tip}
+    return result
 
 
 @router.post("", response_model=CameraFeed)
@@ -236,6 +261,7 @@ async def create_camera(cam_in: CameraCreateRequest, db: AsyncSession = Depends(
     location = (cam_in.location or "").strip()
     if len(location) > 120:
         raise HTTPException(status_code=422, detail="Location is too long (max 120 characters).")
+    role = _role_or_422(cam_in.role)
 
     src = await _normalised_source(cam_in.source_type, cam_in.rtsp_url, cam_in.username, cam_in.password)
 
@@ -245,6 +271,15 @@ async def create_camera(cam_in: CameraCreateRequest, db: AsyncSession = Depends(
 
     payload = _writable_payload(cam_in)
     payload.update(name=name, department=department, location=location, rtsp_url=src.url)
+    payload.pop("role", None)
+    if role:
+        # The role's defaults, with any feature value the client sent explicitly on top.
+        payload["role"] = role
+        features = camera_roles.default_features(role)
+        sent = _sent_feature_keys(cam_in.features) if "features" in cam_in.model_fields_set else set()
+        explicit = payload.get("features") or {}
+        features.update({k: explicit[k] for k in sent if k in explicit})
+        payload["features"] = CameraFeatureConfig.model_validate(features).model_dump()
     # Nothing has been measured yet: the worker reports status, fps and
     # resolution once it reads frames. Only an explicit client value is kept.
     sent = cam_in.model_fields_set
@@ -276,6 +311,9 @@ async def create_camera(cam_in: CameraCreateRequest, db: AsyncSession = Depends(
             camera_source.delete_credentials(cam_id)
         raise
     await db.refresh(new_cam)
+    camera_roles.role_cache.invalidate()
+    if new_cam.features:
+        feature_manager.set_camera_features(cam_id, CameraFeatureConfig.model_validate(new_cam.features))
     logger.info("Camera %s added (%s %s)", cam_id, src.source_type, camera_source.mask_url(src.url))
 
     # Start its worker now rather than on the next reconcile tick.
@@ -316,6 +354,12 @@ async def update_camera(camera_id: str, cam_in: CameraFeed, db: AsyncSession = D
 
     if cam is not None and "features" in payload:
         _keep_unsent_settings(payload["features"], cam_in.features, cam.features)
+    # Setting a role here stores it without touching the toggles; use
+    # PUT /{id}/role with apply_defaults to apply the preset.
+    if "role" in payload:
+        payload["role"] = _role_or_422(payload["role"])
+    if "pos_register_id" in payload:
+        payload["pos_register_id"] = str(payload["pos_register_id"]).strip() or None
     if cam is None:
         cam = CameraModel(id=camera_id, **payload)
         db.add(cam)
@@ -325,6 +369,7 @@ async def update_camera(camera_id: str, cam_in: CameraFeed, db: AsyncSession = D
 
     await db.commit()
     await db.refresh(cam)
+    camera_roles.role_cache.invalidate()
     if "features" in payload:
         feature_manager.set_camera_features(camera_id, CameraFeatureConfig.model_validate(payload["features"]))
     return _model_to_feed(cam)
@@ -360,6 +405,7 @@ async def delete_camera(camera_id: str, db: AsyncSession = Depends(get_db)):
     cam = await _get_camera_or_404(camera_id, db)
     await db.delete(cam)
     await db.commit()
+    camera_roles.role_cache.invalidate()
     camera_source.delete_credentials(camera_id)
     try:
         live_engine.stop_camera(camera_id)
@@ -539,7 +585,9 @@ async def save_camera_snapshot(camera_id: str, db: AsyncSession = Depends(get_db
     return {
         "saved": True,
         "filename": filename,
-        "url": f"/api/v1/events/snapshots/{filename}",
+        # <img>/<a> cannot send a bearer header; the snapshot route takes a short-lived
+        # clip-access token like event clips do.
+        "url": f"/api/v1/events/snapshots/{filename}?token={auth_service.generate_clip_token(filename)}",
         "camera_id": camera_id,
         "frame_width": int(w),
         "frame_height": int(h),

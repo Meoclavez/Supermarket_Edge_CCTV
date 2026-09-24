@@ -545,7 +545,10 @@ def test_live_detector_reports_the_provider_it_really_runs(live_detector):
         accel = s["provider"] not in ("cpu", "openvino")
         ladder = settings.POSE_MODEL_LADDER_GPU if accel else settings.POSE_MODEL_LADDER_CPU
         allowed = [n.strip() for n in ladder.split(",") if n.strip()]
-        allowed += [settings.POSE_MODEL_GPU if accel else settings.POSE_MODEL_CPU]
+        # Floor for this provider class, then the other class's model, which
+        # _model_candidates tries last when the GPU is busy (e.g. another
+        # process shares it) and nothing larger fits the budget.
+        allowed += [settings.POSE_MODEL_GPU, settings.POSE_MODEL_CPU]
         # The ladder picks by measured latency; whatever it picked is reported.
         sel = s["model_selection"]
         assert s["model"] in allowed and sel["chosen"] == s["model"], (s["model"], sel)

@@ -1,0 +1,100 @@
+/* ===================================================================
+   Insights: recommendations list, "Run analysis" and the daily report
+   (js/insights.js). Loaded after style.css; colours are theme tokens only.
+   =================================================================== */
+
+#insights-recs, #tab-digest { display: none; flex-direction: column; gap: 14px; min-width: 0; }
+#insights-recs.active, #tab-digest.active { display: flex; }
+
+.ins-card-title { flex-wrap: wrap; gap: 8px; }
+.ins-title-actions { display: inline-flex; flex-wrap: wrap; gap: 6px; text-transform: none; letter-spacing: 0; }
+.ins-intro { margin: 0 0 10px; font-size: 12px; line-height: 1.5; color: var(--text-dim); }
+
+.ins-run-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 8px; }
+.ins-check { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2);
+  cursor: pointer; min-height: 32px; user-select: none; }
+.ins-check input { accent-color: var(--accent-cyan); width: 16px; height: 16px; }
+.ins-run-status { font-size: 12px; color: var(--text-dim); line-height: 1.45; min-width: 0; overflow-wrap: anywhere; }
+.ins-run-ok { color: var(--accent-green); }
+.ins-run-warn { color: var(--amber); }
+.ins-run-err { color: var(--rose); }
+.ins-meta { font-size: 11.5px; color: var(--text-dim); line-height: 1.5; overflow-wrap: anywhere; }
+.ins-meta:empty { display: none; }
+.ins-meta + .ins-meta { margin-top: 2px; }
+
+.ins-filter-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 10px; }
+.ins-chip { min-height: 32px; padding: 4px 14px; border-radius: 20px; font: 700 11.5px var(--font-sans); cursor: pointer;
+  background: rgba(var(--tint-rgb), 0.04); color: var(--text-dim);
+  border: 1px solid var(--control-border, rgba(var(--slate-rgb), 0.25)); }
+.ins-chip:hover { color: var(--text-main); }
+.ins-chip.active { color: var(--accent-cyan); background: var(--accent-cyan-dim); border-color: var(--accent-cyan); }
+.ins-chip:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.ins-filter-row .ins-check { margin-left: auto; }
+
+.ins-list { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.ins-empty { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+
+/* Recommendation cards (share .action-card from style.css) */
+.ins-rec { display: flex; flex-direction: column; gap: 6px; min-width: 0; overflow-wrap: anywhere; }
+.ins-rec-head { flex-wrap: wrap; }
+.ins-rec-badges { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.ins-source { font-size: 10px; text-transform: none; }
+.ins-zone { font-size: 12px; font-weight: 700; color: var(--text-2); }
+.ins-rec-title { display: block; font-size: 13.5px; }
+.ins-rec-body { display: flex; flex-direction: column; gap: 3px; }
+.ins-rec-foot { justify-content: space-between; align-items: center; }
+.ins-rec-status { font-size: 11px; color: var(--rose); }
+.ins-rec-status:empty { display: none; }
+
+.action-card.severity-LOW { border-left: 3px solid rgba(var(--slate-rgb), 0.5); }
+.action-card.status-REVIEWED { opacity: 0.92; }
+.action-card.status-APPLIED, .action-card.status-DISMISSED { opacity: 0.7; }
+.action-card.status-PENDING, .action-card.status-INFO { opacity: 1; }
+
+.ins-evidence { font-size: 11.5px; color: var(--text-2); }
+.ins-evidence summary { cursor: pointer; font-weight: 700; color: var(--text-dim); min-height: 28px;
+  display: flex; align-items: center; }
+.ins-evidence summary:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.ins-ev-grid { display: grid; grid-template-columns: minmax(90px, max-content) minmax(0, 1fr); gap: 3px 12px;
+  margin: 4px 0 0; padding: 8px 10px; border-radius: 8px; background: rgba(var(--tint-rgb), 0.03);
+  border: 1px solid rgba(var(--slate-rgb), 0.14); }
+.ins-ev-grid dt { color: var(--text-dim); overflow-wrap: anywhere; }
+.ins-ev-grid dd { margin: 0; color: var(--text-soft); font-family: var(--font-mono); font-size: 11px; overflow-wrap: anywhere; min-width: 0; }
+.ins-ev-list { margin: 0; padding-left: 16px; font-family: var(--font-sans); }
+.ins-ev-sub { color: var(--text-dim); }
+.ins-evidence-none { font-size: 11px; color: var(--text-faint); font-style: italic; }
+
+.ins-summary { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; padding: 12px 14px; border-radius: 10px;
+  background: rgba(var(--info-rgb), 0.06); border: 1px solid rgba(var(--info-rgb), 0.25); overflow-wrap: anywhere; }
+.ins-summary-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+
+/* Daily report */
+.ins-report-summary { margin: 0 0 4px; }
+.ins-report-kpis { margin: 12px 0; }
+.ins-report-val { font-size: 18px; overflow-wrap: anywhere; }
+.ins-report-note { font-size: 10px; color: var(--text-faint); }
+.ins-report-h { margin: 14px 0 6px; font-size: 12.5px; color: var(--text-strong); }
+.ins-report-gen { margin-top: 10px; }
+
+@media (max-width: 600px) {
+  .ins-filter-row .ins-check { margin-left: 0; }
+  .ins-ev-grid { grid-template-columns: minmax(0, 1fr); }
+  .ins-ev-grid dd { margin-bottom: 4px; }
+  .ins-rec-foot { flex-direction: column; align-items: flex-start; }
+}
+
+@media (pointer: coarse) {
+  .ins-chip, .ins-check, .ins-evidence summary { min-height: 40px; }
+  #insights-recs .btn, #tab-digest .btn { min-height: 40px; }
+}
+
+/* Print the daily report on its own: the report is a sub-view of Insights,
+   and style.css hides every .tab-view when printing. */
+@media print {
+  #tab-insights { display: block !important; }
+  #tab-insights > :not(#tab-digest), #insightsSubNav, #tab-digest .ins-title-actions { display: none !important; }
+  #tab-digest { display: block !important; }
+}
+
+/* Card hooks (layout comes from .glass-card). */
+.ins-run-card, .ins-report-card { min-width: 0; }

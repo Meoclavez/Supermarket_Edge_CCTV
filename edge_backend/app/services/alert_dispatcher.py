@@ -350,7 +350,14 @@ class AlertDispatcher:
 
     # ---- public API
     async def dispatch(self, event_type: str, severity: str, title: str, body: str, data: Optional[dict] = None,
-                       *, persist: bool = True, broadcast: bool = True) -> dict:
+                       *, persist: bool = True, broadcast: bool = True, bypass_cooldown: bool = False) -> dict:
+        """Log, broadcast and push one alert.
+
+        ``bypass_cooldown`` is for alerts a person asked for explicitly (e.g.
+        "staff sent" on a theft incident): the per-camera cooldown exists to
+        stop automatic alerts repeating, not to swallow an operator's action.
+        Phone preferences and camera mutes still apply.
+        """
         from app.models.schemas import EventSeverity, EventType
         from app.services import device_identity
 
@@ -390,7 +397,7 @@ class AlertDispatcher:
             ws_clients = await alert_hub.broadcast_event(jsonable_encoder({
                 "id": alert_id, "title": title, "body": body, **data,
             }))
-        push = await self._push(title, body, data, camera)
+        push = await self._push(title, body, data, camera, bypass_cooldown=bypass_cooldown)
         return {
             "alert_id": alert_id,
             "event_type": et,
@@ -472,7 +479,8 @@ class AlertDispatcher:
             )).scalars().all()
             return [_Target(r) for r in rows]
 
-    async def _push(self, title: str, body: str, data: Dict[str, Any], camera) -> dict:
+    async def _push(self, title: str, body: str, data: Dict[str, Any], camera,
+                    bypass_cooldown: bool = False) -> dict:
         from app.services.pairing_service import prefs_filter_reason
 
         result: Dict[str, Any] = {"provider": "fcm_v1", "devices": 0, "targets": 0, "sent": 0, "failed": 0,
@@ -485,7 +493,7 @@ class AlertDispatcher:
         now = time.monotonic()
         last = self._last_push.get(key)
         cooldown = float(settings.CAMERA_ALERT_COOLDOWN_SEC)
-        if last is not None and now - last < cooldown:
+        if not bypass_cooldown and last is not None and now - last < cooldown:
             result["skipped"] = f"cooldown ({cooldown:.0f}s per camera and alert type)"
             return result
 

@@ -1,0 +1,159 @@
+/* Camera purpose (roles), setup checklist and POS register link (js/camera_roles.js).
+   Colours come from the theme variables in style.css, so light and dark both work. */
+
+/* ---------------------------------------------------------------- picker */
+.role-picker {
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-md);
+  padding: 10px 12px 12px;
+  margin: 10px 0 4px;
+  min-width: 0;
+  background: rgba(var(--tint-rgb), 0.02);
+}
+.role-picker-title { font-size: 12.5px; font-weight: 800; color: var(--text-main); padding: 0 4px; }
+.role-picker-sub { font-size: 11.5px; color: var(--text-dim); margin: 2px 0 8px; line-height: 1.45; }
+.role-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 6px;
+  min-width: 0;
+}
+.role-option {
+  display: flex; align-items: center; gap: 7px;
+  min-height: 36px; padding: 6px 9px;
+  border: 1px solid var(--control-border, rgba(var(--slate-rgb), 0.22));
+  border-radius: var(--radius-sm);
+  background: rgba(var(--tint-rgb), 0.03);
+  cursor: pointer; font-size: 12px; font-weight: 600; color: var(--text-main);
+  min-width: 0;
+}
+.role-option:hover { border-color: var(--accent-cyan); }
+.role-option input { margin: 0; accent-color: var(--accent-cyan); flex: none; }
+.role-option.is-selected { border-color: var(--accent-cyan); background: var(--accent-cyan-dim); color: var(--accent-cyan); }
+.role-option:focus-within { outline: 2px solid var(--focus-ring, var(--accent-cyan)); outline-offset: 1px; }
+.role-ico { flex: none; font-size: 14px; line-height: 1; }
+.role-opt-label { min-width: 0; overflow-wrap: anywhere; line-height: 1.25; }
+
+.role-detail { margin-top: 10px; font-size: 12px; color: var(--text-main); line-height: 1.5; min-width: 0; }
+.role-detail-empty { color: var(--text-dim); font-size: 11.5px; font-style: italic; }
+.role-desc { font-weight: 600; }
+.role-tip { margin-top: 4px; color: var(--text-dim); font-size: 11.5px; }
+.role-preview-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px 16px; margin-top: 8px; }
+.role-preview-h { font-size: 10.5px; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-dim); margin: 4px 0 4px; }
+.role-feat-list, .role-measure-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; font-size: 11.5px; }
+.role-measure-list li::before { content: '• '; color: var(--accent-cyan); }
+.role-feat-list .is-on { color: var(--text-main); }
+.role-feat-list .is-on span { color: var(--accent-green); font-weight: 800; }
+.role-feat-list .is-off { color: var(--text-dim); }
+.role-change { color: var(--amber); font-weight: 600; }
+.role-extras { margin-top: 6px; font-size: 11.5px; color: var(--text-dim); }
+
+.role-apply-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 10px; }
+.role-apply-row[hidden], .role-register[hidden] { display: none; }
+.role-keep { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-dim); min-height: 32px; cursor: pointer; }
+.role-keep[hidden] { display: none; }
+
+/* --------------------------------------------------------- POS register */
+.role-register {
+  margin-top: 10px; padding: 10px; border-radius: var(--radius-sm);
+  border: 1px dashed rgba(var(--cyan-rgb), 0.35); background: rgba(var(--cyan-rgb), 0.04);
+}
+.role-register-h { font-size: 12px; font-weight: 800; color: var(--text-main); }
+.role-register-sub { font-size: 11.5px; color: var(--text-dim); margin: 2px 0 8px; line-height: 1.45; }
+.role-register-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.role-register-row .form-input { flex: 1 1 160px; min-width: 0; min-height: 34px; }
+
+/* ------------------------------------------------------------- badges */
+.role-badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 9px; min-height: 24px; border-radius: 20px;
+  font-size: 11px; font-weight: 700; line-height: 1.2;
+  max-width: 100%; min-width: 0; overflow-wrap: anywhere;
+}
+.role-badge-set { background: var(--accent-cyan-dim); color: var(--accent-cyan); border: 1px solid rgba(var(--cyan-rgb), 0.35); }
+.role-badge-none { background: rgba(var(--amber-rgb), 0.12); color: var(--amber); border: 1px dashed rgba(var(--amber-rgb), 0.5); }
+.role-badge-prog { font-family: var(--font-mono); font-size: 10px; opacity: 0.85; }
+
+.cam-role-slot {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px;
+  padding: 8px 12px 0; min-width: 0;
+}
+.role-slot-text { font-size: 11.5px; color: var(--amber); font-weight: 600; }
+.role-setup-btn { margin-left: auto; }
+.role-setup-btn.is-done { color: var(--accent-green); border-color: rgba(var(--green-rgb), 0.45); }
+
+/* ---------------------------------------------------------- checklist */
+.role-checklist-inline:empty { display: none; }
+.role-checklist-inline { margin-top: 10px; }
+.rc-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 6px; }
+.rc-score { font-size: 12px; font-weight: 800; color: var(--amber); }
+.rc-score.is-done { color: var(--accent-green); }
+.rc-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.rc-item {
+  display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: center; gap: 8px;
+  padding: 8px 10px; border-radius: var(--radius-sm);
+  border: 1px solid var(--card-border); background: rgba(var(--tint-rgb), 0.02);
+}
+.rc-item.is-done { border-color: rgba(var(--green-rgb), 0.35); background: rgba(var(--green-rgb), 0.05); }
+.rc-mark {
+  width: 22px; height: 22px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 2px solid var(--control-border, rgba(var(--slate-rgb), 0.35));
+  font-size: 12px; font-weight: 900; color: var(--on-accent, #fff);
+}
+.rc-item.is-done .rc-mark { background: var(--accent-green); border-color: var(--accent-green); }
+.rc-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.rc-label { font-size: 12.5px; font-weight: 700; color: var(--text-main); overflow-wrap: anywhere; }
+.rc-item.is-done .rc-label { color: var(--text-dim); }
+.rc-tag { font-size: 9.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim);
+  border: 1px solid var(--card-border); border-radius: 10px; padding: 1px 6px; margin-left: 4px; white-space: nowrap; }
+.rc-tag.is-req { color: var(--amber); border-color: rgba(var(--amber-rgb), 0.45); }
+.rc-hint { font-size: 11.5px; color: var(--text-dim); line-height: 1.45; overflow-wrap: anywhere; }
+.rc-action { white-space: nowrap; min-height: 32px; }
+
+.rc-modal-card { max-width: 620px; }
+.rc-modal-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+.rc-title { font-size: 15px; font-weight: 800; color: var(--accent-cyan); margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.rc-sub { font-size: 12px; color: var(--text-dim); line-height: 1.5; }
+.rc-foot { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+
+/* Today "Store setup" card: one row per camera. */
+.rc-cams { margin: 12px 0; }
+.rc-cams-h { font-size: 10.5px; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-dim); margin-bottom: 6px; }
+.rc-cam-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.rc-cam-row {
+  display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) auto auto; align-items: center; gap: 8px;
+  font-size: 12px; padding: 6px 8px; border-radius: var(--radius-sm); border: 1px solid var(--card-border);
+}
+.rc-cam-row.is-done { border-color: rgba(var(--green-rgb), 0.35); }
+.rc-cam-name { font-weight: 700; color: var(--text-main); overflow-wrap: anywhere; min-width: 0; }
+.rc-cam-role { color: var(--text-dim); overflow-wrap: anywhere; min-width: 0; }
+.rc-cam-state { font-size: 11px; font-weight: 700; color: var(--amber); white-space: nowrap; }
+.rc-cam-row.is-done .rc-cam-state { color: var(--accent-green); }
+
+/* Department label (optional text, kept for alert reports). */
+.dept-hint { font-size: 10.5px; color: var(--text-dim); margin-top: 3px; line-height: 1.4; }
+
+@media (max-width: 600px) {
+  .role-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .rc-item { grid-template-columns: 24px minmax(0, 1fr); }
+  .rc-action { grid-column: 2; justify-self: start; }
+  .rc-cam-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .rc-cam-role { grid-column: 1; }
+}
+
+@media (pointer: coarse) {
+  .role-option, .rc-action, .role-register-row .form-input { min-height: 40px; }
+  .role-keep { min-height: 40px; }
+}
+
+.role-suggest { font-size: 11.5px; color: var(--text-main); background: rgba(var(--cyan-rgb), 0.07);
+  border-left: 3px solid var(--accent-cyan); padding: 6px 9px; border-radius: 4px; margin-bottom: 8px; line-height: 1.45; }
+.role-apply-row [hidden], .role-picker [hidden] { display: none !important; }
+.role-picker-new, .role-picker-edit { min-inline-size: 0; }
+/* Camera settings modal on a phone: one column, so the wider purpose picker never pushes it sideways. */
+#modalCameraConfig .form-grid-2col > * { min-width: 0; }
+#modalCameraConfig .form-input { min-width: 0; max-width: 100%; }
+@media (max-width: 600px) {
+  #modalCameraConfig .form-grid-2col { grid-template-columns: minmax(0, 1fr); }
+}

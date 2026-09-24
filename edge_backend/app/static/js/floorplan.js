@@ -90,11 +90,21 @@
 
   // Heatmap kinds served by GET /api/v1/analytics/heatmaps?kind=...
   const HEATMAP_KINDS = [
-    { kind: 'presence', label: 'Presence', title: 'Where people were (tracked floor positions)' },
-    { kind: 'dwell', label: 'Dwell', title: 'Seconds spent per cell' },
-    { kind: 'interaction', label: 'Interactions', title: 'Shelf reaches, at the shopper\'s floor position' },
+    { kind: 'presence', label: 'Walked', title: 'Where people walked (tracked floor positions today)' },
+    { kind: 'dwell', label: 'Stopped', title: 'Where people stopped (time spent per spot today)' },
+    { kind: 'interaction', label: 'Touched shelves', title: 'Where people reached into shelves today' },
   ];
   const HEATMAP_KIND_KEY = 'edge_cctv_heatmap_kind';
+  // Time range of the map heatmap. Today = the live endpoint above; the others
+  // sum the recorded hourly snapshots (GET /api/v1/analytics/heatmaps/aggregate).
+  const HEATMAP_RANGES = [
+    { range: 'today', label: 'Today', title: 'Today so far, updated live' },
+    { range: 'yesterday', label: 'Yesterday', title: 'Recorded hours of yesterday' },
+    { range: '7d', label: 'Last 7 days', title: 'Recorded hours of the last 7 days, today included' },
+    { range: '30d', label: 'Last 30 days', title: 'Recorded hours of the last 30 days, today included' },
+  ];
+  const HEATMAP_RANGE_KEY = 'edge_cctv_heatmap_range';
+  const HEATMAP_HISTORY_REFRESH_MS = 3 * 60 * 1000;
 
   class BlueprintEditor {
     constructor(canvas) {
@@ -117,6 +127,13 @@
         const saved = window.localStorage.getItem(HEATMAP_KIND_KEY);
         if (HEATMAP_KINDS.some((k) => k.kind === saved)) this.heatmapKind = saved;
       } catch (_) { /* storage unavailable: default kind */ }
+      this.heatmapRange = 'today';
+      try {
+        const savedRange = window.localStorage.getItem(HEATMAP_RANGE_KEY);
+        if (HEATMAP_RANGES.some((r) => r.range === savedRange)) this.heatmapRange = savedRange;
+      } catch (_) { /* storage unavailable: default range */ }
+      this._heatmapFetchedAt = 0;     // last aggregate fetch (non-today ranges)
+      this._heatmapFetchKey = null;   // "range|kind" of that fetch
       this.coverage = null;
       this.activeNow = null;
 
@@ -176,15 +193,27 @@
       return this.toWorld(clientX - r.left, clientY - r.top);
     }
 
+    /** Height of the summary overlay at the bottom of the map (0 when hidden). */
+    hudReserve() {
+      const hud = document.querySelector('#fpWrapper .fp-hud-bottom');
+      if (!hud) return 0;
+      const h = hud.getBoundingClientRect().height;
+      return h > 0 ? Math.ceil(h) + 10 : 0;
+    }
+
     fitToView() {
       if (!this.layout) return;
-      const pad = 48;
+      const pad = 36;
       const W = this.canvas.clientWidth, H = this.canvas.clientHeight;
       if (W < 10 || H < 10) return;      // hidden tab: measure again when shown
-      const w = W - pad * 2, h = H - pad * 2 - 40;
+      // The fitted plan (plus the scale bar under it) stays clear of the
+      // summary overlay at the bottom, so the two never overlap.
+      const bottom = Math.max(pad, this.hudReserve() + 30);
+      const top = pad;
+      const w = W - pad * 2, h = H - top - bottom;
       this.scale = Math.max(2, Math.min(w / this.layout.width_m, h / this.layout.height_m));
       this.offsetX = (W - this.layout.width_m * this.scale) / 2;
-      this.offsetY = (H - this.layout.height_m * this.scale) / 2 + 20;
+      this.offsetY = top + (h - this.layout.height_m * this.scale) / 2;
     }
 
     resize() {
@@ -261,10 +290,12 @@
       if (!this.isVisible() || !this.layout) return;
       if (window.edgeAuth && typeof window.edgeAuth.isAuthenticated === 'function' && !window.edgeAuth.isAuthenticated()) return;
       const kind = this.heatmapKind;
+      const range = this.heatmapRange;
+      const heatUrl = this._heatmapUrl(range, kind);
       try {
         const [fpRes, hmRes] = await Promise.all([
           fetch('/api/v1/analytics/floorplan'),
-          fetch(`/api/v1/analytics/heatmaps?resolution_w=60&resolution_h=40&kind=${encodeURIComponent(kind)}`),
+          heatUrl ? fetch(heatUrl) : Promise.resolve(null),
         ]);
         if (fpRes.ok) {
           const fp = await fpRes.json();
@@ -273,11 +304,17 @@
           (fp.zones || []).forEach((z) => { this.zoneMetrics[z.id] = z.metrics; });
           this.activeNow = (fp.active_shoppers_now === undefined) ? null : fp.active_shoppers_now;
         }
-        if (hmRes.ok && kind === this.heatmapKind) {
+        if (hmRes && hmRes.ok && kind === this.heatmapKind && range === this.heatmapRange) {
           const hm = await hmRes.json();
+          if (range !== 'today') { this._heatmapFetchedAt = Date.now(); this._heatmapFetchKey = `${range}|${kind}`; }
           this.heatmap = hm.observed ? hm : null;
           this.heatmapMessage = hm.observed ? null : hm.message;
           this._renderHeatmapNote(hm);
+        } else if (hmRes && !hmRes.ok && kind === this.heatmapKind && range === this.heatmapRange && range !== 'today') {
+          this.heatmap = null;
+          this._heatmapFetchedAt = Date.now();
+          this._heatmapFetchKey = `${range}|${kind}`;
+          this._renderHeatmapNote({ observed: false, message: `Recorded heatmaps could not be loaded (HTTP ${hmRes.status})` });
         }
         this.emitState();
       } catch (_) { /* transient; next tick retries */ }
@@ -354,6 +391,17 @@
       if (window.ResizeObserver) {
         const wrap = c.parentElement || c;
         new ResizeObserver(() => this.resize()).observe(wrap);
+        // The summary text can wrap onto more lines: refit so the plan stays clear of it.
+        const hud = document.querySelector('#fpWrapper .fp-hud-bottom');
+        if (hud) {
+          let lastH = 0;
+          new ResizeObserver(() => {
+            const h = Math.round(hud.getBoundingClientRect().height);
+            if (Math.abs(h - lastH) < 2) return;
+            lastH = h;
+            if (this.layout && !this._userZoomed) this.fitToView();
+          }).observe(hud);
+        }
       }
     }
 
@@ -1332,30 +1380,51 @@
      * stylesheet class beyond the shared .btn/.btn-sm/.btn-primary.
      */
     _mountHeatmapKindToggle() {
+      // Own row in the layer bar (#fpHeatBar); falls back to after the checkbox.
+      const bar = document.getElementById('fpHeatBar');
       const cb = document.getElementById('layerHeatmap');
       const anchor = cb ? (cb.closest('label') || cb) : null;
-      if (!anchor || document.getElementById('fpHeatmapKind')) return;
+      if ((!bar && !anchor) || document.getElementById('fpHeatmapKind')) return;
       const group = document.createElement('span');
       group.id = 'fpHeatmapKind';
+      group.className = 'fp-heat-kinds';
       group.setAttribute('role', 'group');
-      group.setAttribute('aria-label', 'Heatmap kind');
-      group.style.cssText = 'display:inline-flex;align-items:center;gap:2px;';
+      group.setAttribute('aria-label', 'Heatmap: what to show');
       HEATMAP_KINDS.forEach((k) => {
         const b = document.createElement('button');
         b.type = 'button';
-        b.className = 'btn btn-sm';
+        b.className = 'btn btn-xs fp-heat-kind';
         b.dataset.heatmapKind = k.kind;
         b.textContent = k.label;
         b.title = k.title;
-        b.style.cssText = 'padding:1px 6px;font-size:10px;line-height:1.4;';
         b.addEventListener('click', () => this.setHeatmapKind(k.kind));
         group.appendChild(b);
       });
+      // Time range: Today (live) or a sum of recorded hourly snapshots.
+      const ranges = document.createElement('span');
+      ranges.id = 'fpHeatRange';
+      ranges.className = 'fp-heat-kinds';
+      ranges.setAttribute('role', 'group');
+      ranges.setAttribute('aria-label', 'Heatmap: time range');
+      HEATMAP_RANGES.forEach((r) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'btn btn-xs fp-heat-kind';
+        b.dataset.heatmapRange = r.range;
+        b.textContent = r.label;
+        b.title = r.title;
+        b.addEventListener('click', () => this.setHeatmapRange(r.range));
+        ranges.appendChild(b);
+      });
+      const legend = document.createElement('span');
+      legend.className = 'fp-heat-legend';
+      legend.title = 'Colour scale of the heatmap';
+      legend.innerHTML = '<span>Quiet</span><span class="fp-heat-ramp" aria-hidden="true"></span><span>Busy</span>';
       const note = document.createElement('span');
       note.id = 'fpHeatmapNote';
-      note.style.cssText = 'font-size:10px;color:var(--text-dim);margin-left:4px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
-      group.appendChild(note);
-      anchor.insertAdjacentElement('afterend', group);
+      note.className = 'fp-heat-note';
+      if (bar) { bar.appendChild(group); bar.appendChild(ranges); bar.appendChild(legend); bar.appendChild(note); }
+      else { anchor.insertAdjacentElement('afterend', group); group.insertAdjacentElement('afterend', ranges); ranges.appendChild(note); }
       this._syncHeatmapKindButtons();
     }
 
@@ -1365,17 +1434,97 @@
         b.classList.toggle('btn-primary', on);
         b.setAttribute('aria-pressed', on ? 'true' : 'false');
       });
+      document.querySelectorAll('#fpHeatRange [data-heatmap-range]').forEach((b) => {
+        const on = b.dataset.heatmapRange === this.heatmapRange;
+        b.classList.toggle('btn-primary', on);
+        b.setAttribute('aria-pressed', on ? 'true' : 'false');
+      });
+    }
+
+    /**
+     * URL of the heatmap for a range, or null when the last recorded-range
+     * fetch is still fresh (history changes at most once an hour, so it is
+     * re-read every few minutes rather than every metrics tick).
+     * Dates are sent without an offset: the server reads them as store time.
+     */
+    _heatmapUrl(range, kind) {
+      const k = encodeURIComponent(kind);
+      if (range === 'today' || !HEATMAP_RANGES.some((r) => r.range === range)) {
+        return `/api/v1/analytics/heatmaps?resolution_w=60&resolution_h=40&kind=${k}`;
+      }
+      if (this._heatmapFetchKey === `${range}|${kind}` && Date.now() - this._heatmapFetchedAt < HEATMAP_HISTORY_REFRESH_MS) return null;
+      const pad = (n) => String(n).padStart(2, '0');
+      const day = (offset) => {
+        const d = new Date();
+        d.setHours(12, 0, 0, 0);
+        d.setDate(d.getDate() + offset);
+        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T00:00:00`;
+      };
+      let from, to;
+      if (range === 'yesterday') { from = day(-1); to = day(0); }
+      else if (range === '7d') { from = day(-6); to = day(1); }
+      else { from = day(-29); to = day(1); }
+      // Hourly snapshots are kept HEATMAP_HOURLY_RETENTION_DAYS (35 by default), so 30 days sum hours.
+      return `/api/v1/analytics/heatmaps/aggregate?space=floor&kind=${k}&bucket=hour&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
+    }
+
+    setHeatmapRange(range) {
+      if (!HEATMAP_RANGES.some((r) => r.range === range)) return;
+      this.heatmapRange = range;
+      try { window.localStorage.setItem(HEATMAP_RANGE_KEY, range); } catch (_) { /* not persisted */ }
+      this.heatmap = null;
+      this.heatmapMessage = null;
+      this._heatmapFetchKey = null;
+      this._heatmapFetchedAt = 0;
+      this._syncHeatmapKindButtons();
+      const note = document.getElementById('fpHeatmapNote');
+      if (note) note.textContent = 'loading…';
+      this.refreshMetrics();
+    }
+
+    /** Busiest spot in plain words: which area it is in and how much activity. */
+    _heatmapPeakPlace(hm) {
+      try {
+        const m = hm.density_matrix, gw = hm.grid_width, gh = hm.grid_height;
+        if (!m || !gw || !gh || !this.layout) return '';
+        let best = -1, bx = 0, by = 0;
+        for (let y = 0; y < gh; y++) for (let x = 0; x < gw; x++) if (m[y][x] > best) { best = m[y][x]; bx = x; by = y; }
+        const W = hm.width_m > 0 ? hm.width_m : this.layout.width_m, H = hm.height_m > 0 ? hm.height_m : this.layout.height_m;
+        const px = ((bx + 0.5) / gw) * W, py = ((by + 0.5) / gh) * H;
+        const inside = (poly) => {
+          let c = false;
+          for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+            const a = poly[i], b = poly[j];
+            if (((a.y > py) !== (b.y > py)) && (px < ((b.x - a.x) * (py - a.y)) / ((b.y - a.y) || 1e-9) + a.x)) c = !c;
+          }
+          return c;
+        };
+        const zone = (this.zones || []).find((z) => Array.isArray(z.polygon) && z.polygon.length > 2 && inside(z.polygon));
+        return zone ? `in ${zone.name}` : `near ${px.toFixed(0)} m, ${py.toFixed(0)} m`;
+      } catch (_) { return ''; }
     }
 
     _renderHeatmapNote(hm) {
       const note = document.getElementById('fpHeatmapNote');
       if (!note) return;
+      const rangeInfo = HEATMAP_RANGES.find((r) => r.range === this.heatmapRange) || HEATMAP_RANGES[0];
+      const recorded = this.heatmapRange !== 'today';
       if (hm && hm.observed) {
         const peak = hm.peak_value !== undefined ? hm.peak_value : hm.peak_count;
-        note.textContent = `peak ${peak} ${hm.unit || ''} · ${hm.samples} samples`;
-        note.title = note.textContent;
+        const where = this._heatmapPeakPlace(hm);
+        const what = this.heatmapKind === 'dwell' ? 'busiest stopping spot' : this.heatmapKind === 'interaction' ? 'most shelf reaches' : 'busiest spot';
+        note.textContent = `${rangeInfo.label} · ${what}${where ? ' ' + where : ''}`;
+        note.title = recorded
+          ? `Peak ${peak} ${hm.unit || ''} per spot over ${hm.recorded_hours} recorded hour(s) (${hm.snapshots_used} hourly heatmaps); hours not recorded are left out`
+          : `Peak ${peak} ${hm.unit || ''} from ${hm.samples} measurements today`;
+      } else if (recorded) {
+        // Aggregate with nothing to draw: nothing recorded, or recorded but nobody seen.
+        note.textContent = hm && hm.snapshots_used
+          ? `${rangeInfo.label} · ${hm.recorded_hours} recorded hour(s), nobody seen`
+          : `${rangeInfo.label} · Nothing recorded in this period`;
+        note.title = (hm && hm.message) || note.textContent;
       } else {
-        note.textContent = (hm && hm.message) || '';
+        note.textContent = (hm && hm.message) || 'Nothing recorded today yet';
         note.title = note.textContent;
       }
     }
@@ -1426,6 +1575,11 @@
 
       if (!this.layout) { this.drawCentredText('Loading blueprint…', T.placeholder); return; }
 
+      // Camera and person labels are queued while drawing and placed last,
+      // so they avoid each other, every marker and the area names (flushLabels).
+      this._labelQueue = [];
+      this._markers = [];
+      this._fixedText = [];
       this.drawFloor();
       if (this.showLayers.heatmap) this.drawHeatmap();
       if (this.showLayers.structures) this.drawStructures();
@@ -1434,8 +1588,78 @@
       this.drawDraft();
       if (this.showLayers.cameras) this.drawCameras();
       if (this.showLayers.persons) this.drawPersons();
+      this.flushLabels();
       this.drawCalOverlay();
       this.drawScaleBar();
+    }
+
+    /** Queue a text label anchored on a marker at screen (x, y) of radius r. */
+    queueLabel(text, x, y, r, opts) {
+      if (!this._labelQueue) return;
+      this._labelQueue.push(Object.assign({ text: String(text), x, y, r, prio: 1, required: false,
+        font: '600 10px system-ui, sans-serif', color: T.text2, prefer: 'up' }, opts || {}));
+    }
+
+    /**
+     * Greedy placement: labels in priority order try positions around their
+     * marker (above, below, right, left, diagonals, then further out) and take
+     * the first that overlaps no marker and no label already placed. A label
+     * marked required (camera names) is drawn at its preferred spot when all
+     * are taken; optional ones (person ids) are left out rather than piled up.
+     */
+    flushLabels() {
+      const queue = this._labelQueue || [];
+      this._labelQueue = null;
+      if (!queue.length) return;
+      const ctx = this.ctx;
+      const W = this.canvas.clientWidth, H = this.canvas.clientHeight;
+      const placed = [];
+      const obstacles = (this._markers || []).map((m) => ({ x: m.x - m.r - 1, y: m.y - m.r - 1, w: 2 * m.r + 2, h: 2 * m.r + 2 }))
+        .concat(this._fixedText || []);
+      const hit = (a, b) => a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+      ctx.save();
+      queue.sort((a, b) => a.prio - b.prio);
+      queue.forEach((L) => {
+        ctx.font = L.font;
+        const w = Math.ceil(ctx.measureText(L.text).width) + 6, h = 13;
+        const d = L.r + 3;
+        const spots = {
+          up: [L.x - w / 2, L.y - d - h], down: [L.x - w / 2, L.y + d], right: [L.x + d + 1, L.y - h / 2],
+          left: [L.x - d - 1 - w, L.y - h / 2], ur: [L.x + d - 2, L.y - d - h + 2], ul: [L.x - d + 2 - w, L.y - d - h + 2],
+          dr: [L.x + d - 2, L.y + d - 2], dl: [L.x - d + 2 - w, L.y + d - 2],
+          up2: [L.x - w / 2, L.y - d - 2 * h - 2], down2: [L.x - w / 2, L.y + d + h + 2],
+        };
+        const order = L.prefer === 'down'
+          ? ['down', 'up', 'right', 'left', 'dr', 'dl', 'ur', 'ul', 'down2', 'up2']
+          : ['up', 'down', 'right', 'left', 'ur', 'ul', 'dr', 'dl', 'up2', 'down2'];
+        let box = null;
+        for (const k of order) {
+          const [bx, by] = spots[k];
+          const b = { x: bx, y: by, w, h };
+          if (b.x < 0 || b.y < 0 || b.x + b.w > W || b.y + b.h > H) continue;
+          if (placed.some((p) => hit(b, p)) || obstacles.some((o) => hit(b, o))) continue;
+          box = b;
+          break;
+        }
+        if (!box) {
+          if (!L.required) return;
+          const [bx, by] = spots[order[0]];
+          box = { x: bx, y: by, w, h };
+        }
+        placed.push(box);
+        // Plate in the plan colour keeps the text legible over zones and the heatmap.
+        ctx.globalAlpha = 0.82;
+        ctx.fillStyle = T.bg;
+        ctx.fillRect(box.x, box.y, box.w, box.h);
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = L.color;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(L.text, box.x + 3, box.y + h / 2 + 0.5);
+      });
+      ctx.restore();
+      this.lastLabelBoxes = placed;   // read by the UI tests (no overlap between labels)
+      this.lastFixedText = this._fixedText || [];
     }
 
     drawCentredText(text, color, dy = 0) {
@@ -1483,7 +1707,11 @@
       if (!this.heatmap || !this.heatmap.density_matrix) return;
       const ctx = this.ctx;
       const { density_matrix: m, grid_width: gw, grid_height: gh } = this.heatmap;
-      const cw = (this.layout.width_m / gw) * this.scale, ch = (this.layout.height_m / gh) * this.scale;
+      // Recorded aggregates carry the extent they were recorded with (the store
+      // may have been resized since); the live heatmap always matches the layout.
+      const W = this.heatmap.width_m > 0 ? this.heatmap.width_m : this.layout.width_m;
+      const H = this.heatmap.height_m > 0 ? this.heatmap.height_m : this.layout.height_m;
+      const cw = (W / gw) * this.scale, ch = (H / gh) * this.scale;
       ctx.save();
       // Additive glow on the dark plan; multiply keeps it visible on the light one.
       ctx.globalCompositeOperation = T.heatBlend;
@@ -1491,7 +1719,7 @@
         for (let gx = 0; gx < gw; gx++) {
           const v = m[gy][gx];
           if (v <= 0.02) continue;
-          const s = this.toScreen((gx / gw) * this.layout.width_m, (gy / gh) * this.layout.height_m);
+          const s = this.toScreen((gx / gw) * W, (gy / gh) * H);
           const r = Math.round(40 + 215 * v), g = Math.round(200 * (1 - v) + 40);
           ctx.fillStyle = `rgba(${r},${g},120,${0.18 + 0.55 * v})`;
           ctx.fillRect(s.x, s.y, cw + 1, ch + 1);
@@ -1629,10 +1857,14 @@
           ctx.font = '600 11px system-ui, sans-serif';
           ctx.textAlign = 'center';
           ctx.fillText(z.name, s.x, s.y);
+          const fixed = this._fixedText;
+          if (fixed) { const w = ctx.measureText(z.name).width; fixed.push({ x: s.x - w / 2 - 2, y: s.y - 10, w: w + 4, h: 13 }); }
           if (m && m.observed) {
             ctx.fillStyle = zc;
             ctx.font = '500 10px ui-monospace, monospace';
-            ctx.fillText(`${m.visits} visits · ${m.avg_dwell_seconds || 0}s`, s.x, s.y + 13);
+            const txt = `${m.visits} visits · ${m.avg_dwell_seconds || 0}s`;
+            ctx.fillText(txt, s.x, s.y + 13);
+            if (fixed) { const w = ctx.measureText(txt).width; fixed.push({ x: s.x - w / 2 - 2, y: s.y + 3, w: w + 4, h: 13 }); }
           }
         }
         ctx.restore();
@@ -1738,13 +1970,14 @@
         ctx.lineWidth = 2;
         ctx.stroke();
 
+        const r = selected ? 10 : 8;
+        if (this._markers) this._markers.push({ x: s.x, y: s.y, r });
         if (this.showLayers.labels) {
-          ctx.fillStyle = T.text2;
-          ctx.font = '600 10px system-ui, sans-serif';
-          ctx.textAlign = 'center';
-          ctx.fillText((cam.name || cam.camera_id).slice(0, 22), s.x, s.y - 14);
-          if (!cam.has_homography) { ctx.fillStyle = T.warn; ctx.fillText('uncalibrated', s.x, s.y + 21); }
-          else if (!online) { ctx.fillStyle = T.danger; ctx.fillText(String(cam.status || 'offline').toLowerCase(), s.x, s.y + 21); }
+          const name = (cam.name || cam.camera_id);
+          this.queueLabel(name.length > 22 ? `${name.slice(0, 21)}…` : name, s.x, s.y, r,
+            { prio: 0, required: true, color: T.text2 });
+          if (!cam.has_homography) this.queueLabel('uncalibrated', s.x, s.y, r, { prio: 1, required: true, color: T.warn, prefer: 'down' });
+          else if (!online) this.queueLabel(String(cam.status || 'offline').toLowerCase(), s.x, s.y, r, { prio: 1, required: true, color: T.danger, prefer: 'down' });
         }
         ctx.restore();
       });
@@ -1773,11 +2006,10 @@
         ctx.beginPath(); ctx.arc(s.x, s.y, 6, 0, Math.PI * 2);
         ctx.fillStyle = hexToRgba(color, stale ? 0.5 : 0.95); ctx.fill();
         ctx.strokeStyle = T.outline; ctx.lineWidth = 1.5; ctx.stroke();
+        if (this._markers) this._markers.push({ x: s.x, y: s.y, r: 6 });
         if (this.showLayers.labels) {
-          ctx.fillStyle = T.marker;
-          ctx.font = '700 9px ui-monospace, monospace';
-          ctx.textAlign = 'center';
-          ctx.fillText(shortId(t.track_id), s.x, s.y - 10);
+          this.queueLabel(shortId(t.track_id), s.x, s.y, 6,
+            { prio: 2, font: '700 9px ui-monospace, monospace', color: T.text });
         }
       }
       ctx.restore();
@@ -1817,7 +2049,8 @@
       const ctx = this.ctx;
       const metres = this.scale > 60 ? 1 : this.scale > 25 ? 2 : this.scale > 10 ? 5 : 10;
       const px = metres * this.scale;
-      const x = 18, y = this.canvas.clientHeight - 64;
+      // Just above the summary overlay, never underneath it.
+      const x = 18, y = this.canvas.clientHeight - Math.max(24, this.hudReserve() + 12);
       ctx.save();
       ctx.strokeStyle = T.muted; ctx.lineWidth = 2;
       ctx.beginPath();

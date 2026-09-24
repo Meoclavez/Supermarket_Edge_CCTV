@@ -183,7 +183,44 @@ recorded floor point; dwell = seconds per cell (gaps >
 `HEATMAP_DWELL_MAX_GAP_SEC` not credited); interaction = pose shelf
 interactions binned at the shopper's floor position (calibrated cameras only).
 Normalised 0-1 with `peak_value` / `unit`; with nothing observed the matrix is
-omitted.
+omitted. Optional `from`/`to` and `presence_weighting=tracks` (visitors per
+cell). Binning is the shared `bin_heatmap_paths` / `bin_heatmap_points`.
+
+**Recorded history** (`services/heatmap_history.py`, table `heatmap_snapshots`,
+m0013): `heatmap_recorder` (asyncio task from the lifespan, stopped before the
+pipeline) records every store-local hour `HEATMAP_SETTLE_SEC` after it closes
+(re-recording the two before it), rolls hours up into days (1440) after local
+midnight, backfills `HEATMAP_BACKFILL_DAYS` from rows on startup, and prunes
+(`HEATMAP_HOURLY_RETENTION_DAYS` / `HEATMAP_DAILY_RETENTION_DAYS`). Spaces:
+`floor` (0.5 m cells, calibrated `x/y`) and `image` per camera (64x36,
+normalised foot point `u/v` the engine samples into `Track.path_points` every
+`TRAJECTORY_SAMPLE_SEC`, plus interaction contact points), so uncalibrated
+cameras get heatmaps. Presence is track-weighted (visitors per cell), dwell
+time-weighted, interaction per reach. Cells: base64(zlib(uint16 LE)) x `scale`.
+Empty hours are stored only with measured `uptime_seconds` (camera off = no
+row). API (`/api/v1/analytics/heatmaps/`): `history`, `snapshot/{id}`,
+`aggregate`, `compare`, `hour-profile`, `POST record-now`.
+`business_analysis_service.heatmap_trends` adds HEATMAP_DEAD_SPACE,
+HEATMAP_HOTSPOT_SHIFT, HEATMAP_CONGESTION and HEATMAP_BROWSE_NO_TOUCH findings
+citing snapshot ids and periods (else "not enough recorded history") and a
+compact summary for the Ollama narration. Tests: `tests/test_heatmap_history.py`.
+
+### Camera roles (`services/camera_roles.py`, `routes/camera_roles.py`, m0012)
+
+`ROLE_PRESETS` (entrance, exit, entrance_exit, checkout, aisle, high_value,
+stockroom, overview): label, mounting tip, default flags + person-size gate,
+`theft_sensitivity`, `required_setup` / `optional_setup` checklist ids.
+`cameras.role` / `cameras.pos_register_id` (m0012). APIs: `GET /api/v1/camera-roles`,
+`PUT /api/v1/cameras/{id}/role` (`apply_defaults`), `GET .../setup` (items computed
+from real config), `PUT .../pos-register`, `GET /api/v1/store/setup` (analytics
+available/limited/blocked + score), `GET /api/v1/store/pos-registers`.
+Behaviour: door-camera tripwires preferred for footfall, stockroom never footfall,
+theft thresholds scaled per role (pose_analytics, 5 s role cache), high_value =
+all zones high value + HIGH severity, EXIT_WITHOUT_CHECKOUT suppressed on
+product-area cameras when checkout cameras exist (single-camera rule, no re-id).
+Studio queue areas (`/api/zones/queue`, kind checkout|queue, image space) are
+evaluated by `tripwire_engine` into `queue_visits` and reported by
+`/analytics/queues` with POS register attribution. No role = old behaviour.
 
 ### One coordinate system
 
@@ -382,6 +419,7 @@ than firing on empty data.
 * **[`app/services/retail_metrics_service.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/retail_metrics_service.py):** Zone metrics, funnels, queues, heatmaps and the hourly forecast, all aggregated from `zone_visits` / `customer_tracks` / `pos_transactions`; returns `null` (never 0 or a constant) when nothing was observed.
 * **[`app/services/business_analysis_service.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/business_analysis_service.py):** Deterministic threshold rules over real zone metrics, persisted to `ai_decision_recommendations`, optionally narrated by a local Ollama model that never invents a figure.
 * **[`app/services/shelf_interaction_service.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/shelf_interaction_service.py):** Product shelf zones (normalised image coords, `storage/shelf_products_config.json`) with operator-set or derived shelf level (TOP/MIDDLE/BOTTOM from the polygon's position in its shelf unit) and value tier; `product_summary()` aggregates per-product / per-level reaches from `shelf_interactions` rows (no in-memory counters) plus POS units per SKU (conversion only with POS rows, else "needs POS data"). Served by `/analytics/products/summary` and `/products/{id}/stats`; rendered by `js/product_reach.js` on the Analytics tab. `process_person_pose` backs the diagnostic `POST /analytics/products/interactions` and records nothing.
+* **[`app/services/camera_roles.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/camera_roles.py):** Camera role presets, role cache, scaled theft thresholds, exit-rule gate, per-camera setup checklist and store coverage (`tests/test_camera_roles.py`).
 * **[`app/services/pose_analytics.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/pose_analytics.py):** Per-(camera, track) pose state -> shelf interactions and loss-prevention incidents; background writer for `shelf_interactions` / `theft_incidents`, `render_evidence()` JPEGs, `notify_loss_prevention` dispatch.
 * **[`app/services/theft_detection_service.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/theft_detection_service.py):** Pure rule functions (concealment, shelf sweeping, loitering, exit without checkout, POS-only sweethearting), `evidence_confidence` / `saturating`, and the incident lifecycle service.
 * **[`app/services/privacy_mask.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/privacy_mask.py):** `apply_privacy_masks()` for BLUR/MOSAIC/BLACKOUT/COLOR (fail closed) and the AI_IGNORE foot-point filter.
@@ -438,3 +476,13 @@ than firing on empty data.
 * **[`docs/supermarket_cctv/hardware_sizing_and_procurement_guide_30_cameras.md`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/docs/supermarket_cctv/hardware_sizing_and_procurement_guide_30_cameras.md):** Complete hardware sizing, workload throughput mathematics, multi-model TensorRT VRAM sizing, itemized Bill of Materials (BOM), and procurement options for 32-camera supermarket installations.
 * **[`docs/supermarket_cctv/Supermarket_Edge_AI_CCTV_Hardware_and_Services_Guide.pdf`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/docs/supermarket_cctv/Supermarket_Edge_AI_CCTV_Hardware_and_Services_Guide.pdf):** Print-ready formal PDF document (5 pages, A4) detailing 32-camera deterministic mathematical sizing, single NVDEC decode throughput, 10-Pillar Foolproof Engineering Validation Matrix, itemized BOM, 32-channel store layout, and procurement checklist.
 * **[`docs/supermarket_cctv/Supermarket_Edge_AI_CCTV_Hardware_and_Services_Guide.html`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/docs/supermarket_cctv/Supermarket_Edge_AI_CCTV_Hardware_and_Services_Guide.html):** Paged-media HTML source for regenerating the 32-camera PDF specification document.
+
+## Dashboard shell and operator workflow (2026-09-24)
+
+* **Navigation:** five tabs plus a Settings gear: **Today** (default after sign-in), **Cameras**, **Store map**, **Insights**, **Loss prevention**. Old hashes redirect (`LEGACY_ROUTES` / `resolveRoute` in `static/js/analytics.js`): `#matrix`→`#cameras`, `#floorplan`→`#map`, `#analytics`→`#insights/footfall`, `#actions`/`#market_ai`→`#insights`, `#digest`→`#insights/report`, `#theft`→`#loss`. Phones get a bottom tab bar.
+* **`static/js/today.js`:** Today screen: cameras working, people now, visitors today with source, visitors by hour (today vs yesterday vs same weekday last week; unrecorded hours striped, never zero), needs-review incidents, top recommendations, store-setup card.
+* **`static/js/camera_roles.js` + `css/camera_roles.css`:** camera purpose picker (Add camera and camera settings), role badges, till/register link for checkout cameras, per-camera setup checklist modal with deep links into Studio tools (`?camera_id&tool&kind&from=checklist`) and calibration; `?checklist=<id>` opens it.
+* **`static/js/insights.js` + `css/insights.css`:** one consolidated recommendations list (`GET /api/v1/analytics/recommendations`), explicit Run analysis (`POST /business/analysis/run`, 429 countdown). Nothing is generated on page open.
+* **`static/js/loss.js` + `css/loss.css`:** resolve with an explicit outcome (`GET /theft/outcomes`), one-click False alarm, "staff sent" with the real delivery report, false-alarm rate per rule, re-resolving legacy incidents.
+* **`static/js/heatmap_history.js`:** Insights heatmap history (floor or per-camera view, Walked / Stopped / Touched shelves, hour strip observed/quiet/camera off, playback, compare with diff legend, hour-of-day profile, Record now, cited HEATMAP_* findings). Store map heatmap has Today / Yesterday / 7 d / 30 d ranges.
+* **Backend behind these:** `services/hourly_traffic.py` (`GET /analytics/footfall/hourly`), `services/recommendations_service.py` + `routes/insights.py` (consolidated list, analysis runs, m0014), `services/camera_roles.py` + `routes/camera_roles.py` (m0012), `services/heatmap_history.py` (m0013). No GET route writes to the database (enforced by `tests/test_ux_backend.py`).

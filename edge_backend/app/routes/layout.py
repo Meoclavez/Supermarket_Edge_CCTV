@@ -155,6 +155,8 @@ class AdoptRequest(BaseModel):
     azimuth_deg: float = 90.0
     fov_deg: float = 85.0
     stream_url: Optional[str] = None
+    # Optional camera role (services/camera_roles.py); its defaults are applied.
+    role: Optional[str] = None
 
 
 # ------------------------------------------------------------------ layout
@@ -608,10 +610,19 @@ async def adopt_device(
 ):
     """Turn a discovered device into an active camera on the blueprint.
 
+    An optional ``role`` is validated and its preset defaults (analytics
+    flags, person-size gate) are applied to the new camera.
+
     This is how cameras enter the system now -- one at a time, from something
     that genuinely responded on the network, rather than from a fixed list of
     32 fabricated entries re-seeded on every boot.
     """
+    from app.services import camera_roles
+
+    try:
+        role = camera_roles.normalise_role(req.role)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
     device = await db.get(DiscoveredDeviceModel, req.device_id)
     if device is None:
         raise HTTPException(status_code=404, detail="device not found; run a scan first")
@@ -671,6 +682,8 @@ async def adopt_device(
         is_ai_enabled=True,
         ai_models=["person_detection"],
     )
+    if role:
+        camera_roles.apply_role(cam, role, apply_defaults=True)
     db.add(cam)
     device.adopted_camera_id = cam_id
     try:
@@ -689,6 +702,7 @@ async def adopt_device(
         "stream_url": redact_url(stream_url),
         "floor_x": cam.floor_x,
         "floor_y": cam.floor_y,
+        "role": cam.role,
     }
 
 

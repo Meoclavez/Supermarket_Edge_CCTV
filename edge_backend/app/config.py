@@ -386,6 +386,15 @@ class Settings(BaseSettings):
     # Where alert snapshots are written; empty means <STORAGE_DIR>/zone_alerts.
     ZONE_ALERT_EVIDENCE_DIR: str = os.getenv("ZONE_ALERT_EVIDENCE_DIR", "")
 
+    # Camera roles (services/camera_roles.py). Pipeline threads re-read the
+    # cameras' roles at most this often.
+    CAMERA_ROLE_CACHE_TTL_SEC: float = float(os.getenv("CAMERA_ROLE_CACHE_TTL_SEC", "5"))
+    # Studio checkout / queue areas: a foot point may leave the area this long
+    # (boundary jitter, brief occlusion) without ending the person's visit.
+    QUEUE_AREA_EXIT_GRACE_SEC: float = float(os.getenv("QUEUE_AREA_EXIT_GRACE_SEC", "2.0"))
+    # Average time at a lane above which it is reported CONGESTED.
+    QUEUE_CONGESTED_WAIT_SEC: float = float(os.getenv("QUEUE_CONGESTED_WAIT_SEC", "270"))
+
     # Network camera open / read timeouts for the live workers (live_analytics_engine._open).
     CAMERA_OPEN_TIMEOUT_SEC: float = float(os.getenv("CAMERA_OPEN_TIMEOUT_SEC", "8"))
     CAMERA_READ_TIMEOUT_SEC: float = float(os.getenv("CAMERA_READ_TIMEOUT_SEC", "10"))
@@ -396,6 +405,50 @@ class Settings(BaseSettings):
     # lasted this long, and (tracks) was matched on at least this many frames.
     FOOTFALL_MIN_TRACK_SECONDS: float = float(os.getenv("FOOTFALL_MIN_TRACK_SECONDS", "3.0"))
     FOOTFALL_MIN_TRACK_HITS: int = int(os.getenv("FOOTFALL_MIN_TRACK_HITS", os.getenv("TRACK_MIN_HITS", "3")))
+
+    # ---------------- Recorded heatmap history (services/heatmap_history.py) ----------------
+    # Persisted track path: one sample (normalised image foot point, plus floor
+    # metres when calibrated) at most every TRAJECTORY_SAMPLE_SEC, at most
+    # TRAJECTORY_MAX_POINTS per track row (0.5 s x 3600 = 30 min).
+    TRAJECTORY_SAMPLE_SEC: float = float(os.getenv("TRAJECTORY_SAMPLE_SEC", "0.5"))
+    TRAJECTORY_MAX_POINTS: int = int(os.getenv("TRAJECTORY_MAX_POINTS", "3600"))
+    HEATMAP_RECORDING_ENABLED: bool = os.getenv("HEATMAP_RECORDING_ENABLED", "true").lower() in ("1", "true", "yes")
+    # Floor grid cell size (metres) and per-axis cap; image grid per camera.
+    HEATMAP_FLOOR_CELL_M: float = float(os.getenv("HEATMAP_FLOOR_CELL_M", "0.5"))
+    HEATMAP_FLOOR_MAX_CELLS: int = int(os.getenv("HEATMAP_FLOOR_MAX_CELLS", "120"))
+    HEATMAP_IMAGE_GRID_W: int = int(os.getenv("HEATMAP_IMAGE_GRID_W", "64"))
+    HEATMAP_IMAGE_GRID_H: int = int(os.getenv("HEATMAP_IMAGE_GRID_H", "36"))
+    # An hour is recorded this long after it closes (finished tracks reach the
+    # DB first); the two hours before it are re-recorded at the same time.
+    HEATMAP_SETTLE_SEC: float = float(os.getenv("HEATMAP_SETTLE_SEC", "300"))
+    HEATMAP_TICK_SEC: float = float(os.getenv("HEATMAP_TICK_SEC", "30"))
+    # Startup backfill of missing past hours from existing rows (bounded).
+    HEATMAP_BACKFILL_DAYS: int = int(os.getenv("HEATMAP_BACKFILL_DAYS", "14"))
+    # Retention: hourly snapshots / daily roll-ups.
+    HEATMAP_HOURLY_RETENTION_DAYS: int = int(os.getenv("HEATMAP_HOURLY_RETENTION_DAYS", "35"))
+    HEATMAP_DAILY_RETENTION_DAYS: int = int(os.getenv("HEATMAP_DAILY_RETENTION_DAYS", "400"))
+    # Heatmap-trend rules (business_analysis_service). Below the minimum
+    # history a rule reports "not enough recorded history" instead of firing.
+    HEATMAP_TREND_DAYS: int = int(os.getenv("HEATMAP_TREND_DAYS", "7"))
+    HEATMAP_TREND_MIN_DAYS: int = int(os.getenv("HEATMAP_TREND_MIN_DAYS", "5"))
+    # Dead space: zone visitor density below this share of the median covered
+    # zone on at least HEATMAP_DEAD_SPACE_DAY_SHARE of the recorded days.
+    HEATMAP_DEAD_SPACE_RATIO: float = float(os.getenv("HEATMAP_DEAD_SPACE_RATIO", "0.15"))
+    HEATMAP_DEAD_SPACE_DAY_SHARE: float = float(os.getenv("HEATMAP_DEAD_SPACE_DAY_SHARE", "0.8"))
+    HEATMAP_MIN_ZONE_COVERAGE: float = float(os.getenv("HEATMAP_MIN_ZONE_COVERAGE", "0.5"))
+    # Hot-spot shift: centroid of the busiest cells moved at least this far
+    # week over week, each week with HEATMAP_SHIFT_MIN_DAYS recorded days.
+    HEATMAP_SHIFT_MIN_M: float = float(os.getenv("HEATMAP_SHIFT_MIN_M", "3.0"))
+    HEATMAP_SHIFT_MIN_DAYS: int = int(os.getenv("HEATMAP_SHIFT_MIN_DAYS", "4"))
+    # Minimum visitor-cell passes (sum of the presence grid) in each compared week.
+    HEATMAP_SHIFT_MIN_PASSES: int = int(os.getenv("HEATMAP_SHIFT_MIN_PASSES", "200"))
+    # Congestion: people standing in a CHECKOUT/ENTRANCE/EXIT zone at its
+    # peak hour, above its quietest recorded hour (staff baseline).
+    HEATMAP_CONGESTION_MIN_PEOPLE: float = float(os.getenv("HEATMAP_CONGESTION_MIN_PEOPLE", "3.0"))
+    HEATMAP_CONGESTION_MIN_DAYS_PER_HOUR: int = int(os.getenv("HEATMAP_CONGESTION_MIN_DAYS_PER_HOUR", "3"))
+    # Browsed, not touched: shopper-minutes in front of a product zone vs reaches.
+    HEATMAP_BROWSE_MIN_SHOPPER_MIN: float = float(os.getenv("HEATMAP_BROWSE_MIN_SHOPPER_MIN", "30"))
+    HEATMAP_BROWSE_MAX_REACHES_PER_MIN: float = float(os.getenv("HEATMAP_BROWSE_MAX_REACHES_PER_MIN", "0.05"))
 
 
 settings = Settings()

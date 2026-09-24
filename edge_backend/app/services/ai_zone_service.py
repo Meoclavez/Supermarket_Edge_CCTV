@@ -1,9 +1,10 @@
-"""Per-camera overlay store: tripwires, restricted areas and privacy masks.
+"""Per-camera overlay store: tripwires, restricted areas, queue areas and privacy masks.
 
 All geometry is in image coordinates normalised 0..1 to the camera's own
 frame (Camera Studio / mobile zone editor). Privacy masks are applied by
-services/privacy_mask.py; tripwires and restricted areas ("intrusion_zones")
-are evaluated live by services/tripwire_engine.py.
+services/privacy_mask.py; tripwires, restricted areas ("intrusion_zones") and
+checkout / queue areas ("queue_zones") are evaluated live by
+services/tripwire_engine.py.
 """
 
 import json
@@ -119,6 +120,7 @@ class AIZoneService:
         self.tripwires: Dict[str, Dict[str, Any]] = {}
         self.intrusion_zones: Dict[str, Dict[str, Any]] = {}
         self.exclusion_masks: Dict[str, Dict[str, Any]] = {}
+        self.queue_zones: Dict[str, Dict[str, Any]] = {}
         self.zone_trackers: Dict[str, Any] = {}
         self._load_persistent_zones()
 
@@ -131,6 +133,7 @@ class AIZoneService:
                     self.tripwires = {tw["id"]: tw for tw in data.get("tripwires", [])}
                     self.intrusion_zones = {iz["id"]: iz for iz in data.get("intrusion_zones", [])}
                     self.exclusion_masks = {ex["id"]: ex for ex in data.get("exclusion_masks", [])}
+                    self.queue_zones = {qz["id"]: qz for qz in data.get("queue_zones", [])}
                     logger.info(f"Loaded {len(self.tripwires)} tripwires, {len(self.intrusion_zones)} intrusion zones, {len(self.exclusion_masks)} masks.")
                     return
                 except Exception as e:
@@ -143,13 +146,15 @@ class AIZoneService:
         self.tripwires = {}
         self.intrusion_zones = {}
         self.exclusion_masks = {}
+        self.queue_zones = {}
 
     def _save_persistent_zones(self):
         try:
             payload = {
                 "tripwires": list(self.tripwires.values()),
                 "intrusion_zones": list(self.intrusion_zones.values()),
-                "exclusion_masks": list(self.exclusion_masks.values())
+                "exclusion_masks": list(self.exclusion_masks.values()),
+                "queue_zones": list(self.queue_zones.values()),
             }
             with open(ZONES_CONFIG_FILE, "w") as f:
                 json.dump(payload, f, indent=2)
@@ -251,15 +256,50 @@ class AIZoneService:
                 return True
             return False
 
-    def clear_all(self, kinds: Optional[List[str]] = None) -> int:
-        """Delete every overlay of the given kinds (default: all three kinds).
+    # Checkout / queue areas (camera roles, m0012): polygons whose dwell is
+    # recorded in queue_visits by tripwire_engine.
+    def add_queue_zone(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        with self.lock:
+            qz_id = data.get("id") or f"qa_{int(time.time()*1000)}"
+            data["id"] = qz_id
+            self.queue_zones[qz_id] = data
+            self._save_persistent_zones()
+            return dict(data)
 
-        kinds: any of "tripwires", "intrusion_zones", "exclusion_masks".
+    def get_queue_zone(self, qz_id: str) -> Optional[Dict[str, Any]]:
+        with self.lock:
+            qz = self.queue_zones.get(qz_id)
+            return dict(qz) if qz is not None else None
+
+    def update_queue_zone(self, qz_id: str, record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Replace a queue area's stored record (already validated); None if missing."""
+        with self.lock:
+            if qz_id not in self.queue_zones:
+                return None
+            record = dict(record)
+            record["id"] = qz_id
+            self.queue_zones[qz_id] = record
+            self._save_persistent_zones()
+            return dict(record)
+
+    def delete_queue_zone(self, qz_id: str) -> bool:
+        with self.lock:
+            if qz_id in self.queue_zones:
+                del self.queue_zones[qz_id]
+                self._save_persistent_zones()
+                return True
+            return False
+
+    def clear_all(self, kinds: Optional[List[str]] = None) -> int:
+        """Delete every overlay of the given kinds (default: all kinds).
+
+        kinds: any of "tripwires", "intrusion_zones", "exclusion_masks", "queue_zones".
         """
         stores = {
             "tripwires": self.tripwires,
             "intrusion_zones": self.intrusion_zones,
             "exclusion_masks": self.exclusion_masks,
+            "queue_zones": self.queue_zones,
         }
         with self.lock:
             n = 0
@@ -276,11 +316,13 @@ class AIZoneService:
                 tws = [tw for tw in self.tripwires.values() if tw.get("camera_id", "cam_main") == camera_id or camera_id == "all"]
                 izs = [iz for iz in self.intrusion_zones.values() if iz.get("camera_id", "cam_main") == camera_id or camera_id == "all"]
                 exs = [ex for ex in self.exclusion_masks.values() if ex.get("camera_id", "cam_main") == camera_id or camera_id == "all"]
-                return {"tripwires": tws, "intrusion_zones": izs, "exclusion_masks": exs}
+                qzs = [qz for qz in self.queue_zones.values() if qz.get("camera_id") == camera_id or camera_id == "all"]
+                return {"tripwires": tws, "intrusion_zones": izs, "exclusion_masks": exs, "queue_zones": qzs}
             return {
                 "tripwires": list(self.tripwires.values()),
                 "intrusion_zones": list(self.intrusion_zones.values()),
-                "exclusion_masks": list(self.exclusion_masks.values())
+                "exclusion_masks": list(self.exclusion_masks.values()),
+                "queue_zones": list(self.queue_zones.values()),
             }
 
     def is_bbox_in_exclusion(self, x_center: float, y_center: float, camera_id: str = "cam_main") -> bool:

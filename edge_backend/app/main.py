@@ -160,6 +160,21 @@ async def lifespan(app: FastAPI):
     from .services.pose_analytics import pose_analytics
     await pose_analytics.start()
 
+    # 4b. Recorded heatmap history: hourly snapshots, daily roll-ups, backfill.
+    from .services.heatmap_history import heatmap_recorder
+    try:
+        await heatmap_recorder.start()
+    except Exception as exc:  # heatmap history must never block the store system
+        startup_log.exception(f"Heatmap recorder failed to start: {exc}")
+
+    # 4c. Scheduled business analysis (rules only), so the dashboard's
+    # recommendations list is filled by a plain GET (recommendations_service).
+    from .services.recommendations_service import recommendations_service
+    try:
+        await recommendations_service.start()
+    except Exception as exc:
+        startup_log.exception(f"Analysis scheduler failed to start: {exc}")
+
     # 5. Remote access (online dashboard): runs cloudflared only when enabled,
     # a hostname and a token are configured, and authentication is on.
     from .services.remote_access_service import remote_access_service
@@ -176,9 +191,12 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         shutdown_signal.request_shutdown()
+        # Before the pipeline: its final partial-hour record reads the live engine.
+        await heatmap_recorder.stop()
         await pipeline_supervisor.stop()
         await asyncio.to_thread(pose_analytics.stop)
         await remote_access_service.stop()
+        await recommendations_service.stop()
 
 
 app = FastAPI(
@@ -229,6 +247,12 @@ app.include_router(pairing_routes.push_router)
 from .routes import remote_access as remote_access_routes  # noqa: E402
 
 app.include_router(remote_access_routes.router)
+from .routes import camera_roles as camera_roles_routes  # noqa: E402
+
+app.include_router(camera_roles_routes.router)
+from .routes import insights as insights_routes  # noqa: E402
+
+app.include_router(insights_routes.router)
 
 # Mount Static Files
 STATIC_DIR = Path(__file__).resolve().parent / "static"

@@ -428,7 +428,7 @@ def test_analytics_daily_report_json(client):
 
     assert set(data) == {
         "report_title", "date", "generated_at", "data_available", "kpi_scorecard",
-        "coverage", "funnel", "queues", "findings", "findings_count",
+        "kpi_scorecard_labels", "coverage", "funnel", "queues", "findings", "findings_count",
         "analysis_message", "executive_summary", "shelf_reach",
     }
     for gone in ("store_id", "generated_by", "overview", "decisions",
@@ -464,7 +464,7 @@ def test_analytics_daily_report_html(client):
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
     assert "Daily Intelligence Digest" in response.text
-    assert "Total Footfall" in response.text
+    assert "Visitors today" in response.text   # human label, not title-cased snake_case
     assert "Findings" in response.text
 
 

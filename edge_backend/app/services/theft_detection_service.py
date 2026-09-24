@@ -530,45 +530,94 @@ class TheftDetectionService:
         return list(result.scalars().all())
 
     async def get_statistics(self, db: AsyncSession) -> TheftStatisticsResponse:
-        """Compute live theft & loss prevention dashboard statistics."""
+        """Loss-prevention KPIs from recorded incidents and their review outcomes.
+
+        Value is only "actioned" when a reviewer recorded an outcome in
+        ``THEFT_ACTIONED_OUTCOMES``: false alarms, "no action", incidents still
+        open and rows resolved before outcomes were required never count.
+        The false-alarm rate per rule is false alarms / incidents reviewed for
+        that rule, the feedback needed to tune the rule thresholds.
+        """
         # Stored times are naive UTC; "today" is the store's local day.
+        from app.models.schemas import THEFT_ACTIONED_OUTCOMES, TheftRuleOutcomeStats
         from app.services.timeutil import local_day_bounds_utc
 
         now = datetime.utcnow()
         start_of_today = local_day_bounds_utc()[0]
+        T = TheftIncidentModel
 
-        # Active incidents
-        active_stmt = select(func.count()).select_from(TheftIncidentModel).where(TheftIncidentModel.status.in_(["ACTIVE", "ACKNOWLEDGED", "DISPATCHED"]))
-        active_res = await db.execute(active_stmt)
-        active_count = active_res.scalar_one_or_none() or 0
+        active_count = await db.scalar(
+            select(func.count()).select_from(T).where(T.status.in_(["ACTIVE", "ACKNOWLEDGED", "DISPATCHED"]))
+        ) or 0
+        today_count = await db.scalar(
+            select(func.count()).select_from(T).where(T.timestamp >= start_of_today)
+        ) or 0
 
-        # Today's incidents
-        today_stmt = select(func.count()).select_from(TheftIncidentModel).where(TheftIncidentModel.timestamp >= start_of_today)
-        today_res = await db.execute(today_stmt)
-        today_count = today_res.scalar_one_or_none() or 0
+        by_dept = {row[0]: row[1] for row in (await db.execute(
+            select(T.department, func.count(T.id)).group_by(T.department))).all()}
+        by_type = {row[0]: row[1] for row in (await db.execute(
+            select(T.theft_type, func.count(T.id)).group_by(T.theft_type))).all()}
 
-        # Prevented loss sum
-        prevented_stmt = select(func.sum(TheftIncidentModel.estimated_loss_value)).where(TheftIncidentModel.status.in_(["DISPATCHED", "RESOLVED"]))
-        prevented_res = await db.execute(prevented_stmt)
-        prevented_val = prevented_res.scalar_one_or_none() or 0.0
+        rows = (await db.execute(
+            select(T.status, T.resolution, T.resolved_by, T.estimated_loss_value, T.recovered_value,
+                   T.rule, T.theft_type)
+        )).all()
+        value_actioned = 0.0
+        value_pending = 0.0
+        recovered: list[float] = []
+        outcomes: Dict[str, int] = {}
+        per_rule: Dict[str, List[int]] = {}
+        legacy_unverified = 0
+        for status, resolution, resolved_by, est, rec_val, rule, theft_type in rows:
+            status = (status or "").upper()
+            outcome = (resolution or "").upper() or None
+            if status == "FALSE_ALARM":
+                outcome = "FALSE_ALARM"
+            if status in ("ACTIVE", "ACKNOWLEDGED", "DISPATCHED"):
+                value_pending += float(est or 0.0)
+                continue
+            if status not in ("RESOLVED", "FALSE_ALARM") or outcome is None:
+                continue
+            # A RESOLVED row without resolved_by predates required outcomes:
+            # its outcome may be the old RECOVERED_GOODS default. Only an
+            # explicit false alarm is trusted from that era.
+            if resolved_by is None and outcome != "FALSE_ALARM":
+                legacy_unverified += 1
+                continue
+            outcomes[outcome] = outcomes.get(outcome, 0) + 1
+            key = rule or theft_type or "UNKNOWN"
+            stat = per_rule.setdefault(key, [0, 0])
+            stat[0] += 1
+            if outcome == "FALSE_ALARM":
+                stat[1] += 1
+            if outcome in THEFT_ACTIONED_OUTCOMES:
+                value_actioned += float(est or 0.0)
+            if rec_val is not None:
+                recovered.append(float(rec_val))
 
-        # By Department
-        dept_stmt = select(TheftIncidentModel.department, func.count(TheftIncidentModel.id)).group_by(TheftIncidentModel.department)
-        dept_res = await db.execute(dept_stmt)
-        by_dept = {row[0]: row[1] for row in dept_res.all()}
-
-        # By Theft Type
-        type_stmt = select(TheftIncidentModel.theft_type, func.count(TheftIncidentModel.id)).group_by(TheftIncidentModel.theft_type)
-        type_res = await db.execute(type_stmt)
-        by_type = {row[0]: row[1] for row in type_res.all()}
-
+        reviewed = sum(v[0] for v in per_rule.values())
+        false_alarms = sum(v[1] for v in per_rule.values())
+        by_rule = [
+            TheftRuleOutcomeStats(rule=r, label=RULE_LABELS.get(r, r), reviewed=n, false_alarms=fa,
+                                  false_alarm_rate=round(fa / n, 4) if n else None)
+            for r, (n, fa) in sorted(per_rule.items())
+        ]
         return TheftStatisticsResponse(
-            active_incidents_count=active_count,
-            today_incidents_count=today_count,
-            prevented_loss_estimate=round(float(prevented_val), 2),
+            active_incidents_count=int(active_count),
+            today_incidents_count=int(today_count),
+            prevented_loss_estimate=round(value_actioned, 2),
             by_department=by_dept,
             by_theft_type=by_type,
             generated_at=now,
+            value_actioned=round(value_actioned, 2),
+            value_pending_outcome=round(value_pending, 2),
+            value_recovered=round(sum(recovered), 2) if recovered else None,
+            outcomes=outcomes,
+            reviewed_count=reviewed,
+            false_alarm_count=false_alarms,
+            false_alarm_rate=round(false_alarms / reviewed, 4) if reviewed else None,
+            false_alarm_rate_by_rule=by_rule,
+            unverified_legacy_resolutions=legacy_unverified,
         )
 
     async def acknowledge_incident(
@@ -577,7 +626,7 @@ class TheftDetectionService:
         guard_id: str,
         db: AsyncSession,
     ) -> Optional[TheftIncidentModel]:
-        """Acknowledge theft incident by security guard."""
+        """Record who acknowledged the incident (the caller passes the real actor)."""
         stmt = select(TheftIncidentModel).where(TheftIncidentModel.id == incident_id)
         res = await db.execute(stmt)
         incident = res.scalar_one_or_none()
@@ -585,7 +634,7 @@ class TheftDetectionService:
             return None
 
         incident.status = TheftIncidentStatus.ACKNOWLEDGED.value
-        incident.guard_id = guard_id
+        incident.guard_id = (guard_id or "")[:64] or None
         await db.commit()
         await db.refresh(incident)
         logger.info(f"Theft incident {incident_id} ACKNOWLEDGED by {guard_id}")
@@ -594,12 +643,18 @@ class TheftDetectionService:
     async def dispatch_security(
         self,
         incident_id: str,
-        guard_unit: str,
-        audio_deterrent: bool = True,
-        announcement_type: str = "CUSTOMER_ASSISTANCE_GREETING",
+        dispatched_by: str,
+        staff_name: Optional[str] = None,
+        note: Optional[str] = None,
         db: Optional[AsyncSession] = None,
     ) -> Optional[TheftIncidentModel]:
-        """Dispatch security floor guard and/or trigger automated smart audio greeting deterrence."""
+        """Record that staff were sent: who marked it and when, plus what they typed.
+
+        Nothing is invented here. There is no default guard unit and no audio
+        deterrent: this system has no way to dispatch a unit or play audio, so
+        it records only what the operator did. Phones are alerted by the route
+        through ``alert_dispatcher``.
+        """
         session = db
         should_close = False
         if session is None:
@@ -613,20 +668,35 @@ class TheftDetectionService:
             if not incident:
                 return None
 
+            when = datetime.utcnow()
             incident.status = TheftIncidentStatus.DISPATCHED.value
-            incident.dispatch_details = {
-                "guard_unit": guard_unit,
-                "audio_deterrent_triggered": audio_deterrent,
-                "announcement_type": announcement_type,
-                "dispatched_at": datetime.utcnow().isoformat(),
-            }
+            incident.dispatched_by = (dispatched_by or "")[:128] or None
+            incident.dispatched_at = when
+            details = {"dispatched_by": incident.dispatched_by, "dispatched_at": when.isoformat()}
+            if staff_name and staff_name.strip():
+                details["staff_sent"] = staff_name.strip()[:128]
+            if note and note.strip():
+                details["note"] = note.strip()[:500]
+            incident.dispatch_details = details
             await session.commit()
             await session.refresh(incident)
-            logger.info(f"Security dispatched to incident {incident_id} (Unit: {guard_unit}, Audio: {audio_deterrent})")
+            logger.info(f"Staff sent to incident {incident_id} (marked by {dispatched_by})")
             return incident
         finally:
             if should_close and session:
                 await session.close()
+
+    async def record_dispatch_alert(self, incident_id: str, report: Dict[str, Any],
+                                    db: AsyncSession) -> None:
+        """Store the real delivery report of the staff-sent alert on the incident."""
+        incident = await db.get(TheftIncidentModel, incident_id)
+        if incident is None:
+            return
+        details = dict(incident.dispatch_details or {})
+        details["alert"] = report
+        incident.dispatch_details = details
+        await db.commit()
+        await db.refresh(incident)
 
     async def resolve_incident(
         self,
@@ -634,8 +704,17 @@ class TheftDetectionService:
         resolution: str,
         notes: Optional[str] = None,
         db: Optional[AsyncSession] = None,
+        *,
+        resolved_by: Optional[str] = None,
+        recovered_value: Optional[float] = None,
     ) -> Optional[TheftIncidentModel]:
-        """Resolve an incident (or mark as FALSE_ALARM)."""
+        """Close an incident with the reviewer's outcome (FALSE_ALARM sets that status).
+
+        ``resolution`` is required: there is no default outcome. Re-resolving
+        replaces the outcome, so a wrong or legacy entry can be corrected.
+        """
+        if not resolution:
+            raise ValueError("an outcome is required")
         session = db
         should_close = False
         if session is None:
@@ -649,16 +728,19 @@ class TheftDetectionService:
             if not incident:
                 return None
 
-            status_val = TheftIncidentStatus.FALSE_ALARM.value if resolution.upper() == "FALSE_ALARM" else TheftIncidentStatus.RESOLVED.value
+            outcome = resolution.upper()
+            status_val = TheftIncidentStatus.FALSE_ALARM.value if outcome == "FALSE_ALARM" else TheftIncidentStatus.RESOLVED.value
             incident.status = status_val
-            incident.resolution = resolution
+            incident.resolution = outcome
             incident.resolved_at = datetime.utcnow()
+            incident.resolved_by = (resolved_by or "")[:128] or None
+            incident.recovered_value = recovered_value
             if notes:
                 incident.notes = notes
 
             await session.commit()
             await session.refresh(incident)
-            logger.info(f"Theft incident {incident_id} marked as {status_val} ({resolution})")
+            logger.info(f"Theft incident {incident_id} marked as {status_val} ({outcome}) by {resolved_by}")
             return incident
         finally:
             if should_close and session:

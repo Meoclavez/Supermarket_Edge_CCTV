@@ -19,10 +19,11 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import urllib.error
 import urllib.request
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Optional
 
 from sqlalchemy import select
@@ -311,6 +312,405 @@ def _detect_products(summary: Optional[dict]) -> tuple[list[Finding], list[str]]
     return findings, suppressed
 
 
+# ------------------------------------------------------------ heatmap trends
+# Rules over the recorded heatmap history (services/heatmap_history.py).
+# Each finding cites the snapshot ids and periods it used; each rule reports
+# "not enough recorded history" instead of firing on thin data. Thresholds
+# are HEATMAP_* in config.py.
+
+_DEAD_SPACE_CATEGORIES = ("AISLE", "DEPARTMENT", "SHELF")
+_CONGESTION_CATEGORIES = ("CHECKOUT", "ENTRANCE", "EXIT")
+
+
+def _congestion_roles() -> tuple:
+    """Camera roles whose whole view is a lane or a door (camera_roles presets)."""
+    from app.services.camera_roles import PRIMARY_FOOTFALL_ROLES
+
+    return ("checkout",) + tuple(PRIMARY_FOOTFALL_ROLES)
+
+
+def _period(days: list) -> dict:
+    return {"from": days[0].isoformat(), "to": days[-1].isoformat(), "days": len(days)} if days else {}
+
+
+def _zone_at(zones: list, x: float, y: float) -> Optional[str]:
+    from app.services.store_layout_service import point_in_polygon
+
+    for z in zones:
+        if point_in_polygon(x, y, z.polygon or []):
+            return z.name
+    return None
+
+
+async def heatmap_trends(db: AsyncSession, layout_id: Optional[str] = None, *,
+                         now: Optional[datetime] = None, zones: Optional[list] = None,
+                         cameras: Optional[list] = None, products: Optional[list] = None) -> dict:
+    """Heatmap-trend findings, suppressed-rule reasons and a compact summary for the narration.
+
+    Uses complete store-local days only (today excluded):
+
+    * dead space -- a covered AISLE/DEPARTMENT/SHELF zone whose presence
+      (visitors per cell) stays under HEATMAP_DEAD_SPACE_RATIO x the median
+      covered zone on HEATMAP_DEAD_SPACE_DAY_SHARE of the recorded days;
+    * hot-spot shift -- the centroid of the busiest 5% of presence cells moved
+      at least HEATMAP_SHIFT_MIN_M week over week;
+    * congestion -- people standing (dwell / 3600) in a CHECKOUT/ENTRANCE/EXIT
+      zone at its peak store-local hour exceeds its quietest recorded hour by
+      HEATMAP_CONGESTION_MIN_PEOPLE;
+    * congestion by camera role -- the same peak-vs-quietest test on the
+      whole image of each checkout / entrance / exit camera (image-space
+      dwell), so an uncalibrated lane camera is still assessed;
+    * browsed, not touched -- a Studio product zone on an aisle or
+      high-value camera (or one with no role) with at least
+      HEATMAP_BROWSE_MIN_SHOPPER_MIN shopper-minutes in front of it (image
+      dwell) but under HEATMAP_BROWSE_MAX_REACHES_PER_MIN reaches per minute.
+    """
+    import numpy as np
+
+    from app.models.db_models import CameraModel
+    from app.services import heatmap_history as hh
+    from app.services.store_layout_service import store_layout_service
+    from app.services.timeutil import local_midnight_utc, to_local, utcnow
+
+    now = now or utcnow()
+    findings: list[Finding] = []
+    suppressed: list[str] = []
+    n_days = max(int(settings.HEATMAP_TREND_DAYS), 1)
+    min_days = max(int(settings.HEATMAP_TREND_MIN_DAYS), 1)
+    today = to_local(now).date()
+    days = [today - timedelta(days=i) for i in range(n_days, 0, -1)]
+    win_start, win_end = local_midnight_utc(days[0]), local_midnight_utc(today)
+
+    layout = await store_layout_service.get_active_layout(db)
+    if layout is not None and layout_id and layout.id != layout_id:
+        from app.models.db_models import StoreLayoutModel
+
+        layout = await db.get(StoreLayoutModel, layout_id) or layout
+    # zones / cameras / products default to the blueprint, the cameras table
+    # and the Studio product zones (tests inject them).
+    if zones is None:
+        zones = await store_layout_service.list_zones(db, layout.id) if layout is not None else []
+    if cameras is None:
+        cameras = list((await db.execute(select(CameraModel))).scalars().all())
+    from app.services.camera_roles import PRODUCT_AREA_ROLES, ROLE_PRESETS, preset
+
+    roles = {c.id: (getattr(c, "role", None) if getattr(c, "role", None) in ROLE_PRESETS else None)
+             for c in cameras}
+    names = {c.id: (getattr(c, "name", None) or c.id) for c in cameras}
+
+    presence = [r for r in await hh.load_rows(db, "floor", None, "presence", win_start, win_end, hh.DAY_MINUTES)
+                if r.total_samples > 0]
+    summary: dict[str, Any] = {"window": _period(days), "days_with_floor_history": len(presence),
+                               "days_required": min_days}
+
+    def not_enough(rule: str, have: int, need: int, what: str = "days with floor presence recorded") -> str:
+        return f"{rule}: not enough recorded history ({have} of {need} {what})"
+
+    # ---- shared floor geometry
+    ref = max(presence, key=lambda r: r.bucket_start) if presence else None
+    zone_masks: dict[str, Any] = {}
+    covered_ids: set = set()
+    if ref is not None and layout is not None:
+        shape = (ref.grid_w, ref.grid_h, ref.width_m, ref.height_m)
+        presence = [r for r in presence if (r.grid_w, r.grid_h, r.width_m, r.height_m) == shape]
+        cover = hh.floor_coverage_mask(cameras, ref.width_m, ref.height_m, ref.grid_w, ref.grid_h)
+        for z in zones:
+            m = hh.polygon_cells(z.polygon or [], ref.width_m, ref.height_m, ref.grid_w, ref.grid_h)
+            if not m.any():
+                continue
+            zone_masks[z.id] = m
+            if (cover & m).sum() / m.sum() >= settings.HEATMAP_MIN_ZONE_COVERAGE:
+                covered_ids.add(z.id)
+        summary["zones_in_camera_view"] = len(covered_ids)
+
+    # ---- 1. dead space
+    if len(presence) < min_days:
+        suppressed.append(not_enough("heatmap_dead_space", len(presence), min_days))
+    else:
+        cand = [z for z in zones if z.category in _DEAD_SPACE_CATEGORIES and z.id in zone_masks]
+        covered = [z for z in cand if z.id in covered_ids]
+        uncovered = [z.name for z in cand if z.id not in covered_ids]
+        if uncovered:
+            suppressed.append("heatmap_dead_space: not judged, no calibrated camera covers "
+                              + ", ".join(uncovered[:5]))
+        if len(covered) < 3:
+            suppressed.append("heatmap_dead_space: needs at least 3 aisle/department/shelf zones "
+                              f"in view of a calibrated camera ({len(covered)} now)")
+        else:
+            per_day = []   # (row, {zone_id: visitors per cell}, median)
+            for r in presence:
+                g = hh.row_grid(r)
+                dens = {z.id: float(g[zone_masks[z.id]].mean()) for z in covered}
+                per_day.append((r, dens, float(np.median(list(dens.values())))))
+            need = math.ceil(settings.HEATMAP_DEAD_SPACE_DAY_SHARE * len(per_day))
+            for z in covered:
+                cold = [(r, d[z.id], med) for (r, d, med) in per_day
+                        if med > 0 and d[z.id] < settings.HEATMAP_DEAD_SPACE_RATIO * med]
+                if len(cold) < need:
+                    continue
+                mean_z = sum(d[z.id] for (_r, d, _m) in per_day) / len(per_day)
+                mean_med = sum(m for (_r, _d, m) in per_day) / len(per_day)
+                used_days = sorted(hh.day_of(r.bucket_start) for (r, _d, _m) in per_day)
+                findings.append(Finding(
+                    category="HEATMAP_DEAD_SPACE", severity="MEDIUM", zone=z.name,
+                    finding=(f"{z.name} stayed cold on {len(cold)} of {len(per_day)} recorded days: "
+                             f"{mean_z:.1f} visitors per cell per day against a median of {mean_med:.1f} "
+                             "across the zones cameras cover."),
+                    root_cause=("Shoppers are not routing through this area: it may be off the main path, "
+                                "blocked, poorly signed or holding low-draw categories."),
+                    action_item=(f"Walk {z.name}: check sightlines and signage, and consider moving a "
+                                 "destination or promoted category into it."),
+                    evidence={"snapshot_ids": [r.id for (r, _d, _m) in per_day], "period": _period(used_days),
+                              "cold_days": len(cold), "recorded_days": len(per_day),
+                              "zone_visitors_per_cell_per_day": round(mean_z, 2),
+                              "median_zone_visitors_per_cell_per_day": round(mean_med, 2),
+                              "ratio_threshold": settings.HEATMAP_DEAD_SPACE_RATIO},
+                ))
+
+    # ---- 2. hot-spot shift, week over week
+    if layout is not None:
+        this_days = [today - timedelta(days=i) for i in range(7, 0, -1)]
+        prev_days = [today - timedelta(days=i) for i in range(14, 7, -1)]
+        weeks = []
+        for ds in (prev_days, this_days):
+            rows = [r for r in await hh.load_rows(db, "floor", None, "presence", local_midnight_utc(ds[0]),
+                                                  local_midnight_utc(ds[-1] + timedelta(days=1)), hh.DAY_MINUTES)
+                    if r.total_samples > 0]
+            weeks.append((ds, rows))
+        need = settings.HEATMAP_SHIFT_MIN_DAYS
+        have = min(len(weeks[0][1]), len(weeks[1][1]))
+        if have < need:
+            suppressed.append(not_enough("heatmap_hotspot_shift", have, need,
+                                         "days recorded in each of the last two weeks"))
+        else:
+            s_prev, s_now = hh.sum_rows(weeks[0][1]), hh.sum_rows(weeks[1][1])
+            r_now = s_now["ref"]
+            if (s_prev["ref"].grid_w, s_prev["ref"].grid_h, s_prev["ref"].width_m, s_prev["ref"].height_m) != \
+                    (r_now.grid_w, r_now.grid_h, r_now.width_m, r_now.height_m):
+                suppressed.append("heatmap_hotspot_shift: the blueprint was resized between the two weeks")
+            elif min(s_prev["grid"].sum(), s_now["grid"].sum()) < settings.HEATMAP_SHIFT_MIN_PASSES:
+                suppressed.append(f"heatmap_hotspot_shift: not enough recorded history (fewer than "
+                                  f"{settings.HEATMAP_SHIFT_MIN_PASSES} visitor-cell passes in a week)")
+            else:
+                # Only cells seen in both weeks, so a camera added or lost is not read as a shift.
+                both = (s_prev["grid"] > 0) & (s_now["grid"] > 0)
+                a = np.where(both, s_prev["grid"] / len(s_prev["used"]), 0.0)
+                b = np.where(both, s_now["grid"] / len(s_now["used"]), 0.0)
+                ca, cb = hh.weighted_centroid(a), hh.weighted_centroid(b)
+                if ca and cb:
+                    sx, sy = r_now.width_m / r_now.grid_w, r_now.height_m / r_now.grid_h
+                    pa = (ca[0] * sx, ca[1] * sy)
+                    pb = (cb[0] * sx, cb[1] * sy)
+                    dist = math.hypot(pb[0] - pa[0], pb[1] - pa[1])
+                    summary["hotspot_shift_m"] = round(dist, 1)
+                    if dist >= settings.HEATMAP_SHIFT_MIN_M:
+                        za = _zone_at(zones, *pa) or f"the area at ({pa[0]:.1f} m, {pa[1]:.1f} m)"
+                        zb = _zone_at(zones, *pb) or f"the area at ({pb[0]:.1f} m, {pb[1]:.1f} m)"
+                        d_prev = sorted(hh.day_of(r.bucket_start) for r in s_prev["used"])
+                        d_now = sorted(hh.day_of(r.bucket_start) for r in s_now["used"])
+                        findings.append(Finding(
+                            category="HEATMAP_HOTSPOT_SHIFT", severity="LOW", zone=zb,
+                            finding=(f"The busiest part of the floor moved {dist:.1f} m week over week, "
+                                     f"from {za} to {zb}."),
+                            root_cause=("A change in layout, promotion, stock position or an obstruction "
+                                        "has redirected shopper traffic."),
+                            action_item=(f"Check what changed near {zb} and {za} this week, and whether "
+                                         "staffing and replenishment followed the traffic."),
+                            evidence={"snapshot_ids": [r.id for r in s_now["used"]],
+                                      "previous_snapshot_ids": [r.id for r in s_prev["used"]],
+                                      "period": _period(d_now), "previous_period": _period(d_prev),
+                                      "centroid_previous_m": [round(pa[0], 2), round(pa[1], 2)],
+                                      "centroid_now_m": [round(pb[0], 2), round(pb[1], 2)],
+                                      "distance_m": round(dist, 2)},
+                        ))
+
+    # ---- 3. congestion near checkout / entrance at peak hours
+    targets = [z for z in zones if z.category in _CONGESTION_CATEGORIES and z.id in zone_masks]
+    dwell_rows = await hh.load_rows(db, "floor", None, "dwell", win_start, win_end, hh.HOUR_MINUTES)
+    if ref is not None:
+        dwell_rows = [r for r in dwell_rows
+                      if (r.grid_w, r.grid_h, r.width_m, r.height_m) == (ref.grid_w, ref.grid_h, ref.width_m, ref.height_m)]
+    if not targets:
+        suppressed.append("heatmap_congestion: needs a checkout, entrance or exit zone on the blueprint")
+    else:
+        by_hour: dict[int, list] = {}
+        for r in dwell_rows:
+            by_hour.setdefault(to_local(r.bucket_start).hour, []).append((r, hh.row_grid(r)))
+        need = settings.HEATMAP_CONGESTION_MIN_DAYS_PER_HOUR
+        eligible = {h: rs for h, rs in by_hour.items() if len(rs) >= need}
+        judged = [z for z in targets if z.id in covered_ids]
+        for z in targets:
+            if z.id not in covered_ids:
+                suppressed.append(f"heatmap_congestion: {z.name} is not in view of a calibrated camera")
+        if not eligible:
+            best = max((len(rs) for rs in by_hour.values()), default=0)
+            suppressed.append(not_enough("heatmap_congestion", best, need,
+                                         "days recorded for any single hour of day"))
+        else:
+            for z in judged:
+                mask = zone_masks[z.id]
+                means = {h: sum(float(g[mask].sum()) / (r.bucket_minutes * 60.0) for (r, g) in rs) / len(rs)
+                         for h, rs in eligible.items()}
+                peak_h = max(means, key=means.get)
+                base_h = min(means, key=means.get)
+                excess = means[peak_h] - means[base_h]
+                if excess < settings.HEATMAP_CONGESTION_MIN_PEOPLE:
+                    continue
+                used = eligible[peak_h]
+                findings.append(Finding(
+                    category="HEATMAP_CONGESTION", severity="HIGH", zone=z.name,
+                    finding=(f"Around {peak_h:02d}:00 an average of {means[peak_h]:.1f} people stand in {z.name} "
+                             f"({len(used)} recorded days), {excess:.1f} more than at its quietest hour "
+                             f"({base_h:02d}:00, {means[base_h]:.1f})."),
+                    root_cause=("Arrivals outpace service or the doorway at this hour; the figure includes staff, "
+                                "who are part of the quiet-hour baseline."),
+                    action_item=f"Add a lane or door staff in {z.name} from about {peak_h:02d}:00.",
+                    evidence={"snapshot_ids": [r.id for (r, _g) in used],
+                              "baseline_snapshot_ids": [r.id for (r, _g) in eligible[base_h]],
+                              "period": _period(sorted(hh.day_of(r.bucket_start) for (r, _g) in used)),
+                              "peak_hour_local": f"{peak_h:02d}:00", "avg_people_at_peak": round(means[peak_h], 2),
+                              "quietest_hour_local": f"{base_h:02d}:00",
+                              "avg_people_at_quietest": round(means[base_h], 2)},
+                ))
+
+    # ---- 3b. congestion on checkout / entrance / exit cameras (by role, image space)
+    need = settings.HEATMAP_CONGESTION_MIN_DAYS_PER_HOUR
+    for cam, role in roles.items():
+        if role not in _congestion_roles():
+            continue
+        rows = [r for r in await hh.load_rows(db, "image", cam, "dwell", win_start, win_end, hh.HOUR_MINUTES)]
+        by_hour_c: dict[int, list] = {}
+        for r in rows:
+            by_hour_c.setdefault(to_local(r.bucket_start).hour, []).append(r)
+        eligible_c = {h: rs for h, rs in by_hour_c.items() if len(rs) >= need}
+        label = f"{names[cam]} ({preset(role).label})"
+        if not eligible_c:
+            best = max((len(rs) for rs in by_hour_c.values()), default=0)
+            suppressed.append(not_enough(f"heatmap_congestion[{cam}]", best, need,
+                                         "days recorded for any single hour of day"))
+            continue
+        means = {h: sum(r.total_value / (r.bucket_minutes * 60.0) for r in rs) / len(rs)
+                 for h, rs in eligible_c.items()}
+        peak_h, base_h = max(means, key=means.get), min(means, key=means.get)
+        excess = means[peak_h] - means[base_h]
+        if excess < settings.HEATMAP_CONGESTION_MIN_PEOPLE:
+            continue
+        used = eligible_c[peak_h]
+        findings.append(Finding(
+            category="HEATMAP_CONGESTION", severity="HIGH", zone=label,
+            finding=(f"Around {peak_h:02d}:00 an average of {means[peak_h]:.1f} people stand in view of "
+                     f"{label} ({len(used)} recorded days), {excess:.1f} more than at its quietest hour "
+                     f"({base_h:02d}:00, {means[base_h]:.1f})."),
+            root_cause=("Arrivals outpace service or the doorway at this hour; the figure includes staff "
+                        "in view, who are part of the quiet-hour baseline."),
+            action_item=(f"Open another lane or add door staff near {names[cam]} from about {peak_h:02d}:00."
+                         if role == "checkout" else
+                         f"Keep the doorway at {names[cam]} clear and staffed from about {peak_h:02d}:00."),
+            evidence={"snapshot_ids": [r.id for r in used],
+                      "baseline_snapshot_ids": [r.id for r in eligible_c[base_h]],
+                      "camera_id": cam, "camera_role": role,
+                      "period": _period(sorted(hh.day_of(r.bucket_start) for r in used)),
+                      "peak_hour_local": f"{peak_h:02d}:00", "avg_people_at_peak": round(means[peak_h], 2),
+                      "quietest_hour_local": f"{base_h:02d}:00",
+                      "avg_people_at_quietest": round(means[base_h], 2)},
+        ))
+
+    # ---- 4. browsed but not touched (image space, Studio product zones)
+    if products is None:
+        try:
+            from app.services.shelf_interaction_service import shelf_interaction_service
+
+            products = shelf_interaction_service.get_zones()
+        except Exception as e:  # never let product config break the trends
+            logger.warning(f"product zones unavailable for heatmap trends: {e}")
+            products = []
+    products = [p for p in products if getattr(p, "enabled", True)]
+    if not products:
+        suppressed.append("heatmap_browse_no_touch: no product shelf areas are mapped in Studio")
+    else:
+        by_cam: dict[str, list] = {}
+        for p in products:
+            by_cam.setdefault(p.camera_id, []).append(p)
+        for cam, prods in by_cam.items():
+            role = roles.get(cam)
+            if role is not None and role not in PRODUCT_AREA_ROLES:
+                # Standing at a checkout rack or a door is queuing or transit, not browsing.
+                suppressed.append(f"heatmap_browse_no_touch[{cam}]: not applied, camera role is "
+                                  f"{preset(role).label}; it applies to aisle and high-value cameras")
+                continue
+            severity = (preset(role).alert_severity_floor if role else None) or "MEDIUM"
+            dwell = {hh.day_of(r.bucket_start): r for r in await hh.load_rows(
+                db, "image", cam, "dwell", win_start, win_end, hh.DAY_MINUTES) if r.total_samples > 0}
+            inter = {hh.day_of(r.bucket_start): r for r in await hh.load_rows(
+                db, "image", cam, "interaction", win_start, win_end, hh.DAY_MINUTES)}
+            used_days = sorted(d for d in dwell if d in inter)
+            if len(used_days) < min_days:
+                suppressed.append(not_enough(f"heatmap_browse_no_touch[{cam}]", len(used_days), min_days,
+                                             "days with both dwell and shelf-interaction recording"))
+                continue
+            d_rows = [dwell[d] for d in used_days]
+            i_rows = [inter[d] for d in used_days]
+            s_d, s_i = hh.sum_rows(d_rows), hh.sum_rows(i_rows)
+            gd, gi = s_d["grid"], s_i["grid"]
+            gh, gw = gd.shape
+            for p in prods:
+                xs = [pt.x for pt in p.points]
+                ys = [pt.y for pt in p.points]
+                if len(xs) < 3:
+                    continue
+                x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+                # Where the shopper's feet are while facing this shelf (approximate):
+                # the shelf's columns, from its top edge down by its own height.
+                ay1 = min(1.0, y1 + max(y1 - y0, 0.1))
+                cols = np.arange(gw)
+                rows_ = np.arange(gh)
+                cx, cy = (cols + 0.5) / gw, (rows_ + 0.5) / gh
+                approach = np.outer((cy >= y0) & (cy <= ay1), (cx >= x0) & (cx <= x1))
+                hx, hy = 0.5 / gw, 0.5 / gh
+                reach = np.outer((cy >= y0 - hy) & (cy <= y1 + hy), (cx >= x0 - hx) & (cx <= x1 + hx))
+                shopper_min = float(gd[approach].sum()) / 60.0
+                reaches = float(gi[reach].sum())
+                if shopper_min < settings.HEATMAP_BROWSE_MIN_SHOPPER_MIN:
+                    continue
+                rate = reaches / shopper_min
+                if rate >= settings.HEATMAP_BROWSE_MAX_REACHES_PER_MIN:
+                    continue
+                findings.append(Finding(
+                    category="HEATMAP_BROWSE_NO_TOUCH", severity=severity, zone=p.name,
+                    finding=(f"Shoppers spent {shopper_min:.0f} minutes in front of {p.name} over "
+                             f"{len(used_days)} recorded days but reached for it {int(reaches)} time(s) "
+                             f"({rate:.3f} reaches per shopper-minute)."),
+                    root_cause=("Browsed but not touched: the product is seen but not picked up -- price, "
+                                "facing, label clarity or stock condition."),
+                    action_item=f"Check price label, facings and stock condition of {p.name} (SKU {p.sku_id}).",
+                    evidence={"snapshot_ids": [r.id for r in d_rows], "interaction_snapshot_ids": [r.id for r in i_rows],
+                              "camera_id": cam, "camera_role": role, "period": _period(used_days),
+                              "shopper_minutes": round(shopper_min, 1), "reaches": int(reaches),
+                              "reaches_per_shopper_minute": round(rate, 4),
+                              "note": "area in front of the shelf is estimated in the camera image"},
+                ))
+
+    # ---- compact summary for the narration (numbers from snapshots only)
+    if len(presence) < min_days:
+        summary["status"] = "not enough recorded history"
+    else:
+        summary["status"] = "ok"
+        # Hourly floor dwell of the window (already filtered to the presence grid shape).
+        s = hh.sum_rows([r for r in dwell_rows if r.total_samples > 0])
+        if s["grid"] is not None and covered_ids:
+            tot = float(s["grid"].sum())
+            shares = sorted(((z.name, float(s["grid"][zone_masks[z.id]].sum()) / tot * 100.0)
+                             for z in zones if z.id in covered_ids), key=lambda t: -t[1]) if tot > 0 else []
+            summary["busiest_zones_by_dwell"] = [{"zone": n, "share_pct": round(v, 1)} for n, v in shares[:3]]
+            summary["quietest_zones_by_dwell"] = [{"zone": n, "share_pct": round(v, 1)} for n, v in shares[-2:]]
+        hourly_p = await hh.load_rows(db, "floor", None, "presence", win_start, win_end, hh.HOUR_MINUTES)
+        prof = [p for p in hh.hour_profile_from_rows(hourly_p) if p["mean_value"] is not None]
+        if prof:
+            summary["peak_hour_local"] = max(prof, key=lambda p: p["mean_value"])["label"]
+    summary["findings"] = [{"category": f.category, "zone": f.zone} for f in findings]
+    return {"findings": findings, "suppressed": suppressed, "summary": summary}
+
+
 class BusinessAnalysisService:
     """Generates, narrates and persists store recommendations."""
 
@@ -344,7 +744,8 @@ class BusinessAnalysisService:
                     return n
         return generative[0]
 
-    def narrate(self, findings: list[Finding], overview: dict, timeout: float = 90.0) -> dict:
+    def narrate(self, findings: list[Finding], overview: dict, timeout: float = 90.0,
+                heatmap_summary: Optional[dict] = None) -> dict:
         """Ask the local model for an executive summary of the findings.
 
         The generation budget is generous because this runs on demand, not on
@@ -377,7 +778,11 @@ class BusinessAnalysisService:
             "You are a retail operations analyst. Below are findings measured by an "
             "in-store camera analytics system, with the store's headline numbers.\n\n"
             f"Store metrics: {json.dumps({k: overview.get(k) for k in ('today_footfall', 'active_shoppers_now', 'avg_dwell_minutes', 'conversion_rate_pct', 'daily_revenue')})}\n"
-            f"Findings: {json.dumps(facts)}\n\n"
+            f"Findings: {json.dumps(facts)}\n"
+            # Compact recorded-heatmap summary (heatmap_trends); numbers from snapshots only.
+            + (f"Recorded heatmap history: {json.dumps(heatmap_summary, default=str)}\n"
+               if heatmap_summary else "")
+            + "\n"
             "Write a 3-sentence executive summary for the store manager. State what is "
             "happening, why it matters commercially, and what to do first. "
             "Use only the numbers given above. Do not invent figures. Do not use markdown."
@@ -480,6 +885,15 @@ class BusinessAnalysisService:
             logger.warning(f"Product reach summary unavailable: {e}")
         product_findings, product_suppressed = _detect_products(product_summary)
         findings.extend(product_findings)
+
+        # Trends over the recorded heatmap history (heatmap_trends).
+        heatmap = None
+        try:
+            heatmap = await heatmap_trends(db, layout_id)
+            findings.extend(heatmap["findings"])
+            product_suppressed = product_suppressed + heatmap["suppressed"]
+        except Exception as e:  # never let the history rules break the analysis
+            logger.warning(f"Heatmap trend rules unavailable: {e}")
         _order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
         findings.sort(key=lambda f: _order.get(f.severity, 9))
 
@@ -508,6 +922,9 @@ class BusinessAnalysisService:
                 }
                 if product_summary else None
             ),
+            "heatmap_trends": (
+                {"summary": heatmap["summary"], "findings": len(heatmap["findings"])} if heatmap else None
+            ),
             # Say plainly why an empty result is empty.
             "sufficient_data": assessable > 0 or bool(product_findings),
             "message": (
@@ -519,7 +936,8 @@ class BusinessAnalysisService:
             ),
         }
         if narrate:
-            result["narrative"] = self.narrate(findings, overview)
+            result["narrative"] = self.narrate(findings, overview,
+                                               heatmap_summary=heatmap["summary"] if heatmap else None)
         return result
 
     async def _persist(self, db: AsyncSession, findings: list[Finding]) -> None:

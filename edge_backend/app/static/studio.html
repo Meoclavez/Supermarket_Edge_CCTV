@@ -5,26 +5,30 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <!-- Colour theme before first paint (js/theme.js adds the header control). -->
   <script>(function(){var m=null;try{m=localStorage.getItem('edge_cctv_theme')}catch(e){}document.documentElement.setAttribute('data-theme',m==='light'||m==='system'?m:'dark')})();</script>
-  <title>Edge AI CCTV - Camera Studio & Zone Editor</title>
+  <title>Edge AI CCTV - Camera setup</title>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;800&family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap" rel="stylesheet">
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/static/css/style.css?v=2.1.5">
-  <script src="/static/js/auth.js?v=2.1.6"></script>
-  <script src="/static/js/theme.js?v=2.1.6" defer></script>
+  <link rel="stylesheet" href="/static/css/style.css?v=2.3.0">
+  <link rel="stylesheet" href="/static/css/studio_tools.css?v=2.3.0">
+  <script src="/static/js/auth.js?v=2.3.0"></script>
+  <script src="/static/js/theme.js?v=2.3.0" defer></script>
 </head>
 <body>
   <div class="app-container">
     <header class="header">
-      <div class="logo-group">
-        <a href="/dashboard" class="btn btn-primary btn-sm">⬅ Camera Matrix</a>
-        <a href="/dashboard#floorplan" class="btn btn-sm">🗺️ Blueprint</a>
-        <a href="/dashboard#analytics" class="btn btn-sm">📈 Analytics</a>
-        <div>
-          <div class="logo-title">CAMERA STUDIO &amp; ZONE EDITOR</div>
-          <div class="logo-sub">Per-camera tripwires, restricted areas, privacy masks and product shelves</div>
+      <div class="logo-group studio-logo-group">
+        <div class="studio-title-block">
+          <div class="logo-title">CAMERA SETUP</div>
+          <div class="logo-sub">Draw counting lines, staff-only areas, checkout and queue areas, privacy masks and product shelves on one camera</div>
         </div>
+        <nav class="studio-nav" aria-label="Back to the dashboard">
+          <a href="/dashboard#cameras" id="backToChecklist" class="btn btn-warning btn-sm studio-back-checklist" style="display:none;">← Back to setup checklist</a>
+          <a href="/dashboard#cameras" class="btn btn-primary btn-sm">⬅ Cameras</a>
+          <a href="/dashboard#map" class="btn btn-sm">Store map</a>
+          <a href="/dashboard#today" class="btn btn-sm">Today</a>
+        </nav>
       </div>
-      <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+      <div class="studio-badges header-actions">
         <span class="badge" id="sourceBadge">No camera selected</span>
         <span class="badge" id="fpsBadge" title="Frames per second the pipeline is actually reading">&mdash; FPS</span>
         <span class="badge" id="detectorBadge" title="Inference backend in use">&mdash;</span>
@@ -37,7 +41,7 @@
         <div id="cameraButtonsList" style="display: flex; gap: 6px;"></div>
       </div>
       <button type="button" class="btn btn-sm" onclick="loadStudioSources()">🔄 Reload cameras</button>
-      <a href="/dashboard#floorplan" class="btn btn-primary btn-sm">🔍 Find &amp; adopt cameras</a>
+      <a href="/dashboard#map" class="btn btn-primary btn-sm">+ Add cameras</a>
     </div>
 
     <div class="studio-grid">
@@ -48,23 +52,25 @@
           <div id="viewportEmpty" class="viewport-empty" style="display:none;"></div>
         </div>
 
-        <div class="studio-tools">
+        <div class="studio-tools" id="studioTools">
           <div style="display: flex; gap: 8px; flex-wrap: wrap;">
             <label for="zoneNameInput" class="sr-only" style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;">Zone label</label>
             <input type="text" id="zoneNameInput" name="zoneName" class="form-input" placeholder="Label for the zone you are drawing" aria-label="Zone label" style="flex: 1.5;" />
-            <span id="drawModeLabel" class="badge" style="align-self:center;">mode: none</span>
+            <span id="drawModeLabel" class="badge" style="align-self:center;">Choose a tool</span>
           </div>
-          <div style="display: flex; gap: 6px; flex-wrap: wrap;">
-            <button type="button" class="btn btn-sm" id="btnToolTripwire" style="flex: 1;" onclick="setDrawMode('TRIPWIRE')">🚪 Tripwire (2 pts)</button>
-            <button type="button" class="btn btn-danger btn-sm" id="btnToolRestricted" style="flex: 1.2;" onclick="setDrawMode('INTRUSION')">⛔ Restricted area (3+ pts)</button>
+          <div class="studio-tool-row">
+            <button type="button" class="btn btn-sm studio-tool-btn" id="btnToolTripwire" data-tool="tripwire" aria-pressed="false" style="flex: 1;" onclick="setDrawMode('TRIPWIRE')">🚪 Tripwire (2 pts)</button>
+            <button type="button" class="btn btn-danger btn-sm studio-tool-btn" id="btnToolRestricted" data-tool="restricted" aria-pressed="false" style="flex: 1.2;" onclick="setDrawMode('INTRUSION')">⛔ Restricted area (3+ pts)</button>
+            <button type="button" class="btn btn-sm studio-tool-btn qa-tool-btn" id="btnToolQueue" data-tool="checkout" aria-pressed="false" style="flex: 1.4;" onclick="setDrawMode('QUEUE')">🧾 Checkout / queue area (3+ pts)</button>
           </div>
-          <div style="display: flex; gap: 6px; flex-wrap: wrap;">
-            <button type="button" class="btn btn-primary btn-sm" style="flex: 1;" onclick="setDrawMode('EXCLUSION')">🌫️ Privacy mask (3+ pts)</button>
-            <button type="button" class="btn btn-warning btn-sm" style="flex: 1.2;" onclick="setDrawMode('PRODUCT_SHELF')">🛒 Product shelf (4+ pts)</button>
-            <button type="button" class="btn btn-success btn-sm" style="flex: 0.8;" onclick="saveDrawnZone()">💾 Save</button>
+          <div class="studio-tool-row">
+            <button type="button" class="btn btn-primary btn-sm studio-tool-btn" id="btnToolMask" data-tool="mask" aria-pressed="false" style="flex: 1;" onclick="setDrawMode('EXCLUSION')">🌫️ Privacy mask (3+ pts)</button>
+            <button type="button" class="btn btn-warning btn-sm studio-tool-btn" id="btnToolProduct" data-tool="product" aria-pressed="false" style="flex: 1.2;" onclick="setDrawMode('PRODUCT_SHELF')">🛒 Product shelf (4+ pts)</button>
+            <button type="button" class="btn btn-success btn-sm" id="btnSaveDrawn" style="flex: 0.8;" onclick="saveDrawnZone()">💾 Save</button>
             <button type="button" class="btn btn-sm" style="flex: 0.6;" onclick="undoPoint()">Undo</button>
             <button type="button" class="btn btn-danger btn-sm" style="flex: 0.6;" onclick="clearCanvasPoints()">✕ Cancel</button>
           </div>
+          <div id="toolHelp" class="studio-tool-help" aria-live="polite">Choose a tool above to see what it does.</div>
           <!-- Shown while drawing a privacy mask: what the mask does to video and analysis. -->
           <div id="maskModeRow" style="display: none; flex-direction: column; gap: 4px;">
             <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
@@ -162,6 +168,29 @@
             </div>
             <div id="restrictedFormStatus" class="form-status" aria-live="polite"></div>
           </div>
+          <!-- Checkout / queue area settings: shown while drawing or editing one. -->
+          <div id="queueFormRow" class="rule-form qa-form" style="display: none;">
+            <div class="rule-form-title" id="queueFormTitle">New checkout / queue area</div>
+            <div class="qa-explain">Draw around where customers stand at a till (Checkout lane) or wait in line (Queue line). The system times how long people stay there; it works without calibrating the camera.</div>
+            <div class="rule-form-grid">
+              <div class="form-group">
+                <label for="qaName">Name</label>
+                <input type="text" id="qaName" name="qaName" class="form-input" maxlength="80" placeholder="e.g. Till 1" />
+              </div>
+              <div class="form-group">
+                <label for="qaKind">Kind</label>
+                <select id="qaKind" name="qaKind" class="form-select">
+                  <option value="checkout">Checkout lane (time at the till)</option>
+                  <option value="queue">Queue line (waiting time)</option>
+                </select>
+              </div>
+            </div>
+            <div class="rule-form-actions">
+              <button type="button" class="btn btn-success btn-sm" id="btnSaveQueue" onclick="saveDrawnZone()">💾 Save area</button>
+              <button type="button" class="btn btn-sm" id="btnCancelQueue" onclick="clearCanvasPoints()">Cancel</button>
+            </div>
+            <div id="queueFormStatus" class="form-status" aria-live="polite"></div>
+          </div>
           <div id="drawStatus" class="form-status" aria-live="polite">Pick a tool, then click on the video to place points. Coordinates are stored relative to the camera frame.</div>
         </div>
 
@@ -196,6 +225,11 @@
         <div class="glass-card">
           <div class="card-title"><span>⛔ Restricted areas</span></div>
           <div id="intrusionListContainer"><div class="fp-empty">Loading…</div></div>
+        </div>
+
+        <div class="glass-card">
+          <div class="card-title"><span>🧾 Checkout &amp; queue areas</span></div>
+          <div id="queueAreasListContainer"><div class="fp-empty">Loading…</div></div>
         </div>
 
         <div class="glass-card">
@@ -302,6 +336,6 @@
 
   <div class="toast" id="toast">Notification</div>
 
-  <script src="/static/js/studio.js?v=2.1.6"></script>
+  <script src="/static/js/studio.js?v=2.3.0"></script>
 </body>
 </html>

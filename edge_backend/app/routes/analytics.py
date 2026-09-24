@@ -173,19 +173,166 @@ async def get_heatmaps(
     resolution_h: int = Query(30, ge=8, le=200),
     kind: str = Query("presence", pattern="^(presence|dwell|interaction)$",
                       description="presence = where people were, dwell = seconds spent, interaction = shelf reaches"),
+    presence_weighting: str = Query("samples", pattern="^(samples|tracks)$",
+                                    description="presence only: samples = one per recorded point, "
+                                                "tracks = visitors per cell (as the recorded history)"),
+    from_: Optional[str] = Query(None, alias="from", description="ISO start (default: today 00:00 store time)"),
+    to: Optional[str] = Query(None, description="ISO end, exclusive (default: end of today)"),
     db: AsyncSession = Depends(get_db),
 ):
     """Floor density of today's observations (presence, dwell or shelf interactions).
 
     Returns density_matrix=null when nothing has been observed, rather than the
-    synthetic Gaussian blobs this endpoint used to emit.
+    synthetic Gaussian blobs this endpoint used to emit. ``from``/``to``
+    select another window (tracks by start time).
     """
     layout = await _active_layout(db)
     start, end = day_bounds()
+    if from_ or to:
+        start = _parse_window_bound(from_, "from") or start
+        end = _parse_window_bound(to, "to") or end
+        if end <= start:
+            raise HTTPException(status_code=422, detail="'to' must be after 'from'")
+        if end - start > timedelta(days=93):
+            raise HTTPException(status_code=422, detail="window is limited to 93 days")
     return await retail_metrics_service.heatmap(
         db, layout.id, start, end, layout.width_m, layout.height_m,
-        grid_w=resolution_w, grid_h=resolution_h, kind=kind,
+        grid_w=resolution_w, grid_h=resolution_h, kind=kind, presence_weighting=presence_weighting,
     )
+
+
+# ------------------------------------------------ recorded heatmap history
+# services/heatmap_history.py. Snapshots are per store-local hour (bucket=hour)
+# or day (bucket=day). A bucket with no row was not recorded (camera or
+# pipeline off); a row with total_samples 0 was measured and empty.
+
+_HM_SPACE = Query("floor", pattern="^(floor|image)$", description="floor (metres) or image (one camera)")
+_HM_KIND = Query("presence", pattern="^(presence|dwell|interaction)$",
+                 description="presence = visitors per cell, dwell = seconds, interaction = shelf reaches")
+_HM_BUCKET = Query("hour", pattern="^(hour|day)$")
+
+
+def _hm_scope(space: str, camera_id: Optional[str]) -> Optional[str]:
+    if space == "image" and not camera_id:
+        raise HTTPException(status_code=422, detail="camera_id is required for space=image")
+    return camera_id if space == "image" else None
+
+
+def _hm_window(from_: Optional[str], to: Optional[str], default_days: int = 7,
+               names: tuple = ("from", "to")) -> tuple:
+    end = _parse_window_bound(to, names[1]) or utcnow()
+    start = _parse_window_bound(from_, names[0]) or (end - timedelta(days=default_days))
+    if end <= start:
+        raise HTTPException(status_code=422, detail=f"'{names[1]}' must be after '{names[0]}'")
+    if end - start > timedelta(days=400):
+        raise HTTPException(status_code=422, detail="window is limited to 400 days")
+    return start, end
+
+
+def _hm_minutes(bucket: str) -> int:
+    from app.services import heatmap_history as hh
+
+    return hh.HOUR_MINUTES if bucket == "hour" else hh.DAY_MINUTES
+
+
+@router.get("/heatmaps/history")
+async def get_heatmap_history(
+    space: str = _HM_SPACE,
+    camera_id: Optional[str] = Query(None),
+    kind: str = _HM_KIND,
+    from_: Optional[str] = Query(None, alias="from", description="ISO start (default: 7 days ago); no offset = store time"),
+    to: Optional[str] = Query(None, description="ISO end, exclusive (default: now)"),
+    bucket: str = _HM_BUCKET,
+    db: AsyncSession = Depends(get_db),
+):
+    """Recorded snapshot metadata in a range, with recorded / empty / not-recorded bucket counts."""
+    from app.services import heatmap_history as hh
+
+    cam = _hm_scope(space, camera_id)
+    start, end = _hm_window(from_, to)
+    out = await hh.history(db, space, cam, kind, start, end, _hm_minutes(bucket))
+    out["recorder"] = hh.heatmap_recorder.status()
+    # Oldest snapshot of this space/camera/kind at any time (not only this range), so
+    # the UI can tell "nothing recorded yet" from "nothing in this range".
+    from sqlalchemy import func as _f
+    from app.models.db_models import HeatmapSnapshotModel as _H
+
+    q = select(_f.min(_H.bucket_start)).where(_H.space == space, _H.kind == kind)
+    q = q.where(_H.camera_id == cam) if cam else q.where(_H.camera_id.is_(None))
+    out["first_recorded"] = hh.iso_z(await db.scalar(q))
+    return out
+
+
+@router.get("/heatmaps/snapshot/{snapshot_id}")
+async def get_heatmap_snapshot(snapshot_id: int, db: AsyncSession = Depends(get_db)):
+    """One snapshot with its decoded grid (raw ``values`` and normalised ``density_matrix``)."""
+    from app.models.db_models import HeatmapSnapshotModel
+    from app.services import heatmap_history as hh
+
+    row = await db.get(HeatmapSnapshotModel, snapshot_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="heatmap snapshot not found")
+    return {**hh.snapshot_meta(row), **hh.grid_payload(hh.row_grid(row), row.kind)}
+
+
+@router.get("/heatmaps/aggregate")
+async def get_heatmap_aggregate(
+    space: str = _HM_SPACE,
+    camera_id: Optional[str] = Query(None),
+    kind: str = _HM_KIND,
+    from_: Optional[str] = Query(None, alias="from"),
+    to: Optional[str] = Query(None),
+    bucket: str = _HM_BUCKET,
+    db: AsyncSession = Depends(get_db),
+):
+    """Sum of the recorded snapshots in a range, citing the snapshot ids used."""
+    from app.services import heatmap_history as hh
+
+    cam = _hm_scope(space, camera_id)
+    start, end = _hm_window(from_, to)
+    return await hh.aggregate(db, space, cam, kind, start, end, _hm_minutes(bucket))
+
+
+@router.get("/heatmaps/compare")
+async def get_heatmap_compare(
+    a_from: str = Query(...), a_to: str = Query(...), b_from: str = Query(...), b_to: str = Query(...),
+    space: str = _HM_SPACE,
+    camera_id: Optional[str] = Query(None),
+    kind: str = _HM_KIND,
+    bucket: str = _HM_BUCKET,
+    db: AsyncSession = Depends(get_db),
+):
+    """Period B minus period A, per recorded hour (so unequal periods compare fairly), plus a summary."""
+    from app.services import heatmap_history as hh
+
+    cam = _hm_scope(space, camera_id)
+    a = _hm_window(a_from, a_to, names=("a_from", "a_to"))
+    b = _hm_window(b_from, b_to, names=("b_from", "b_to"))
+    return await hh.compare(db, space, cam, kind, a, b, _hm_minutes(bucket))
+
+
+@router.get("/heatmaps/hour-profile")
+async def get_heatmap_hour_profile(
+    space: str = _HM_SPACE,
+    camera_id: Optional[str] = Query(None),
+    kind: str = _HM_KIND,
+    days: int = Query(14, ge=1, le=90),
+    hour: Optional[int] = Query(None, ge=0, le=23, description="also return the mean grid of this store-local hour"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Store-local hour-of-day pattern: per hour, the mean over the days that recorded it."""
+    from app.services import heatmap_history as hh
+
+    cam = _hm_scope(space, camera_id)
+    return await hh.hour_profile(db, space, cam, kind, days, hour)
+
+
+@router.post("/heatmaps/record-now")
+async def post_heatmap_record_now():
+    """Close and record the current partial hour now (``complete: false`` until the hour ends)."""
+    from app.services import heatmap_history as hh
+
+    return await hh.heatmap_recorder.record_now()
 
 
 @router.get("/funnels")
@@ -209,7 +356,7 @@ async def get_funnels_data(db: AsyncSession = Depends(get_db)):
 
 @router.get("/queues")
 async def get_checkout_queues(db: AsyncSession = Depends(get_db)):
-    """Queue state per CHECKOUT zone, from live occupancy and measured dwell."""
+    """Queue state per checkout lane (blueprint CHECKOUT zones and Studio checkout / queue areas)."""
     layout = await _active_layout(db)
     start, end = day_bounds()
     lanes = await retail_metrics_service.checkout_queues(db, layout.id, start, end)
@@ -219,7 +366,8 @@ async def get_checkout_queues(db: AsyncSession = Depends(get_db)):
         "observed": any(l["observed"] for l in lanes),
         "message": (
             None if lanes
-            else "No zones are categorised as CHECKOUT. Draw one on the blueprint to measure queues."
+            else "No checkout lanes yet. Draw a checkout or queue area on a Checkout camera in Studio, "
+                 "or a CHECKOUT zone on the blueprint (calibrated cameras), to measure queues."
         ),
     }
 
@@ -328,8 +476,9 @@ async def get_daily_executive_report(
     overview = await retail_metrics_service.overview(db, layout.id, settings.STORE_NAME)
     funnel = await retail_metrics_service.funnel(db, layout.id, *day_bounds())
     queues = await retail_metrics_service.checkout_queues(db, layout.id, *day_bounds())
+    # Read-only: a GET never persists findings (POST /business/analysis/run does).
     analysis = await business_analysis_service.analyse(
-        db, layout.id, persist=True, narrate=narrate
+        db, layout.id, persist=False, narrate=narrate
     )
 
     def fmt(value, suffix="", prefix=""):
@@ -348,6 +497,15 @@ async def get_daily_executive_report(
             "daily_revenue": fmt(overview["daily_revenue"], prefix="$"),
             # Hand reaches to mapped product shelves (shelf_interactions rows).
             "shelf_reaches": fmt((analysis.get("product_reach") or {}).get("reaches") or None),
+        },
+        # Human labels for the scorecard keys (the UI used to title-case snake_case).
+        "kpi_scorecard_labels": {
+            "total_footfall": "Visitors today",
+            "shoppers_now": "In store now",
+            "avg_dwell": "Average time in store",
+            "conversion": "Visitors who bought",
+            "daily_revenue": "Sales today",
+            "shelf_reaches": "Shelf reaches",
         },
         "coverage": overview["coverage"],
         "funnel": funnel,
@@ -377,7 +535,7 @@ async def get_daily_executive_report(
 
     if format_type == "html":
         rows = "".join(
-            f"<tr><td>{k.replace('_', ' ').title()}</td><td><b>{v}</b></td></tr>"
+            f"<tr><td>{report['kpi_scorecard_labels'].get(k) or k.replace('_', ' ').title()}</td><td><b>{v}</b></td></tr>"
             for k, v in report["kpi_scorecard"].items()
         )
         findings_html = "".join(
@@ -722,15 +880,34 @@ async def get_market_llm_status():
 
 
 @router.post("/market/llm-optimize")
-async def trigger_llm_market_optimizations(db: AsyncSession = Depends(get_db)):
+async def trigger_llm_market_optimizations(request: Request, db: AsyncSession = Depends(get_db)):
     """Run the business analysis and narrate it with the local model.
 
     This used to feed the model a set of hardcoded shelf counters and a canned
     traffic curve, then fall back to a templated string when the six-second
     budget expired -- which it always did -- while reporting the model active.
     """
-    layout = await _active_layout(db)
-    return await business_analysis_service.analyse(db, layout.id, persist=True, narrate=True)
+    # Recorded as a run (analysis_runs) and rate-limited like POST
+    # /business/analysis/run. Inside the limit, or while a run is going, the
+    # latest recorded run is returned (``reused_run``) instead of running again,
+    # so a page that fires this on every open cannot hammer the model.
+    from app.services.actor import describe_actor
+    from app.services.recommendations_service import RunInProgress, RunRateLimited, recommendations_service
+
+    try:
+        run = await recommendations_service.run(
+            db, trigger="market", requested_by=await describe_actor(request, db), narrate=True)
+        return {**(run["result"] or {}), "run": {k: v for k, v in run.items() if k != "result"},
+                "reused_run": False}
+    except (RunRateLimited, RunInProgress) as e:
+        latest = await recommendations_service.latest_row(db, narrated=True) or await recommendations_service.latest_row(db)
+        if latest is None:
+            raise HTTPException(status_code=409, detail="An analysis is already running; try again shortly.")
+        from app.services.recommendations_service import serialize_run
+
+        run = serialize_run(latest)
+        return {**(run["result"] or {}), "run": {k: v for k, v in run.items() if k != "result"},
+                "reused_run": True, "retry_after": getattr(e, "retry_after", None)}
 
 
 # ---------------- 13. System Database Backup & Restore Endpoints ----------------
@@ -796,16 +973,21 @@ async def get_business_analysis(
     narrate: bool = Query(False, description="Also ask the local model for an executive summary"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Run the rule engine over today's observations and persist the findings.
+    """Evaluate the rule engine over today's observations, read-only.
 
-    Findings are deterministic and cite the metrics that triggered them. The
-    local model, when asked for, only narrates them -- it never contributes a
-    number or a finding of its own.
+    Nothing is persisted: a GET never writes. Recording a run (and refreshing
+    the stored recommendations) is ``POST /business/analysis/run``; the last
+    recorded run is ``GET /business/analysis/latest`` and the dashboard list
+    is ``GET /recommendations``. Findings are deterministic and cite the
+    metrics that triggered them. The local model, when asked for, only
+    narrates them -- it never contributes a number or a finding of its own.
     """
     layout = await _active_layout(db)
-    return await business_analysis_service.analyse(
-        db, layout.id, persist=True, narrate=narrate
+    result = await business_analysis_service.analyse(
+        db, layout.id, persist=False, narrate=narrate
     )
+    result["persisted"] = False
+    return result
 
 
 @router.get("/business/model-status")

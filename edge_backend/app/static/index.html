@@ -5,63 +5,69 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <!-- Colour theme before first paint (js/theme.js adds the header control). -->
   <script>(function(){var m=null;try{m=localStorage.getItem('edge_cctv_theme')}catch(e){}document.documentElement.setAttribute('data-theme',m==='light'||m==='system'?m:'dark')})();</script>
-  <title>Edge AI CCTV - Retail Intelligence & Multi-Camera Matrix</title>
-  
-  <!-- Modern Fonts -->
+  <title>Edge AI CCTV - Store dashboard</title>
+
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;800&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  
-  <!-- Cyber-Glassmorphism Stylesheet -->
-  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/static/css/style.css?v=2.1.5" />
-  <link rel="stylesheet" href="/static/css/floorplan.css?v=2.1.5" />
-  <script src="/static/js/auth.js?v=2.1.6"></script>
-  <script src="/static/js/theme.js?v=2.1.6" defer></script>
 
-  <!-- Chart.js for High-Performance Canvas Graphs -->
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/css/style.css?v=2.3.0" />
+  <link rel="stylesheet" href="/static/css/floorplan.css?v=2.3.0" />
+  <link rel="stylesheet" href="/static/css/loss.css?v=2.3.0" />
+  <link rel="stylesheet" href="/static/css/insights.css?v=2.3.0" />
+  <link rel="stylesheet" href="/static/css/camera_roles.css?v=2.3.0" />
+  <link rel="stylesheet" href="/static/css/heatmap_history.css?v=2.3.0" />
+  <script src="/static/js/auth.js?v=2.3.0"></script>
+  <script src="/static/js/theme.js?v=2.3.0" defer></script>
+
+  <!-- Chart.js for the visitors-by-hour charts -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
   <div class="dashboard-shell">
-    <!-- Top Navigation Header -->
+    <!-- Header: store name, the five destinations, and Settings behind the gear.
+         theme.js and auth.js mount the theme switch and Sign out into .header-actions. -->
     <header class="top-nav-header">
       <div class="brand-group">
-        <span class="brand-logo-glow">👁️</span>
+        <span class="brand-logo-glow" aria-hidden="true">👁️</span>
         <div class="brand-titles">
-          <h1 class="brand-title">EDGE AI CCTV SURVEILLANCE</h1>
+          <h1 class="brand-title" id="brandTitle">Store dashboard</h1>
           <span class="brand-subtitle" id="brandSubtitle">&mdash;</span>
         </div>
       </div>
 
-      <div class="hardware-telemetry-hud">
-        <div class="telemetry-item">
-          <span class="telemetry-label">Decoder</span>
-          <span class="telemetry-val" id="telemetryDecoderBadge" style="color: var(--accent-cyan);">&mdash;</span>
-        </div>
-        <div class="telemetry-item">
-          <span class="telemetry-label">AI Engine</span>
-          <span class="telemetry-val" id="telemetryInferenceBadge" style="color: var(--accent-green);">&mdash;</span>
-        </div>
-        <div class="telemetry-item">
-          <span class="telemetry-label">CPU / RAM</span>
-          <span class="telemetry-val" id="telemetryCpuVal">&mdash;</span>
-          <span class="telemetry-val" id="telemetryRamVal" style="color: var(--text-dim); font-size: 10px;">&mdash;</span>
-        </div>
-        <div class="telemetry-item">
-          <span class="telemetry-label">Edge Uptime</span>
-          <span class="telemetry-val" id="telemetryUptimeVal">&mdash;</span>
-        </div>
-      </div>
+      <nav class="tab-nav-bar" id="mainNav" aria-label="Main">
+        <button type="button" class="tab-btn" data-tab="today" onclick="switchTab('today')">
+          <span class="tab-icon" aria-hidden="true">🏠</span><span class="tab-label">Today</span>
+        </button>
+        <button type="button" class="tab-btn" data-tab="cameras" onclick="switchTab('cameras')">
+          <span class="tab-icon" aria-hidden="true">📹</span><span class="tab-label">Cameras</span>
+          <span class="tab-count" id="matrixCamCountBadge" title="Cameras configured">0</span>
+        </button>
+        <button type="button" class="tab-btn" data-tab="map" onclick="switchTab('map')">
+          <span class="tab-icon" aria-hidden="true">🗺️</span><span class="tab-label" data-short="Map">Store map</span>
+        </button>
+        <button type="button" class="tab-btn" data-tab="insights" onclick="switchTab('insights')">
+          <span class="tab-icon" aria-hidden="true">📈</span><span class="tab-label">Insights</span>
+          <span class="tab-count" id="tabActionCountBadge" title="Open recommendations" hidden>0</span>
+        </button>
+        <button type="button" class="tab-btn" data-tab="loss" onclick="switchTab('loss')">
+          <span class="tab-icon" aria-hidden="true">🚨</span><span class="tab-label" data-short="Alerts">Loss prevention</span>
+          <span class="tab-count tab-count-alert" id="tabTheftCountBadge" title="Incidents waiting for review" hidden>0</span>
+        </button>
+      </nav>
 
       <div class="header-actions">
-        <button class="btn btn-sm" onclick="switchTab('floorplan')">🔍 Find cameras</button>
-        <a href="/dashboard/studio" class="btn btn-primary btn-sm">🎨 Camera Studio</a>
+        <button type="button" class="btn btn-sm header-gear" data-tab="settings" onclick="switchTab('settings')"
+                id="navSettings" title="Settings: cameras, phones, online access, sales data, system health" aria-label="Settings">
+          <span aria-hidden="true">⚙️</span><span class="header-gear-label">Settings</span>
+        </button>
       </div>
     </header>
 
-    <!-- Top Floating Theft Warning Alert Banner -->
-    <div id="theftAlertBanner" class="theft-banner" style="margin-bottom: 12px; display: none;">
+    <!-- BANNER:BEGIN (loss.js owns this region: the theft alert banner) -->
+    <div id="theftAlertBanner" class="theft-banner" style="display: none;">
       <div class="theft-banner-left">
         <span class="theft-banner-icon">🚨</span>
         <div>
@@ -76,193 +82,215 @@
         </div>
       </div>
       <div class="theft-banner-actions">
-        <button class="btn btn-danger btn-sm" id="btnBannerDispatch" onclick="dispatchGuardFromBanner()">🚨 Dispatch Guard</button>
-        <button class="btn btn-primary btn-sm" onclick="switchTab('theft'); scrollToTheftIncident()">👁️ View Details</button>
-        <button class="btn btn-sm" onclick="dismissTheftBanner()">Dismiss ✕</button>
+        <button type="button" class="btn btn-primary btn-sm" data-banner="review">Review now</button>
+        <button type="button" class="btn btn-sm" data-banner="dismiss" title="Hide until the next new incident">Dismiss</button>
       </div>
     </div>
-
-    <!-- Headline KPIs. Values are placeholders only until the first poll;
-         anything not observed renders as an em dash, never as zero. -->
-    <div id="dataStateBanner" class="data-state-banner" role="status" style="display:none;"></div>
-    <section class="overview-strip">
-      <div class="stat-box">
-        <span class="stat-label">Store Footfall Today</span>
-        <span class="stat-val metric-unobserved" id="kpiFootfallToday">&mdash;</span>
-      </div>
-      <div class="stat-box">
-        <span class="stat-label">Shoppers In Store Now</span>
-        <span class="stat-val metric-unobserved" id="kpiActiveShoppers" style="color: var(--accent-green);">&mdash;</span>
-      </div>
-      <div class="stat-box">
-        <span class="stat-label">Avg Store Dwell</span>
-        <span class="stat-val metric-unobserved" id="kpiAvgDwell">&mdash;</span>
-      </div>
-      <div class="stat-box">
-        <span class="stat-label">Conversion Rate</span>
-        <span class="stat-val metric-unobserved" id="kpiConversion" style="color: var(--accent-cyan);">&mdash;</span>
-      </div>
-      <div class="stat-box">
-        <span class="stat-label">Revenue Today</span>
-        <span class="stat-val metric-unobserved" id="kpiRevenue">&mdash;</span>
-      </div>
-    </section>
-
-    <!-- Interactive Tabs Navigation Bar -->
-    <nav class="tab-nav-bar">
-      <button class="tab-btn active" data-tab="matrix" onclick="switchTab('matrix')">
-        <span>📹</span>
-        <span>Live Camera Matrix</span>
-        <span class="tab-count" id="matrixCamCountBadge">0</span>
-      </button>
-      <button class="tab-btn" data-tab="floorplan" onclick="switchTab('floorplan')">
-        <span>🗺️</span>
-        <span>2D Store Blueprint & Heatmap HUD</span>
-      </button>
-      <button class="tab-btn" data-tab="analytics" onclick="switchTab('analytics')">
-        <span>📈</span>
-        <span>Retail Analytics & Funnels</span>
-      </button>
-      <button class="tab-btn" data-tab="actions" onclick="switchTab('actions')">
-        <span>⚡</span>
-        <span>AI Decision Action Center</span>
-        <span class="tab-count" id="tabActionCountBadge">0</span>
-      </button>
-      <button class="tab-btn" data-tab="market_ai" onclick="switchTab('market_ai')">
-        <span>🧠</span>
-        <span>ML Market Intelligence & Suggestions</span>
-        <span class="tab-count tab-count-ai">AI</span>
-      </button>
-      <button class="tab-btn" data-tab="theft" onclick="switchTab('theft')">
-        <span>🚨</span>
-        <span>Loss Prevention & Theft AI</span>
-        <span class="tab-count" id="tabTheftCountBadge">0</span>
-      </button>
-      <button class="tab-btn" data-tab="digest" onclick="switchTab('digest')">
-        <span>📑</span>
-        <span>Executive Daily Digest</span>
-      </button>
-      <button class="tab-btn" data-tab="settings" onclick="switchTab('settings')">
-        <span>⚙️</span>
-        <span>Settings</span>
-      </button>
-    </nav>
+    <!-- BANNER:END -->
 
     <!-- ==========================================
-         TAB 1: Live Camera Matrix
+         TODAY (js/today.js): the home screen after sign-in.
+         Every figure comes from the API; anything not measured says so.
          ========================================== -->
-    <main id="tab-matrix" class="tab-view active">
+    <main id="tab-today" class="tab-view">
+      <div id="dataStateBanner" class="data-state-banner" role="status" style="display:none;"></div>
+
+      <section class="overview-strip today-kpis" aria-label="Today at a glance">
+        <div class="stat-box" id="kpiCamerasBox">
+          <span class="stat-label">Cameras working</span>
+          <span class="stat-val metric-unobserved" id="kpiCameras">&mdash;</span>
+          <span class="stat-note" id="kpiCamerasNote"></span>
+        </div>
+        <div class="stat-box">
+          <span class="stat-label">In the store now</span>
+          <span class="stat-val metric-unobserved" id="kpiActiveShoppers">&mdash;</span>
+          <span class="stat-note" id="kpiActiveShoppersNote"></span>
+        </div>
+        <div class="stat-box">
+          <span class="stat-label">Visitors today</span>
+          <span class="stat-val metric-unobserved" id="kpiFootfallToday">&mdash;</span>
+          <span class="stat-note" id="kpiFootfallSource"></span>
+        </div>
+        <div class="stat-box">
+          <span class="stat-label">Busiest hour so far</span>
+          <span class="stat-val metric-unobserved" id="kpiBusiestHour">&mdash;</span>
+          <span class="stat-note" id="kpiBusiestHourNote"></span>
+        </div>
+        <div class="stat-box">
+          <span class="stat-label">Average visit</span>
+          <span class="stat-val metric-unobserved" id="kpiAvgDwell">&mdash;</span>
+          <span class="stat-note">time a shopper spends inside</span>
+        </div>
+        <div class="stat-box" id="kpiSalesBox">
+          <span class="stat-label">Sales today</span>
+          <span class="stat-val metric-unobserved" id="kpiRevenue">&mdash;</span>
+          <span class="stat-note" id="kpiSalesNote"></span>
+        </div>
+      </section>
+
+      <div class="today-grid">
+        <div class="today-col today-col-main">
+          <div class="glass-card today-chart-card">
+            <div class="card-title">
+              <span>Visitors by hour</span>
+              <span class="badge metric-unobserved" id="todayHourlySource">&mdash;</span>
+            </div>
+            <div class="hourly-legend" id="todayHourlyLegend"></div>
+            <div class="chart-container hourly-chart"><canvas id="todayHourlyChart" aria-label="Visitors by hour today, with yesterday and the same day last week"></canvas></div>
+            <div class="hourly-note" id="todayHourlyNote"></div>
+          </div>
+
+          <div class="glass-card today-recs-card" id="todayRecsCard">
+            <div class="card-title">
+              <span>Top recommendations</span>
+              <button type="button" class="btn btn-sm" onclick="switchTab('insights')">All insights</button>
+            </div>
+            <div id="todayRecs" class="today-list"><div class="fp-empty">Loading…</div></div>
+          </div>
+        </div>
+        <div class="today-col today-col-side">
+          <div class="glass-card today-incidents-card" id="todayIncidentsCard">
+            <div class="card-title">
+              <span>Needs review</span>
+              <button type="button" class="btn btn-sm" onclick="switchTab('loss')">Open loss prevention</button>
+            </div>
+            <div id="todayIncidents" class="today-list"><div class="fp-empty">Loading…</div></div>
+          </div>
+
+          <div class="glass-card today-setup-card" id="todaySetupCard">
+            <div class="card-title">
+              <span>Store setup</span>
+              <span class="badge metric-unobserved" id="todaySetupScore">&mdash;</span>
+            </div>
+            <div id="todaySetup"><div class="fp-empty">Loading…</div></div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- ==========================================
+         CAMERAS: live matrix
+         ========================================== -->
+    <section id="tab-matrix" class="tab-view">
       <div class="controls-strip">
         <div class="filter-group" id="cameraFilterChips">
-          <span style="font-size: 11px; font-weight: 700; color: var(--text-dim); margin-right: 4px;">Area:</span>
+          <span class="filter-label">Area:</span>
           <!-- Pills are built from the departments cameras are actually assigned to. -->
         </div>
 
-        <div class="filter-group" id="fpsFilterChips">
-          <span style="font-size: 11px; font-weight: 700; color: var(--text-dim); margin-right: 4px;">FPS Throttle:</span>
-          <button type="button" class="fps-btn" data-fps="1" onclick="setDecimationFPS(1)">1 FPS</button>
-          <button type="button" class="fps-btn active" data-fps="5" onclick="setDecimationFPS(5)">5 FPS</button>
-          <button type="button" class="fps-btn" data-fps="15" onclick="setDecimationFPS(15)">15 FPS</button>
-          <button type="button" class="fps-btn" data-fps="25" onclick="setDecimationFPS(25)">25 FPS</button>
+        <div class="filter-group" id="fpsFilterChips" title="How many pictures per second each tile shows. Lower is lighter on this computer.">
+          <span class="filter-label">Video smoothness:</span>
+          <button type="button" class="fps-btn" data-fps="1" onclick="setDecimationFPS(1)">Low</button>
+          <button type="button" class="fps-btn active" data-fps="5" onclick="setDecimationFPS(5)">Normal</button>
+          <button type="button" class="fps-btn" data-fps="15" onclick="setDecimationFPS(15)">High</button>
         </div>
 
-        <div>
-          <label for="cameraSearchInput" class="sr-only" style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;">Search cameras</label>
+        <div class="controls-right">
+          <label for="cameraSearchInput" class="sr-only">Search cameras</label>
           <input type="text" id="cameraSearchInput" name="cameraSearch" class="search-input" placeholder="🔍 Search cameras..." oninput="filterCamerasBySearch(this.value)" aria-label="Search cameras" autocomplete="off" />
+          <button type="button" class="btn btn-sm btn-primary" onclick="openDeviceManager()">+ Add cameras</button>
         </div>
       </div>
 
       <div class="camera-grid" id="cameraMatrixGrid"></div>
-    </main>
+    </section>
 
     <!-- ==========================================
-         TAB 2: 2D Interactive Store Blueprint & Heatmap HUD
+         STORE MAP: blueprint editor, live people and heatmap
          ========================================== -->
     <section id="tab-floorplan" class="tab-view">
       <div class="blueprint-layout" id="fpLayout">
-        <div class="floorplan-wrapper" id="fpWrapper">
-          <canvas id="floorplanCanvas"></canvas>
-
+        <div class="fp-plan-col" id="fpPlanCol">
           <!-- Editor toolbar. Every control here writes to the database. -->
           <div class="floorplan-toolbar" id="fpToolbar">
             <div class="fp-tool-group">
-              <button class="btn btn-sm" onclick="blueprintEditor.zoom(1.2)" title="Zoom in">+</button>
-              <button class="btn btn-sm" onclick="blueprintEditor.zoom(0.8)" title="Zoom out">&minus;</button>
-              <button class="btn btn-sm" onclick="blueprintEditor.resetView()" title="Fit the whole store in view">Fit</button>
+              <button type="button" class="btn btn-sm" onclick="blueprintEditor.zoom(1.2)" title="Zoom in" aria-label="Zoom in">+</button>
+              <button type="button" class="btn btn-sm" onclick="blueprintEditor.zoom(0.8)" title="Zoom out" aria-label="Zoom out">&minus;</button>
+              <button type="button" class="btn btn-sm" onclick="blueprintEditor.resetView()" title="Fit the whole store in view">Fit</button>
             </div>
-            <span class="fp-sep"></span>
-            <div class="fp-tool-group" id="fpTools">
-              <button class="btn btn-sm fp-tool active" data-tool="view" onclick="blueprintEditor.setTool('view')" title="Select, move shapes, drag vertices (V)">Select</button>
-              <button class="btn btn-sm fp-tool" data-tool="ROOM" onclick="blueprintEditor.startDraw('ROOM')" title="Draw a room outline (R)"><span class="fp-tool-swatch fp-swatch-room"></span>Room</button>
-              <button class="btn btn-sm fp-tool" data-tool="WALL" onclick="blueprintEditor.startDraw('WALL')" title="Draw a wall polyline (W), hold Shift for straight segments"><span class="fp-tool-swatch fp-swatch-wall"></span>Wall</button>
-              <button class="btn btn-sm fp-tool" data-tool="SHELF" onclick="blueprintEditor.startDraw('SHELF')" title="Draw a shelf, counter or obstacle (S)"><span class="fp-tool-swatch fp-swatch-shelf"></span>Shelf</button>
-              <button class="btn btn-sm fp-tool" data-tool="DOOR" onclick="blueprintEditor.startDraw('DOOR')" title="Draw a door opening (D)"><span class="fp-tool-swatch fp-swatch-door"></span>Door</button>
-              <button class="btn btn-sm fp-tool btn-primary" data-tool="ZONE" onclick="blueprintEditor.startDrawZone()" title="Draw an analytics zone (Z)">Zone</button>
-              <button class="btn btn-sm" onclick="blueprintEditor.resizeStore()" title="Floor name and dimensions">Store size</button>
+            <span class="fp-sep fp-edit-only"></span>
+            <div class="fp-tool-group fp-edit-only" id="fpTools">
+              <button type="button" class="btn btn-sm fp-tool active" data-tool="view" onclick="blueprintEditor.setTool('view')" title="Select, move shapes, drag corners (V)">Select</button>
+              <button type="button" class="btn btn-sm fp-tool" data-tool="ROOM" onclick="blueprintEditor.startDraw('ROOM')" title="Draw a room outline (R)"><span class="fp-tool-swatch fp-swatch-room"></span>Room</button>
+              <button type="button" class="btn btn-sm fp-tool" data-tool="WALL" onclick="blueprintEditor.startDraw('WALL')" title="Draw a wall (W), hold Shift for straight segments"><span class="fp-tool-swatch fp-swatch-wall"></span>Wall</button>
+              <button type="button" class="btn btn-sm fp-tool" data-tool="SHELF" onclick="blueprintEditor.startDraw('SHELF')" title="Draw a shelf, counter or obstacle (S)"><span class="fp-tool-swatch fp-swatch-shelf"></span>Shelf</button>
+              <button type="button" class="btn btn-sm fp-tool" data-tool="DOOR" onclick="blueprintEditor.startDraw('DOOR')" title="Draw a door opening (D)"><span class="fp-tool-swatch fp-swatch-door"></span>Door</button>
+              <button type="button" class="btn btn-sm fp-tool btn-primary" data-tool="ZONE" onclick="blueprintEditor.startDrawZone()" title="Draw an area of the floor to measure, in metres on this map (Z). Shelf areas for hand reaches are drawn on the camera picture in Camera setup.">Store area</button>
+              <button type="button" class="btn btn-sm" onclick="blueprintEditor.resizeStore()" title="Floor name and dimensions">Store size</button>
             </div>
-            <span class="fp-sep"></span>
-            <label class="fp-toggle" for="fpSnap" title="Snap points to a 0.5 m grid"><input type="checkbox" id="fpSnap" name="fpSnap" checked onchange="blueprintEditor.toggleSnap(this.checked)"> Snap 0.5 m</label>
-            <span class="fp-mode">mode: <b id="fpMode">view</b></span>
+            <span class="fp-sep fp-edit-only"></span>
+            <label class="fp-toggle fp-edit-only" for="fpSnap" title="Snap points to a 0.5 m grid"><input type="checkbox" id="fpSnap" name="fpSnap" checked onchange="blueprintEditor.toggleSnap(this.checked)"> Snap 0.5 m</label>
+            <span class="fp-mode fp-edit-only" title="What a click on the map does now">Now: <b id="fpMode">view</b></span>
+            <button type="button" class="btn btn-sm fp-edit-toggle" id="fpEditToggle" aria-pressed="false" onclick="toggleMapEditing()">Edit map</button>
           </div>
 
+          <!-- What is drawn on the map, and the heatmap kind (js/floorplan.js mounts
+               the kind buttons, legend and note into #fpHeatBar). -->
           <div class="fp-layerbar" id="fpLayerBar">
-            <label class="fp-toggle" for="layerStructures"><input type="checkbox" id="layerStructures" name="layerStructures" checked onchange="blueprintEditor.toggleLayer('structures', this.checked)"> Structures</label>
-            <label class="fp-toggle" for="layerZones"><input type="checkbox" id="layerZones" name="layerZones" checked onchange="blueprintEditor.toggleLayer('zones', this.checked)"> Zones</label>
-            <label class="fp-toggle" for="layerCameras"><input type="checkbox" id="layerCameras" name="layerCameras" checked onchange="blueprintEditor.toggleLayer('cameras', this.checked)"> Cameras</label>
+            <span class="fp-bar-label fp-layer-opt">Show:</span>
+            <label class="fp-toggle fp-layer-opt" for="layerStructures"><input type="checkbox" id="layerStructures" name="layerStructures" checked onchange="blueprintEditor.toggleLayer('structures', this.checked)"> Walls &amp; shelves</label>
+            <label class="fp-toggle fp-layer-opt" for="layerZones"><input type="checkbox" id="layerZones" name="layerZones" checked onchange="blueprintEditor.toggleLayer('zones', this.checked)"> Areas</label>
+            <label class="fp-toggle fp-layer-opt" for="layerCameras"><input type="checkbox" id="layerCameras" name="layerCameras" checked onchange="blueprintEditor.toggleLayer('cameras', this.checked)"> Cameras</label>
+            <label class="fp-toggle fp-layer-opt" for="layerPersons"><input type="checkbox" id="layerPersons" name="layerPersons" checked onchange="blueprintEditor.toggleLayer('persons', this.checked)"> People</label>
+            <label class="fp-toggle fp-layer-opt" for="layerLabels"><input type="checkbox" id="layerLabels" name="layerLabels" checked onchange="blueprintEditor.toggleLayer('labels', this.checked)"> Labels</label>
+            <label class="fp-toggle fp-layer-opt" for="layerGrid"><input type="checkbox" id="layerGrid" name="layerGrid" checked onchange="blueprintEditor.toggleLayer('grid', this.checked)"> Grid</label>
+            <span class="fp-sep fp-layer-opt"></span>
             <label class="fp-toggle" for="layerHeatmap"><input type="checkbox" id="layerHeatmap" name="layerHeatmap" checked onchange="blueprintEditor.toggleLayer('heatmap', this.checked)"> Heatmap</label>
-            <label class="fp-toggle" for="layerPersons"><input type="checkbox" id="layerPersons" name="layerPersons" checked onchange="blueprintEditor.toggleLayer('persons', this.checked)"> People</label>
-            <label class="fp-toggle" for="layerLabels"><input type="checkbox" id="layerLabels" name="layerLabels" checked onchange="blueprintEditor.toggleLayer('labels', this.checked)"> Labels</label>
-            <label class="fp-toggle" for="layerGrid"><input type="checkbox" id="layerGrid" name="layerGrid" checked onchange="blueprintEditor.toggleLayer('grid', this.checked)"> Grid</label>
+            <span class="fp-heatbar" id="fpHeatBar"></span>
           </div>
 
-          <!-- Shown only while a shape is being drawn, so the mode is never
-               ambiguous and there is always a visible way to finish or abort. -->
-          <div id="fpDrawBanner" class="fp-draw-banner" style="display:none;">
-            <span id="fpDrawHint">Click on the plan to add corners.</span>
-            <span class="fp-draw-count"><b id="fpDrawCount">0</b> points</span>
-            <button class="btn btn-sm btn-primary" id="fpDrawFinish" onclick="blueprintEditor.finishPolygon()">Finish</button>
-            <button class="btn btn-sm" onclick="blueprintEditor.undoPoint()">Undo point</button>
-            <button class="btn btn-sm btn-danger" onclick="blueprintEditor.cancelDraw()">Cancel</button>
-          </div>
+          <div class="floorplan-wrapper" id="fpWrapper">
+            <canvas id="floorplanCanvas"></canvas>
 
-          <!-- First-run hint, hidden as soon as anything has been configured. -->
-          <div id="fpHint" class="fp-hint-overlay" style="display:none;"></div>
+            <!-- Shown only while a shape is being drawn, so the mode is never
+                 ambiguous and there is always a visible way to finish or abort. -->
+            <div id="fpDrawBanner" class="fp-draw-banner" style="display:none;">
+              <span id="fpDrawHint">Click on the plan to add corners.</span>
+              <span class="fp-draw-count"><b id="fpDrawCount">0</b> points</span>
+              <button type="button" class="btn btn-sm btn-primary" id="fpDrawFinish" onclick="blueprintEditor.finishPolygon()">Finish</button>
+              <button type="button" class="btn btn-sm" onclick="blueprintEditor.undoPoint()">Undo point</button>
+              <button type="button" class="btn btn-sm btn-danger" onclick="blueprintEditor.cancelDraw()">Cancel</button>
+            </div>
 
-          <!-- One badge per camera: live track count and calibration state. -->
-          <div id="fpCamBadges" class="fp-cam-badges"></div>
+            <!-- First-run hint, hidden as soon as anything has been configured. -->
+            <div id="fpHint" class="fp-hint-overlay" style="display:none;"></div>
 
-          <div class="floorplan-legend">
-            <div id="fpStats" class="fp-stats">Loading…</div>
-            <div id="fpLive" class="fp-live fp-live-idle">live map: waiting for the pipeline</div>
-            <div id="fpStatus" class="fp-status"></div>
+            <!-- Bottom overlay: map summary on the left, one badge per camera on the
+                 right. One wrapping row, so the two can never overlap. -->
+            <div class="fp-hud-bottom">
+              <div class="floorplan-legend">
+                <div id="fpStats" class="fp-stats">Loading…</div>
+                <div id="fpLive" class="fp-live fp-live-idle">live map: waiting for the pipeline</div>
+                <div id="fpStatus" class="fp-status" role="status" aria-live="polite"></div>
+              </div>
+              <div id="fpCamBadges" class="fp-cam-badges"></div>
+            </div>
           </div>
         </div>
 
-        <!-- Calibration workspace (calibration.js). Opens as a second column
-             next to the plan so image and plan points can be paired visually. -->
+        <!-- Calibration workspace (calibration.js). While it is open the side
+             column is hidden, so the plan and the camera picture share the width. -->
         <div class="glass-card fp-cal-panel" id="fpCalibrationPanel"></div>
 
-        <div class="blueprint-side">
+        <div class="blueprint-side" id="fpSide">
           <!-- Fresh-state guide: only rendered while nothing is configured. -->
           <div class="glass-card fp-setup-card" id="fpSetupPanel" style="display:none;"></div>
 
-          <!-- Inspector: the selected zone, structure, camera or store settings. -->
+          <!-- Inspector: the selected area, structure, camera or store settings. -->
           <div class="glass-card zone-inspector-card">
-            <div class="card-title"><span id="fpInspectorTitle">Inspector</span></div>
+            <div class="card-title"><span id="fpInspectorTitle">Details</span></div>
             <div id="zoneInspectorBody">
-              <div class="fp-empty">Select a zone, structure or camera on the plan to edit it.</div>
+              <div class="fp-empty">Select an area, shelf, wall or camera on the map to see and edit it.</div>
             </div>
           </div>
 
-          <!-- Device manager: scan, adopt, place, calibrate, remove. -->
+          <!-- Device manager: scan, add, place, calibrate, remove. -->
           <div class="glass-card" id="deviceManagerCard">
-            <div class="card-title">
-              <span>Cameras &amp; devices</span>
-              <div style="display: flex; gap: 6px;">
-                <button class="btn btn-sm btn-secondary" onclick="deviceManager.toggleDahuaPanel()" id="btnToggleDahua" title="Configure Dahua NVR and scan channels">📹 Dahua NVR</button>
-                <button class="btn btn-sm btn-secondary" onclick="deviceManager.toggleAddPanel()" id="btnToggleAddCamera" aria-expanded="false" aria-controls="addCameraPanel" title="Add a camera by RTSP / MJPEG URL, ONVIF address, USB device or video file">+ Add camera</button>
-                <button class="btn btn-sm btn-primary" onclick="deviceManager.scan()" id="btnScanDevices">Scan network</button>
-              </div>
+            <div class="card-title dev-card-title"><span>Cameras &amp; devices</span></div>
+            <div class="dev-toolbar" role="group" aria-label="Add cameras">
+              <button type="button" class="btn btn-sm btn-primary" onclick="deviceManager.scan()" id="btnScanDevices" title="Look for cameras on USB and the local network">Scan network</button>
+              <button type="button" class="btn btn-sm btn-secondary" onclick="deviceManager.toggleAddPanel()" id="btnToggleAddCamera" aria-expanded="false" aria-controls="addCameraPanel" title="Add a camera by RTSP / MJPEG address, ONVIF address, USB device or video file">+ Add camera</button>
+              <button type="button" class="btn btn-sm btn-secondary" onclick="deviceManager.toggleDahuaPanel()" id="btnToggleDahua" title="Add many cameras at once from a Dahua recorder (NVR / XVR / DVR)">Dahua recorder</button>
             </div>
 
             <!-- Add a camera by address: inline form, tested before it is saved. -->
@@ -282,17 +310,13 @@
                     <option value="usb">USB camera (index or /dev path)</option>
                     <option value="file">Local video file (testing)</option>
                   </select></div>
-                <div class="fp-field"><label for="acDept">Area</label>
-                  <select id="acDept" name="acDept">
-                    <option value="ENTRANCE">ENTRANCE</option>
-                    <option value="EXIT">EXIT</option>
-                    <option value="AISLE">AISLE</option>
-                    <option value="DEPARTMENT">DEPARTMENT</option>
-                    <option value="CHECKOUT">CHECKOUT</option>
-                    <option value="STOCKROOM">STOCKROOM</option>
-                    <option value="GENERAL" selected>GENERAL</option>
-                  </select></div>
+                <div class="fp-field"><label for="acDept">Department label (optional)</label>
+                  <input id="acDept" name="acDept" type="text" maxlength="40" list="deptSuggestions" autocomplete="off" placeholder="e.g. LIQUOR" spellcheck="false">
+                  <datalist id="deptSuggestions"></datalist>
+                  <div class="dept-hint">Groups this camera's alerts in reports. What it measures is set by its purpose below.</div></div>
               </div>
+              <!-- V2 MOUNT POINT: camera role picker for new cameras. -->
+              <div id="acRoleMount" data-mount="camera-role-new"></div>
               <div class="fp-field"><label for="acUrl" id="acUrlLabel">Stream URL</label>
                 <input id="acUrl" name="acUrl" type="text" maxlength="480" spellcheck="false" autocomplete="off" placeholder="rtsp://192.168.1.64:554/stream1">
                 <div class="dev-hint" id="acUrlHint"></div></div>
@@ -318,70 +342,71 @@
               </figure>
             </div>
 
+
             <!-- Dahua NVR Multi-Channel Setup Panel -->
             <div id="dahuaNvrPanel" class="nvr-panel" style="display: none;">
-              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                <div class="nvr-panel-title">📹 Dahua NVR / Multi-Channel Scanner</div>
-                <button class="btn btn-xs" onclick="deviceManager.toggleDahuaPanel()">✕ Close</button>
+              <div class="dev-add-head">
+                <div class="nvr-panel-title">Dahua recorder: add its channels</div>
+                <button type="button" class="btn btn-xs" onclick="deviceManager.toggleDahuaPanel()">Close</button>
               </div>
               <div class="nvr-panel-help">
-                Connect CCTV cameras through Dahua NVR / XVR / DVR via RTSP. Credentials persist on disk.
+                Enter the recorder's address and sign-in, then scan its channels and add the ones you want. Credentials are stored on this device.
               </div>
               <div class="fp-field-row">
-                <div class="fp-field" style="flex: 2;">
-                  <label for="nvrHost">Dahua NVR IP / Host</label>
+                <div class="fp-field">
+                  <label for="nvrHost">Recorder IP / host</label>
                   <input id="nvrHost" type="text" placeholder="e.g. 192.168.1.108" autocomplete="off">
                 </div>
-                <div class="fp-field" style="flex: 1;">
-                  <label for="nvrPort">RTSP Port</label>
+                <div class="fp-field">
+                  <label for="nvrPort">RTSP port</label>
                   <input id="nvrPort" type="number" value="554">
                 </div>
               </div>
               <div class="fp-field-row">
-                <div class="fp-field" style="flex: 1;">
+                <div class="fp-field">
                   <label for="nvrUser">Username</label>
                   <input id="nvrUser" type="text" value="admin" autocomplete="off">
                 </div>
-                <div class="fp-field" style="flex: 1; position: relative;">
+                <div class="fp-field">
                   <label for="nvrPass">Password <span id="nvrPassStatus" class="nvr-pass-status"></span></label>
-                  <div style="display: flex; align-items: center;">
-                    <input id="nvrPass" type="password" placeholder="NVR Password" style="flex: 1; padding-right: 32px;" autocomplete="new-password">
-                    <button type="button" class="btn btn-xs pass-vis-btn" onclick="deviceManager.togglePassVis('nvrPass')">👁</button>
+                  <div class="dev-pass-wrap">
+                    <input id="nvrPass" type="password" placeholder="Recorder password" autocomplete="new-password">
+                    <button type="button" class="btn btn-xs dev-pass-toggle" id="nvrPassToggle" aria-label="Show password" aria-pressed="false" onclick="deviceManager.togglePassVis('nvrPass'); this.setAttribute('aria-pressed', document.getElementById('nvrPass').type === 'text'); this.textContent = document.getElementById('nvrPass').type === 'text' ? 'Hide' : 'Show';">Show</button>
                   </div>
                 </div>
               </div>
               <div class="fp-field-row">
-                <div class="fp-field" style="flex: 1;">
-                  <label for="nvrChannels">Scan Channels</label>
+                <div class="fp-field">
+                  <label for="nvrChannels">Channels to scan</label>
                   <select id="nvrChannels">
-                    <option value="4">4 Channels</option>
-                    <option value="8">8 Channels</option>
-                    <option value="16" selected>16 Channels</option>
-                    <option value="32">32 Channels</option>
-                    <option value="64">64 Channels</option>
+                    <option value="4">4 channels</option>
+                    <option value="8">8 channels</option>
+                    <option value="16" selected>16 channels</option>
+                    <option value="32">32 channels</option>
+                    <option value="64">64 channels</option>
                   </select>
                 </div>
-                <div class="fp-field" style="flex: 1;">
-                  <label for="nvrQuality">Stream Mode</label>
+                <div class="fp-field">
+                  <label for="nvrQuality">Stream</label>
                   <select id="nvrQuality">
-                    <option value="sub" selected>Substream (AI Recommended)</option>
-                    <option value="main">Mainstream (High Res)</option>
+                    <option value="sub" selected>Sub-stream (recommended for AI)</option>
+                    <option value="main">Main stream (high resolution)</option>
                   </select>
                 </div>
               </div>
-              <div style="display: flex; gap: 8px; margin-top: 10px;">
-                <button class="btn btn-sm btn-primary" id="btnProbeNvr" onclick="deviceManager.probeNvr()">🔍 Scan NVR Channels</button>
-                <button class="btn btn-sm" id="btnSaveNvrCreds" onclick="deviceManager.saveNvrCreds()">💾 Save Credentials</button>
+              <div class="fp-actions">
+                <button type="button" class="btn btn-sm btn-primary" id="btnProbeNvr" onclick="deviceManager.probeNvr()">Scan recorder channels</button>
+                <button type="button" class="btn btn-sm" id="btnSaveNvrCreds" onclick="deviceManager.saveNvrCreds()">Save sign-in</button>
               </div>
-              <div id="dahuaProbeStatus" class="fp-status" role="status" aria-live="polite" style="margin-top: 8px;"></div>
-              <div id="dahuaChannelsList" style="margin-top: 10px; max-height: 220px; overflow-y: auto;"></div>
+              <div id="dahuaProbeStatus" class="fp-status" role="status" aria-live="polite"></div>
+              <div id="dahuaChannelsList" class="nvr-channels"></div>
             </div>
 
-            <div id="deviceScanStatus" class="fp-status"></div>
+            <div id="deviceScanStatus" class="fp-status" role="status" aria-live="polite"></div>
             <div id="activeCameraList" class="dev-list"></div>
-            <div class="dev-section-title">Discovered, not yet added</div>
+            <div class="dev-section-title">Found on the network, not added yet</div>
             <div id="discoveredList" class="dev-list">
-              <div class="fp-empty">Run a scan or configure Dahua NVR to add cameras.</div>
+              <div class="fp-empty">Press Scan network, add a camera by address, or add a Dahua recorder's channels.</div>
             </div>
           </div>
         </div>
@@ -389,211 +414,299 @@
     </section>
 
     <!-- ==========================================
-         TAB 3: Retail Analytics & Funnels
+         INSIGHTS: recommendations, shoppers & footfall, daily report
          ========================================== -->
-    <section id="tab-analytics" class="tab-view">
-      <div class="analytics-two-col">
-        <div class="glass-card">
-          <div class="card-title">
-            <span>📈 Hourly Traffic Curves</span>
-            <span class="badge badge-green">LIVE AI COUNT</span>
+    <section id="tab-insights" class="tab-view">
+      <nav class="sub-nav" id="insightsSubNav" aria-label="Insights">
+        <button type="button" class="sub-nav-btn" data-sub="recs" onclick="switchTab('insights/recs')">Recommendations</button>
+        <button type="button" class="sub-nav-btn" data-sub="footfall" onclick="switchTab('insights/footfall')">Shoppers &amp; footfall</button>
+        <button type="button" class="sub-nav-btn" data-sub="report" onclick="switchTab('insights/report')">Daily report</button>
+      </nav>
+
+      <div id="insights-recs" class="sub-view">
+        <!-- INSIGHTS-RECS:BEGIN (insights.js owns this region) -->
+        <div class="glass-card ins-run-card">
+          <div class="card-title ins-card-title">
+            <span>Recommendations</span>
+            <span class="badge metric-unobserved" id="recsOpenBadge">&mdash;</span>
           </div>
-          <div class="chart-container">
-            <canvas id="hourlyFootfallChart"></canvas>
+          <p class="ins-intro">What the store analysis suggests you change, from measured visits, dwell, shelf reaches and recorded heatmaps. It runs by itself every hour; you can also run it now.</p>
+          <div class="ins-run-row">
+            <button type="button" class="btn btn-primary btn-sm" id="btnRunAnalysis" data-action="run-analysis">Run analysis now</button>
+            <label class="ins-check" for="runNarrate" title="Asks the local AI model for a short written summary. Takes longer (up to a minute).">
+              <input type="checkbox" id="runNarrate" name="runNarrate"> Add AI summary (slower)
+            </label>
+            <span class="ins-run-status" id="runAnalysisStatus" role="status" aria-live="polite"></span>
           </div>
+          <div class="ins-meta" id="recsLastRun">Last analysis: &mdash;</div>
+          <div class="ins-meta" id="recsInputs"></div>
+          <div class="ins-meta" id="recsModelStatus"></div>
         </div>
 
         <div class="glass-card">
-          <div class="card-title">
-            <span>🎯 5-Stage Shopper Conversion Funnel</span>
-            <span class="badge metric-unobserved" id="funnelConvBadge">CONVERSION: &mdash;</span>
+          <div class="ins-filter-row" role="group" aria-label="Filter recommendations">
+            <button type="button" class="ins-chip active" data-rec-filter="open" aria-pressed="true">Open</button>
+            <button type="button" class="ins-chip" data-rec-filter="all" aria-pressed="false">All</button>
+            <label class="ins-check" for="recsShowDismissed">
+              <input type="checkbox" id="recsShowDismissed" name="recsShowDismissed"> Show dismissed
+            </label>
           </div>
-          <div id="funnelStagesList" style="display: flex; flex-direction: column; gap: 8px; margin-top: 10px;"></div>
+          <div id="recsSummary"></div>
+          <div id="recsList" class="ins-list"><div class="fp-empty">Loading…</div></div>
         </div>
+        <!-- INSIGHTS-RECS:END -->
       </div>
 
-      <!-- Entrances: today's in/out per Studio tripwire (js/entrances.js). -->
-      <div class="glass-card" id="entrancesCard" style="margin-top: 14px;">
-        <div class="card-title">
-          <span>🚪 Entrances today</span>
-          <span class="badge" id="entrancesSourceBadge" title="Which signal store footfall uses today">FOOTFALL: &mdash;</span>
-        </div>
-        <div class="entrances-summary">
-          <div class="stat-box">
-            <div class="stat-label">In</div>
-            <div class="stat-val metric-unobserved" id="entrancesTotalIn">&mdash;</div>
-          </div>
-          <div class="stat-box">
-            <div class="stat-label">Out</div>
-            <div class="stat-val metric-unobserved" id="entrancesTotalOut">&mdash;</div>
-          </div>
-          <div class="stat-box">
-            <div class="stat-label">Inside now (estimate)</div>
-            <div class="stat-val metric-unobserved" id="entrancesOccupancy">&mdash;</div>
-          </div>
-        </div>
-        <div style="overflow-x: auto;">
-          <table class="friction-table entrances-table">
-            <thead>
-              <tr><th>Tripwire</th><th>Camera</th><th>In</th><th>Out</th><th>Net</th></tr>
-            </thead>
-            <tbody id="entrancesTableBody"><tr><td colspan="5"><div class="fp-empty">Loading…</div></td></tr></tbody>
-          </table>
-        </div>
-        <div class="form-status entrances-note" id="entrancesNote"></div>
-      </div>
-
-      <div class="analytics-two-col" style="margin-top: 14px;">
+      <div id="tab-analytics" class="sub-view">
         <div class="glass-card">
           <div class="card-title">
-            <span>⚠️ Top 5 Lost Sales Friction Zones (Ranked by ϕ)</span>
-            <span class="badge badge-danger">LOST SALES INDEX</span>
+            <span>Visitors by hour</span>
+            <span class="badge metric-unobserved" id="hourlySourceBadge">&mdash;</span>
           </div>
-          <div style="overflow-x: auto;">
-            <table class="friction-table">
-              <thead>
-                <tr>
-                  <th>Zone / Aisle</th>
-                  <th>Lost Sales Index ϕ</th>
-                  <th>Avg Dwell</th>
-                  <th>Primary Friction Reason</th>
-                  <th>Est. Daily Revenue Loss</th>
-                </tr>
-              </thead>
-              <tbody id="frictionZonesTableBody"></tbody>
-            </table>
+          <div class="hourly-legend" id="hourlyLegend"></div>
+          <div class="chart-container hourly-chart"><canvas id="hourlyFootfallChart" aria-label="Visitors by hour today, with yesterday and the same day last week"></canvas></div>
+          <div class="hourly-note" id="hourlyNote"></div>
+        </div>
+
+        <div class="analytics-two-col">
+          <div class="glass-card">
+            <div class="card-title">
+              <span>Shopper journey</span>
+              <span class="badge metric-unobserved" id="funnelConvBadge">BOUGHT: &mdash;</span>
+            </div>
+            <div id="funnelStagesList" class="funnel-list"></div>
+          </div>
+
+          <!-- Entrances: today's in/out per Studio tripwire (js/entrances.js). -->
+          <div class="glass-card" id="entrancesCard">
+            <div class="card-title">
+              <span>Entrances today</span>
+              <span class="badge" id="entrancesSourceBadge" title="Which signal store footfall uses today">FOOTFALL: &mdash;</span>
+            </div>
+            <div class="entrances-summary">
+              <div class="stat-box">
+                <div class="stat-label">In</div>
+                <div class="stat-val metric-unobserved" id="entrancesTotalIn">&mdash;</div>
+              </div>
+              <div class="stat-box">
+                <div class="stat-label">Out</div>
+                <div class="stat-val metric-unobserved" id="entrancesTotalOut">&mdash;</div>
+              </div>
+              <div class="stat-box">
+                <div class="stat-label">Inside now (estimate)</div>
+                <div class="stat-val metric-unobserved" id="entrancesOccupancy">&mdash;</div>
+              </div>
+            </div>
+            <div class="table-scroll">
+              <table class="friction-table entrances-table">
+                <thead>
+                  <tr><th>Counting line</th><th>Camera</th><th>In</th><th>Out</th><th>Net</th></tr>
+                </thead>
+                <tbody id="entrancesTableBody"><tr><td colspan="5"><div class="fp-empty">Loading…</div></td></tr></tbody>
+              </table>
+            </div>
+            <div class="form-status entrances-note" id="entrancesNote"></div>
           </div>
         </div>
 
-        <div class="glass-card">
-          <div class="card-title">
-            <span>👥 Customer Demographics & Cart Profile</span>
-            <span class="badge">BASKET vs TROLLEY</span>
+        <div class="analytics-two-col">
+          <div class="glass-card">
+            <div class="card-title">
+              <span>Areas where shoppers leave without engaging</span>
+            </div>
+            <div class="table-scroll">
+              <table class="friction-table">
+                <thead>
+                  <tr>
+                    <th>Area</th>
+                    <th title="Share of visitors to this area who reached for a shelf">Engaged</th>
+                    <th>Average stay</th>
+                    <th>Visits</th>
+                    <th>Lost sales</th>
+                  </tr>
+                </thead>
+                <tbody id="frictionZonesTableBody"></tbody>
+              </table>
+            </div>
           </div>
-          <div class="chart-container" style="height: 220px;">
-            <canvas id="demographicsChart"></canvas>
+
+          <div class="glass-card">
+            <div class="card-title">
+              <span>Shopper profile</span>
+            </div>
+            <div class="chart-container demographics-chart">
+              <canvas id="demographicsChart"></canvas>
+            </div>
           </div>
         </div>
+
+        <!-- Product shelf reaches: js/product_reach.js -->
+        <div class="glass-card" id="productReachPanel">
+          <div class="card-title">
+            <span>Product shelf reaches today</span>
+            <span class="badge metric-unobserved" id="productReachBadge">REACHES: &mdash;</span>
+          </div>
+          <div id="productReachBody"><div class="fp-empty">Loading…</div></div>
+        </div>
+
+        <!-- V2 MOUNT POINT: heatmap history panel (Insights > Shoppers & footfall).
+             Left empty and hidden on purpose; V2 fills it and removes `hidden`. -->
+        <section id="insights-heatmap-history" class="glass-card" data-mount="heatmap-history" hidden></section>
       </div>
 
-      <!-- Product shelf reaches: js/product_reach.js -->
-      <div class="glass-card" id="productReachPanel" style="margin-top: 14px;">
-        <div class="card-title">
-          <span>🛒 Product Shelf Reaches (hand-to-shelf, today)</span>
-          <span class="badge metric-unobserved" id="productReachBadge">REACHES: &mdash;</span>
+      <div id="tab-digest" class="sub-view">
+        <!-- INSIGHTS-REPORT:BEGIN (insights.js owns this region) -->
+        <div class="glass-card ins-report-card">
+          <div class="card-title ins-card-title">
+            <span><span id="digestStoreName">Store</span> daily report</span>
+            <span class="ins-title-actions">
+              <button type="button" class="btn btn-sm" id="btnRefreshDigest" data-action="refresh-report">Refresh</button>
+              <button type="button" class="btn btn-primary btn-sm" id="btnPrintDigest" data-action="print-report">Print / save PDF</button>
+            </span>
+          </div>
+          <div class="digest-narrative" id="digestNarrative"><div class="fp-empty">Loading…</div></div>
         </div>
-        <div id="productReachBody"><div class="fp-empty">Loading…</div></div>
+        <!-- INSIGHTS-REPORT:END -->
       </div>
     </section>
 
     <!-- ==========================================
-         TAB 4: AI Decision Action Center
-         ========================================== -->
-    <section id="tab-actions" class="tab-view">
-      <div class="glass-card">
-        <div class="card-title" style="display: flex; justify-content: space-between; align-items: center;">
-          <span>⚡ Automated AI Operational Directives</span>
-          <span class="badge metric-unobserved" id="actionsOpenBadge">&mdash;</span>
-        </div>
-        <div id="actionCardsList" style="display: flex; flex-direction: column; gap: 10px; margin-top: 10px;"></div>
-      </div>
-    </section>
-
-    <!-- ==========================================
-         TAB 5: ML Market Intelligence & Suggestions
-         ========================================== -->
-    <section id="tab-market_ai" class="tab-view">
-      <div style="margin-bottom: 14px;">
-        <div class="glass-card">
-          <div class="card-title">
-            <span>⚡ Automated Market Synthesis</span>
-            <button class="btn btn-primary btn-sm" onclick="runLLMOptimizations()">⚡ Run Optimization</button>
-          </div>
-          <div id="llmOptimizationsContainer" style="display: flex; flex-direction: column; gap: 10px; margin-top: 10px;"></div>
-        </div>
-      </div>
-    </section>
-
-    <!-- ==========================================
-         TAB 6: Loss Prevention & Theft AI
+         LOSS PREVENTION (js/loss.js)
          ========================================== -->
     <section id="tab-theft" class="tab-view">
-      <!-- Theft KPIs -->
-      <div class="overview-strip" style="margin-bottom: 14px;">
+      <!-- LOSS:BEGIN (loss.js owns this region) -->
+      <section class="overview-strip loss-kpis" aria-label="Loss prevention at a glance">
         <div class="stat-box">
-          <span class="stat-label">Open Incidents for Review</span>
-          <span class="metric-unobserved stat-val" id="kpiTheftActiveAlerts" style="color: var(--accent-red);">&mdash;</span>
+          <span class="stat-label">Waiting for review</span>
+          <span class="stat-val metric-unobserved" id="lossKpiOpen">&mdash;</span>
+          <span class="loss-kpi-note" id="lossKpiOpenNote"></span>
         </div>
         <div class="stat-box">
-          <span class="stat-label">Incidents Flagged Today</span>
-          <span class="metric-unobserved stat-val" id="kpiTheftAttemptsToday">&mdash;</span>
+          <span class="stat-label">Flagged today</span>
+          <span class="stat-val metric-unobserved" id="lossKpiToday">&mdash;</span>
+          <span class="loss-kpi-note" id="lossKpiTodayNote"></span>
         </div>
         <div class="stat-box">
-          <span class="stat-label">Item Value in Actioned Incidents</span>
-          <span class="metric-unobserved stat-val" id="kpiTheftPreventedLoss" style="color: var(--accent-green);">&mdash;</span>
+          <span class="stat-label">Value in confirmed incidents</span>
+          <span class="stat-val metric-unobserved" id="lossKpiValue">&mdash;</span>
+          <span class="loss-kpi-note" id="lossKpiValueNote"></span>
         </div>
         <div class="stat-box">
-          <span class="stat-label">Top High-Risk Dept</span>
-          <span class="metric-unobserved stat-val" id="kpiTheftHighRiskDept" style="color: var(--accent-orange); font-size: 13px;">&mdash;</span>
+          <span class="stat-label">False-alarm rate</span>
+          <span class="stat-val metric-unobserved" id="lossKpiFalseRate">&mdash;</span>
+          <span class="loss-kpi-note" id="lossKpiFalseRateNote"></span>
         </div>
+      </section>
+
+      <div class="glass-card">
+        <div class="card-title">
+          <span>Review queue</span>
+          <button type="button" class="btn btn-sm" data-action="refresh">Refresh</button>
+        </div>
+        <p class="loss-intro">
+          Each entry is <b>suspicious behaviour for staff to check</b>, not a finding of theft. Look at the evidence
+          image and the live camera, then record what really happened. Your outcomes decide which rules are trusted.
+        </p>
+        <div class="loss-legacy" id="lossLegacyNotice" role="status" hidden></div>
+        <div class="loss-chips" id="lossFilterChips" role="group" aria-label="Show incidents"></div>
+        <div id="theftIncidentsList" class="loss-list"><div class="fp-empty">Loading…</div></div>
       </div>
 
-      <!-- Recent Incidents Stream Table / Cards -->
       <div class="glass-card">
-        <div class="card-title" style="display: flex; justify-content: space-between; align-items: center;">
-          <span>📋 Loss-Prevention Review Queue</span>
-          <button class="btn btn-sm" onclick="fetchTheftIncidents()">🔄 Refresh</button>
+        <div class="card-title"><span>False alarms by rule</span></div>
+        <p class="loss-intro">How often each check was wrong, from the outcomes staff recorded. A high rate means the rule needs tuning for this store.</p>
+        <div class="loss-table-wrap">
+          <table class="friction-table loss-rule-table">
+            <thead><tr><th>Check</th><th>Reviewed</th><th>False alarms</th><th>Rate</th></tr></thead>
+            <tbody id="lossRuleTableBody"><tr><td colspan="4"><div class="fp-empty">Loading…</div></td></tr></tbody>
+          </table>
         </div>
-        <p style="margin: 6px 0 0; font-size: 11.5px; color: var(--text-dim); line-height: 1.45;">
-          Every entry is <b>suspicious behaviour for staff review</b>, not a finding of theft. The pose pipeline flags
-          concealment, shelf sweeping, loitering at high-value products and exit without checkout; confidence is derived
-          from keypoint visibility, duration and how many signals agreed. Check the evidence image and footage before acting.
-        </p>
-        <div id="theftIncidentsList" style="display: flex; flex-direction: column; gap: 10px; margin-top: 10px;"></div>
       </div>
 
       <!-- Full-size evidence viewer (inline overlay; no popups or dialogs) -->
-      <div id="theftEvidenceViewer" role="dialog" aria-modal="true" aria-label="Evidence image"
-           onclick="if (event.target === this) closeTheftEvidence()"
-           style="display: none; position: fixed; inset: 0; z-index: 1000; background: var(--lightbox-scrim); align-items: center; justify-content: center; padding: 16px;">
-        <div style="display: flex; flex-direction: column; gap: 8px; max-width: 96vw; max-height: 94vh;">
-          <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;">
-            <span id="theftEvidenceCaption" style="color: var(--lightbox-text); font-size: 12px;"></span>
-            <span style="display: flex; gap: 6px;">
+      <div id="theftEvidenceViewer" class="loss-viewer" role="dialog" aria-modal="true" aria-label="Evidence image" style="display: none;">
+        <div class="loss-viewer-inner">
+          <div class="loss-viewer-bar">
+            <span id="theftEvidenceCaption" class="loss-viewer-caption"></span>
+            <span class="loss-viewer-actions">
               <a id="theftEvidenceOpen" class="btn btn-sm" href="#" target="_blank" rel="noopener">Open in new tab</a>
-              <button id="theftEvidenceClose" type="button" class="btn btn-sm" onclick="closeTheftEvidence()">Close ✕</button>
+              <button id="theftEvidenceClose" type="button" class="btn btn-sm">Close</button>
             </span>
           </div>
-          <img id="theftEvidenceFull" alt="Evidence image: annotated frame and person crop"
-               style="display: block; max-width: 96vw; max-height: 86vh; object-fit: contain; background: var(--media-bg); border-radius: 6px;">
+          <img id="theftEvidenceFull" class="loss-viewer-img" alt="Evidence image: annotated frame and person crop">
         </div>
       </div>
+      <!-- LOSS:END -->
     </section>
 
     <!-- ==========================================
-         TAB 7: Executive Daily Digest
-         ========================================== -->
-    <section id="tab-digest" class="tab-view">
-      <div class="glass-card">
-        <div class="card-title" style="display: flex; justify-content: space-between; align-items: center;">
-          <span>📑 <span id="digestStoreName">Store</span> Executive Briefing</span>
-          <button class="btn btn-primary btn-sm" onclick="printDailyDigest()">🖨️ Export PDF / Print</button>
-        </div>
-        <div class="digest-narrative" id="digestNarrative" style="font-size: 13px; line-height: 1.6; color: var(--text-steps); margin-top: 12px;"></div>
-      </div>
-    </section>
-
-    <!-- ==========================================
-         TAB: Settings. Each panel is owned by one script:
+         SETTINGS (header gear). Each panel is owned by one script:
          device + remote access -> remote_access.js,
-         pairing, push and paired phones -> pairing.js
+         pairing, push and paired phones -> pairing.js,
+         sales data + system health -> analytics.js
          ========================================== -->
     <section id="tab-settings" class="tab-view">
+      <div class="settings-jump" aria-label="Settings sections">
+        <button type="button" class="btn btn-sm" onclick="openDeviceManager()">Cameras &amp; recorders</button>
+        <a class="btn btn-sm" href="#settings-pairing" onclick="return jumpTo('settings-pairing')">Phones</a>
+        <a class="btn btn-sm" href="#settings-remote" onclick="return jumpTo('settings-remote')">Online access</a>
+        <a class="btn btn-sm" href="#settings-pos" onclick="return jumpTo('settings-pos')">Sales data</a>
+        <a class="btn btn-sm" href="#settings-health" onclick="return jumpTo('settings-health')">System health</a>
+        <a class="btn btn-sm" href="#settings-appearance" onclick="return jumpTo('settings-appearance')">Appearance</a>
+      </div>
       <div class="glass-card" id="settings-device"></div>
       <div class="glass-card" id="settings-remote"></div>
       <div class="glass-card" id="settings-pairing"></div>
       <div class="glass-card" id="settings-push"></div>
       <div class="glass-card" id="settings-devices"></div>
+
+      <!-- Appearance: the same light / dark / system choice as the header switch
+           (on phones the header switch is hidden to make room). -->
+      <div class="glass-card" id="settings-appearance">
+        <div class="card-title"><span>Appearance</span></div>
+        <div class="appearance-row" role="radiogroup" aria-label="Colour theme">
+          <button type="button" class="btn btn-sm" data-set-theme="light" role="radio">Light</button>
+          <button type="button" class="btn btn-sm" data-set-theme="dark" role="radio">Dark</button>
+          <button type="button" class="btn btn-sm" data-set-theme="system" role="radio">Same as this device</button>
+        </div>
+      </div>
+
+      <!-- Point of sale: whether sales data arrives and how to connect it (analytics.js). -->
+      <div class="glass-card" id="settings-pos">
+        <div class="card-title"><span>Sales data (point of sale)</span><span class="badge metric-unobserved" id="posStatusBadge">&mdash;</span></div>
+        <div id="posStatusBody"><div class="fp-empty">Loading…</div></div>
+      </div>
+
+      <!-- System health: moved here from the page header (analytics.js). -->
+      <div class="glass-card" id="settings-health">
+        <div class="card-title"><span>System health</span></div>
+        <div class="health-grid">
+          <div class="telemetry-item" title="How video is decoded on this device">
+            <span class="telemetry-label">Video decoding</span>
+            <span class="telemetry-val" id="telemetryDecoderBadge">&mdash;</span>
+          </div>
+          <div class="telemetry-item" title="The engine that runs person detection">
+            <span class="telemetry-label">Detection engine</span>
+            <span class="telemetry-val" id="telemetryInferenceBadge">&mdash;</span>
+          </div>
+          <div class="telemetry-item">
+            <span class="telemetry-label">Detection speed</span>
+            <span class="telemetry-val" id="telemetryLatencyVal">&mdash;</span>
+          </div>
+          <div class="telemetry-item">
+            <span class="telemetry-label">Processor</span>
+            <span class="telemetry-val" id="telemetryCpuVal">&mdash;</span>
+          </div>
+          <div class="telemetry-item">
+            <span class="telemetry-label">Memory</span>
+            <span class="telemetry-val" id="telemetryRamVal">&mdash;</span>
+          </div>
+          <div class="telemetry-item">
+            <span class="telemetry-label">Running for</span>
+            <span class="telemetry-val" id="telemetryUptimeVal">&mdash;</span>
+          </div>
+        </div>
+      </div>
     </section>
   </div>
 
@@ -623,16 +736,21 @@
 
         <div class="form-grid-2col" style="margin-top: 8px;">
           <div class="form-group">
-            <label for="configDepartment">Department</label>
-            <!-- Options are the zone categories from GET /api/v1/layout plus any
-                 department already in use; nothing is invented client-side. -->
-            <select class="form-select" id="configDepartment" name="department"></select>
+            <label for="configDepartment">Department label (optional)</label>
+            <!-- Free text, suggestions are departments already in use. What the
+                 camera measures is its purpose (role), chosen below. -->
+            <input type="text" class="form-input" id="configDepartment" name="department" maxlength="40" list="configDeptList" autocomplete="off" spellcheck="false" placeholder="e.g. LIQUOR" />
+            <datalist id="configDeptList"></datalist>
+            <div class="dept-hint">Groups this camera's alerts in reports.</div>
           </div>
           <div class="form-group">
             <label for="configLocation">Location description</label>
             <input type="text" class="form-input" id="configLocation" name="location" />
           </div>
         </div>
+
+        <!-- V2 MOUNT POINT: camera role picker and setup checklist. -->
+        <div id="cameraRoleMount" data-mount="camera-role"></div>
 
         <div class="form-group" style="margin-top: 8px;">
           <label for="configRtspUrl">Stream source (RTSP URL or /dev/video path)</label>
@@ -720,17 +838,23 @@
     </div>
   </div>
 
+
   <!-- Toast Notification -->
-  <div class="toast" id="toast">Notification</div>
+  <div class="toast" id="toast" role="status" aria-live="polite">Notification</div>
 
   <!-- Scripts -->
-  <script src="/static/js/floorplan.js?v=2.1.6"></script>
-  <script src="/static/js/devices.js?v=2.1.6"></script>
-  <script src="/static/js/calibration.js?v=2.1.6"></script>
-  <script src="/static/js/analytics.js?v=2.1.6"></script>
-  <script src="/static/js/product_reach.js?v=2.1.6"></script>
-  <script src="/static/js/entrances.js?v=2.1.6"></script>
-  <script src="/static/js/remote_access.js?v=2.1.6"></script>
-  <script src="/static/js/pairing.js?v=2.1.6"></script>
+  <script src="/static/js/floorplan.js?v=2.3.0"></script>
+  <script src="/static/js/devices.js?v=2.3.0"></script>
+  <script src="/static/js/calibration.js?v=2.3.0"></script>
+  <script src="/static/js/analytics.js?v=2.3.0"></script>
+  <script src="/static/js/camera_roles.js?v=2.3.0"></script>
+  <script src="/static/js/today.js?v=2.3.0"></script>
+  <script src="/static/js/loss.js?v=2.3.0"></script>
+  <script src="/static/js/insights.js?v=2.3.0"></script>
+  <script src="/static/js/heatmap_history.js?v=2.3.0"></script>
+  <script src="/static/js/product_reach.js?v=2.3.0"></script>
+  <script src="/static/js/entrances.js?v=2.3.0"></script>
+  <script src="/static/js/remote_access.js?v=2.3.0"></script>
+  <script src="/static/js/pairing.js?v=2.3.0"></script>
 </body>
 </html>

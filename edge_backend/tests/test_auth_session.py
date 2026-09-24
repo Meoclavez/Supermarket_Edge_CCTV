@@ -218,7 +218,9 @@ def test_m0011_creates_revoked_tokens_on_a_copy_of_an_m0010_database(tmp_path):
     copy = tmp_path / "copy.db"
     shutil.copy(base, copy)
 
-    report = run_migrations(copy, backups_dir=tmp_path / "backups")
+    # Up to m0011 only: later migrations (m0012+) are tested on their own.
+    report = run_migrations(copy, migrations=[m for m in migrations if m.version <= 11],
+                            backups_dir=tmp_path / "backups")
     assert report["applied"] == ["0011_revoked_tokens"]
     with sqlite3.connect(copy) as conn:
         cols = {r[1]: r[2] for r in conn.execute("PRAGMA table_info(revoked_tokens)")}

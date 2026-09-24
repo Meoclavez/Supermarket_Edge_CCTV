@@ -119,7 +119,10 @@ def test_snapshot_action_saves_the_real_frame(client, camera_row):
         data = res.json()
         assert data["saved"] is True
         assert data["filename"].startswith(f"{camera_row}_") and data["filename"].endswith(".jpg")
-        assert data["url"] == f"/api/v1/events/snapshots/{data['filename']}"
+        assert data["url"].startswith(f"/api/v1/events/snapshots/{data['filename']}?token=")
+        # The URL's own token opens the picture without a bearer header (<img> tags cannot send one).
+        img = client.get(data["url"], headers={"Authorization": ""})
+        assert img.status_code == 200 and img.headers["content-type"] == "image/jpeg"
         assert (data["frame_width"], data["frame_height"]) == (64, 48)
         path = settings.SNAPSHOTS_DIR / data["filename"]
         assert path.exists() and path.stat().st_size == data["bytes"] > 0

@@ -131,6 +131,11 @@ class Track:
     floor_xy: Optional[tuple[float, float]] = None
     # Trajectory in floor metres, appended only while a homography exists.
     floor_points: list[dict] = field(default_factory=list)
+    # Persisted path (customer_tracks.trajectory_points), sampled every
+    # TRAJECTORY_SAMPLE_SEC while people_counting is on: normalised image foot
+    # point {"u", "v", "t"} for every camera, plus floor {"x", "y"} when
+    # calibrated. Feeds the image- and floor-space heatmaps.
+    path_points: list[dict] = field(default_factory=list)
     # Zone the track is currently inside, and when it entered.
     current_zone_id: Optional[str] = None
     zone_entered_at: Optional[float] = None

@@ -257,6 +257,12 @@ class CameraState:
     # Per-camera feature flags (feature_manager), refreshed every frame.
     interactions_on: bool = True
     theft_on: bool = True
+    # Camera role (services/camera_roles.py), refreshed every frame from the
+    # role cache: scaled theft thresholds, exit-rule gate, zone valuation.
+    role: Optional[str] = None
+    thresholds: Dict[str, Any] = field(default_factory=dict)
+    exit_rule_on: bool = True
+    zones_role: Optional[str] = None
 
 
 # ============================================================================
@@ -340,6 +346,26 @@ class PoseAnalytics:
             except Exception:
                 return True
 
+    @staticmethod
+    def _refresh_role(cam: CameraState) -> None:
+        """Role-derived settings for this frame. No role (or no store) = config defaults."""
+        try:
+            from app.services import camera_roles as cr
+
+            roles = cr.role_cache.all()
+            role = roles.get(cam.camera_id)
+            cam.thresholds = cr.scaled_theft_thresholds(cr.theft_sensitivity(role))
+            cam.exit_rule_on = cr.exit_rule_allowed(role, roles.values())
+        except Exception:
+            role = None
+            cam.thresholds = {}
+            cam.exit_rule_on = True
+        cam.role = role
+
+    @staticmethod
+    def _thr(cam: CameraState, key: str, default: Any) -> Any:
+        return cam.thresholds.get(key, default)
+
     # --------------------------------------------------------------- zones
 
     def _camera(self, camera_id: str) -> CameraState:
@@ -356,8 +382,17 @@ class PoseAnalytics:
             cam.zones = []
             return
         version = getattr(sis, "version", 0)
-        if version == cam.zones_version and cam.zones:
+        if version == cam.zones_version and cam.zones and cam.zones_role == cam.role:
             return
+        # On a high-value camera (role) every product zone counts as high value.
+        role_hv = False
+        try:
+            from app.services.camera_roles import preset
+
+            p = preset(cam.role)
+            role_hv = bool(p and p.all_zones_high_value)
+        except Exception:
+            pass
         high_cats = _parse_names(settings.THEFT_HIGH_VALUE_CATEGORIES)
         min_price = float(settings.THEFT_HIGH_VALUE_MIN_PRICE or 0.0)
         try:
@@ -375,12 +410,13 @@ class PoseAnalytics:
                 id=z.id, name=z.name, space="image", polygon=poly,
                 bbox=(min(xs), min(ys), max(xs), max(ys)), category=cat,
                 price=float(z.price or 0.0), sku_id=z.sku_id,
-                high_value=(cat in high_cats) or (min_price > 0 and float(z.price or 0.0) >= min_price),
+                high_value=role_hv or (cat in high_cats) or (min_price > 0 and float(z.price or 0.0) >= min_price),
                 shelf_level=(attrs.get(z.id) or {}).get("shelf_level"),
                 value_tier=(attrs.get(z.id) or {}).get("value_tier"),
             ))
         cam.zones = zones
         cam.zones_version = version
+        cam.zones_role = cam.role
 
     def _floor_zones(self) -> List[Dict[str, Any]]:
         if self._floor_zones_override is not None:
@@ -488,6 +524,7 @@ class PoseAnalytics:
                         tracks: list, objects: list, result: ObserveResult) -> None:
         cam.interactions_on = self._flag(cam.camera_id, "shelf_interaction")
         cam.theft_on = self._flag(cam.camera_id, "theft_detection")
+        self._refresh_role(cam)
         if not cam.interactions_on and not cam.theft_on:
             # Both analyses are switched off for this camera: keep no state.
             if cam.tracks:
@@ -786,7 +823,7 @@ class PoseAnalytics:
                 verdict = rules.detect_concealment(
                     hand.post_reach,
                     window_sec=settings.THEFT_CONCEAL_WINDOW_SEC,
-                    min_hold_frames=settings.THEFT_CONCEAL_MIN_HOLD_FRAMES,
+                    min_hold_frames=self._thr(cam, "conceal_min_hold_frames", settings.THEFT_CONCEAL_MIN_HOLD_FRAMES),
                     no_return_sec=settings.THEFT_CONCEAL_NO_RETURN_SEC,
                 )
                 state = verdict.get("state")
@@ -925,7 +962,7 @@ class PoseAnalytics:
         verdict = rules.detect_shelf_sweeping(
             [r for r in st.reaches if r["zone_id"] == zone.id],
             window_sec=settings.THEFT_SWEEP_WINDOW_SEC,
-            min_reaches=settings.THEFT_SWEEP_MIN_REACHES,
+            min_reaches=self._thr(cam, "sweep_min_reaches", settings.THEFT_SWEEP_MIN_REACHES),
         )
         if verdict.get("detected"):
             self._raise(cam, st, rules.RULE_SHELF_SWEEPING, verdict, ts, result,
@@ -1210,7 +1247,8 @@ class PoseAnalytics:
                 st.presence[z.id] = p
             p["last"] = ts
             dwell = p["last"] - p["start"]
-            if dwell < settings.THEFT_LOITER_MIN_DWELL_SEC:
+            min_dwell = self._thr(cam, "loiter_min_dwell_sec", settings.THEFT_LOITER_MIN_DWELL_SEC)
+            if dwell < min_dwell:
                 continue
             reaches = sum(1 for r in st.reaches if r["zone_id"] == z.id and r["timestamp"] >= p["start"])
             turns = sum(1 for t in st.head_turns if t >= p["start"])
@@ -1219,9 +1257,9 @@ class PoseAnalytics:
             verdict = rules.detect_suspicious_loitering(
                 dwell_sec=dwell, reaches=reaches, head_turns=turns, head_samples=len(samples),
                 visibility=vis,
-                min_dwell_sec=settings.THEFT_LOITER_MIN_DWELL_SEC,
-                min_reaches=settings.THEFT_LOITER_MIN_REACHES,
-                min_head_turns=settings.THEFT_LOITER_MIN_HEAD_TURNS,
+                min_dwell_sec=min_dwell,
+                min_reaches=self._thr(cam, "loiter_min_reaches", settings.THEFT_LOITER_MIN_REACHES),
+                min_head_turns=self._thr(cam, "loiter_min_head_turns", settings.THEFT_LOITER_MIN_HEAD_TURNS),
                 zone_label=z.name,
             )
             if verdict.get("detected"):
@@ -1245,6 +1283,11 @@ class PoseAnalytics:
         if len(st.zone_sequence) > 200:
             del st.zone_sequence[:-200]
         if not settings.THEFT_EXIT_RULE_ENABLED or cat not in rules.EXIT_CATEGORIES:
+            return
+        if not cam.exit_rule_on:
+            # Camera role: a product-area camera in a store with dedicated
+            # checkout cameras never sees the checkout visit (single-camera
+            # rule), and stockroom cameras watch staff.
             return
         verdict = rules.detect_exit_without_checkout(
             st.zone_sequence,
@@ -1273,7 +1316,7 @@ class PoseAnalytics:
         if not cam.theft_on:
             return
         confidence = float(verdict.get("confidence") or 0.0)
-        if confidence < settings.THEFT_MIN_CONFIDENCE:
+        if confidence < self._thr(cam, "min_confidence", settings.THEFT_MIN_CONFIDENCE):
             return
         last = st.fired.get(rule)
         if last is not None and ts - last < settings.THEFT_INCIDENT_COOLDOWN_SEC:
@@ -1304,7 +1347,7 @@ class PoseAnalytics:
             "track_id": str(st.track_id),
             "ts": ts,
             "confidence": round(confidence, 3),
-            "severity": "HIGH" if confidence >= 0.75 else ("MEDIUM" if confidence >= 0.5 else "LOW"),
+            "severity": self._severity(cam, confidence),
             "zone_id": zone_id,
             "zone_name": zone.name if zone else None,
             "evidence": evidence,
@@ -1320,6 +1363,20 @@ class PoseAnalytics:
         logger.info(f"Suspicious behaviour for review: {rule} on {cam.camera_id} track {st.track_id} "
                     f"(confidence {confidence:.2f})")
 
+    @staticmethod
+    def _severity(cam: CameraState, confidence: float) -> str:
+        sev = "HIGH" if confidence >= 0.75 else ("MEDIUM" if confidence >= 0.5 else "LOW")
+        try:
+            from app.services.camera_roles import preset
+
+            p = preset(cam.role)
+        except Exception:
+            p = None
+        order = ("LOW", "MEDIUM", "HIGH")
+        if p is not None and p.alert_severity_floor in order and order.index(sev) < order.index(p.alert_severity_floor):
+            sev = p.alert_severity_floor
+        return sev
+
     def _finalize_track(self, cam: CameraState, st: TrackState, ts: float,
                         frame: Optional[np.ndarray] = None) -> None:
         for hand in st.hands.values():
@@ -1327,7 +1384,7 @@ class PoseAnalytics:
                 verdict = rules.detect_concealment(
                     hand.post_reach,
                     window_sec=settings.THEFT_CONCEAL_WINDOW_SEC,
-                    min_hold_frames=settings.THEFT_CONCEAL_MIN_HOLD_FRAMES,
+                    min_hold_frames=self._thr(cam, "conceal_min_hold_frames", settings.THEFT_CONCEAL_MIN_HOLD_FRAMES),
                     no_return_sec=settings.THEFT_CONCEAL_NO_RETURN_SEC,
                     track_ended=True,
                 )

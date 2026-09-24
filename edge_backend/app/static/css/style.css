@@ -122,6 +122,12 @@
   --chart-fill: rgba(0, 240, 255, 0.1);
   --chart-grid: rgba(255, 255, 255, 0.05);
   --chart-tick: #8b949e;
+  /* Visitors by hour: today (bars), yesterday (line), same day last week
+     (dashed line). Checked with the dataviz palette validator on the dark card. */
+  --hourly-today: #1a8fd0;
+  --hourly-yday: #c47a16;
+  --hourly-week: #d0609a;
+  --hourly-nodata: rgba(148, 163, 184, 0.45);
 }
 
 /* Light theme, chosen explicitly (data-theme="light"). */
@@ -222,6 +228,10 @@
   --chart-fill: rgba(10, 102, 128, 0.12);
   --chart-grid: rgba(15, 23, 42, 0.08);
   --chart-tick: #475569;
+  --hourly-today: #0880a8;
+  --hourly-yday: #b45309;
+  --hourly-week: #a3306e;
+  --hourly-nodata: rgba(71, 85, 105, 0.40);
 }
 
 /* System mode (data-theme="system", or no attribute when scripts are off):
@@ -324,6 +334,10 @@
     --chart-fill: rgba(10, 102, 128, 0.12);
     --chart-grid: rgba(15, 23, 42, 0.08);
     --chart-tick: #475569;
+  --hourly-today: #0880a8;
+  --hourly-yday: #b45309;
+  --hourly-week: #a3306e;
+  --hourly-nodata: rgba(71, 85, 105, 0.40);
   }
 }
 
@@ -2153,3 +2167,189 @@ html, body {
 
 .selftest-results { position: fixed; bottom: 0; left: 0; right: 0; max-height: 45vh; overflow: auto; margin: 0; padding: 10px;
   background: var(--term-bg); color: var(--term-fg); font: 11px ui-monospace, monospace; z-index: 99999; white-space: pre-wrap; }
+
+/* ==========================================================================
+   v2.2 navigation, Today, Insights shell, Settings cards, phone layout
+   ========================================================================== */
+
+/* Header: brand, the five destinations, and the gear/theme/sign-out group.
+   The nav wraps instead of scrolling, so no tab is ever hidden off-screen. */
+.top-nav-header { gap: 10px 16px; padding: 8px 0 12px; margin-bottom: 14px; }
+.brand-group { flex: 0 1 auto; }
+.brand-title { font-size: 17px; overflow: hidden; text-overflow: ellipsis; max-width: 340px; }
+.tab-nav-bar { flex: 0 1 auto; margin: 0 auto; flex-wrap: wrap; overflow: visible; white-space: normal; justify-content: center;
+  gap: 4px; padding: 4px; background: rgba(var(--tint-rgb), 0.025); backdrop-filter: none; }
+.tab-btn { padding: 7px 14px; font-size: 13px; min-height: 38px; gap: 7px; }
+.tab-icon { font-size: 14px; line-height: 1; }
+.tab-btn .tab-count[hidden] { display: none; }
+.tab-btn .tab-count.tab-count-alert { background: var(--rose); color: #ffffff; border-color: transparent; font-weight: 800; }
+.header-actions { margin-left: auto; flex-wrap: nowrap; gap: 8px; }
+.header-gear.active { background: var(--accent-cyan-dim); border-color: var(--accent-cyan); color: var(--accent-cyan); }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+
+/* Toast feedback kinds */
+.toast { max-width: calc(100vw - 32px); overflow-wrap: anywhere; }
+.toast.toast-ok { background: var(--accent-green); color: var(--on-accent); }
+.toast.toast-error { background: var(--rose); color: #ffffff; box-shadow: 0 8px 24px rgba(var(--rose-rgb), 0.35); }
+.empty-action { margin-left: 8px; }
+.link-btn { background: none; border: none; padding: 0; margin: 0; font: inherit; font-weight: 700; color: var(--accent-cyan);
+  cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+.link-btn:hover { color: var(--text-strong); }
+.table-scroll { overflow-x: auto; max-width: 100%; }
+.funnel-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.demographics-chart { height: 220px; }
+.theft-banner { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
+.data-state-banner { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 0; }
+
+/* Insights sub-navigation */
+.sub-nav { display: flex; flex-wrap: wrap; gap: 6px; }
+.sub-nav-btn { padding: 6px 14px; min-height: 34px; border-radius: 20px; font: inherit; font-size: 12.5px; font-weight: 700; cursor: pointer;
+  background: rgba(var(--tint-rgb), 0.04); color: var(--text-dim); border: 1px solid var(--control-border, rgba(var(--slate-rgb), 0.22)); }
+.sub-nav-btn:hover { color: var(--text-main); }
+.sub-nav-btn.active { color: var(--accent-cyan); border-color: var(--accent-cyan); background: var(--accent-cyan-dim); }
+.sub-view { display: none; flex-direction: column; gap: 14px; min-width: 0; }
+.sub-view.active { display: flex; }
+
+/* Cameras view */
+.filter-label { font-size: 11px; font-weight: 700; color: var(--text-dim); margin-right: 4px; }
+.controls-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+.camera-card-titles { min-width: 0; }
+.cam-role-slot:empty { display: none; }
+.fps-btn { min-height: 28px; padding: 4px 11px; }
+.channel-pill { padding: 5px 10px; min-height: 28px; font-size: 10.5px; }
+.theme-toggle-btn { width: 28px; height: 28px; }
+
+/* Today */
+.today-kpis { margin-bottom: 0; grid-template-columns: repeat(auto-fit, minmax(165px, 1fr)); }
+.stat-note { font-size: 11px; color: var(--text-dim); line-height: 1.4; overflow-wrap: anywhere; }
+.overview-strip .stat-val.stat-val-text { font-size: 17px; }
+.stat-box.stat-box-alert { border-color: rgba(var(--rose-rgb), 0.55); }
+.today-grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 14px; align-items: start; }
+.today-col { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.today-col-main, .today-col-side, .today-chart-card, .today-recs-card, .today-setup-card, .today-incidents-card { min-width: 0; }
+.today-rec { min-width: 0; }
+.today-grid .card-title { gap: 8px; flex-wrap: wrap; }
+.today-list { display: flex; flex-direction: column; gap: 8px; }
+.today-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 9px; min-width: 0;
+  background: rgba(var(--tint-rgb), 0.03); border: 1px solid rgba(var(--slate-rgb), 0.12); }
+.today-row-main { flex: 1 1 auto; min-width: 0; }
+.today-row-title { font-size: 12.5px; font-weight: 700; color: var(--text-strong); overflow-wrap: anywhere; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.today-row-sub { font-size: 11px; color: var(--text-dim); line-height: 1.45; overflow-wrap: anywhere; margin-top: 2px; }
+.today-row-sub .badge { padding: 1px 7px; font-size: 9.5px; }
+.today-row-title .badge { padding: 1px 7px; font-size: 9.5px; }
+.today-thumb { flex: 0 0 auto; width: 76px; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 6px; background: var(--media-bg);
+  border: 1px solid rgba(var(--tint-rgb), 0.1); }
+.today-thumb-empty { display: inline-flex; align-items: center; justify-content: center; font-size: 18px; }
+.setup-next { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; padding: 10px 12px; border-radius: 9px;
+  background: rgba(var(--info-rgb), 0.06); border: 1px solid rgba(var(--info-rgb), 0.25); }
+.setup-next-text { flex: 1 1 220px; min-width: 0; font-size: 12px; color: var(--text-2); line-height: 1.5; overflow-wrap: anywhere; }
+.setup-list { list-style: none; margin-top: 10px; display: flex; flex-direction: column; gap: 4px; }
+.setup-item { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; column-gap: 8px; align-items: baseline;
+  padding: 5px 4px; border-bottom: 1px solid rgba(var(--slate-rgb), 0.08); font-size: 12px; }
+.setup-icon { font-weight: 800; text-align: center; }
+.setup-label { color: var(--text-2); font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.setup-state { font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: .05em; }
+.setup-msg { grid-column: 2 / -1; font-size: 11px; color: var(--text-dim); line-height: 1.45; overflow-wrap: anywhere; }
+.setup-available .setup-icon, .setup-available .setup-state { color: var(--accent-green); }
+.setup-limited .setup-icon, .setup-limited .setup-state { color: var(--amber); }
+.setup-blocked .setup-icon, .setup-blocked .setup-state { color: var(--rose); }
+.setup-unsupported .setup-icon, .setup-unsupported .setup-state { color: var(--text-faint); }
+
+/* Visitors by hour */
+.hourly-chart { height: 260px; position: relative; }
+.hourly-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: -4px 0 8px; font-size: 11px; color: var(--text-dim); }
+.hl-item { display: inline-flex; align-items: center; gap: 6px; }
+.hl-swatch { display: inline-block; width: 14px; height: 10px; border-radius: 2px; }
+.hl-bar { background: var(--hourly-today); }
+.hl-partial { background: var(--hourly-today); opacity: 0.45; }
+.hl-nodata { background: repeating-linear-gradient(135deg, var(--hourly-nodata) 0 2px, transparent 2px 5px); border: 1px solid var(--hourly-nodata); }
+.hl-line { height: 0; border-radius: 0; border-top: 2px solid; }
+.hl-yday { border-top-color: var(--hourly-yday); }
+.hl-week { border-top: 2px dashed var(--hourly-week); }
+.hourly-note { font-size: 11.5px; color: var(--text-dim); line-height: 1.5; margin-top: 8px; }
+
+/* Settings */
+.settings-jump { display: flex; flex-wrap: wrap; gap: 6px; }
+.health-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px 16px; }
+.health-grid .telemetry-label { font-size: 9.5px; }
+.health-grid .telemetry-val { font-size: 13px; overflow-wrap: anywhere; }
+.telemetry-val.health-bad { color: var(--rose); }
+
+@media (max-width: 1100px) {
+  .today-grid { display: flex; flex-direction: column; gap: 14px; }
+  .today-col { display: contents; }
+  .today-incidents-card { order: -1; }
+}
+
+/* Touch screens: bigger targets everywhere. */
+@media (pointer: coarse) {
+  .btn, .btn-sm, .btn-xs, .tab-btn, .fps-btn, .channel-pill, .sub-nav-btn, .fp-toggle { min-height: 40px; }
+  .theme-toggle-btn { width: 40px; height: 40px; }
+  .link-btn { min-height: 32px; }
+}
+
+/* Phones: compact header, bottom tab bar, two-column KPI tiles. */
+@media (max-width: 760px) {
+  .dashboard-shell { padding: 8px 12px calc(84px + env(safe-area-inset-bottom)); }
+  .top-nav-header { gap: 8px; padding: 2px 0 8px; margin-bottom: 10px; flex-wrap: nowrap; }
+  .brand-logo-glow { font-size: 20px; }
+  .brand-title { font-size: 15px; max-width: 46vw; }
+  .brand-subtitle { font-size: 9.5px; }
+  .header-gear-label { display: none; }
+  .top-nav-header .header-actions { gap: 6px; width: auto; flex: 0 0 auto; justify-content: flex-end; }
+  .brand-group { flex: 1 1 auto; }
+  .header-actions .btn { padding: 5px 8px; }
+  .tab-nav-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 900; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 2px; padding: 4px 4px calc(4px + env(safe-area-inset-bottom)); border-radius: 0; border-width: 1px 0 0;
+    background: var(--modal-bg); box-shadow: 0 -6px 20px rgba(var(--shadow-rgb), 0.25); }
+  .tab-btn { flex-direction: column; justify-content: center; gap: 1px; padding: 4px 2px; min-height: 54px; font-size: 10.5px; min-width: 0; position: relative; }
+  .tab-icon { font-size: 18px; }
+  .tab-label { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tab-label[data-short] { font-size: 0; }
+  .tab-label[data-short]::after { content: attr(data-short); font-size: 10.5px; }
+  .tab-btn .tab-count { position: absolute; top: 2px; right: 6px; padding: 0 5px; font-size: 9px; }
+  .toast { bottom: calc(76px + env(safe-area-inset-bottom)) !important; }
+  .overview-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .overview-strip .stat-box { padding: 10px 11px; }
+  .overview-strip .stat-val { font-size: 20px; }
+  .controls-right { margin-left: 0; width: 100%; }
+  .controls-right .search-input { flex: 1 1 160px; min-width: 0; }
+  .glass-card { padding: 12px; }
+  .card-title { flex-wrap: wrap; gap: 6px; }
+  .analytics-two-col { grid-template-columns: minmax(0, 1fr); }
+  .funnel-stage-row { grid-template-columns: 90px minmax(0, 1fr) 56px; }
+  .today-thumb { width: 60px; }
+}
+
+/* Settings > Appearance */
+.appearance-row { display: flex; flex-wrap: wrap; gap: 6px; }
+
+@media (max-width: 760px) {
+  /* Room for the store name: the theme switch lives in Settings > Appearance on phones. */
+  .top-nav-header .theme-toggle { display: none; }
+  .brand-subtitle { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 46vw; }
+  .theft-banner { padding: 10px 12px; gap: 8px; }
+  .theft-banner-icon { display: none; }
+  .theft-banner-meta { font-size: 11px; }
+  .theft-banner-meta > span:nth-child(n+4) { display: none; }
+  .theft-banner-actions { width: 100%; }
+}
+
+@media print {
+  .top-nav-header, .theft-banner, .sub-nav { display: none !important; }
+}
+
+/* Camera setup (Studio) header: title first, then the way back; wraps on phones. */
+.header { flex-wrap: wrap; gap: 10px 16px; }
+.studio-logo-group { flex-wrap: wrap; min-width: 0; gap: 8px 16px; flex: 1 1 420px; }
+.studio-title-block { min-width: 0; flex: 1 1 260px; }
+.studio-nav { display: flex; flex-wrap: wrap; gap: 6px; }
+.studio-badges { justify-content: flex-end; min-width: 0; flex-wrap: wrap; }
+@media (max-width: 760px) {
+  .header { position: static; }
+  .studio-logo-group { flex-basis: 100%; }
+  .studio-title-block { flex-basis: 100%; }
+  .studio-badges { width: 100%; justify-content: flex-start; }
+  .logo-title { font-size: 15px; }
+  .studio-badges .badge { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+}

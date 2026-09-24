@@ -11,6 +11,7 @@ dashboard session cookie), so an ``<img>`` tag can load the evidence image.
 """
 
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Body, Request
@@ -26,7 +27,12 @@ from app.models.schemas import (
     TheftAcknowledgeRequest,
     TheftDispatchRequest,
     TheftResolveRequest,
+    TheftOutcome,
+    THEFT_ACTIONED_OUTCOMES,
+    THEFT_OUTCOME_LABELS,
+    THEFT_RECOVERY_OUTCOMES,
 )
+from app.services.actor import describe_actor
 from app.services.auth_service import auth_service
 from app.services.pose_analytics import pose_analytics
 from app.services.theft_detection_service import RULE_LABELS, theft_detection_service
@@ -57,6 +63,14 @@ class TheftIncidentOut(TheftIncident):
     evidence: Optional[List[str]] = None
     snapshot_url: Optional[str] = None
     review_label: str = REVIEW_LABEL
+    outcome: Optional[str] = None
+    outcome_label: Optional[str] = None
+    recovered_value: Optional[float] = None
+    resolved_by: Optional[str] = None
+    dispatched_by: Optional[str] = None
+    dispatched_at: Optional[datetime] = None
+    # For the dashboard's "Watch camera now" link.
+    studio_url: Optional[str] = None
 
 
 class TheftIncidentOutList(BaseModel):
@@ -74,6 +88,10 @@ def _serialize(inc: TheftIncidentModel) -> TheftIncidentOut:
     out.snapshot_url = f"/api/v1/theft/incidents/{inc.id}/evidence" if has_image else None
     # The mobile app reads this field (relative URL, fetched with a bearer token).
     out.evidence_snapshot_url = out.snapshot_url
+    if inc.status in ("RESOLVED", "FALSE_ALARM") and inc.resolution:
+        out.outcome = inc.resolution
+        out.outcome_label = THEFT_OUTCOME_LABELS.get(inc.resolution, inc.resolution.replace("_", " ").capitalize())
+    out.studio_url = f"/dashboard/studio?camera_id={inc.camera_id}" if inc.camera_id else None
     return out
 
 
@@ -144,14 +162,33 @@ async def get_theft_statistics(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/outcomes")
+async def list_theft_outcomes():
+    """The outcomes a reviewer can record, for the resolve buttons."""
+    return {
+        "outcomes": [
+            {
+                "id": o.value,
+                "label": THEFT_OUTCOME_LABELS[o.value],
+                "counts_as_actioned": o.value in THEFT_ACTIONED_OUTCOMES,
+                "accepts_recovered_value": o.value in THEFT_RECOVERY_OUTCOMES,
+                "is_false_alarm": o is TheftOutcome.FALSE_ALARM,
+            }
+            for o in TheftOutcome
+        ],
+        "required": True,
+    }
+
+
 @router.post("/incidents/{incident_id}/acknowledge", response_model=TheftIncidentOut)
 async def acknowledge_theft_incident(
     incident_id: str,
+    request: Request,
     payload: Optional[TheftAcknowledgeRequest] = Body(None),
     db: AsyncSession = Depends(get_db),
 ):
-    """Acknowledge a live theft incident by a security guard or operator."""
-    guard_id = payload.guard_id if payload else "guard_01"
+    """Record who acknowledged the incident (the name given, else the signed-in operator)."""
+    guard_id = (payload.guard_id if payload and payload.guard_id else None) or await describe_actor(request, db)
     incident = await theft_detection_service.acknowledge_incident(
         incident_id=incident_id,
         guard_id=guard_id,
@@ -162,44 +199,105 @@ async def acknowledge_theft_incident(
     return _serialize(incident)
 
 
+_RULE_EVENT_TYPES = {
+    "CONCEALMENT": "CONCEALMENT",
+    "SHELF_SWEEPING": "SHELF_SWEEP",
+    "SUSPICIOUS_LOITERING": "LOITERING",
+    "EXIT_WITHOUT_CHECKOUT": "EXIT_WITHOUT_CHECKOUT",
+}
+
+
 @router.post("/incidents/{incident_id}/dispatch", response_model=TheftIncidentOut)
 async def dispatch_security_to_incident(
     incident_id: str,
+    request: Request,
     payload: Optional[TheftDispatchRequest] = Body(None),
     db: AsyncSession = Depends(get_db),
 ):
-    """Dispatch security floor personnel or trigger active audio greeting deterrent in zone."""
-    guard_unit = payload.guard_unit if payload else "Unit 1 - Floor Guard"
-    audio_deterrent = payload.audio_deterrent if payload else True
-    announcement_type = (payload.announcement_type if payload else None) or "CUSTOMER_ASSISTANCE_GREETING"
+    """Mark "staff sent": records who marked it and when, and alerts paired phones.
 
+    Nothing is invented: no guard unit and no audio deterrent are recorded
+    unless typed by the operator (``staff_name``), because this system cannot
+    dispatch a unit or play audio. The loss-prevention alert goes out through
+    ``alert_dispatcher`` and its real delivery report is stored on the incident
+    (``dispatch_details.alert``) and returned.
+    """
+    payload = payload or TheftDispatchRequest()
+    actor = await describe_actor(request, db)
     incident = await theft_detection_service.dispatch_security(
         incident_id=incident_id,
-        guard_unit=guard_unit,
-        audio_deterrent=audio_deterrent,
-        announcement_type=announcement_type,
+        dispatched_by=actor,
+        staff_name=payload.staff_name,
+        note=payload.note,
         db=db,
     )
     if not incident:
         raise HTTPException(status_code=404, detail=f"Theft incident '{incident_id}' not found")
+
+    if payload.notify_phones:
+        from app.services.alert_dispatcher import alert_dispatcher
+
+        rule = incident.rule or incident.theft_type or ""
+        label = RULE_LABELS.get(rule, rule.replace("_", " ").capitalize() or "Loss-prevention alert")
+        where = incident.camera_name or incident.camera_id
+        sent = f" ({payload.staff_name.strip()})" if payload.staff_name and payload.staff_name.strip() else ""
+        body = f"{actor} sent staff{sent} to check {where}. Suspicious behaviour for staff review."
+        if payload.note and payload.note.strip():
+            body += f" Note: {payload.note.strip()[:200]}"
+        has_image = bool(incident.snapshot_path) and Path(incident.snapshot_path).is_file()
+        try:
+            report = await alert_dispatcher.dispatch(
+                _RULE_EVENT_TYPES.get(rule, "THEFT_SUSPECTED"),
+                incident.severity or "HIGH",
+                f"Staff sent: {label} - {where}",
+                body,
+                {
+                    "camera_id": incident.camera_id,
+                    "incident_id": incident.id,
+                    "kind": "staff_dispatch",
+                    "dispatched_by": actor,
+                    "snapshot_url": f"/api/v1/theft/incidents/{incident.id}/evidence" if has_image else "",
+                },
+                bypass_cooldown=True,
+            )
+            push = report.get("push") or {}
+            summary = {
+                "alert_id": report.get("alert_id"),
+                "logged": report.get("logged"),
+                "websocket_clients": report.get("websocket_clients"),
+                "phones_paired": push.get("devices"),
+                "phones_sent": push.get("sent"),
+                "phones_failed": push.get("failed"),
+                "skipped": push.get("skipped"),
+            }
+        except Exception as exc:  # the record stands even if the alert could not go out
+            logger.error(f"Staff-sent alert for {incident_id} failed: {exc}")
+            summary = {"error": str(exc)[:200]}
+        await theft_detection_service.record_dispatch_alert(incident.id, summary, db)
+        incident = await db.get(TheftIncidentModel, incident_id)
     return _serialize(incident)
 
 
 @router.post("/incidents/{incident_id}/resolve", response_model=TheftIncidentOut)
 async def resolve_theft_incident(
     incident_id: str,
-    payload: Optional[TheftResolveRequest] = Body(None),
+    request: Request,
+    payload: TheftResolveRequest = Body(...),
     db: AsyncSession = Depends(get_db),
 ):
-    """Resolve an incident (e.g. RECOVERED_GOODS, FALSE_ALARM, POLICE_DISPATCHED)."""
-    resolution = payload.resolution if payload else "RECOVERED_GOODS"
-    notes = payload.notes if payload else None
+    """Close an incident with the reviewer's outcome. ``outcome`` is required (422 without it).
 
+    Outcomes: see ``GET /api/v1/theft/outcomes``. ``resolution`` is accepted
+    as the old name. ``recovered_value`` only with RECOVERED_GOODS or
+    CUSTOMER_PAID. The operator who recorded it is stored as ``resolved_by``.
+    """
     incident = await theft_detection_service.resolve_incident(
         incident_id=incident_id,
-        resolution=resolution,
-        notes=notes,
+        resolution=payload.outcome.value,
+        notes=payload.notes,
         db=db,
+        resolved_by=await describe_actor(request, db),
+        recovered_value=payload.recovered_value,
     )
     if not incident:
         raise HTTPException(status_code=404, detail=f"Theft incident '{incident_id}' not found")

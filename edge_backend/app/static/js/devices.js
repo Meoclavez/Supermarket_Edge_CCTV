@@ -19,6 +19,23 @@
     ));
   }
 
+  /** Camera purpose badge from js/camera_roles.js (empty until it has loaded). */
+  function roleBadge(cameraId) {
+    return window.edgeRoles && typeof window.edgeRoles.badgeHtml === 'function'
+      ? window.edgeRoles.badgeHtml(cameraId, { progress: true }) : '';
+  }
+
+  function roleOptions() {
+    const list = window.edgeRoles && typeof window.edgeRoles.presets === 'function' ? window.edgeRoles.presets() : [];
+    return list.map((p) => `<option value="${esc(p.id)}">${esc(p.label)}</option>`).join('');
+  }
+
+  /** Department label as stored by the server: upper case, GENERAL when empty. */
+  function normDept(v) {
+    const s = String(v || '').toUpperCase().replace(/[^A-Z0-9 _&/-]/g, '').replace(/\s+/g, ' ').trim().slice(0, 40);
+    return s || 'GENERAL';
+  }
+
   function status(msg, kind) {
     const e = el('deviceScanStatus');
     if (!e) return;
@@ -105,7 +122,7 @@
       } catch (e) {
         status(`Scan failed: ${e.message}`, 'error');
       } finally {
-        if (btn) { btn.disabled = false; btn.textContent = 'Scan for cameras'; }
+        if (btn) { btn.disabled = false; btn.textContent = 'Scan network'; }
       }
     },
 
@@ -134,12 +151,14 @@
             <div class="dev-name">${esc(c.name)}</div>
             <div class="dev-sub">${esc(c.status)} · ${(+c.floor_x || 0).toFixed(1)}, ${(+c.floor_y || 0).toFixed(1)} m · ${Math.round(c.azimuth_deg || 0)}°</div>
             <div class="dev-meta">
+              ${roleBadge(c.camera_id)}
               <span class="dev-tag ${c.frame_width ? '' : 'warn'}">${frame}</span>
               <span class="dev-tag ${c.has_homography ? 'ok' : 'warn'}">${c.has_homography ? 'calibrated' : 'uncalibrated'}</span>
             </div>
           </div>
           <div class="dev-actions">
             <button class="btn btn-xs" onclick="deviceManager.config('${id}')" title="Position, bearing, field of view">Config</button>
+            <button class="btn btn-xs" data-role-action="open-checklist" data-camera="${id}" title="What is left to set up for this camera's purpose">Checklist</button>
             <button class="btn btn-xs ${c.has_homography ? '' : 'btn-primary'}" onclick="deviceManager.calibrate('${id}')" title="Map this camera's image onto the plan">Calibrate</button>
             <button class="btn btn-xs" onclick="deviceManager.place('${id}')" title="Click the plan to reposition">Place</button>
             <button class="btn btn-xs btn-danger" onclick="deviceManager.remove('${id}')">Remove</button>
@@ -204,10 +223,10 @@
           <div class="dev-form-title">Add ${esc(device.model_name || device.host || device.device_path)}</div>
           <div class="fp-field"><label for="adName">Camera name</label>
             <input id="adName" name="cameraName" type="text" value="${esc(device.model_name || device.host || 'Camera')}"></div>
-          <div class="fp-field"><label for="adDept">Area</label>
-            <select id="adDept" name="department">
-              ${['ENTRANCE','EXIT','AISLE','DEPARTMENT','CHECKOUT','STOCKROOM','GENERAL']
-                .map((d) => `<option value="${d}">${d}</option>`).join('')}
+          <div class="fp-field"><label for="adRole">What does it look at?</label>
+            <select id="adRole" name="role">
+              <option value="">Not sure yet (set later)</option>
+              ${roleOptions()}
             </select></div>
           ${needsAuth ? `
           <div class="fp-field-row">
@@ -245,7 +264,7 @@
         const body = {
           device_id: deviceId,
           name: document.getElementById('adName').value.trim() || 'Camera',
-          department: document.getElementById('adDept').value,
+          role: document.getElementById('adRole').value || undefined,
           floor_x: parseFloat(document.getElementById('adX').value) || 1,
           floor_y: parseFloat(document.getElementById('adY').value) || 1,
         };
@@ -267,6 +286,7 @@
           if (window.blueprintEditor) await window.blueprintEditor.load();
           await this.refresh();
           if (window.blueprintEditor) window.blueprintEditor.selectCamera(cam.camera_id || cam.id);
+          if (window.edgeRoles) window.edgeRoles.afterCameraAdded({ id: cam.camera_id || cam.id, name: cam.name, role: cam.role || body.role || null });
         } catch (e) {
           status(`Could not add device: ${e.message}`, 'error');
           btn.disabled = false;
@@ -423,7 +443,8 @@
         name: el('acName').value.trim(),
         source_type: type,
         url: el('acUrl').value.trim(),
-        department: el('acDept').value,
+        department: normDept(el('acDept').value),
+        role: (window.edgeRoles && window.edgeRoles.newCameraRole()) || null,
         location: el('acLoc').value.trim(),
         username: creds ? el('acUser').value.trim() : '',
         password: creds ? el('acPass').value : '',
@@ -471,6 +492,7 @@
           body: JSON.stringify({
             source_type: body.source_type, url: body.url,
             username: body.username || null, password: body.password || null,
+            ...(body.role ? { role: body.role } : {}),
           }),
         });
         if (!res.ok) {
@@ -499,7 +521,7 @@
           : (data.fps_reported != null ? `${data.fps_reported} fps (reported by stream)` : 'fps unknown');
         const via = data.resolved_via === 'onvif' ? ` · resolved ${data.resolved_url}` : '';
         el('acPreviewCap').textContent = `${data.width}×${data.height} · ${fps} · ${data.elapsed_ms} ms${via}`;
-        this.addStatus('Connected. This is the frame the server received.', 'ok');
+        this.addStatus(`Connected. This is the frame the server received.${data.mounting_tip ? ` Tip for ${data.role_label}: ${data.mounting_tip}` : ''}`, 'ok');
       } catch (e) {
         this.clearPreview();
         this.addStatus(`Test failed: ${e.message}`, 'error');
@@ -521,6 +543,7 @@
           name: body.name, department: body.department, location: body.location,
           source_type: body.source_type, rtsp_url: body.url,
         };
+        if (body.role) payload.role = body.role;
         if (body.username) payload.username = body.username;
         if (body.password) payload.password = body.password;
         const res = await fetch('/api/v1/cameras', {
@@ -540,7 +563,7 @@
         }
         const cam = await res.json();
         // Clear the secret fields and the form for the next camera.
-        ['acName', 'acUrl', 'acUser', 'acPass', 'acLoc'].forEach((id) => { el(id).value = ''; });
+        ['acName', 'acUrl', 'acUser', 'acPass', 'acLoc', 'acDept'].forEach((id) => { el(id).value = ''; });
         this.clearPreview();
         this.addStatus('', 'info');
         this.toggleAddPanel(false);
@@ -549,6 +572,8 @@
         await this.refresh();
         if (typeof window.loadCamerasMatrix === 'function') window.loadCamerasMatrix();
         window.dispatchEvent(new CustomEvent('edge:cameras-changed', { detail: { camera_id: cam.id } }));
+        // Straight to the purpose's setup checklist (or a hint to set one).
+        if (window.edgeRoles) window.edgeRoles.afterCameraAdded(cam);
       } catch (e) {
         this.addStatus(`Not saved: ${e.message}`, 'error');
       } finally {
@@ -645,7 +670,7 @@
     async probeNvr() {
       const host = (el('nvrHost')?.value || '').trim();
       if (!host) {
-        dahuaStatus('Enter the Dahua NVR IP address first (e.g. 192.168.1.108).', 'error');
+        dahuaStatus('Enter the recorder IP address first (e.g. 192.168.1.108).', 'error');
         el('nvrHost')?.setAttribute('aria-invalid', 'true');
         el('nvrHost')?.focus();
         return;
@@ -702,7 +727,7 @@
 
         const activeCount = probe.active_channels_count || 0;
         if (stat) {
-          stat.textContent = `✓ Found ${activeCount} active camera feed(s) across ${probe.channel_count_scanned} channels on Dahua NVR.`;
+          stat.textContent = `✓ Found ${activeCount} active camera feed(s) across ${probe.channel_count_scanned} channels on the recorder.`;
           stat.className = activeCount > 0 ? 'fp-status fp-ok' : 'fp-status fp-warn';
         }
 
@@ -785,7 +810,7 @@
             });
             if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
             const data = await res.json();
-            status(`Successfully adopted ${data.adopted_count} Dahua NVR channel(s) onto blueprint!`, 'ok');
+            status(`Added ${data.adopted_count} recorder channel(s). Place them on the map to count people per area.`, 'ok');
             if (window.blueprintEditor) await window.blueprintEditor.load();
             await this.refresh();
             this.toggleDahuaPanel();

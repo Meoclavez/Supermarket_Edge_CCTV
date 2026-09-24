@@ -117,6 +117,25 @@ def camera_setting(camera_id: str, name: str):
         return None
 
 
+def _append_path_point(t, fx: float, fy: float, w: int, h: int, floor, now: float) -> None:
+    """Sample the track's path for the recorded heatmaps (services/heatmap_history.py).
+
+    At most one point per TRAJECTORY_SAMPLE_SEC and TRAJECTORY_MAX_POINTS per
+    track: the normalised image foot point always (uncalibrated cameras still
+    get image-space heatmaps), floor metres only when calibrated.
+    """
+    pts = t.path_points
+    if len(pts) >= settings.TRAJECTORY_MAX_POINTS or w <= 0 or h <= 0:
+        return
+    if pts and now - float(pts[-1]["t"]) < settings.TRAJECTORY_SAMPLE_SEC:
+        return
+    p = {"u": round(min(max(fx / w, 0.0), 1.0), 4), "v": round(min(max(fy / h, 0.0), 1.0), 4),
+         "t": round(now, 2)}
+    if floor is not None:
+        p["x"], p["y"] = round(floor[0], 2), round(floor[1], 2)
+    pts.append(p)
+
+
 def _reset_pose_camera(camera_id: str) -> None:
     pa = _get_pose_analytics()
     if pa is None:
@@ -532,6 +551,8 @@ class CameraWorker(threading.Thread):
                         )
                         self.engine.attribute_zone(t, floor[0], floor[1], now)
                         entry["zone_id"] = t.current_zone_id
+                if counting:
+                    _append_path_point(t, fx, fy, w, h, floor, now)
                 if not counting and t.current_zone_id is not None:
                     # Counting was switched off mid-visit: finish it honestly.
                     self.engine.leave_zone(t, now)

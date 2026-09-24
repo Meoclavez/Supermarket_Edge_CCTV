@@ -253,7 +253,12 @@ class PipelineSupervisor:
                             start_time=utc_from_ts(t.first_seen),
                             end_time=utc_from_ts(t.last_seen),
                             hits=int(t.hits),
-                            trajectory_points=t.floor_points[:500],
+                            # Sampled path (image + floor when calibrated,
+                            # heatmap_history); floor-only for older Track objects.
+                            trajectory_points=(
+                                list(getattr(t, "path_points", None) or [])[:settings.TRAJECTORY_MAX_POINTS]
+                                or t.floor_points[:500]
+                            ),
                         )
                     )
                     written += 1

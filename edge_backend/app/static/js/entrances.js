@@ -75,7 +75,7 @@
               <td class="entrances-out">${cell(t.out)}</td>
               <td>${cell(t.net)}</td>
             </tr>`).join('')
-        : '<tr><td colspan="5"><div class="fp-empty">No tripwires yet. Draw one across each entrance in Camera Studio (Tripwire tool) to count people in and out.</div></td></tr>';
+        : '<tr><td colspan="5"><div class="fp-empty">No counting lines yet. Draw one across each entrance in Camera setup (Tripwire tool) to count people in and out exactly.</div></td></tr>';
     }
     if (note) {
       note.textContent = data.observed
@@ -93,7 +93,8 @@
     }, 10000);
   }
 
-  window.addEventListener('edge:tab', (e) => { if (e.detail && e.detail.tab === 'analytics') start(); });
+  // Insights > Shoppers & footfall (the old 'analytics' tab).
+  window.addEventListener('edge:tab', (e) => { if (e.detail && (e.detail.tab === 'analytics' || (e.detail.tab === 'insights' && e.detail.sub === 'footfall'))) start(); });
   window.entrancesCard = { refresh };
   const boot = () => {
     const tab = el('tab-analytics');

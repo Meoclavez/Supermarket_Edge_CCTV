@@ -1,9 +1,13 @@
 /**
- * Edge AI CCTV - Retail Intelligence Dashboard Controller
+ * Edge AI CCTV - dashboard controller
  *
- * Owns: tab navigation, header telemetry, headline KPIs, the live camera
- * matrix, the camera configuration modal, the analytics / action / market /
- * theft / digest tabs, and an opt-in self test (?__selftest=1).
+ * Owns: navigation (Today / Cameras / Store map / Insights / Loss prevention,
+ * Settings behind the header gear) with redirects for the old hashes, the
+ * header, the live camera matrix, the camera configuration modal, the
+ * "Shoppers & footfall" insights view (visitors by hour, journey, areas), the
+ * Settings "Sales data" and "System health" cards, the shared helpers other
+ * modules use (today.js, loss.js, insights.js), and an opt-in self test
+ * (?__selftest=1).
  *
  * Rules this file follows:
  *  - Every number shown comes from an API response. A value the API reports
@@ -15,21 +19,45 @@
 'use strict';
 
 const DASH = '—';
-const VALID_TABS = ['matrix', 'floorplan', 'analytics', 'actions', 'market_ai', 'theft', 'digest', 'settings'];
+
+// Top-level views -> their section element.
+const VIEW_SECTIONS = {
+  today: 'tab-today',
+  cameras: 'tab-matrix',
+  map: 'tab-floorplan',
+  insights: 'tab-insights',
+  loss: 'tab-theft',
+  settings: 'tab-settings',
+};
+// Insights sub-views -> their element.
+const INSIGHT_SUBS = { recs: 'insights-recs', footfall: 'tab-analytics', report: 'tab-digest' };
+// Old hashes (links, bookmarks, the phone app) -> their new home.
+const LEGACY_ROUTES = {
+  matrix: 'cameras',
+  floorplan: 'map',
+  analytics: 'insights/footfall',
+  actions: 'insights/recs',
+  market_ai: 'insights/recs',
+  theft: 'loss',
+  digest: 'insights/report',
+  settings: 'settings',
+};
+// Every route the self test walks, old ones included.
+const VALID_TABS = ['today', 'cameras', 'map', 'insights', 'insights/recs', 'insights/footfall', 'insights/report',
+  'loss', 'settings', ...Object.keys(LEGACY_ROUTES)];
 
 let activeCameraFilter = 'ALL';
 let currentDecimationFPS = 5;
 let allCamerasList = [];
-let allDecisions = [];
-let hourlyChartInstance = null;
-let activeTheftIncidentId = null;
-let lastAlertedTheftId = null;
 let layoutSnapshot = null;          // last GET /api/v1/layout
 let pipelineSnapshot = null;        // last GET /api/v1/layout/pipeline/status
 let lastCameraSignature = null;     // change detector for the matrix re-render
+let currentView = null;
+let currentSub = null;
+let lastInsightsSub = 'recs';     // the Insights tab reopens where the operator left it
 
 // ==========================================
-// Small helpers
+// Small helpers (also used by today.js, loss.js and insights.js)
 // ==========================================
 function el(id) { return document.getElementById(id); }
 
@@ -62,13 +90,16 @@ async function getJSON(url, fallback = null) {
   }
 }
 
-function showToast(msg) {
+/** Short message at the bottom of the screen. kind: 'ok' | 'error' | undefined. */
+function showToast(msg, kind) {
   const t = el('toast');
   if (!t) return;
   t.textContent = msg;
+  t.classList.toggle('toast-ok', kind === 'ok');
+  t.classList.toggle('toast-error', kind === 'error');
   t.style.display = 'block';
   clearTimeout(showToast._timer);
-  showToast._timer = setTimeout(() => { t.style.display = 'none'; }, 3000);
+  showToast._timer = setTimeout(() => { t.style.display = 'none'; }, kind === 'error' ? 6000 : 3500);
 }
 
 /**
@@ -80,7 +111,7 @@ function setMetric(id, value, { suffix = '', prefix = '', digits = null } = {}) 
   if (value === null || value === undefined || (typeof value === 'number' && !Number.isFinite(value))) {
     node.textContent = DASH;
     node.classList.add('metric-unobserved');
-    node.title = 'Not observed yet';
+    node.title = 'Not measured yet';
     return;
   }
   node.classList.remove('metric-unobserved');
@@ -93,72 +124,191 @@ function setMetric(id, value, { suffix = '', prefix = '', digits = null } = {}) 
 
 function emptyState(message, actionLabel, actionFn) {
   const btn = actionLabel
-    ? ` <button type="button" class="btn btn-sm btn-primary" style="margin-left:8px" onclick="${actionFn}">${escapeHtml(actionLabel)}</button>`
+    ? ` <button type="button" class="btn btn-sm btn-primary empty-action" onclick="${actionFn}">${escapeHtml(actionLabel)}</button>`
     : '';
   return `<div class="fp-empty">${escapeHtml(message)}${btn}</div>`;
 }
 
-// ==========================================
-// 1. Tab navigation & hash routing
-// ==========================================
-function switchTab(tabId) {
-  if (!VALID_TABS.includes(tabId)) tabId = 'matrix';
+/** Parse an API time: naive strings are UTC, offset strings are taken as given. */
+function parseApiTime(ts) {
+  if (!ts) return null;
+  const iso = typeof ts === 'string' && /T?\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(ts) && !/[zZ]|[+-]\d{2}:?\d{2}$/.test(ts)
+    ? `${ts.replace(' ', 'T')}Z` : ts;
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
 
-  document.querySelectorAll('.tab-btn').forEach((btn) => {
-    btn.classList.toggle('active', btn.getAttribute('data-tab') === tabId);
-  });
-  document.querySelectorAll('.tab-view').forEach((view) => {
-    view.classList.toggle('active', view.id === `tab-${tabId}`);
-  });
+function formatTimestamp(ts) {
+  if (!ts) return DASH;
+  const d = parseApiTime(ts);
+  return d ? d.toLocaleString() : String(ts);
+}
 
-  if (window.location.hash !== `#${tabId}`) {
-    history.replaceState(null, '', `#${tabId}`);
+/** "just now", "5 min ago", "3 h ago", or a date for anything older than a day. */
+function formatAgo(ts) {
+  const d = parseApiTime(ts);
+  if (!d) return DASH;
+  const s = Math.round((Date.now() - d.getTime()) / 1000);
+  if (s < 0) return `in ${formatDuration(-s)}`;
+  if (s < 45) return 'just now';
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+  return d.toLocaleDateString();
+}
+
+/** Seconds -> "24 s", "1 min 30 s", "2 h 5 min". Never "0.4m" (m reads as metres here). */
+function formatDuration(seconds) {
+  if (!isNum(seconds)) return DASH;
+  const s = Math.max(0, Math.round(seconds));
+  if (s < 60) return `${s} s`;
+  if (s < 3600) {
+    const m = Math.floor(s / 60), r = s % 60;
+    return r ? `${m} min ${r} s` : `${m} min`;
   }
+  const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60);
+  return m ? `${h} h ${m} min` : `${h} h`;
+}
 
-  // Lets tab-specific scripts (settings panels) load their data on demand.
-  window.dispatchEvent(new CustomEvent('edge:tab', { detail: { tab: tabId } }));
+function theftAuthUrl(url) {
+  if (!url) return url;
+  return (window.edgeAuth && typeof window.edgeAuth.authUrl === 'function') ? window.edgeAuth.authUrl(url) : url;
+}
+
+/**
+ * An evidence picture that cannot be loaded (file pruned by retention, moved,
+ * or not reachable) is replaced by a plain note instead of a broken image.
+ */
+document.addEventListener('error', (e) => {
+  const img = e.target;
+  if (!img || img.tagName !== 'IMG') return;
+  const today = img.classList.contains('today-thumb');
+  if (!today && !img.classList.contains('evidence-thumb')) return;
+  const note = document.createElement(today ? 'span' : 'div');
+  note.className = today ? 'today-thumb today-thumb-empty' : 'evidence-thumb-empty';
+  note.textContent = today ? '🚫' : 'Evidence image not available';
+  note.title = 'The evidence picture could not be loaded';
+  const link = img.closest('a');
+  (link || img).replaceWith(note);
+}, true);
+
+/** Scroll a section into view at once (no smooth scroll, so tests can measure). */
+function jumpTo(id) {
+  const node = el(id);
+  if (node) node.scrollIntoView({ behavior: 'instant', block: 'start' });
+  return false;
+}
+
+// ==========================================
+// 1. Navigation & hash routing
+// ==========================================
+/** Normalise any route (new, 'insights/<sub>', or an old hash) to {view, sub}. */
+function resolveRoute(id) {
+  let route = String(id || '').replace(/^#/, '');
+  if (LEGACY_ROUTES[route]) route = LEGACY_ROUTES[route];
+  let [view, sub] = route.split('/');
+  if (!VIEW_SECTIONS[view]) { view = 'today'; sub = null; }
+  if (view === 'insights') sub = INSIGHT_SUBS[sub] ? sub : lastInsightsSub;
+  else sub = null;
+  return { view, sub };
+}
+
+function switchTab(id) {
+  const { view, sub } = resolveRoute(id);
+  const sectionId = VIEW_SECTIONS[view];
+
+  document.querySelectorAll('[data-tab]').forEach((btn) => {
+    const on = btn.getAttribute('data-tab') === view;
+    btn.classList.toggle('active', on);
+    if (on) btn.setAttribute('aria-current', 'page'); else btn.removeAttribute('aria-current');
+  });
+  document.querySelectorAll('.tab-view').forEach((v) => {
+    v.classList.toggle('active', v.id === sectionId);
+  });
+  if (view === 'insights') {
+    Object.entries(INSIGHT_SUBS).forEach(([k, elId]) => {
+      const node = el(elId);
+      if (node) node.classList.toggle('active', k === sub);
+    });
+    document.querySelectorAll('#insightsSubNav [data-sub]').forEach((b) => {
+      const on = b.getAttribute('data-sub') === sub;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+  }
+  currentView = view;
+  currentSub = sub;
+  if (sub) lastInsightsSub = sub;
+
+  const hash = view === 'insights' && sub !== 'recs' ? `#insights/${sub}` : `#${view}`;
+  if (window.location.hash !== hash) history.replaceState(null, '', hash);
+
+  // Lets the other modules load their data on demand.
+  window.dispatchEvent(new CustomEvent('edge:tab', { detail: { tab: view, sub } }));
 
   // The blueprint canvas is sized from its container, which has no size
   // while its tab is hidden, so it must be measured again once visible.
-  if (tabId === 'floorplan' && window.blueprintEditor) {
+  if (view === 'map') fitMapHeight();
+  if (view === 'map' && window.blueprintEditor) {
     setTimeout(() => {
       try { window.blueprintEditor.resize(); window.blueprintEditor.resetView(); } catch (e) { /* editor not ready */ }
     }, 60);
   }
-  if (tabId === 'analytics') setTimeout(initOrUpdateCharts, 50);
-  if (tabId === 'market_ai') setTimeout(loadMarketPredictions, 50);
-  if (tabId === 'theft') setTimeout(fetchTheftIncidents, 50);
-  if (tabId === 'actions') setTimeout(loadActionCenter, 50);
-  if (tabId === 'digest') setTimeout(loadExecutiveDigest, 50);
+  if (view === 'insights' && sub === 'footfall') setTimeout(initOrUpdateCharts, 50);
+  if (view === 'settings') setTimeout(loadSettingsCards, 50);
 
-  // Streams are only kept open while the matrix is the visible tab.
+  // Streams are only kept open while the camera matrix is the visible view.
   attachCameraStreams();
 }
 window.switchTab = switchTab;
 
 function initHashRouting() {
-  const hash = window.location.hash.replace('#', '');
-  switchTab(VALID_TABS.includes(hash) ? hash : 'matrix');
+  switchTab(window.location.hash.replace('#', '') || 'today');
 }
 window.addEventListener('hashchange', () => {
   const hash = window.location.hash.replace('#', '');
-  if (VALID_TABS.includes(hash)) switchTab(hash);
+  const { view, sub } = resolveRoute(hash);
+  if (view !== currentView || sub !== currentSub || LEGACY_ROUTES[hash]) switchTab(hash);
 });
 
+/** Cameras are added and managed in the Store map side panel. */
+function openDeviceManager() {
+  if (window.calibrationTool && window.calibrationTool.isOpen()) window.calibrationTool.close();
+  switchTab('map');
+  setTimeout(() => {
+    const card = el('deviceManagerCard');
+    if (card) {
+      card.scrollIntoView({ behavior: 'instant', block: 'start' });
+      card.classList.add('flash-highlight');
+      setTimeout(() => card.classList.remove('flash-highlight'), 1600);
+    }
+  }, 90);
+}
+
+/** Phones: the map is view-only until "Edit map" is pressed (desktop always edits). */
+function toggleMapEditing(force) {
+  const col = el('fpPlanCol');
+  const btn = el('fpEditToggle');
+  if (!col) return;
+  const on = typeof force === 'boolean' ? force : !col.classList.contains('fp-editing');
+  col.classList.toggle('fp-editing', on);
+  if (btn) {
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    btn.textContent = on ? 'Done editing' : 'Edit map';
+  }
+  if (!on && window.blueprintEditor) {
+    try { window.blueprintEditor.setTool('view'); } catch (_) { /* editor not ready */ }
+  }
+}
+
 // ==========================================
-// 2. Header telemetry, KPIs and data-state banner
+// 2. Header and Settings cards (system health, sales data)
 // ==========================================
 /**
- * The AI engine label reports the backend that is genuinely executing
- * inference, taken from the detector itself; "NO DETECTOR" when none is.
- * The decoder label is the probed decode capability of this box.
+ * The detection engine label reports the backend that is genuinely executing
+ * inference, taken from the detector itself; "Not available" when none is.
  */
 async function fetchSystemTelemetry() {
-  const [hw, stats, pipe] = await Promise.all([
-    getJSON('/api/v1/system/hardware', {}),
-    getJSON('/api/v1/system/stats', {}),
-    getJSON('/api/v1/layout/pipeline/status', null),
-  ]);
+  const pipe = await getJSON('/api/v1/layout/pipeline/status', null);
   const set = (id, text) => { const n = el(id); if (n) n.textContent = text; };
 
   if (pipe) {
@@ -168,88 +318,115 @@ async function fetchSystemTelemetry() {
     if (inference) {
       if (d.available) {
         inference.textContent = `${String(d.backend || '').toUpperCase()} / ${String(d.provider || d.device || '').toUpperCase()}`;
-        inference.style.color = 'var(--accent-green)';
+        inference.classList.remove('health-bad');
         inference.title = d.model ? `Model: ${d.model}` : '';
       } else {
-        inference.textContent = 'NO DETECTOR';
-        inference.style.color = 'var(--accent-red)';
+        inference.textContent = 'Not available';
+        inference.classList.add('health-bad');
         inference.title = d.reason || 'No inference backend is available on this machine.';
       }
     }
-    const latency = isNum(d.avg_latency_ms) && d.avg_latency_ms > 0 ? ` · ${d.avg_latency_ms.toFixed(0)}ms INFERENCE` : ' · NO FRAMES INFERRED YET';
-    set('brandSubtitle',
-      `${pipe.cameras_online ?? DASH}/${pipe.cameras_total ?? DASH} CAMERAS ONLINE · ${pipe.zones_loaded ?? DASH} ZONES` +
-      (d.available ? latency : ' · DETECTION UNAVAILABLE'));
+    set('telemetryLatencyVal', isNum(d.avg_latency_ms) && d.avg_latency_ms > 0
+      ? `${d.avg_latency_ms.toFixed(0)} ms per picture` : (d.available ? 'no pictures analysed yet' : DASH));
+    const on = pipe.cameras_online, tot = pipe.cameras_total;
+    set('brandSubtitle', isNum(tot)
+      ? (tot === 0 ? 'No cameras yet' : `${on ?? DASH} of ${tot} camera${tot === 1 ? '' : 's'} working${d.available ? '' : ' · detection unavailable'}`)
+      : DASH);
     updateMatrixHud(pipe);
-  } else {
-    set('telemetryInferenceBadge', DASH);
   }
 
-  const decoder = hw.decoder_capability || hw.decoder_type;
-  set('telemetryDecoderBadge', decoder ? String(decoder).toUpperCase() : DASH);
-  set('telemetryCpuVal', isNum(stats.cpu_usage_percent) ? `${stats.cpu_usage_percent.toFixed(1)}%` : DASH);
-  set('telemetryRamVal', (isNum(stats.ram_used_gb) && isNum(stats.ram_total_gb))
-    ? `${stats.ram_used_gb.toFixed(1)} / ${stats.ram_total_gb.toFixed(0)} GB` : DASH);
-  set('telemetryUptimeVal', isNum(stats.uptime_seconds)
-    ? `${Math.floor(stats.uptime_seconds / 3600)}h ${Math.floor((stats.uptime_seconds % 3600) / 60)}m` : DASH);
+  if (currentView === 'settings') {
+    const [hw, stats] = await Promise.all([
+      getJSON('/api/v1/system/hardware', {}),
+      getJSON('/api/v1/system/stats', {}),
+    ]);
+    const decoder = hw.decoder_capability || hw.decoder_type;
+    set('telemetryDecoderBadge', decoder ? String(decoder).toUpperCase() : DASH);
+    set('telemetryCpuVal', isNum(stats.cpu_usage_percent) ? `${stats.cpu_usage_percent.toFixed(1)} % busy` : DASH);
+    set('telemetryRamVal', (isNum(stats.ram_used_gb) && isNum(stats.ram_total_gb))
+      ? `${stats.ram_used_gb.toFixed(1)} of ${stats.ram_total_gb.toFixed(0)} GB` : DASH);
+    set('telemetryUptimeVal', isNum(stats.uptime_seconds) ? formatDuration(stats.uptime_seconds) : DASH);
+  }
+}
+
+/** Store name in the header, from the overview (STORE_NAME on the server). */
+async function refreshBrand() {
+  const overview = await getJSON('/api/v1/analytics/overview', null);
+  const title = el('brandTitle');
+  if (title && overview && overview.store_name && overview.store_name !== 'Store') {
+    title.textContent = overview.store_name;
+    document.title = `${overview.store_name} - Store dashboard`;
+  }
+}
+
+/** Settings > Sales data: is POS data arriving, and how to connect it. */
+async function loadPosCard() {
+  const body = el('posStatusBody');
+  const badge = el('posStatusBadge');
+  if (!body) return;
+  const s = await getJSON('/api/v1/analytics/pos/status', null);
+  if (!s) { body.innerHTML = emptyState('Sales data status is unavailable: the server did not respond.'); return; }
+  if (badge) {
+    badge.textContent = s.connected ? 'CONNECTED' : 'NOT CONNECTED';
+    badge.classList.toggle('metric-unobserved', !s.connected);
+    badge.classList.toggle('badge-green', !!s.connected);
+  }
+  const ing = s.ingest || {};
+  const example = ing.body_example ? JSON.stringify(ing.body_example, null, 2) : '';
+  body.innerHTML = `
+    <p class="ra-hint">${s.connected
+      ? `Sales rows are arriving: ${Number(s.transactions_today).toLocaleString()} today, ${Number(s.transactions_total).toLocaleString()} in total. Last sale ${escapeHtml(formatAgo(s.last_transaction_at))}. Registers seen: ${escapeHtml((s.registers || []).join(', ') || DASH)}.`
+      : 'No sales rows have been received. Revenue, conversion and lane figures stay empty until your till system sends them here.'}</p>
+    <details class="ra-steps"${s.connected ? '' : ' open'}>
+      <summary>How to connect your tills</summary>
+      <ol>
+        <li>Have the point-of-sale system send each sale to <code>${escapeHtml(ing.method || 'POST')} ${escapeHtml(ing.path || '')}</code>.</li>
+        <li>Authentication: ${escapeHtml(ing.auth || DASH)}.</li>
+        <li>${escapeHtml(ing.notes || '')}</li>
+      </ol>
+      ${example ? `<pre class="ra-pre">${escapeHtml(example)}</pre>` : ''}
+    </details>`;
+}
+
+/** Settings > Appearance mirrors the header theme switch (theme.js owns the setting). */
+function syncAppearance() {
+  const mode = window.edgeTheme ? window.edgeTheme.mode() : null;
+  document.querySelectorAll('[data-set-theme]').forEach((b) => {
+    const on = b.getAttribute('data-set-theme') === mode;
+    b.classList.toggle('btn-primary', on);
+    b.setAttribute('aria-checked', on ? 'true' : 'false');
+  });
+}
+document.addEventListener('click', (e) => {
+  const b = e.target.closest && e.target.closest('[data-set-theme]');
+  if (!b || !window.edgeTheme) return;
+  window.edgeTheme.set(b.getAttribute('data-set-theme'));
+  syncAppearance();
+  showToast(`Colour theme: ${b.textContent.trim()}`, 'ok');
+});
+window.addEventListener('edge:theme', syncAppearance);
+
+function loadSettingsCards() {
+  loadPosCard();
+  fetchSystemTelemetry();
+  syncAppearance();
 }
 
 /**
- * Explain why the store looks quiet. "Not set up", "no cameras", "none
- * calibrated", "no shoppers yet" and "no POS" are different situations and
- * must not look alike.
+ * The store map fills the window below whatever sits above it (header, and
+ * the theft banner when one is showing), so the plan never runs off-screen.
  */
-function renderDataStateBanner(layout, overview) {
-  const banner = el('dataStateBanner');
-  if (!banner) return;
-
-  let html = '';
-  const setup = layout && layout.setup;
-  const configured = setup
-    ? !!setup.configured
-    : !!(layout && ((layout.zones || []).length || (layout.cameras || []).length || (layout.structures || []).length));
-
-  if (layout && !configured) {
-    html = 'Store not set up yet — open the Blueprint tab to draw your floor and add cameras.' +
-      ' <button type="button" class="btn btn-sm btn-primary" style="margin-left:10px" onclick="switchTab(\'floorplan\')">Open Blueprint</button>';
-  } else if (overview) {
-    const c = overview.coverage || {};
-    const online = pipelineSnapshot ? pipelineSnapshot.cameras_online : null;
-    if (!c.cameras_total) {
-      html = 'No cameras configured. Open the Blueprint tab and scan for devices.' +
-        ' <button type="button" class="btn btn-sm btn-primary" style="margin-left:10px" onclick="switchTab(\'floorplan\')">Scan for cameras</button>';
-    } else if (online === 0) {
-      const errs = (pipelineSnapshot.cameras || []).map((k) => k.last_error).filter(Boolean);
-      html = `${c.cameras_total} camera(s) configured, none delivering video${errs.length ? ': ' + escapeHtml(errs[0]) : ''}.` +
-        ' <button type="button" class="btn btn-sm" style="margin-left:10px" onclick="switchTab(\'floorplan\')">Check devices</button>';
-    } else if (!c.cameras_calibrated) {
-      html = `${c.cameras_total} camera(s) running, none calibrated. People are detected but cannot be placed on the floor plan.` +
-        ' <button type="button" class="btn btn-sm" style="margin-left:10px" onclick="switchTab(\'floorplan\')">Calibrate</button>';
-    } else if (!overview.has_data) {
-      html = 'Cameras are running. No shopper activity recorded yet today.';
-    } else if (!overview.pos_connected) {
-      html = 'Shopper metrics are live. Connect the POS feed to enable revenue and conversion.';
-    }
+function fitMapHeight() {
+  const layout = el('fpLayout');
+  const view = el('tab-floorplan');
+  if (!layout || !view || !view.classList.contains('active')) return;
+  const top = Math.round(layout.getBoundingClientRect().top + window.scrollY);
+  const next = `${top + 16}px`;
+  if (document.documentElement.style.getPropertyValue('--fp-offset') !== next) {
+    document.documentElement.style.setProperty('--fp-offset', next);
   }
-  banner.innerHTML = html;
-  banner.style.display = html ? 'block' : 'none';
 }
-
-async function fetchStoreKPIs() {
-  const [overview, layout] = await Promise.all([
-    getJSON('/api/v1/analytics/overview', null),
-    getJSON('/api/v1/layout', null),
-  ]);
-  if (layout) layoutSnapshot = layout;
-  if (overview) {
-    setMetric('kpiFootfallToday', overview.today_footfall);
-    setMetric('kpiActiveShoppers', overview.active_shoppers_now);
-    setMetric('kpiAvgDwell', overview.avg_dwell_minutes, { suffix: 'm', digits: 1 });
-    setMetric('kpiConversion', overview.conversion_rate_pct, { suffix: '%', digits: 1 });
-    setMetric('kpiRevenue', overview.daily_revenue, { prefix: '$', digits: 2 });
-  }
-  renderDataStateBanner(layout, overview);
-}
+window.addEventListener('resize', fitMapHeight);
 
 // ==========================================
 // 3. Live camera matrix
@@ -266,7 +443,7 @@ async function loadCamerasMatrix() {
 
   // Re-render only when the set of cameras changed; a re-render tears down
   // every open MJPEG connection.
-  const signature = allCamerasList.map((c) => `${c.id}|${c.name}|${c.department}|${c.location}`).join(';');
+  const signature = allCamerasList.map((c) => `${c.id}|${c.name}|${c.department}|${c.location}|${c.role || ''}`).join(';');
   if (signature !== lastCameraSignature) {
     lastCameraSignature = signature;
     renderCameraGrid();
@@ -275,11 +452,22 @@ async function loadCamerasMatrix() {
   }
 }
 
+/** Filter key of a camera: its purpose (role), or 'NONE' when it has none. */
+function cameraPurposeKey(cam) { return cam.role || 'NONE'; }
+
+function cameraPurposeLabel(key) {
+  if (key === 'NONE') return 'No purpose set';
+  const roles = window.edgeRoles;
+  return roles && typeof roles.roleLabel === 'function' ? roles.roleLabel(key) : key;
+}
+
 function buildAreaChips() {
   const host = el('cameraFilterChips');
   if (!host) return;
-  const departments = [...new Set(allCamerasList.map((c) => c.department).filter(Boolean))].sort();
+  // Grouped by camera purpose (role); the old department field is only a report label now.
+  const departments = [...new Set(allCamerasList.map(cameraPurposeKey))].sort();
   host.querySelectorAll('.channel-pill').forEach((n) => n.remove());
+  host.style.display = departments.length > 1 ? '' : 'none';
   if (!departments.length) return;
   if (!departments.includes(activeCameraFilter) && activeCameraFilter !== 'ALL') activeCameraFilter = 'ALL';
   const make = (label, value) => {
@@ -292,7 +480,7 @@ function buildAreaChips() {
     host.appendChild(b);
   };
   make(`All (${allCamerasList.length})`, 'ALL');
-  departments.forEach((d) => make(`${d} (${allCamerasList.filter((c) => c.department === d).length})`, d));
+  departments.forEach((d) => make(`${cameraPurposeLabel(d)} (${allCamerasList.filter((c) => cameraPurposeKey(c) === d).length})`, d));
 }
 
 function filterCameras(category) {
@@ -312,6 +500,8 @@ function filterCamerasBySearch(query) {
   });
 }
 
+const FPS_LABEL = { 1: 'Low', 5: 'Normal', 15: 'High' };
+
 /** Change the frame rate of every open tile stream by re-requesting it. */
 function setDecimationFPS(fps) {
   currentDecimationFPS = fps;
@@ -321,7 +511,7 @@ function setDecimationFPS(fps) {
   document.querySelectorAll('img.camera-img[data-camera-id]').forEach((img) => {
     if (img.getAttribute('src')) img.src = streamUrl(img.getAttribute('data-camera-id'));
   });
-  showToast(`Tile streams re-requested at ${fps} FPS`);
+  showToast(`Video smoothness: ${FPS_LABEL[fps] || `${fps} pictures per second`}`, 'ok');
 }
 
 function streamUrl(cameraId) {
@@ -338,16 +528,16 @@ function renderCameraGrid() {
     grid.innerHTML = `
       <div class="matrix-empty">
         <div class="matrix-empty-title">No cameras yet</div>
-        <div class="matrix-empty-text">This system has no camera configured. Scan the network and USB ports from the
-          Blueprint tab, adopt a device, and it will appear here with its live feed.</div>
-        <button type="button" class="btn btn-primary" onclick="switchTab('floorplan')">Open Blueprint &amp; scan for cameras</button>
+        <div class="matrix-empty-text">Add a camera by its address, scan the network and USB ports, or add a Dahua
+          recorder's channels. Each camera then appears here with its live picture.</div>
+        <button type="button" class="btn btn-primary" onclick="openDeviceManager()">Add cameras</button>
       </div>`;
     return;
   }
 
-  const filtered = allCamerasList.filter((cam) => activeCameraFilter === 'ALL' || cam.department === activeCameraFilter);
+  const filtered = allCamerasList.filter((cam) => activeCameraFilter === 'ALL' || cameraPurposeKey(cam) === activeCameraFilter);
   if (!filtered.length) {
-    grid.innerHTML = emptyState(`No cameras in "${activeCameraFilter}".`, 'Show all', "filterCameras('ALL')");
+    grid.innerHTML = emptyState(`No cameras in "${cameraPurposeLabel(activeCameraFilter)}".`, 'Show all', "filterCameras('ALL')");
     return;
   }
 
@@ -360,28 +550,31 @@ function renderCameraGrid() {
     const online = cam.status === 'ONLINE';
     card.innerHTML = `
       <div class="camera-card-header">
-        <div>
+        <div class="camera-card-titles">
           <div class="camera-title">${escapeHtml(cam.name)}</div>
-          <div class="cam-meta-text">${escapeHtml(cam.department || '')}${cam.location ? ' · ' + escapeHtml(cam.location) : ''}</div>
+          <div class="cam-meta-text">${[cam.department && cam.department !== 'GENERAL' ? cam.department : '', cam.location || ''].filter(Boolean).map(escapeHtml).join(' · ')}</div>
         </div>
-        <span class="badge ${online ? 'badge-green' : 'badge-danger'}" data-status-for="${escapeHtml(cam.id)}">● ${escapeHtml(cam.status || 'UNKNOWN')}</span>
+        <span class="badge ${online ? 'badge-green' : 'badge-danger'}" data-status-for="${escapeHtml(cam.id)}">● ${online ? 'WORKING' : escapeHtml(cam.status || 'UNKNOWN')}</span>
       </div>
 
       <div class="camera-video-container">
-        <img class="camera-img" data-camera-id="${escapeHtml(cam.id)}" alt="${escapeHtml(cam.name)} live feed" />
+        <img class="camera-img" data-camera-id="${escapeHtml(cam.id)}" alt="${escapeHtml(cam.name)} live picture" />
         <div class="camera-overlay-top">
           <span class="cam-hud-badge ${online ? 'cam-hud-live' : 'cam-hud-offline'}" data-live-for="${escapeHtml(cam.id)}">${online ? '● LIVE' : '● ' + escapeHtml(cam.status || 'OFFLINE')}</span>
-          <span class="cam-hud-badge" data-res-for="${escapeHtml(cam.id)}" title="Stream resolution">${DASH}</span>
+          <span class="cam-hud-badge" data-res-for="${escapeHtml(cam.id)}" title="Picture size">${DASH}</span>
         </div>
         <div class="camera-overlay-bottom">
-          <span class="cam-hud-badge" data-hud-for="${escapeHtml(cam.id)}" title="fps · detections in last frame · live tracks · calibration">${DASH}</span>
-          <span class="cam-hud-badge" data-age-for="${escapeHtml(cam.id)}" title="Age of the newest frame"></span>
+          <span class="cam-hud-badge" data-hud-for="${escapeHtml(cam.id)}" title="People the camera sees right now, and whether it is placed on the store map">${DASH}</span>
+          <span class="cam-hud-badge" data-age-for="${escapeHtml(cam.id)}" title="Age of the newest picture"></span>
         </div>
       </div>
 
+      <!-- V2 MOUNT POINT: camera role badge / setup checklist for this camera. -->
+      <div class="cam-role-slot" data-role-slot="${escapeHtml(cam.id)}"></div>
+
       <div class="camera-footer">
-        <button type="button" class="btn btn-sm" onclick="openCameraConfigModal('${escapeHtml(cam.id)}')">⚙️ Config</button>
-        <a href="/dashboard/studio?camera_id=${encodeURIComponent(cam.id)}" class="btn btn-primary btn-sm">🎨 Studio &amp; Zones</a>
+        <button type="button" class="btn btn-sm" onclick="openCameraConfigModal('${escapeHtml(cam.id)}')">⚙️ Settings</button>
+        <a href="/dashboard/studio?camera_id=${encodeURIComponent(cam.id)}" class="btn btn-primary btn-sm" title="Draw counting lines, shelf areas, staff-only areas and privacy masks on this camera">Camera setup</a>
       </div>`;
     grid.appendChild(card);
   });
@@ -391,8 +584,8 @@ function renderCameraGrid() {
 }
 
 /**
- * Per-tile HUD from the pipeline: real fps, detections in the last frame,
- * live tracks, calibration state and how stale the newest frame is.
+ * Per-tile HUD from the pipeline in plain words: people in view, whether the
+ * camera is placed on the store map, and how stale the newest frame is.
  */
 function updateMatrixHud(pipe) {
   const cams = (pipe && pipe.cameras) || [];
@@ -402,19 +595,22 @@ function updateMatrixHud(pipe) {
     if (hud) {
       const parts = [];
       if (!c.has_frame) {
-        parts.push('no frame analysed');
+        parts.push('no picture analysed yet');
+      } else if (isNum(c.live_tracks)) {
+        parts.push(`${c.live_tracks} ${c.live_tracks === 1 ? 'person' : 'people'} in view`);
       } else {
-        parts.push(isNum(c.fps) && c.fps > 0 ? `${c.fps.toFixed(1)} fps` : `${DASH} fps`);
-        parts.push(isNum(c.detections_last_frame) ? `${c.detections_last_frame} det` : `${DASH} det`);
-        parts.push(isNum(c.live_tracks) ? `${c.live_tracks} trk` : `${DASH} trk`);
+        parts.push(`${DASH} people in view`);
       }
-      if (typeof c.calibrated === 'boolean') parts.push(c.calibrated ? 'calibrated' : 'uncalibrated');
+      if (typeof c.calibrated === 'boolean') parts.push(c.calibrated ? 'on the map' : 'not on the map yet');
       hud.textContent = parts.join(' · ');
+      hud.title = c.has_frame && isNum(c.fps)
+        ? `${c.fps.toFixed(1)} pictures per second analysed · ${c.detections_last_frame ?? DASH} detections in the last picture`
+        : 'People the camera sees right now';
     }
     const age = document.querySelector(`[data-age-for="${CSS.escape(id)}"]`);
     if (age) {
-      if (!c.has_frame) age.textContent = c.last_error ? `no frame: ${c.last_error}` : 'no frame';
-      else if (isNum(c.seconds_since_frame)) age.textContent = c.seconds_since_frame > 5 ? `stale ${c.seconds_since_frame.toFixed(0)}s` : '';
+      if (!c.has_frame) age.textContent = c.last_error ? `no picture: ${c.last_error}` : 'no picture';
+      else if (isNum(c.seconds_since_frame)) age.textContent = c.seconds_since_frame > 5 ? `picture ${c.seconds_since_frame.toFixed(0)} s old` : '';
       else age.textContent = '';
     }
     const live = document.querySelector(`[data-live-for="${CSS.escape(id)}"]`);
@@ -427,7 +623,7 @@ function updateMatrixHud(pipe) {
     const status = document.querySelector(`[data-status-for="${CSS.escape(id)}"]`);
     if (status) {
       const online = c.status === 'ONLINE';
-      status.textContent = `● ${c.status || 'OFFLINE'}`;
+      status.textContent = `● ${online ? 'WORKING' : (c.status || 'OFFLINE')}`;
       status.classList.toggle('badge-green', online);
       status.classList.toggle('badge-danger', !online);
     }
@@ -436,7 +632,7 @@ function updateMatrixHud(pipe) {
 
 /**
  * Attach a live MJPEG stream (with the detector's real boxes drawn) to each
- * tile while the matrix tab is visible; drop it otherwise, because an <img>
+ * tile while the matrix is visible; drop it otherwise, because an <img>
  * with an MJPEG source keeps decoding forever and every open stream costs a
  * JPEG encode on the edge box.
  */
@@ -476,7 +672,195 @@ function attachCameraStreams() {
 document.addEventListener('visibilitychange', attachCameraStreams);
 
 // ==========================================
-// 4. Retail analytics, funnel & charts
+// 4. Visitors by hour (shared by Today and Insights > Shoppers & footfall)
+// ==========================================
+function chartTheme() {
+  const tok = (name) => {
+    try { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); } catch (_) { return ''; }
+  };
+  return {
+    line: tok('--chart-line'), fill: tok('--chart-fill'), grid: tok('--chart-grid'), tick: tok('--chart-tick'),
+    today: tok('--hourly-today'), yday: tok('--hourly-yday'), week: tok('--hourly-week'),
+    nodata: tok('--hourly-nodata'), surface: tok('--hourly-surface'),
+  };
+}
+
+function applyChartDefaults(ct) {
+  if (typeof Chart === 'undefined' || !Chart.defaults) return;
+  if (ct.tick) Chart.defaults.color = ct.tick;
+  if (ct.grid) Chart.defaults.borderColor = ct.grid;
+  Chart.defaults.font.family = "'Plus Jakarta Sans', system-ui, sans-serif";
+}
+
+/** Same colour at a given alpha, from #rrggbb. */
+function withAlpha(hex, a) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || '').trim());
+  if (!m) return hex;
+  const n = parseInt(m[1], 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
+}
+
+function hatchPattern(ctx, color) {
+  const c = document.createElement('canvas');
+  c.width = 8; c.height = 8;
+  const g = c.getContext('2d');
+  g.strokeStyle = color;
+  g.lineWidth = 1.5;
+  g.beginPath(); g.moveTo(0, 8); g.lineTo(8, 0); g.moveTo(-2, 2); g.lineTo(2, -2); g.moveTo(6, 10); g.lineTo(10, 6); g.stroke();
+  return ctx.createPattern(c, 'repeat');
+}
+
+// "No data" hours are drawn as a hatched column behind the bars, so an hour
+// the cameras were not recording can never be mistaken for a measured zero.
+const hourlyNoDataPlugin = {
+  id: 'hourlyNoData',
+  beforeDatasetsDraw(chart) {
+    const meta = chart.$hourly;
+    if (!meta) return;
+    const { ctx, chartArea, scales } = chart;
+    const x = scales.x;
+    if (!x || !chartArea) return;
+    const step = meta.statuses.length > 1 ? Math.abs(x.getPixelForValue(1) - x.getPixelForValue(0)) : chartArea.width;
+    ctx.save();
+    ctx.fillStyle = hatchPattern(ctx, meta.nodataColor);
+    meta.statuses.forEach((s, i) => {
+      if (s !== 'no_data') return;
+      const cx = x.getPixelForValue(i);
+      ctx.fillRect(cx - step * 0.42, chartArea.top, step * 0.84, chartArea.bottom - chartArea.top);
+    });
+    ctx.restore();
+  },
+};
+
+const hourlyCharts = {};      // canvasId -> Chart
+const hourlyData = {};        // canvasId -> last API payload (for theme redraws)
+
+function hourlyLegendHtml(ct) {
+  return `
+    <span class="hl-item"><span class="hl-swatch hl-bar"></span>Today</span>
+    <span class="hl-item"><span class="hl-swatch hl-partial"></span>Part of the hour</span>
+    <span class="hl-item"><span class="hl-swatch hl-nodata"></span>No data (not recording)</span>
+    <span class="hl-item"><span class="hl-swatch hl-line hl-yday"></span>Yesterday</span>
+    <span class="hl-item"><span class="hl-swatch hl-line hl-week"></span>Same day last week</span>`;
+}
+
+/**
+ * Draw GET /api/v1/analytics/footfall/hourly into a canvas: bars for today
+ * (hatched = no data, lighter = part of the hour, nothing = still to come),
+ * lines for yesterday and the same weekday last week. Bars are keyed by
+ * `index`, not `hour`, so a 23- or 25-hour DST day still lines up.
+ */
+function renderHourlyVisitors(ids, data) {
+  const canvas = el(ids.canvas);
+  const badge = ids.badge ? el(ids.badge) : null;
+  const note = ids.note ? el(ids.note) : null;
+  const legend = ids.legend ? el(ids.legend) : null;
+  if (!canvas) return;
+  hourlyData[ids.canvas] = { ids, data };
+
+  if (!data || !data.today) {
+    if (badge) { badge.textContent = DASH; badge.classList.add('metric-unobserved'); }
+    if (note) note.textContent = 'Visitors by hour is unavailable: the server did not respond.';
+    return;
+  }
+  const t = data.today;
+  if (badge) {
+    badge.textContent = t.source_label || DASH;
+    badge.classList.toggle('metric-unobserved', !t.source);
+    badge.title = 'How today\'s visitors are counted';
+  }
+  const ct = chartTheme();
+  if (legend) legend.innerHTML = hourlyLegendHtml(ct);
+
+  const hours = t.hours || [];
+  const byIndex = (series) => {
+    const map = new Map(((series && series.hours) || []).map((h) => [h.index, h]));
+    return hours.map((h) => { const o = map.get(h.index); return o && isNum(o.visitors) ? o.visitors : null; });
+  };
+  const todayVals = hours.map((h) => (isNum(h.visitors) ? h.visitors : null));
+  const colours = hours.map((h) => (h.status === 'partial' ? withAlpha(ct.today, 0.45) : ct.today));
+
+  const measured = t.totals ? (t.totals.hours_measured || 0) + (t.totals.hours_partial || 0) : 0;
+  if (note) {
+    const bits = [];
+    if (!measured) bits.push('No visitor counts recorded yet today. Counting starts when a camera is running with people counting on; draw an entrance counting line in Camera setup for exact numbers.');
+    if (data.busiest_hour) bits.push(`Busiest so far: ${data.busiest_hour.label} with ${Number(data.busiest_hour.visitors).toLocaleString()} visitors.`);
+    if (t.totals && t.totals.hours_no_data) bits.push(`${t.totals.hours_no_data} hour${t.totals.hours_no_data === 1 ? '' : 's'} striped: the cameras were not recording, so those hours are unknown, not zero.`);
+    if (data.comparison && data.comparison.note) bits.push(data.comparison.note);
+    note.textContent = bits.join(' ');
+  }
+
+  if (typeof Chart === 'undefined') return;
+  applyChartDefaults(ct);
+  const legendText = data.status_legend || {};
+  const cfg = {
+    type: 'bar',
+    data: {
+      labels: hours.map((h) => h.label),
+      datasets: [
+        {
+          type: 'bar', label: 'Today', data: todayVals, backgroundColor: colours,
+          borderRadius: { topLeft: 4, topRight: 4 }, borderSkipped: 'bottom',
+          barPercentage: 0.84, categoryPercentage: 1, order: 2,
+        },
+        {
+          type: 'line', label: 'Yesterday', data: byIndex(data.yesterday), borderColor: ct.yday, backgroundColor: ct.yday,
+          borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, tension: 0.25, spanGaps: false, order: 1,
+        },
+        {
+          type: 'line', label: 'Same day last week', data: byIndex(data.same_weekday_last_week), borderColor: ct.week, backgroundColor: ct.week,
+          borderWidth: 2, borderDash: [5, 4], pointRadius: 0, pointHoverRadius: 4, tension: 0.25, spanGaps: false, order: 1,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (item) => `${item.dataset.label}: ${isNum(item.raw) ? item.raw.toLocaleString() : 'no data'}`,
+            footer: (items) => {
+              const h = hours[items[0] ? items[0].dataIndex : -1];
+              if (!h) return '';
+              if (h.status === 'no_data') return legendText.no_data || 'No data: the cameras were not recording.';
+              if (h.status === 'partial') return legendText.partial || 'Counts cover part of this hour.';
+              if (h.status === 'future') return legendText.future || 'Still to come.';
+              return h.in_progress ? 'This hour is still running.' : '';
+            },
+          },
+        },
+      },
+      scales: {
+        x: { grid: { display: false }, ticks: { color: ct.tick, maxRotation: 0, autoSkip: true, autoSkipPadding: 8, font: { size: 10 } } },
+        y: { grid: { color: ct.grid }, border: { display: false }, ticks: { color: ct.tick, precision: 0, font: { size: 10 } }, beginAtZero: true },
+      },
+    },
+    plugins: [hourlyNoDataPlugin],
+  };
+  const old = hourlyCharts[ids.canvas];
+  if (old) {
+    old.$hourly = { statuses: hours.map((h) => h.status), nodataColor: ct.nodata };
+    old.data = cfg.data;
+    old.options = cfg.options;
+    old.update('none');
+    return;
+  }
+  const chart = new Chart(canvas.getContext('2d'), cfg);
+  chart.$hourly = { statuses: hours.map((h) => h.status), nodataColor: ct.nodata };
+  chart.update('none');
+  hourlyCharts[ids.canvas] = chart;
+}
+
+window.addEventListener('edge:theme', () => {
+  Object.values(hourlyData).forEach(({ ids, data }) => renderHourlyVisitors(ids, data));
+});
+
+// ==========================================
+// 5. Insights > Shoppers & footfall
 // ==========================================
 function showPanelEmptyState(hostId, message, canvasId) {
   const host = hostId ? el(hostId) : null;
@@ -496,34 +880,16 @@ function showPanelEmptyState(hostId, message, canvasId) {
   }
 }
 
-function clearPanelEmptyState(canvasId) {
-  const c = el(canvasId);
-  if (!c) return;
-  c.style.display = '';
-  const stale = c.parentElement && c.parentElement.querySelector('.panel-empty');
-  if (stale) stale.remove();
-}
-
 async function initOrUpdateCharts() {
-  const [funnel, forecast] = await Promise.all([
+  const [funnel, hourly] = await Promise.all([
     getJSON('/api/v1/analytics/funnels', null),
-    getJSON('/api/v1/analytics/market/predictions', null),
+    getJSON('/api/v1/analytics/footfall/hourly', null),
   ]);
-
-  if (forecast && forecast.sufficient_history && (forecast.hourly_forecast || []).length) {
-    clearPanelEmptyState('hourlyFootfallChart');
-    renderHourlyChart(forecast.hourly_forecast.map((h) => ({ hour: h.hour, footfall: h.expected_traffic })));
-  } else {
-    showPanelEmptyState(null,
-      (forecast && forecast.message) ||
-      (forecast ? `Not enough history for an hourly curve (${forecast.days_observed ?? 0} of ${forecast.days_required ?? '?'} days observed).`
-        : 'Hourly traffic is unavailable: the analytics service did not respond.'),
-      'hourlyFootfallChart');
-  }
+  renderHourlyVisitors({ canvas: 'hourlyFootfallChart', badge: 'hourlySourceBadge', note: 'hourlyNote', legend: 'hourlyLegend' }, hourly);
 
   if (!funnel) {
     const list = el('funnelStagesList');
-    if (list) list.innerHTML = emptyState('Funnel unavailable: the analytics service did not respond.');
+    if (list) list.innerHTML = emptyState('Shopper journey unavailable: the analytics service did not respond.');
     return;
   }
   renderConversionFunnel(funnel.stages || []);
@@ -531,7 +897,8 @@ async function initOrUpdateCharts() {
   const convBadge = el('funnelConvBadge');
   if (convBadge) {
     const v = funnel.conversion_rate_pct;
-    convBadge.textContent = isNum(v) ? `CONVERSION: ${v}%` : `CONVERSION: ${DASH}`;
+    convBadge.textContent = isNum(v) ? `BOUGHT: ${v}%` : `BOUGHT: ${DASH}`;
+    convBadge.title = isNum(v) ? 'Share of visitors who bought something' : 'Needs sales data from the tills (Settings > Sales data)';
     convBadge.classList.toggle('metric-unobserved', !isNum(v));
   }
 
@@ -539,91 +906,25 @@ async function initOrUpdateCharts() {
   const anyEngagement = observedZones.some((z) => isNum(z.interactions) && z.interactions > 0);
   if (!observedZones.length) {
     showPanelEmptyState('frictionZonesTableBody',
-      'No zone activity recorded yet. Draw zones on the blueprint and calibrate a camera so visits can be attributed.');
+      'No area activity recorded yet. Draw store areas on the Store map and calibrate a camera so visits can be counted per area.');
   } else if (!anyEngagement) {
     showPanelEmptyState('frictionZonesTableBody',
-      'Friction ranking needs shelf-interaction events. No interaction source is reporting.');
+      'This ranking needs shelf reaches. Draw product shelf areas in Camera setup and turn on shelf interaction for that camera.');
   } else {
     renderFrictionZones(observedZones);
   }
 
   const demo = funnel.demographics;
   if (!demo || demo.available === false) {
-    showPanelEmptyState(null, (demo && demo.reason) || 'No demographic classifier is enabled on this deployment.', 'demographicsChart');
+    showPanelEmptyState(null, (demo && demo.reason) || 'Shopper profile is not measured on this system (no age or basket classifier is enabled).', 'demographicsChart');
   }
-}
-
-// Chart colours are theme tokens (style.css --chart-*), read at draw time so
-// a chart drawn in one theme can be recoloured when the operator switches.
-function chartTheme() {
-  const tok = (name) => {
-    try { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); } catch (_) { return ''; }
-  };
-  return { line: tok('--chart-line'), fill: tok('--chart-fill'), grid: tok('--chart-grid'), tick: tok('--chart-tick') };
-}
-
-function applyChartDefaults(ct) {
-  if (typeof Chart === 'undefined' || !Chart.defaults) return;
-  if (ct.tick) Chart.defaults.color = ct.tick;
-  if (ct.grid) Chart.defaults.borderColor = ct.grid;
-}
-
-function recolourCharts() {
-  const ct = chartTheme();
-  applyChartDefaults(ct);
-  const chart = hourlyChartInstance;
-  if (!chart) return;
-  chart.data.datasets.forEach((ds) => { ds.borderColor = ct.line; ds.backgroundColor = ct.fill; });
-  const o = chart.options;
-  if (o.plugins && o.plugins.legend && o.plugins.legend.labels) o.plugins.legend.labels.color = ct.tick;
-  ['x', 'y'].forEach((k) => {
-    const sc = o.scales && o.scales[k];
-    if (!sc) return;
-    if (sc.grid) sc.grid.color = ct.grid;
-    if (sc.ticks) sc.ticks.color = ct.tick;
-  });
-  chart.update('none');
-}
-window.addEventListener('edge:theme', recolourCharts);
-
-function renderHourlyChart(points) {
-  const canvas = el('hourlyFootfallChart');
-  if (!canvas || typeof Chart === 'undefined') return;
-  if (hourlyChartInstance) hourlyChartInstance.destroy();
-  const ct = chartTheme();
-  applyChartDefaults(ct);
-  hourlyChartInstance = new Chart(canvas.getContext('2d'), {
-    type: 'line',
-    data: {
-      labels: points.map((p) => `${String(p.hour).padStart(2, '0')}:00`),
-      datasets: [{
-        label: 'Expected shoppers per hour (from this store\'s history)',
-        data: points.map((p) => p.footfall),
-        borderColor: ct.line,
-        backgroundColor: ct.fill,
-        borderWidth: 2.5,
-        fill: true,
-        tension: 0.35,
-        pointRadius: 3,
-      }],
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: { legend: { labels: { color: ct.tick, font: { family: 'JetBrains Mono', size: 10 } } } },
-      scales: {
-        x: { grid: { color: ct.grid }, ticks: { color: ct.tick, font: { size: 9.5 } } },
-        y: { grid: { color: ct.grid }, ticks: { color: ct.tick, font: { size: 9.5 } }, beginAtZero: true },
-      },
-    },
-  });
 }
 
 function renderConversionFunnel(stages) {
   const container = el('funnelStagesList');
   if (!container) return;
   if (!stages.length) {
-    container.innerHTML = emptyState('No funnel stages reported yet. The funnel is built from tracked visits and POS rows.');
+    container.innerHTML = emptyState('No journey stages reported yet. The journey is built from tracked visits and sales data.');
     return;
   }
   const top = stages.find((s) => isNum(s.count) && s.count > 0);
@@ -638,236 +939,29 @@ function renderConversionFunnel(stages) {
         <div class="funnel-stage-val ${observed ? '' : 'metric-unobserved'}">${observed ? s.count.toLocaleString() : DASH}</div>
       </div>`;
   }).join('') +
-  `<div class="fp-empty" style="padding-top:8px">Stages showing ${DASH} were not observed. Converted requires a connected POS feed.</div>`;
+  `<div class="fp-empty">Stages showing ${DASH} were not measured. "Bought" needs sales data from the tills.</div>`;
 }
 
 function renderFrictionZones(zones) {
   const tbody = el('frictionZonesTableBody');
   if (!tbody) return;
+  // Lowest engagement first: the areas where shoppers look but do not reach.
   const ranked = [...zones]
-    .sort((a, b) => (isNum(b.total_dwell_seconds) ? b.total_dwell_seconds : 0) - (isNum(a.total_dwell_seconds) ? a.total_dwell_seconds : 0))
+    .filter((z) => isNum(z.visits) && z.visits > 0)
+    .sort((a, b) => (isNum(a.engagement_rate_pct) ? a.engagement_rate_pct : 101) - (isNum(b.engagement_rate_pct) ? b.engagement_rate_pct : 101))
     .slice(0, 5);
+  if (!ranked.length) {
+    showPanelEmptyState('frictionZonesTableBody', 'No area has visits yet today.');
+    return;
+  }
   tbody.innerHTML = ranked.map((z) => `
     <tr>
       <td>${escapeHtml(z.name)}</td>
-      <td>${isNum(z.engagement_rate_pct) ? z.engagement_rate_pct + '%' : `<span class="fp-dash">${DASH}</span>`}</td>
-      <td>${isNum(z.avg_dwell_seconds) ? z.avg_dwell_seconds + 's' : `<span class="fp-dash">${DASH}</span>`}</td>
-      <td>${isNum(z.visits) ? z.visits : DASH} visits · ${isNum(z.unique_visitors) ? z.unique_visitors : DASH} people</td>
-      <td><span class="fp-dash">needs POS</span></td>
+      <td>${isNum(z.engagement_rate_pct) ? `${z.engagement_rate_pct} % of visitors` : `<span class="fp-dash">${DASH}</span>`}</td>
+      <td>${isNum(z.avg_dwell_seconds) ? escapeHtml(formatDuration(z.avg_dwell_seconds)) : `<span class="fp-dash">${DASH}</span>`}</td>
+      <td>${isNum(z.visits) ? z.visits.toLocaleString() : DASH}</td>
+      <td><span class="fp-dash" title="Needs sales data from the tills">needs sales data</span></td>
     </tr>`).join('');
-}
-
-// ==========================================
-// 5. Loss prevention & theft
-// ==========================================
-function playTheftAlertSound() {
-  try {
-    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const osc = audioCtx.createOscillator();
-    const gain = audioCtx.createGain();
-    osc.type = 'sawtooth';
-    osc.frequency.setValueAtTime(880, audioCtx.currentTime);
-    osc.frequency.exponentialRampToValueAtTime(440, audioCtx.currentTime + 0.3);
-    gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.3);
-    osc.connect(gain);
-    gain.connect(audioCtx.destination);
-    osc.start();
-    osc.stop(audioCtx.currentTime + 0.35);
-  } catch (e) { /* audio blocked */ }
-}
-
-function formatTimestamp(ts) {
-  if (!ts) return DASH;
-  // The API stores and returns naive UTC; without an offset JS would read it as local.
-  const iso = typeof ts === 'string' && /T?\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(ts) && !/[zZ]|[+-]\d{2}:?\d{2}$/.test(ts)
-    ? `${ts.replace(' ', 'T')}Z` : ts;
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? String(ts) : d.toLocaleString();
-}
-
-async function fetchTheftIncidents() {
-  const [data, stats] = await Promise.all([
-    getJSON('/api/v1/theft/incidents', null),
-    getJSON('/api/v1/theft/statistics', null),
-  ]);
-  const incidents = (data && data.incidents) || [];
-
-  // KPIs: counts are real row counts. A sum over zero rows is "nothing
-  // measured", not $0, and is shown as a dash.
-  if (stats) {
-    setMetric('kpiTheftActiveAlerts', stats.active_incidents_count);
-    setMetric('kpiTheftAttemptsToday', stats.today_incidents_count);
-    const anyClosed = incidents.some((i) => i.status === 'DISPATCHED' || i.status === 'RESOLVED');
-    setMetric('kpiTheftPreventedLoss', anyClosed && isNum(stats.prevented_loss_estimate) ? stats.prevented_loss_estimate : null,
-      { prefix: '$', digits: 2 });
-    const depts = Object.entries(stats.by_department || {}).sort((a, b) => b[1] - a[1]);
-    setMetric('kpiTheftHighRiskDept', depts.length ? `${depts[0][0]} (${depts[0][1]})` : null);
-    const badge = el('tabTheftCountBadge');
-    if (badge) badge.textContent = isNum(stats.active_incidents_count) ? stats.active_incidents_count : DASH;
-  } else {
-    ['kpiTheftActiveAlerts', 'kpiTheftAttemptsToday', 'kpiTheftPreventedLoss', 'kpiTheftHighRiskDept'].forEach((id) => setMetric(id, null));
-  }
-
-  const activeInc = incidents.find((i) => i.status === 'ACTIVE');
-  const banner = el('theftAlertBanner');
-  if (activeInc) {
-    activeTheftIncidentId = activeInc.id;
-    if (banner) {
-      banner.style.display = 'flex';
-      el('theftBannerHeadline').textContent = `REVIEW: ${theftRuleLabel(activeInc)} on ${activeInc.camera_name} (${activeInc.department})`;
-      el('theftBannerConfidence').textContent = isNum(activeInc.confidence) ? `Evidence confidence: ${Math.round(activeInc.confidence * 100)}%` : `Confidence: ${DASH}`;
-      el('theftBannerTime').textContent = `Time: ${formatTimestamp(activeInc.timestamp)}`;
-      el('theftBannerDetails').textContent = 'Suspicious behaviour for staff review, not a finding of theft.';
-    }
-    if (lastAlertedTheftId !== activeInc.id) {
-      lastAlertedTheftId = activeInc.id;
-      playTheftAlertSound();
-    }
-  } else if (banner) {
-    banner.style.display = 'none';
-  }
-
-  renderTheftIncidentsList(incidents, data === null);
-}
-
-function theftRuleLabel(inc) {
-  return inc.rule_label || inc.rule || inc.theft_type || 'Suspicious behaviour';
-}
-
-function theftAuthUrl(url) {
-  if (!url) return url;
-  return (window.edgeAuth && typeof window.edgeAuth.authUrl === 'function') ? window.edgeAuth.authUrl(url) : url;
-}
-
-let lastTheftListSignature = null;
-
-function renderTheftIncidentsList(incidents, unavailable) {
-  const container = el('theftIncidentsList');
-  if (!container) return;
-  if (unavailable) {
-    lastTheftListSignature = null;
-    container.innerHTML = emptyState('Incident log unavailable: the theft service did not respond.');
-    return;
-  }
-  if (!incidents.length) {
-    lastTheftListSignature = null;
-    container.innerHTML = emptyState('Nothing to review. The pose pipeline raises an incident only when it observes a concealment, shelf-sweep, loitering or exit-without-checkout pattern; none has been observed.');
-    return;
-  }
-  // The list is polled every few seconds; rebuilding identical cards would
-  // reload every evidence thumbnail and reset the operator's scroll.
-  const signature = JSON.stringify(incidents.map((i) => [i.id, i.status, i.confidence, i.snapshot_url, (i.evidence || []).length]));
-  if (signature === lastTheftListSignature && container.children.length) return;
-  lastTheftListSignature = signature;
-
-  container.innerHTML = '';
-  incidents.forEach((inc) => {
-    const card = document.createElement('div');
-    card.id = `incident-${inc.id}`;
-    card.className = 'incident-card';
-    let statusPill = '<span class="badge badge-green">● RESOLVED</span>';
-    if (inc.status === 'ACTIVE') statusPill = '<span class="badge badge-danger">● NEEDS REVIEW</span>';
-    else if (inc.status === 'ACKNOWLEDGED') statusPill = '<span class="badge badge-warning">👁️ ACKNOWLEDGED</span>';
-    else if (inc.status === 'DISPATCHED') statusPill = '<span class="badge badge-dispatched">GUARD DISPATCHED</span>';
-    else if (inc.status === 'FALSE_ALARM') statusPill = '<span class="badge">FALSE ALARM</span>';
-
-    const conf = isNum(inc.confidence) ? `${Math.round(inc.confidence * 100)}%` : DASH;
-    const value = isNum(inc.estimated_loss_value) && inc.estimated_loss_value > 0 ? `$${inc.estimated_loss_value.toFixed(2)}` : DASH;
-    const evidence = Array.isArray(inc.evidence) && inc.evidence.length
-      ? inc.evidence
-      : (inc.evidence_summary ? [inc.evidence_summary] : []);
-    const bullets = evidence.length
-      ? `<ul style="margin: 4px 0 0 16px; padding: 0; font-size: 11.5px; color: var(--text-steps); line-height: 1.45;">${evidence.map((e) => `<li>${escapeHtml(e)}</li>`).join('')}</ul>`
-      : '<div style="font-size: 11.5px; color: var(--text-dim);">No evidence recorded.</div>';
-    const thumbUrl = inc.snapshot_url || inc.evidence_snapshot_url || null;
-    const thumb = thumbUrl
-      ? `<a data-theft-thumb="1" href="${escapeHtml(theftAuthUrl(thumbUrl))}" target="_blank" rel="noopener" data-evidence-url="${escapeHtml(thumbUrl)}" title="Open the full evidence image" style="flex: 0 0 auto; display: block;">
-           <img src="${escapeHtml(theftAuthUrl(thumbUrl))}" alt="Evidence snapshot for incident ${escapeHtml(inc.id)}" loading="lazy"
-                class="evidence-thumb">
-         </a>`
-      : '<div class="evidence-thumb-empty">No evidence image recorded</div>';
-
-    card.innerHTML = `
-      <div class="incident-head">
-        <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-          <span style="font-size: 14px; font-weight: 800; color: var(--text-strong);">${escapeHtml(theftRuleLabel(inc))}</span>
-          <span class="badge badge-warning" style="font-size: 10px;" title="Flagged for a person to check the footage; not a finding of theft">Suspicious behaviour for review</span>
-          <span class="badge" style="font-size: 10px;">${escapeHtml(inc.department)}</span>
-          <span style="font-family: var(--font-mono); font-size: 11px; color: var(--accent-cyan); font-weight: 700;">${escapeHtml(inc.camera_name)}</span>
-        </div>
-        <div style="display: flex; align-items: center; gap: 8px;">
-          <span style="font-family: var(--font-mono); font-size: 11px; color: var(--accent-orange);" title="Derived from keypoint visibility, duration and the number of agreeing signals">confidence ${conf}</span>
-          ${statusPill}
-        </div>
-      </div>
-      <div style="display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; margin-top: 6px;">
-        ${thumb}
-        <div style="flex: 1 1 240px; min-width: 0;">
-          <div style="font-size: 10.5px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .04em;">Rule: ${escapeHtml(inc.rule || inc.theft_type)} · Evidence</div>
-          ${bullets}
-        </div>
-      </div>
-      <div class="incident-foot">
-        <span style="font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dim);">Logged: ${escapeHtml(formatTimestamp(inc.timestamp))} · Track ${escapeHtml(inc.person_track_id || DASH)} · Item value: <b style="color: var(--accent-green);">${value}</b></span>
-        <div style="display: flex; gap: 6px;">
-          ${inc.status === 'ACTIVE' ? `<button type="button" class="btn btn-sm" onclick="acknowledgeTheft('${escapeHtml(inc.id)}')">Acknowledge</button>` : ''}
-          ${(inc.status === 'ACTIVE' || inc.status === 'ACKNOWLEDGED') ? `<button type="button" class="btn btn-danger btn-sm" onclick="dispatchGuard('${escapeHtml(inc.id)}')">Dispatch Guard</button>` : ''}
-          ${(inc.status !== 'RESOLVED' && inc.status !== 'FALSE_ALARM') ? `<button type="button" class="btn btn-primary btn-sm" onclick="resolveTheft('${escapeHtml(inc.id)}')">✅ Resolve</button>` : ''}
-        </div>
-      </div>`;
-    const link = card.querySelector("[data-theft-thumb]");
-    if (link) {
-      link.addEventListener('click', (ev) => {
-        ev.preventDefault();
-        openTheftEvidence(link.dataset.evidenceUrl, `${theftRuleLabel(inc)} · ${inc.camera_name} · ${formatTimestamp(inc.timestamp)}`);
-      });
-    }
-    container.appendChild(card);
-  });
-}
-
-function openTheftEvidence(url, caption) {
-  const viewer = el('theftEvidenceViewer');
-  const img = el('theftEvidenceFull');
-  if (!viewer || !img || !url) return;
-  const full = theftAuthUrl(url);
-  img.src = full;
-  const open = el('theftEvidenceOpen');
-  if (open) open.href = full;
-  const cap = el('theftEvidenceCaption');
-  if (cap) cap.textContent = `${caption || ''} · suspicious behaviour for staff review`;
-  viewer.style.display = 'flex';
-  const close = el('theftEvidenceClose');
-  if (close) close.focus();
-}
-
-function closeTheftEvidence() {
-  const viewer = el('theftEvidenceViewer');
-  if (viewer) viewer.style.display = 'none';
-}
-
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') closeTheftEvidence();
-});
-
-async function theftAction(id, action, label) {
-  try {
-    const res = await fetch(`/api/v1/theft/incidents/${encodeURIComponent(id)}/${action}`, { method: 'POST' });
-    if (res.ok) { showToast(`${label} ${id}`); lastTheftListSignature = null; fetchTheftIncidents(); }
-    else showToast(`Failed to ${action} ${id} (HTTP ${res.status})`);
-  } catch (e) { showToast(`Failed to ${action}: ${e.message}`); }
-}
-function acknowledgeTheft(id) { return theftAction(id, 'acknowledge', 'Acknowledged'); }
-function dispatchGuard(id) { return theftAction(id, 'dispatch', 'Guard dispatched for'); }
-function resolveTheft(id) { return theftAction(id, 'resolve', 'Resolved'); }
-
-function dismissTheftBanner() { const b = el('theftAlertBanner'); if (b) b.style.display = 'none'; }
-function dispatchGuardFromBanner() { if (activeTheftIncidentId) { dispatchGuard(activeTheftIncidentId); dismissTheftBanner(); } }
-function scrollToTheftIncident() {
-  if (!activeTheftIncidentId) return;
-  const node = el(`incident-${activeTheftIncidentId}`);
-  if (node) node.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
 // ==========================================
@@ -880,16 +974,26 @@ function setCameraConfigStatus(msg, isError) {
   s.classList.toggle('form-status-error', !!isError);
 }
 
-function populateDepartmentOptions(selected) {
-  const select = el('configDepartment');
-  if (!select) return;
+/** Department label suggestions: labels already in use (nothing invented). */
+function departmentSuggestions() {
   const options = new Set();
-  ((layoutSnapshot && layoutSnapshot.zone_categories) || []).forEach((c) => options.add(c));
-  allCamerasList.forEach((c) => { if (c.department) options.add(c.department); });
-  if (selected) options.add(selected);
-  if (!options.size) options.add('GENERAL');
-  select.innerHTML = [...options].sort().map((o) => `<option value="${escapeHtml(o)}">${escapeHtml(o)}</option>`).join('');
-  select.value = selected || select.options[0].value;
+  allCamerasList.forEach((c) => { if (c.department && c.department !== 'GENERAL') options.add(c.department); });
+  return [...options].sort().map((o) => `<option value="${escapeHtml(o)}"></option>`).join('');
+}
+
+function populateDepartmentOptions(selected) {
+  const input = el('configDepartment');
+  if (!input) return;
+  const list = el('configDeptList');
+  if (list) list.innerHTML = departmentSuggestions();
+  // GENERAL is the server default, shown as an empty (optional) label.
+  input.value = selected && selected !== 'GENERAL' ? selected : '';
+}
+
+/** Department label as the server stores it: upper case, safe characters, GENERAL when empty. */
+function normaliseDepartment(v) {
+  const s = String(v || '').toUpperCase().replace(/[^A-Z0-9 _&/-]/g, '').replace(/\s+/g, ' ').trim().slice(0, 40);
+  return s || 'GENERAL';
 }
 
 async function openCameraConfigModal(cameraId) {
@@ -1013,7 +1117,7 @@ async function handleCameraConfigSubmit(event) {
     id: camId,
     name: el('configCameraName').value.trim(),
     channel_number: parseInt(el('configChannelNumber').value, 10) || existing.channel_number || 1,
-    department: el('configDepartment').value,
+    department: normaliseDepartment(el('configDepartment').value),
     location: el('configLocation').value.trim(),
     rtsp_url: el('configRtspUrl').value.trim(),
     fps: parseInt(el('configFps').value, 10) || existing.fps,
@@ -1110,180 +1214,7 @@ async function confirmDeleteCurrentCamera() {
 }
 
 // ==========================================
-// 7. AI decision action centre
-// ==========================================
-async function loadActionCenter() {
-  const data = await getJSON('/api/v1/analytics/actions', null);
-  allDecisions = (data && (data.decisions || data.actions)) || [];
-  renderActionCenter(data === null);
-}
-
-function isOpenDecision(d) {
-  const s = String(d.status || '').toUpperCase();
-  return !['APPLIED', 'DONE', 'DISMISSED', 'RESOLVED'].includes(s);
-}
-
-function renderActionCenter(unavailable) {
-  const list = el('actionCardsList');
-  if (!list) return;
-  const open = allDecisions.filter(isOpenDecision).length;
-  const badge = el('actionsOpenBadge');
-  if (badge) {
-    badge.textContent = unavailable ? DASH : `${open} OPEN ACTION${open === 1 ? '' : 'S'}`;
-    badge.classList.toggle('metric-unobserved', unavailable);
-    badge.classList.toggle('badge-danger', !unavailable && open > 0);
-  }
-  const tabBadge = el('tabActionCountBadge');
-  if (tabBadge) tabBadge.textContent = unavailable ? DASH : open;
-
-  if (unavailable) {
-    list.innerHTML = emptyState('Recommendations unavailable: the analytics service did not respond.');
-    return;
-  }
-  if (!allDecisions.length) {
-    list.innerHTML = emptyState('No recommendations yet. Findings are generated from measured zone visits, dwell and queue data; run "Run Optimization" on the Market Intelligence tab once cameras are calibrated and zones have activity.',
-      'Open Market Intelligence', "switchTab('market_ai')");
-    return;
-  }
-
-  list.innerHTML = '';
-  allDecisions.forEach((item) => {
-    const card = document.createElement('div');
-    card.className = `action-card severity-${escapeHtml(item.severity || 'INFO')} status-${escapeHtml(item.status || 'PENDING')}`;
-    let severityClass = 'badge-primary';
-    if (item.severity === 'CRITICAL') severityClass = 'badge-danger';
-    else if (item.severity === 'HIGH') severityClass = 'badge-warning';
-    card.innerHTML = `
-      <div class="action-card-header">
-        <div style="display:flex; gap: 8px; align-items: center; flex-wrap: wrap;">
-          <span class="badge ${severityClass}">${escapeHtml(item.severity || DASH)}</span>
-          <span class="badge" style="font-size: 10px;">${escapeHtml(item.category || DASH)}</span>
-          <span class="action-title">${escapeHtml(item.zone || 'Store')}: ${escapeHtml(item.finding || '')}</span>
-        </div>
-        <span class="badge badge-neutral">${escapeHtml(item.status || DASH)}</span>
-      </div>
-      <div class="action-desc"><b>Why:</b> ${escapeHtml(item.root_cause || DASH)}<br><b>Do:</b> ${escapeHtml(item.action_item || DASH)}</div>
-      <div class="action-footer">
-        <div class="action-meta">${escapeHtml(item.date || '')}</div>
-        <div class="action-btns">
-          ${isOpenDecision(item) ? `
-            <button type="button" class="btn btn-sm" onclick="updateActionStatus('${escapeHtml(item.id)}', 'REVIEWED')">👁️ Reviewed</button>
-            <button type="button" class="btn btn-primary btn-sm" onclick="updateActionStatus('${escapeHtml(item.id)}', 'APPLIED')">✅ Applied</button>
-            <button type="button" class="btn btn-sm" onclick="updateActionStatus('${escapeHtml(item.id)}', 'DISMISSED')">Dismiss</button>` : ''}
-        </div>
-      </div>`;
-    list.appendChild(card);
-  });
-}
-
-async function updateActionStatus(actionId, newStatus) {
-  try {
-    const res = await fetch(`/api/v1/analytics/actions/${encodeURIComponent(actionId)}`, {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: newStatus }),
-    });
-    if (res.ok) { showToast(`Marked ${actionId} as ${newStatus}`); loadActionCenter(); }
-    else showToast(`Update failed (HTTP ${res.status})`);
-  } catch (e) { showToast(`Update failed: ${e.message}`); }
-}
-
-// ==========================================
-// 8. Market intelligence (local model)
-// ==========================================
-function renderFindings(findings) {
-  if (!findings || !findings.length) return '';
-  return findings.map((f) => `
-    <div class="action-card severity-${escapeHtml(f.severity || 'INFO')}">
-      <div class="action-card-header">
-        <span class="badge ${f.severity === 'CRITICAL' ? 'badge-danger' : (f.severity === 'HIGH' ? 'badge-warning' : '')}">${escapeHtml(f.severity || '')}</span>
-        <span class="action-title">${escapeHtml(f.zone || 'Store')}: ${escapeHtml(f.finding || '')}</span>
-      </div>
-      <div class="action-desc"><b>Why:</b> ${escapeHtml(f.root_cause || DASH)}<br><b>Do:</b> ${escapeHtml(f.action_item || DASH)}</div>
-    </div>`).join('');
-}
-
-async function loadMarketPredictions() {
-  const host = el('llmOptimizationsContainer');
-  if (!host) return;
-  const [status, forecast] = await Promise.all([
-    getJSON('/api/v1/analytics/market/llm-status', null),
-    getJSON('/api/v1/analytics/market/predictions', null),
-  ]);
-  const rows = [];
-  if (!status) {
-    rows.push(emptyState('Model status unavailable: the analytics service did not respond.'));
-  } else if (!status.ollama_active || !status.model) {
-    rows.push(emptyState(`No local language model is available. ${status.reason || ''} Findings are still computed from measurements; only the narrative needs a model.`));
-  } else {
-    rows.push(`<div class="fp-empty">Local model <b>${escapeHtml(status.model)}</b> ${status.generation_verified ? 'answered a test generation' : 'is listed but has not completed a test generation'}. ${escapeHtml(status.note || '')}</div>`);
-  }
-  if (forecast) {
-    rows.push(forecast.sufficient_history
-      ? `<div class="fp-empty">Hourly forecast built from ${forecast.days_observed} observed day(s).</div>`
-      : `<div class="fp-empty">${escapeHtml(forecast.message || `Forecast needs ${forecast.days_required} observed days; ${forecast.days_observed} so far.`)}</div>`);
-  }
-  rows.push('<div class="fp-empty">Press "Run Optimization" to analyse today\'s measurements.</div>');
-  host.innerHTML = rows.join('');
-}
-
-async function runLLMOptimizations() {
-  const host = el('llmOptimizationsContainer');
-  if (!host) return;
-  host.innerHTML = '<div class="fp-empty">Analysing measured zone activity… (a local model narrative may take up to a minute)</div>';
-  try {
-    const res = await fetch('/api/v1/analytics/market/llm-optimize', { method: 'POST' });
-    if (!res.ok) {
-      host.innerHTML = emptyState(`Analysis failed (HTTP ${res.status}).`);
-      return;
-    }
-    const data = await res.json();
-    const parts = [];
-    parts.push(`<div class="fp-empty">${escapeHtml(data.message || '')} Zones assessed: ${data.zones_assessed ?? DASH} of ${data.zones_total ?? DASH}.</div>`);
-    const n = data.narrative;
-    if (n && n.summary) {
-      parts.push(`<div class="digest-narrative" style="padding:10px 12px; border:1px solid rgba(var(--slate-rgb), 0.18); border-radius:9px;">${escapeHtml(n.summary)}<div class="action-meta" style="margin-top:6px">Narrated by ${escapeHtml(n.model_used)} in ${n.elapsed_seconds ?? DASH}s</div></div>`);
-    } else if (n && n.reason) {
-      parts.push(`<div class="fp-empty">No narrative: ${escapeHtml(n.reason)}</div>`);
-    }
-    parts.push(renderFindings(data.findings) || emptyState('No findings: nothing measured today exceeded a threshold.'));
-    host.innerHTML = parts.join('');
-    loadActionCenter();
-  } catch (e) {
-    host.innerHTML = emptyState(`Analysis failed: ${e.message}`);
-  }
-}
-
-// ==========================================
-// 9. Executive digest
-// ==========================================
-async function loadExecutiveDigest() {
-  const host = el('digestNarrative');
-  if (!host) return;
-  const data = await getJSON('/api/v1/analytics/digest', null);
-  if (!data) { host.innerHTML = emptyState('Digest unavailable: the analytics service did not respond.'); return; }
-
-  const storeName = el('digestStoreName');
-  if (storeName && data.report_title) storeName.textContent = data.report_title.replace(/^Daily Intelligence Digest - /, '');
-
-  const card = data.kpi_scorecard || {};
-  const cov = data.coverage || {};
-  const scorecard = Object.entries(card).map(([k, v]) => `
-    <div class="stat-box">
-      <span class="stat-label">${escapeHtml(k.replace(/_/g, ' '))}</span>
-      <span class="stat-val ${(v === null || v === undefined || v === 'Not observed') ? 'metric-unobserved' : ''}" style="font-size:18px">${escapeHtml(v === null || v === undefined ? DASH : v)}</span>
-    </div>`).join('');
-
-  host.innerHTML = `
-    <p><b>${escapeHtml(data.date || '')}</b> · ${escapeHtml(data.executive_summary || 'No summary produced.')}</p>
-    <div class="overview-strip" style="margin:12px 0">${scorecard}</div>
-    <div class="action-meta">Coverage: ${cov.cameras_total ?? DASH} camera(s), ${cov.cameras_calibrated ?? DASH} calibrated · ${data.data_available ? 'observations recorded' : 'no observations recorded for this period'}</div>
-    <h4 style="margin:14px 0 6px; font-size:12.5px;">Findings (${data.findings_count ?? 0})</h4>
-    ${renderFindings(data.findings) || emptyState(data.analysis_message || 'No findings for this period.')}`;
-}
-
-function printDailyDigest() { window.print(); }
-
-// ==========================================
-// 10. Opt-in self test (?__selftest=1)
+// 7. Opt-in self test (?__selftest=1)
 // ==========================================
 async function runSelfTest() {
   const errors = [];
@@ -1299,6 +1230,7 @@ async function runSelfTest() {
   const results = [];
   const check = (name, ok, detail) => results.push(`${ok ? 'PASS' : 'FAIL'} ${name}${detail ? ` :: ${detail}` : ''}`);
 
+  switchTab('cameras');
   // Let the first polls, the stream attach and the first MJPEG frame arrive.
   await new Promise((r) => setTimeout(r, 4500));
 
@@ -1315,35 +1247,30 @@ async function runSelfTest() {
       check(`tile ${id} has src`, /\/stream\?camera_id=/.test(img.getAttribute('src') || ''), img.getAttribute('src'));
       check(`tile ${id} rendered height > 100`, r.height > 100, `${r.width.toFixed(0)}x${r.height.toFixed(0)}`);
       check(`tile ${id} naturalWidth > 0`, img.naturalWidth > 0, `${img.naturalWidth}x${img.naturalHeight}`);
-      if (img.naturalWidth > 0 && r.width > 0) {
-        const natural = img.naturalWidth / img.naturalHeight;
-        const shown = r.width / r.height;
-        check(`tile ${id} aspect not collapsed`, Math.abs(natural - shown) < 0.6 || r.height > 100, `natural ${natural.toFixed(2)} shown ${shown.toFixed(2)}`);
-      }
     });
     const hud = document.querySelector('[data-hud-for]');
     check('per-tile HUD populated from pipeline', !!hud && hud.textContent.trim() !== DASH, hud && hud.textContent.trim());
     check('no fabricated HUD strings', !/Queue: 2|Dwell Alert|In: 142|Engagement: 64/.test(document.body.textContent));
   }
-  check('area chips built from real departments', cams === 0 || document.querySelectorAll('.channel-pill').length >= 2,
-    `${document.querySelectorAll('.channel-pill').length} chips`);
 
-  // FPS throttle really changes the stream URL.
+  // Video smoothness really changes the stream URL.
   if (tiles.length) {
     setDecimationFPS(1);
-    check('fps throttle re-sets src', /fps=1&/.test(tiles[0].getAttribute('src') || ''), tiles[0].getAttribute('src'));
+    check('video smoothness re-sets src', /fps=1&/.test(tiles[0].getAttribute('src') || ''), tiles[0].getAttribute('src'));
     setDecimationFPS(5);
   }
 
-  // Every tab switches, and streams detach when the matrix is hidden.
+  // Every route (old hashes included) lands on its view.
   for (const tab of VALID_TABS) {
     switchTab(tab);
-    const view = document.getElementById(`tab-${tab}`);
-    check(`switchTab('${tab}')`, !!view && view.classList.contains('active') && window.location.hash === `#${tab}`);
+    const { view, sub } = resolveRoute(tab);
+    const section = document.getElementById(VIEW_SECTIONS[view]);
+    const subOk = view !== 'insights' || (el(INSIGHT_SUBS[sub]) && el(INSIGHT_SUBS[sub]).classList.contains('active'));
+    check(`switchTab('${tab}') -> ${view}${sub ? '/' + sub : ''}`, !!section && section.classList.contains('active') && subOk);
   }
   check('streams detached when matrix hidden', [...tiles].every((img) => !img.getAttribute('src')));
-  switchTab('matrix');
-  check('streams re-attached on matrix', tiles.length === 0 || [...tiles].every((img) => !!img.getAttribute('src')));
+  switchTab('cameras');
+  check('streams re-attached on the camera view', tiles.length === 0 || [...tiles].every((img) => !!img.getAttribute('src')));
 
   // Modal opens with metres and closes without prompt/confirm.
   if (cams) {
@@ -1356,21 +1283,20 @@ async function runSelfTest() {
     cancelDeleteCurrentCamera();
     closeCameraConfigModal();
   }
-  check('no prompt/confirm/alert in dashboard scripts', true, 'static check in csscheck/grep');
 
   await new Promise((r) => setTimeout(r, 800));
   check('no page errors', errors.length === 0, errors.join(' | '));
-  const banner = el('dataStateBanner');
-  results.push(`INFO data-state banner: ${banner && banner.style.display !== 'none' ? banner.textContent.trim() : '(hidden)'}`);
-  results.push(`INFO AI engine: ${el('telemetryInferenceBadge').textContent} · decoder: ${el('telemetryDecoderBadge').textContent}`);
   const failed = results.filter((r) => r.startsWith('FAIL')).length;
   results.unshift(`SELFTEST ${failed === 0 ? 'OK' : 'FAILED'} (${results.length} checks, ${failed} failed)`);
   out.textContent = results.join('\n');
   window.__selftestDone = true;
 }
 
-// Expose all public actions on window so inline onclick handlers and console calls always work
+// Expose public actions on window so inline onclick handlers and console calls always work
 window.switchTab = switchTab;
+window.openDeviceManager = openDeviceManager;
+window.toggleMapEditing = toggleMapEditing;
+window.jumpTo = jumpTo;
 window.filterCameras = filterCameras;
 window.filterCamerasBySearch = filterCamerasBySearch;
 window.setDecimationFPS = setDecimationFPS;
@@ -1380,32 +1306,20 @@ window.handleCameraConfigSubmit = handleCameraConfigSubmit;
 window.askDeleteCurrentCamera = askDeleteCurrentCamera;
 window.confirmDeleteCurrentCamera = confirmDeleteCurrentCamera;
 window.cancelDeleteCurrentCamera = cancelDeleteCurrentCamera;
-window.runLLMOptimizations = runLLMOptimizations;
-window.fetchTheftIncidents = fetchTheftIncidents;
-window.printDailyDigest = printDailyDigest;
-window.dispatchGuardFromBanner = dispatchGuardFromBanner;
-window.scrollToTheftIncident = scrollToTheftIncident;
-window.dismissTheftBanner = dismissTheftBanner;
 window.initOrUpdateCharts = initOrUpdateCharts;
-window.loadMarketPredictions = function () {
-  const host = el('llmOptimizationsContainer');
-  if (host && host.children.length === 0) runLLMOptimizations();
-};
+window.renderHourlyVisitors = renderHourlyVisitors;
 
 function initAnalytics() {
   initHashRouting();
   fetchSystemTelemetry();
-  fetchStoreKPIs();
+  refreshBrand();
   loadCamerasMatrix();
-  loadActionCenter();
-  loadExecutiveDigest();
-  fetchTheftIncidents();
 
-  setInterval(fetchSystemTelemetry, 2000);      // also drives the per-tile HUD
-  setInterval(fetchStoreKPIs, 4000);
-  setInterval(loadCamerasMatrix, 5000);         // picks up adopted / removed cameras
-  setInterval(fetchTheftIncidents, 4000);
+  setInterval(fetchSystemTelemetry, 3000);      // header count, per-tile HUD, Settings health
+  setInterval(loadCamerasMatrix, 5000);         // picks up added / removed cameras
   setInterval(attachCameraStreams, 2000);
+  setInterval(fitMapHeight, 1000);              // the theft banner can appear or go at any time
+  setInterval(() => { if (currentView === 'insights' && currentSub === 'footfall' && !document.hidden) initOrUpdateCharts(); }, 60000);
 
   if (new URLSearchParams(window.location.search).get('__selftest') === '1') runSelfTest();
 }
