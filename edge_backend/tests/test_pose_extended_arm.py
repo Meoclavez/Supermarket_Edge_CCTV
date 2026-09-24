@@ -154,10 +154,20 @@ def test_latency_budget_scales_with_camera_count(monkeypatch):
     monkeypatch.setattr(settings, "RECORDING_FPS", 25)
     monkeypatch.setattr(settings, "ANALYTICS_DETECT_EVERY_N_FRAMES", 5)
     monkeypatch.setattr(settings, "POSE_BUDGET_STREAMS", 4)
+    # Without the scheduler every camera is analysed at 25 / 5 = 5 fps.
+    monkeypatch.setattr(settings, "ANALYTICS_SCHEDULER", False)
     b4, src = d.latency_budget()
     assert b4 == pytest.approx(30.0) and "4 stream" in src
     monkeypatch.setattr(settings, "POSE_BUDGET_STREAMS", 32)
     assert d.latency_budget()[0] == pytest.approx(5.0)         # clamped floor (3.75 ms)
+    # With it, the model is fitted for ANALYTICS_TARGET_DETECT_FPS per camera,
+    # the rate the run-time re-fit uses too.
+    monkeypatch.setattr(settings, "ANALYTICS_SCHEDULER", True)
+    monkeypatch.setattr(settings, "ANALYTICS_TARGET_DETECT_FPS", 2.0)
+    monkeypatch.setattr(settings, "ANALYTICS_MIN_DETECT_FPS", 1.0)
+    monkeypatch.setattr(settings, "POSE_BUDGET_STREAMS", 33)
+    b33, src = d.latency_budget()
+    assert b33 == pytest.approx(9.1) and "x 2 fps" in src    # 600 ms / (33 x 2)
     monkeypatch.setattr(settings, "POSE_LATENCY_BUDGET_MS", 42.0)
     assert d.latency_budget() == (42.0, "POSE_LATENCY_BUDGET_MS")
 

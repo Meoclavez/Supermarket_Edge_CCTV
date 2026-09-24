@@ -178,7 +178,7 @@
           <!-- Pills are built from the departments cameras are actually assigned to. -->
         </div>
 
-        <div class="filter-group" id="fpsFilterChips" title="How many pictures per second each tile shows. Lower is lighter on this computer.">
+        <div class="filter-group" id="fpsFilterChips" title="How often each tile's picture refreshes (Low 5 s, Normal 2 s, High 1 s) and how smooth an enlarged tile's live video is. Click a tile to enlarge it. Lower is lighter on this computer.">
           <span class="filter-label">Video smoothness:</span>
           <button type="button" class="fps-btn" data-fps="1" onclick="setDecimationFPS(1)">Low</button>
           <button type="button" class="fps-btn active" data-fps="5" onclick="setDecimationFPS(5)">Normal</button>
@@ -255,16 +255,25 @@
             <!-- First-run hint, hidden as soon as anything has been configured. -->
             <div id="fpHint" class="fp-hint-overlay" style="display:none;"></div>
 
-            <!-- Bottom overlay: map summary on the left, one badge per camera on the
-                 right. One wrapping row, so the two can never overlap. -->
+            <!-- Bottom overlay: the short map summary. The fitted plan stays clear of it. -->
             <div class="fp-hud-bottom">
               <div class="floorplan-legend">
                 <div id="fpStats" class="fp-stats">Loading…</div>
                 <div id="fpLive" class="fp-live fp-live-idle">live map: waiting for the pipeline</div>
                 <div id="fpStatus" class="fp-status" role="status" aria-live="polite"></div>
               </div>
-              <div id="fpCamBadges" class="fp-cam-badges"></div>
             </div>
+          </div>
+
+          <!-- One chip per camera (js/floorplan.js renderLiveDom). Its own row under
+               the plan, never over it: bounded height, scrolls, and starts closed
+               when there are many cameras. -->
+          <div class="fp-cam-list" id="fpCamList">
+            <button type="button" class="fp-cam-list-toggle" id="fpCamListToggle" aria-expanded="false" aria-controls="fpCamBadges">
+              <span class="fp-cam-list-caret" aria-hidden="true">&#9656;</span>
+              <span id="fpCamListSummary" class="fp-cam-list-summary">Cameras</span>
+            </button>
+            <div id="fpCamBadges" class="fp-cam-badges" hidden></div>
           </div>
         </div>
 

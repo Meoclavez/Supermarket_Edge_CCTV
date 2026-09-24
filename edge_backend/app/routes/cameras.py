@@ -37,7 +37,7 @@ from ..services.camera_discovery import camera_discovery_service
 from ..services.clip_recorder import clip_recorder_service
 from ..services.feature_manager import feature_manager
 from ..services.inference_backend import person_detector
-from ..services.live_analytics_engine import _draw_skeleton, live_engine
+from ..services.live_analytics_engine import _draw_skeleton, live_engine, render_overlay
 from ..services.no_signal_slate import render_no_signal
 from ..services.privacy_mask import apply_privacy_masks, ignore_polygons, outside_ignore_regions
 
@@ -520,7 +520,7 @@ async def update_camera_features(camera_id: str, config: CameraFeatureConfig, db
 
 
 @router.get("/{camera_id}/snapshot")
-def get_camera_snapshot(camera_id: str, annotate: bool = True):
+def get_camera_snapshot(camera_id: str, annotate: bool = True, overlay: bool = False):
     """Return the most recent real frame captured from this camera.
 
     When no frame is available the response is a "NO SIGNAL" slate with
@@ -529,6 +529,11 @@ def get_camera_snapshot(camera_id: str, annotate: bool = True):
     pose skeletons) the model genuinely produced for it. Privacy masks are
     always burned in; the model itself runs on the unmasked frame, and
     AI_IGNORE regions drop detections as in the live pipeline.
+
+    ``overlay`` (used with ``annotate=false``) draws the tracker's current
+    boxes from the worker's own snapshot, exactly like ``/stream?overlay=1``.
+    No inference runs, so the dashboard's camera tiles can refresh from this
+    cheaply instead of each holding an MJPEG connection open.
     """
     raw = live_engine.get_raw_frame(camera_id)
     frame = apply_privacy_masks(raw, camera_id) if raw is not None else None
@@ -564,6 +569,11 @@ def get_camera_snapshot(camera_id: str, annotate: bool = True):
             )
             if det.keypoints is not None:
                 _draw_skeleton(frame, det.keypoints, (0, 255, 157))
+    elif overlay:
+        rt = live_engine.runtimes.get(camera_id)
+        if rt is not None:
+            # ``frame`` is this request's own copy (get_raw_frame copies).
+            frame = render_overlay(frame, rt)
 
     ok, jpeg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
     if not ok:

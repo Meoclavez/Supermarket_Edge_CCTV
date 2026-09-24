@@ -131,6 +131,33 @@ def test_snapshot_action_saves_the_real_frame(client, camera_row):
         live_engine.runtimes.pop(camera_row, None)
 
 
+def test_snapshot_overlay_draws_tracker_boxes_without_inference(client, camera_row, monkeypatch):
+    """Dashboard tiles use ?annotate=false&overlay=1: the worker's own boxes, no model run."""
+    import cv2
+
+    def _no_inference(*_a, **_kw):
+        raise AssertionError("overlay must not run the detector")
+
+    monkeypatch.setattr(cameras_module.person_detector, "detect", _no_inference)
+    rt = CameraRuntime(camera_id=camera_row, name="Helper Test Cam", source="")
+    rt.put_frame(np.zeros((240, 320, 3), dtype=np.uint8))
+    rt.set_tracks([{"track_id": "trk_0001", "x1": 100, "y1": 60, "x2": 180, "y2": 220, "confidence": 0.9,
+                    "confirmed": True, "x_m": None, "y_m": None}])
+    live_engine.runtimes[camera_row] = rt
+    try:
+        plain = client.get(f"/api/v1/cameras/{camera_row}/snapshot?annotate=false")
+        boxed = client.get(f"/api/v1/cameras/{camera_row}/snapshot?annotate=false&overlay=1")
+        for res in (plain, boxed):
+            assert res.status_code == 200, res.text
+            assert res.headers["X-Frame-Source"] == "live"
+        dec = lambda r: cv2.imdecode(np.frombuffer(r.content, np.uint8), cv2.IMREAD_COLOR)  # noqa: E731
+        # Left edge of the confirmed box (x=100) is drawn green only with the overlay.
+        assert dec(plain)[140, 99:102].max() < 40
+        assert dec(boxed)[140, 99:102, 1].max() > 150
+    finally:
+        live_engine.runtimes.pop(camera_row, None)
+
+
 # ---------------- clip action ----------------
 
 def test_clip_action_501_without_real_buffer(client, camera_row):

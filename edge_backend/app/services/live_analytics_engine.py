@@ -7,8 +7,9 @@ dashboard came from a literal in a route handler.
 
 One worker thread per enabled camera does the following loop:
 
-    capture frame -> (every Nth frame) pose-estimate people (box + 17
-      keypoints) -> ByteTrack association -> project foot point to floor
+    capture frame -> (when inference_scheduler admits it: the camera's fair
+      share of the accelerator, at most every Nth frame) pose-estimate
+      people (box + 17 keypoints) -> ByteTrack association -> project foot point to floor
       metres -> resolve which zone that is -> emit zone entry/exit facts
       -> hand confirmed tracks (with skeletons) and retail objects to
       pose_analytics -> mark zone visits that saw a shelf interaction
@@ -44,6 +45,7 @@ from app.services.inference_backend import (
     keypoints_to_list,
     person_detector,
 )
+from app.services.inference_scheduler import inference_scheduler
 from app.services.privacy_mask import (
     apply_privacy_masks,
     camera_masks,
@@ -255,6 +257,8 @@ class CameraRuntime:
             "next_retry_in_s": (
                 max(0, round(self.next_retry_at - time.time())) if self.next_retry_at else None
             ),
+            # How often this camera is really analysed (inference_scheduler).
+            "analysis_rate": inference_scheduler.camera_status(self.camera_id),
         }
 
 
@@ -292,6 +296,11 @@ def ffmpeg_capture_options() -> str:
     for an incoming connection", so older builds keep ``stimeout``.
     ``rw_timeout`` bounds every other protocol read (HTTP/MJPEG). The same
     string is used for every open, so concurrent workers never disagree.
+
+    The decoder thread count is deliberately not in here: OpenCV passes this
+    string to the demuxer only, and a ``threads;N`` entry was measured to have
+    no effect (OpenCV 5.0: still ~31 threads per stream on 16 CPUs). It is set
+    per capture with ``CAP_PROP_N_THREADS`` instead (``decode_threads_for``).
     """
     global _FFMPEG_OPTIONS
     if _FFMPEG_OPTIONS is None:
@@ -305,6 +314,38 @@ def ffmpeg_capture_options() -> str:
         sock = f"timeout;{us}" if modern else f"stimeout;{us}"
         _FFMPEG_OPTIONS = f"rtsp_transport;tcp|{sock}|rw_timeout;{us}"
     return _FFMPEG_OPTIONS
+
+
+# Decode threads by stream size (pixels), smallest first; above the last: 4.
+_DECODE_THREAD_STEPS = ((1280 * 720, 1), (1920 * 1080, 2))
+# Used for a first open, before the stream's size is known.
+DECODE_THREADS_UNKNOWN = 2
+
+
+def decode_threads_for(width: Optional[int], height: Optional[int]) -> int:
+    """FFmpeg (CPU) decode threads for one stream.
+
+    ``CAMERA_DECODE_THREADS`` > 0 is taken as is. Otherwise by resolution: 1 up
+    to 720p (a 352x288 or 720p H.264 stream decodes at hundreds of fps on one
+    thread), 2 up to 1080p, 4 above (4K: 72 fps on 1 thread, 133 fps on 4 on a
+    Ryzen 7 7435HS). OpenCV's own default is one per CPU, ~31 threads per
+    stream on a 16-CPU box, which is how 33 cameras became 1143 threads.
+    """
+    fixed = int(settings.CAMERA_DECODE_THREADS)
+    if fixed > 0:
+        return fixed
+    if not width or not height:
+        return DECODE_THREADS_UNKNOWN
+    pixels = int(width) * int(height)
+    for limit, threads in _DECODE_THREAD_STEPS:
+        if pixels <= limit:
+            return threads
+    return 4
+
+
+# Last known frame size per source URL, so a reconnect opens with the right
+# thread count straight away.
+_source_sizes: dict[str, tuple[int, int]] = {}
 
 
 def _resolve_host_bounded(url: str, timeout_s: float) -> None:
@@ -352,6 +393,8 @@ class CameraWorker(threading.Thread):
         self._auth_failures = 0
         self._frame_index = 0
         self._detect_index = 0
+        # FFmpeg decode threads the current capture was opened with.
+        self._decode_threads: Optional[int] = None
         # Latest retail objects; refreshed every OBJECT_DETECT_EVERY_N
         # detection frames, so at most N-1 detection frames old.
         self._objects: list[ObjectDetection] = []
@@ -423,10 +466,14 @@ class CameraWorker(threading.Thread):
             os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = ffmpeg_capture_options()
             open_ms = int(max(0.5, settings.CAMERA_OPEN_TIMEOUT_SEC) * 1000)
             read_ms = int(max(0.5, settings.CAMERA_READ_TIMEOUT_SEC) * 1000)
-            cap = cv2.VideoCapture(
-                src, cv2.CAP_FFMPEG,
-                [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, open_ms, cv2.CAP_PROP_READ_TIMEOUT_MSEC, read_ms],
-            )
+            params = [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, open_ms, cv2.CAP_PROP_READ_TIMEOUT_MSEC, read_ms]
+            # Decoding stays on the CPU; only its thread count is bounded
+            # (a per-capture open parameter, so concurrent opens cannot race).
+            n_threads = getattr(cv2, "CAP_PROP_N_THREADS", None)
+            if n_threads is not None:
+                self._decode_threads = decode_threads_for(*_source_sizes.get(src, (None, None)))
+                params += [n_threads, self._decode_threads]
+            cap = cv2.VideoCapture(src, cv2.CAP_FFMPEG, params)
         else:
             cap = cv2.VideoCapture(src)
 
@@ -498,11 +545,15 @@ class CameraWorker(threading.Thread):
 
                 last_tick = time.time()
                 frames_in_window = 0
+                sized = False
 
                 while not self._stop.is_set():
                     ok, frame = cap.read()
                     if not ok or frame is None:
                         raise RuntimeError("Stream ended or frame read failed")
+                    if not sized:
+                        sized = True
+                        cap = self._fit_decode_threads(cap, active_source, frame)
 
                     self.rt.frames_read += 1
                     self.rt.last_frame_at = time.time()
@@ -520,8 +571,15 @@ class CameraWorker(threading.Thread):
                         frames_in_window = 0
                         last_tick = now
 
-                    if self._frame_index % settings.ANALYTICS_DETECT_EVERY_N_FRAMES == 0:
-                        self._analyse(frame, now)
+                    # The scheduler decides whether this frame gets inferred:
+                    # the camera's fair share of the accelerator, never more
+                    # than every Nth frame. Frames it skips are still shown.
+                    if inference_scheduler.admit(self.rt.camera_id, fps=self.rt.fps,
+                                                 frame_index=self._frame_index):
+                        try:
+                            self._analyse(frame, now)
+                        finally:
+                            inference_scheduler.done(self.rt.camera_id)
 
             except Exception as e:
                 clean_err = redact_url(str(e))
@@ -536,7 +594,9 @@ class CameraWorker(threading.Thread):
                     self.rt.status = "OFFLINE"
                     self.rt.last_error = clean_err
                 self.rt.next_retry_at = time.time() + wait
-                # A camera that drops out contributes nothing until it returns.
+                # A camera that drops out contributes nothing until it returns,
+                # and its share of the accelerator goes to the others.
+                inference_scheduler.forget(self.rt.camera_id)
                 for t in self.tracker.flush_all():
                     self.engine.close_track(t, reason="camera_offline")
                 self.rt.set_tracks([])
@@ -565,9 +625,34 @@ class CameraWorker(threading.Thread):
                 backoff = min(backoff * 2, CAMERA_RETRY_MAX_SEC)
 
         self.rt.status = "DISABLED" if not self.rt.enabled else "OFFLINE"
+        inference_scheduler.forget(self.rt.camera_id)
         for t in self.tracker.flush_all():
             self.engine.close_track(t, reason="worker_stopped")
         _reset_pose_camera(self.rt.camera_id)
+
+    def _fit_decode_threads(self, cap, source: str, frame: np.ndarray):
+        """Remember the stream's size; reopen once if it needs more decode threads.
+
+        The first open of a source cannot know its resolution, so it uses
+        ``DECODE_THREADS_UNKNOWN``. A stream larger than that allows (above
+        1080p) is reopened once with its own count; reconnects then open with
+        it directly. A stream that needs fewer keeps the capture it has.
+        """
+        h, w = frame.shape[:2]
+        _source_sizes[source] = (int(w), int(h))
+        wanted = decode_threads_for(w, h)
+        if self._decode_threads is None or wanted <= self._decode_threads:
+            return cap
+        logger.info(f"Camera {self.rt.camera_id}: {w}x{h} stream needs {wanted} decode threads "
+                    f"(opened with {self._decode_threads}); reopening")
+        try:
+            cap.release()
+        except Exception:
+            pass
+        cap = self._open(source)
+        if not cap or not cap.isOpened():
+            raise RuntimeError(f"Cannot reopen {redact_url(source)} with {wanted} decode threads")
+        return cap
 
     def _push_clip_buffer(self, frame: np.ndarray) -> None:
         try:
@@ -587,6 +672,7 @@ class CameraWorker(threading.Thread):
         cam = self.rt.camera_id
         flags = {f: camera_flag(cam, f) for f in ANALYSIS_FLAGS}
         self.rt.analysis_flags = flags
+        inference_scheduler.set_idle(cam, not any(flags.values()))
         if not any(flags.values()):
             # Every analysis feature is off for this camera: spend no GPU time,
             # show no boxes, and finish any tracks (closing open visits).

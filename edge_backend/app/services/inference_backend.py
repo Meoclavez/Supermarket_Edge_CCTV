@@ -38,6 +38,16 @@ keypoints of each person crop; ``auto`` enables it only on an accelerator and
 only when it fits in half the budget. Everything measured is in
 ``status()["model_selection"]`` and ``status()["keypoint_refiner"]``.
 
+That start-up choice only sees the cameras that exist at start-up. At run time
+``inference_scheduler`` shares the measured capacity between the cameras that
+are really analysing and re-fits the choice when that set or the load changes:
+it switches the refiner (``auto``) and the ladder rung through
+``set_refiner()`` / ``switch_pose_model()``, which load the new session off the
+capture threads and swap it in atomically. On an accelerator every
+``session.run`` is serialised by one device lock, so cameras queue in Python
+(bounded by the scheduler) rather than inside the driver, and the time spent in
+it is the measured device load (``load_metrics()``).
+
 The last state matters as much as the others: when no backend can run, the
 service reports ``available = False`` and returns **no detections at all**.
 It never emits synthetic boxes, because a fabricated detection is
@@ -219,6 +229,11 @@ def _nms(boxes: np.ndarray, scores: np.ndarray, iou_threshold: float) -> list[in
         iou = inter / np.maximum(union, 1e-9)
         order = order[1:][iou <= iou_threshold]
     return keep
+
+
+def _ewma(prev: Optional[float], value: float, alpha: float = 0.1) -> float:
+    """Exponentially weighted mean; the first sample seeds it."""
+    return float(value) if prev is None else prev + alpha * (float(value) - prev)
 
 
 def _parse_literal(value: Optional[str]) -> Any:
@@ -600,6 +615,7 @@ class PersonDetector:
         self.object_provider: Optional[str] = None
         self.object_error: Optional[str] = None
         self.object_warmup_ms: Optional[float] = None
+        self._object_label: Optional[str] = None
 
         # Optional top-down keypoint refiner (RTMPose, Apache-2.0).
         self.refiner_session = None
@@ -623,6 +639,13 @@ class PersonDetector:
         self._obj_infer_ms: deque[float] = deque(maxlen=120)
         self._frames = 0
         self._rejected = 0
+        # One run at a time on an accelerator (MIGraphX/CUDA serialise anyway;
+        # queueing here keeps the measured run times pure device time), and the
+        # load measurements the scheduler reads (load_metrics()).
+        self._device_lock = threading.Lock()
+        self._busy_ms = 0.0
+        self._pose_ewma: Optional[float] = None
+        self._refiner_frame_ewma: Optional[float] = None
 
     # ------------------------------------------------------------- probing
 
@@ -698,8 +721,10 @@ class PersonDetector:
 
         ``POSE_LATENCY_BUDGET_MS`` > 0 is taken as is. Otherwise: one shared
         session serves every analytics camera, each analysed at
-        RECORDING_FPS / ANALYTICS_DETECT_EVERY_N_FRAMES frames per second, and
-        only ``POSE_BUDGET_UTILISATION`` of the accelerator is planned for.
+        RECORDING_FPS / ANALYTICS_DETECT_EVERY_N_FRAMES frames per second
+        (capped at ANALYTICS_TARGET_DETECT_FPS while the scheduler is on, the
+        rate ``inference_scheduler`` re-fits for), and only
+        ``POSE_BUDGET_UTILISATION`` of the accelerator is planned for.
         """
         fixed = float(settings.POSE_LATENCY_BUDGET_MS)
         if fixed > 0:
@@ -710,6 +735,9 @@ class PersonDetector:
             counted = self._count_ai_cameras()
             streams, source = (counted, "enabled cameras") if counted else (4, "default (no cameras yet)")
         per_stream = max(float(settings.RECORDING_FPS) / max(1, int(settings.ANALYTICS_DETECT_EVERY_N_FRAMES)), 0.5)
+        if settings.ANALYTICS_SCHEDULER:
+            per_stream = min(per_stream, max(float(settings.ANALYTICS_TARGET_DETECT_FPS),
+                                             float(settings.ANALYTICS_MIN_DETECT_FPS), 0.1))
         budget = 1000.0 * float(settings.POSE_BUDGET_UTILISATION) / (max(1, streams) * per_stream)
         budget = min(max(budget, 5.0), 150.0)
         return round(budget, 1), f"auto: {streams} stream(s) [{source}] x {per_stream:g} fps"
@@ -959,10 +987,11 @@ class PersonDetector:
         runs = max(1, int(settings.INFERENCE_WARMUP_RUNS))
         times = []
         for _ in range(runs + 1):
-            t = time.perf_counter()
             with lock:
+                t = time.perf_counter()
                 session.run(None, {spec.input_name: x})
-            times.append((time.perf_counter() - t) * 1000.0)
+                times.append((time.perf_counter() - t) * 1000.0)
+        self._account(sum(times), self.provider)
         steady = round(sum(times[1:]) / len(times[1:]), 2) if len(times) > 1 else None
         return round(times[0], 1), steady
 
@@ -1011,7 +1040,7 @@ class PersonDetector:
         self.refiner_batch_ms = batch_ms
         budget, _ = self.latency_budget()
         if mode == "auto" and batch_ms > 0.5 * budget:
-            self.refiner_session = None
+            # Loaded but idle: the scheduler may switch it on when the load drops.
             self.refiner_reason = (f"auto: {n} crops take {batch_ms} ms, over half the "
                                    f"{budget} ms budget")
             return
@@ -1019,8 +1048,10 @@ class PersonDetector:
         self.refiner_reason = f"{mode}: {n} crops in {batch_ms} ms on {self.provider}"
         logger.info(f"Keypoint refiner {path.name} enabled ({self.refiner_reason})")
 
-    def _refine(self, frame: np.ndarray, dets: list["Detection"]) -> None:
+    def _refine(self, frame: np.ndarray, dets: list["Detection"]) -> float:
         """Replace each detection's keypoints with the top-down estimate.
+
+        Returns the milliseconds spent in the refiner session (device time).
 
         Runs on the ``POSE_REFINER_MAX_PERSONS`` most confident people in one
         batch. Visibility becomes ``max(pose-model visibility, refiner
@@ -1030,11 +1061,11 @@ class PersonDetector:
         with self._refiner_lock:
             sess, hw = self.refiner_session, self.refiner_input_hw
         if sess is None or not dets:
-            return
+            return 0.0
         chosen = sorted((d for d in dets if d.keypoints is not None),
                         key=lambda d: d.confidence, reverse=True)[: max(1, int(settings.POSE_REFINER_MAX_PERSONS))]
         if not chosen:
-            return
+            return 0.0
         started = time.perf_counter()
         crops, metas = [], []
         for d in chosen:
@@ -1053,11 +1084,16 @@ class PersonDetector:
             x = np.concatenate([x, np.zeros((pad,) + x.shape[1:], np.float32)])
         name = sess.get_inputs()[0].name
         outs_x, outs_y = [], []
+        run_ms = 0.0
         with self._refiner_lock:
             for i in range(0, x.shape[0], b):
-                ox, oy = sess.run(None, {name: np.ascontiguousarray(x[i: i + b])})
+                with self._gate(self.provider):
+                    t = time.perf_counter()
+                    ox, oy = sess.run(None, {name: np.ascontiguousarray(x[i: i + b])})
+                    run_ms += (time.perf_counter() - t) * 1000.0
                 outs_x.append(ox)
                 outs_y.append(oy)
+        self._account(run_ms, self.provider)
         sx, sy = np.concatenate(outs_x)[:n], np.concatenate(outs_y)[:n]
         fh, fw = frame.shape[:2]
         refined = refiner_decode(sx, sy, metas, hw, fw, fh)
@@ -1071,6 +1107,7 @@ class PersonDetector:
             d.keypoints = out
         with self._stats_lock:
             self._refine_ms.append((time.perf_counter() - started) * 1000.0)
+        return run_ms
 
     def _load_object_model(self, ort) -> None:
         path = self._object_model_path
@@ -1104,6 +1141,7 @@ class PersonDetector:
                 return
             self.object_session, self.object_spec = sess, spec
             self.object_provider = ep.replace("ExecutionProvider", "").lower()
+            self._object_label = next((label for e, label, _ in _PROVIDER_PRIORITY if e == ep), self.object_provider)
             self.object_class_ids = _parse_class_filter(settings.OBJECT_CLASSES, spec.names)
             self.object_warmup_ms, _ = self._warm_up(sess, spec, self._obj_run_lock)
             self._mark_compiled(path, ep=ep)
@@ -1213,12 +1251,18 @@ class PersonDetector:
         "session", "spec", "model_path", "provider", "execution_provider", "backend", "device_name",
         "last_error", "warmup_ms", "warmup_steady_ms", "load_ms", "selection",
         "object_session", "object_spec", "object_class_ids", "object_provider", "object_error",
-        "object_warmup_ms", "refiner_session", "refiner_path", "refiner_input_hw", "refiner_enabled",
+        "object_warmup_ms", "_object_label", "refiner_session", "refiner_path", "refiner_input_hw", "refiner_enabled",
         "refiner_reason", "refiner_batch_ms",
     )
 
-    def _compile_in_child(self) -> tuple[bool, Optional[str]]:
+    def _compile_in_child(self, pose_model: Optional[Path] = None,
+                          expect: str = "migraphx") -> tuple[bool, Optional[str]]:
         """Compile the GPU programs in a child process (scripts/prewarm_inference.py).
+
+        Without ``pose_model`` it compiles what the start-up selection loads
+        (``--no-ladder``: the other ladder rungs are compiled on demand, or by
+        scripts/bootstrap.py at install). With it, just that pose model (the
+        scheduler's next rung), plus the refiner and object model from cache.
 
         Creating an ONNX Runtime session holds the GIL for the whole MIGraphX
         compile (measured: the process stood still for 142 s), so compiling
@@ -1232,13 +1276,13 @@ class PersonDetector:
 
         script = Path(__file__).resolve().parents[2] / "scripts" / "prewarm_inference.py"
         env = dict(os.environ, MIGRAPHX_CACHE_DIR=str(settings.MIGRAPHX_CACHE_DIR),
-                   POSE_MODEL_PATH=str(self._forced_model or ""),
+                   POSE_MODEL_PATH=str(pose_model or self._forced_model or ""),
                    OBJECT_MODEL_PATH=str(self._object_model_path or ""))
         summary: dict = {}
         tail: deque[str] = deque(maxlen=5)
         try:
-            proc = subprocess.Popen([sys.executable, str(script), "--require-gpu"], env=env, text=True,
-                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            proc = subprocess.Popen([sys.executable, str(script), "--require-gpu", "--no-ladder"], env=env,
+                                    text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         except OSError as e:
             return False, f"could not start the compiler process: {e}"
         assert proc.stdout is not None
@@ -1261,7 +1305,7 @@ class PersonDetector:
         rc = proc.wait()
         self.gpu_compile.pop("current", None)
         self.gpu_compile["compiled"] = list((summary.get("gpu_compile") or {}).get("compiled") or [])
-        if rc == 0 and summary.get("provider") == "migraphx":
+        if rc == 0 and summary.get("provider") == expect:
             return True, None
         why = "; ".join(f"{a.get('provider')}: {a.get('reason')}" for a in summary.get("provider_attempts") or []
                         if not a.get("ok")) or " | ".join(tail) or f"exit {rc}"
@@ -1320,6 +1364,7 @@ class PersonDetector:
             # Timings measured on the previous provider no longer describe this one.
             for q in (self._infer_ms, self._total_ms, self._obj_infer_ms, self._refine_ms):
                 q.clear()
+            self._pose_ewma = self._refiner_frame_ewma = None
 
     def _finish_loading(self, ort) -> None:
         """Warm up the chosen session, then load the optional object model."""
@@ -1342,6 +1387,14 @@ class PersonDetector:
             self._fit_to_budget(ort)
         except Exception as e:  # keep the model that already works
             logger.error(f"Pose model budget selection failed, keeping {self.model_path.name}: {e}")
+        ladder = self.pose_ladder()
+        if (self.refiner_enabled and settings.ANALYTICS_SCHEDULER and self._refiner_mode() == "auto"
+                and ladder and self.model_path != ladder[0]):
+            # Under load the refiner is shed before the model is: with the top
+            # rung out of budget it waits (loaded) for the scheduler.
+            self.refiner_enabled = False
+            self.refiner_reason = (f"auto: off while the pose model is below the top of the ladder "
+                                   f"({self.model_path.name}, not {ladder[0].name})")
 
         if settings.OBJECT_DETECT_EVERY_N > 0:
             try:
@@ -1415,14 +1468,32 @@ class PersonDetector:
             return _has_coherent_torso(keypoints)
         return True
 
-    def _run(self, session, spec, lock, frame):
+    def _run(self, session, spec, lock, frame, provider: Optional[str] = None):
         blob, scale, px, py = letterbox(frame, spec.input_size, spec.input_dtype)
-        with lock:
-            # Timed inside the lock: contention between cameras is not model time.
+        provider = provider or self.provider
+        with lock, self._gate(provider):
+            # Timed inside the locks: contention between cameras is not model time.
             t = time.perf_counter()
             raw = session.run(None, {spec.input_name: blob})[0]
             infer_ms = (time.perf_counter() - t) * 1000.0
+        self._account(infer_ms, provider)
         return raw, scale, px, py, infer_ms
+
+    @staticmethod
+    def _is_accelerator(provider: Optional[str]) -> bool:
+        return bool(provider) and provider not in ("cpu", "openvino", "none")
+
+    def _gate(self, provider: Optional[str]):
+        """The device lock for a run on an accelerator; nothing on the CPU,
+        where pose and object sessions run side by side on their thread shares."""
+        return self._device_lock if self._is_accelerator(provider) else contextlib.nullcontext()
+
+    def _account(self, ms: float, provider: Optional[str]) -> None:
+        """Add a run to the device-busy total when it ran where the pose model
+        runs (an object model that fell back to the CPU is not GPU load)."""
+        if provider == self.provider:
+            with self._stats_lock:
+                self._busy_ms += ms
 
     def detect(
         self,
@@ -1474,9 +1545,10 @@ class PersonDetector:
                 if rejected:
                     with self._stats_lock:
                         self._rejected += rejected
+            refine_ms = 0.0
             if self.refiner_enabled and dets:
                 try:
-                    self._refine(frame, dets)
+                    refine_ms = self._refine(frame, dets)
                 except Exception as e:  # the pose model's own keypoints stand
                     logger.error(f"Keypoint refinement failed: {e}")
         except Exception as e:
@@ -1489,6 +1561,11 @@ class PersonDetector:
             self._infer_ms.append(infer_ms)
             self._total_ms.append(total_ms)
             self._frames += 1
+            if session is self.session:     # not a result of a model swapped out meanwhile
+                self._pose_ewma = _ewma(self._pose_ewma, infer_ms)
+                if self.refiner_enabled:
+                    # Per analysed frame, 0 when nobody was in view: what the refiner really costs.
+                    self._refiner_frame_ewma = _ewma(self._refiner_frame_ewma, refine_ms)
         return dets
 
     def detect_objects(self, frame: np.ndarray, conf_threshold: Optional[float] = None) -> list[ObjectDetection]:
@@ -1501,7 +1578,8 @@ class PersonDetector:
             return []
         conf = settings.OBJECT_CONF_THRESHOLD if conf_threshold is None else conf_threshold
         try:
-            raw, scale, px, py, infer_ms = self._run(session, spec, self._obj_run_lock, frame)
+            raw, scale, px, py, infer_ms = self._run(session, spec, self._obj_run_lock, frame,
+                                                     provider=self._object_label)
             boxes, scores, cls, _ = decode_output(raw, spec, conf, class_ids=class_ids)
             if len(boxes) == 0:
                 out: list[ObjectDetection] = []
@@ -1526,6 +1604,119 @@ class PersonDetector:
         with self._stats_lock:
             self._obj_infer_ms.append(infer_ms)
         return out
+
+    # ----------------------------------------------- run-time load control
+
+    @staticmethod
+    def _refiner_mode() -> str:
+        mode = (settings.POSE_REFINER or "auto").strip().lower()
+        return "off" if mode in ("off", "0", "false", "no", "") else mode
+
+    def pose_ladder(self) -> list[Path]:
+        """Pose models the scheduler may step between on this provider, most
+        accurate first (existing files only; one entry when pinned)."""
+        if not self.available:
+            return []
+        if self._forced_model is not None:
+            return [self._forced_model]
+        return [p for p in self._model_candidates(self._is_accelerator(self.provider)) if p.exists()]
+
+    def load_metrics(self) -> dict:
+        """What the scheduler measures from: cumulative device-busy ms and
+        analysed frames (it differences them over time), plus per-part costs."""
+        with self._stats_lock:
+            obj = self._avg(self._obj_infer_ms)
+            return {
+                "busy_ms": self._busy_ms,
+                "frames": self._frames,
+                "provider": self.provider,
+                "model": self.model_path.name if (self.model_path and self.available) else None,
+                "pose_ms": round(self._pose_ewma, 2) if self._pose_ewma is not None else self.warmup_steady_ms,
+                "pose_ms_measured": self._pose_ewma is not None,
+                "object_ms": obj if obj is not None else None,
+                "objects_on_device": self.object_session is not None and self._object_label == self.provider,
+                "refiner_available": self.refiner_session is not None,
+                "refiner_enabled": self.refiner_enabled,
+                "refiner_frame_ms": (round(self._refiner_frame_ewma, 2)
+                                     if self._refiner_frame_ewma is not None else None),
+                "refiner_batch_ms": self.refiner_batch_ms,
+            }
+
+    def set_refiner(self, on: bool, reason: str) -> bool:
+        """Switch the loaded refiner on or off (the scheduler's first lever)."""
+        with self._refiner_lock:
+            if on and self.refiner_session is None:
+                return False
+            changed = self.refiner_enabled != bool(on)
+            self.refiner_enabled = bool(on)
+            self.refiner_reason = reason
+        if changed:
+            logger.info(f"Keypoint refiner {'on' if on else 'off'}: {reason}")
+        return True
+
+    def _needs_child_compile(self, path: Path) -> bool:
+        """Creating this session in-process could compile for minutes with the
+        GIL held (MIGraphX cold cache; a TensorRT engine build), freezing every
+        camera thread, so it is compiled in a child process first."""
+        if self._is_plugin(self.execution_provider):
+            return not amd.is_warm(amd.cache_dir(), path)
+        return self.execution_provider == "TensorrtExecutionProvider"
+
+    def switch_pose_model(self, path: Path, reason: str, progress=None) -> tuple[bool, dict]:
+        """Load ``path`` on the current provider, measure it, and swap it in.
+
+        Runs on the caller's (the scheduler's refit) thread; the running model
+        keeps serving every camera until the swap, which happens under the
+        pose run lock, so no frame sees a half-switched detector. Returns
+        (ok, {"steady_ms", "warmup_ms", "from"} or {"error"}).
+        """
+        path = Path(path)
+        if not self.available:
+            return False, {"error": "no pose model is loaded"}
+        if path == self.model_path:
+            return True, {"steady_ms": self.warmup_steady_ms, "from": path.name}
+        try:
+            import onnxruntime as ort
+        except ImportError as e:
+            return False, {"error": f"onnxruntime not importable: {e}"}
+        ep = self.execution_provider
+        if self._needs_child_compile(path):
+            if progress:
+                progress("compiling")
+            ok, error = self._compile_in_child(pose_model=path, expect=self.provider)
+            if not ok:
+                return False, {"error": error}
+        if progress:
+            progress("loading")
+        sess, why = self._create_session(ort, path, ep)
+        if sess is None:
+            return False, {"error": why}
+        try:
+            spec = build_model_spec(path, sess.get_modelmeta().custom_metadata_map or {},
+                                    sess.get_inputs(), sess.get_outputs())
+            if spec.task != "pose":
+                raise ValueError(f"{path.name} is a {spec.task} model")
+            # Warm-up takes turns with the live cameras on the device lock.
+            lock = self._device_lock if self._is_accelerator(self.provider) else threading.Lock()
+            first, steady = self._warm_up(sess, spec, lock)
+        except Exception as e:  # noqa: BLE001 - keep the model that works
+            return False, {"error": _short(f"{type(e).__name__}: {e}")}
+        self._mark_compiled(path, ep=ep)
+        with self._run_lock, self._stats_lock:
+            if self.execution_provider != ep:
+                # The background GPU compile swapped providers meanwhile.
+                return False, {"error": f"the provider changed to {self.provider} during the switch"}
+            old = self.model_path
+            self.session, self.spec, self.model_path = sess, spec, path
+            self.warmup_ms, self.warmup_steady_ms = first, steady
+            self._infer_ms.clear()
+            self._total_ms.clear()
+            self._pose_ewma = None
+            tried = [t for t in self.selection.get("tried", []) if t.get("model") != path.name]
+            tried.append({"model": path.name, "input_size": list(spec.input_size), "steady_ms": steady})
+            self.selection = {**self.selection, "chosen": path.name, "reason": reason, "tried": tried,
+                              "refitted_at": time.time()}
+        return True, {"steady_ms": steady, "warmup_ms": first, "from": old.name if old else None}
 
     # ------------------------------------------------------------ telemetry
 
@@ -1586,6 +1777,9 @@ class PersonDetector:
             "migraphx": {k: self.migraphx.get(k) for k in ("ok", "reason", "gfx", "devices", "cache_dir",
                                                           "cache_warning")} if self.migraphx else None,
             "cpu_threads": dict(self.cpu_threads),
+            # Run-time budget: target vs measured accelerator load, the rate
+            # each camera really gets, and every model / refiner re-fit.
+            "load_control": _load_control_status() if self is globals().get("person_detector") else None,
             "keypoint_refiner": {
                 "enabled": self.refiner_enabled,
                 "model": self.refiner_path.name if self.refiner_path else None,
@@ -1606,6 +1800,15 @@ class PersonDetector:
                 "error": self.object_error,
             },
         }
+
+
+def _load_control_status() -> Optional[dict]:
+    try:
+        from app.services.inference_scheduler import inference_scheduler
+
+        return inference_scheduler.status()
+    except Exception as e:  # noqa: BLE001 - status must never fail
+        return {"error": f"{type(e).__name__}: {e}"}
 
 
 def _has_coherent_torso(kpts: Optional[np.ndarray]) -> bool:

@@ -1764,6 +1764,15 @@ html, body {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cam-hud-live { color: #00ff9d; border-color: rgba(0,255,157,0.35); }
 .cam-hud-offline { color: #ff5b6b; border-color: rgba(255,91,107,0.35); }
+/* No recent picture: the badge states its age instead of claiming LIVE. */
+.cam-hud-stale { color: #ffc46b; border-color: rgba(255,196,107,0.35); }
+
+/* Tiles refresh from single pictures; clicking one enlarges it across the
+   grid and gives it the one live stream (js/analytics.js, tileFeed). */
+.camera-video-container[data-focus-for] { cursor: zoom-in; }
+.camera-video-container[data-focus-for]:focus-visible { outline: 2px solid var(--accent-cyan); outline-offset: -2px; }
+.camera-card-focus { grid-column: 1 / -1; border-color: var(--accent-cyan); }
+.camera-card-focus .camera-video-container[data-focus-for] { cursor: zoom-out; max-height: 72vh; }
 
 .camera-footer { display: flex; gap: 6px; padding: 9px 12px; }
 

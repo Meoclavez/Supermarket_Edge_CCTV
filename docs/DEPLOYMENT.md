@@ -65,8 +65,11 @@ run time (for example `gfx1200` for an RX 9060 XT). No system ROCm install and
 no `sudo` are needed beyond the amdgpu kernel driver and the `render`/`video`
 groups, which `install.sh` grants. It then **pre-compiles** the models the
 service will load into `storage/migraphx_cache/` (1-3 min per model the first
-time, about 7 min for the default set; a few seconds on later runs), so the
-service starts on the GPU straight away.
+time; a few seconds on later runs), so the service starts on the GPU straight
+away. Every rung of the pose ladder is compiled, not only the one start-up
+picks, because the run-time scheduler (section 6) may step to any of them as
+cameras come and go; a rung it needs that is still cold is compiled in a
+separate process while the current model keeps serving.
 
 If the cache is cold at service start (a new model, a changed camera count
 that selects another model), the service starts on the CPU, compiles in a
@@ -312,6 +315,42 @@ The defaults are conservative. After a day of real footage, check
 - **Real shoppers missed** → lower `PERSON_CONF_THRESHOLD`, and check the
   camera is not so high that people appear wider than tall.
 - **CPU saturated** → raise `ANALYTICS_DETECT_EVERY_N_FRAMES`, or fit a GPU.
+
+### Many cameras: the inference budget
+
+Detection does not run on every Nth frame of every camera any more: one
+accelerator cannot do that for dozens of streams (33 cameras x 5 frames/s x
+14 ms for YOLO26m-pose kept an RX 9060 XT 97 % busy, and detections went
+stale). The service measures what each analysed frame really costs on the
+device and plans for `POSE_BUDGET_UTILISATION` (default 0.6) of that capacity,
+split fairly between the cameras that are analysing:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `ANALYTICS_SCHEDULER` | `1` | `0` restores the fixed every-Nth-frame rule |
+| `POSE_BUDGET_UTILISATION` | `0.6` | share of the measured device capacity inference may use |
+| `ANALYTICS_MIN_DETECT_FPS` | `1.0` | every camera gets at least this, even over budget |
+| `ANALYTICS_DETECT_EVERY_N_FRAMES` | `5` | ceiling: never more often than every Nth frame |
+| `ANALYTICS_TARGET_DETECT_FPS` | `2.0` | the per-camera rate the pose model is chosen for |
+| `ANALYTICS_REFIT_DEBOUNCE_SEC` | `30` | how long a new camera set / load must hold before the model changes |
+| `ANALYTICS_MAX_INFLIGHT` | `4` | analysed frames in flight; a camera whose turn comes beyond that skips the frame |
+| `CAMERA_DECODE_THREADS` | `0` | FFmpeg (CPU) decode threads per camera; 0 = 1 up to 720p, 2 up to 1080p, 4 above |
+
+A frame that is not analysed is still shown live and recorded. When the
+cameras change, or the device stays over the target, the model is re-fitted
+down (or back up) the ladder: the `auto` keypoint refiner is dropped first,
+then `yolo26m-pose-544x960` → `yolo26s-pose-544x960` → `yolo26s-pose` → ….
+For 33 cameras with the defaults that means about 2 frames/s per camera on
+the smaller 960x544 model instead of 1.2/s on the medium one; set
+`ANALYTICS_TARGET_DETECT_FPS` equal to `ANALYTICS_MIN_DETECT_FPS` to prefer
+the larger model. `detector.load_control` in
+`GET /api/v1/layout/pipeline/status` shows the target and measured
+utilisation, the measured ms per frame, the rate each camera is allocated and
+really gets (`cameras[].analysis_rate`), the ladder with its predicted load,
+and every re-fit with its reason; the service log has one
+`Inference re-fit:` line per change. Tracker timings are counted in analysed
+frames (`TRACK_MAX_AGE_FRAMES`, `TRACK_MIN_HITS`), so at a lower rate a lost
+person is kept for longer and a new one takes longer to confirm.
 
 A false positive is indistinguishable from a real shopper once it is recorded,
 so it is better to miss a few people than to invent them.

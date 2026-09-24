@@ -85,6 +85,8 @@
   const LIVE_POLL_MS = 1000;
   const METRICS_POLL_MS = 4000;
   const HIT_PX = 7;
+  const FAN_PX = 30;              // spacing of camera markers fanned out from one shared spot
+  const CAM_LIST_AUTO_OPEN = 8;   // the camera list starts open only up to this many cameras
 
   const MODE = { VIEW: 'view', DRAW: 'draw', PLACE_CAMERA: 'place-camera', PICK: 'pick-point' };
 
@@ -167,6 +169,10 @@
 
       this._thumbTimer = null;
       this._statusTimer = null;
+      this.camListOpen = null;      // null: open only with a few cameras; true/false once toggled
+      this._camListHtml = null;
+      this._fan = new Map();
+      this._fanKey = null;
 
       this._bindEvents();
       this._mountHeatmapKindToggle();
@@ -388,6 +394,13 @@
       window.addEventListener('keydown', (e) => this.onKey(e));
       window.addEventListener('keyup', (e) => { if (e.key === 'Shift') this.shiftDown = false; });
       document.addEventListener('visibilitychange', () => { if (this.isVisible()) this.refreshLive(); });
+      const listToggle = document.getElementById('fpCamListToggle');
+      if (listToggle) {
+        listToggle.addEventListener('click', () => {
+          this.camListOpen = listToggle.getAttribute('aria-expanded') !== 'true';
+          this.renderLiveDom();
+        });
+      }
       if (window.ResizeObserver) {
         const wrap = c.parentElement || c;
         new ResizeObserver(() => this.resize()).observe(wrap);
@@ -515,7 +528,7 @@
         } else if (d.kind === 'camera-rotate') {
           const cam = this.cameras.find((c) => c.camera_id === d.id);
           if (cam) {
-            const s = this.toScreen(cam.floor_x, cam.floor_y);
+            const s = this.cameraScreenPos(cam);
             let deg = Math.atan2(p.y - s.y, p.x - s.x) * 180 / Math.PI + 90;
             deg = ((Math.round(deg) % 360) + 360) % 360;
             if (this.shiftDown) deg = (Math.round(deg / 15) * 15) % 360;
@@ -623,14 +636,57 @@
     cameraAt(px, py) {
       for (let i = this.cameras.length - 1; i >= 0; i--) {
         const c = this.cameras[i];
-        const s = this.toScreen(c.floor_x, c.floor_y);
+        const s = this.cameraScreenPos(c);
         if (Math.hypot(s.x - px, s.y - py) <= 14) return c;
       }
       return null;
     }
 
-    cameraHandlePos(cam) {
+    /**
+     * Where a camera's marker is drawn. Cameras saved at the same spot (for
+     * example a recorder's channels all added at one default point) would be
+     * one pile where only the top marker can be grabbed, so each pile is
+     * fanned out on screen into a small grid around its spot. Display only:
+     * nothing is saved until the operator drags or places a camera, which
+     * moves it out of the pile.
+     */
+    cameraScreenPos(cam) {
       const s = this.toScreen(cam.floor_x, cam.floor_y);
+      const fan = this.cameraFan().get(cam.camera_id);
+      return fan ? { x: s.x + fan.dx, y: s.y + fan.dy, fanned: fan.size } : s;
+    }
+
+    /** camera_id -> {dx, dy, size} screen offsets for cameras sharing a spot (within 5 cm). */
+    cameraFan() {
+      const key = this.cameras.map((c) => `${c.camera_id}@${c.floor_x},${c.floor_y}`).join('|');
+      if (key === this._fanKey) return this._fan;
+      const piles = new Map();
+      this.cameras.forEach((c) => {
+        if (!Number.isFinite(c.floor_x) || !Number.isFinite(c.floor_y)) return;
+        const k = `${Math.round(c.floor_x * 20)}:${Math.round(c.floor_y * 20)}`;
+        if (!piles.has(k)) piles.set(k, []);
+        piles.get(k).push(c);
+      });
+      const fan = new Map();
+      piles.forEach((list) => {
+        if (list.length < 2) return;
+        const cols = Math.ceil(Math.sqrt(list.length));
+        const rows = Math.ceil(list.length / cols);
+        list.forEach((c, i) => {
+          fan.set(c.camera_id, {
+            dx: ((i % cols) - (cols - 1) / 2) * FAN_PX,
+            dy: (Math.floor(i / cols) - (rows - 1) / 2) * FAN_PX,
+            size: list.length,
+          });
+        });
+      });
+      this._fanKey = key;
+      this._fan = fan;
+      return fan;
+    }
+
+    cameraHandlePos(cam) {
+      const s = this.cameraScreenPos(cam);
       const a = ((cam.azimuth_deg || 0) - 90) * Math.PI / 180;
       const r = this.cameraReachPx();
       return { x: s.x + Math.cos(a) * r, y: s.y + Math.sin(a) * r };
@@ -994,7 +1050,7 @@
       if (!cam) return;
       this.select({ type: 'camera', id });
       // Bring it into view if the operator is zoomed elsewhere.
-      const s = this.toScreen(cam.floor_x, cam.floor_y);
+      const s = this.cameraScreenPos(cam);
       if (s.x < 0 || s.y < 0 || s.x > this.canvas.clientWidth || s.y > this.canvas.clientHeight) {
         this._userZoomed = false; this.fitToView();
       }
@@ -1307,25 +1363,53 @@
       }
     }
 
+    /**
+     * The camera list under the plan: a one-line summary that opens into one
+     * chip per camera. It sits below the canvas, never over it, scrolls inside
+     * a bounded height, and starts closed when there are many cameras.
+     */
     renderLiveDom() {
       const host = document.getElementById('fpCamBadges');
+      const toggle = document.getElementById('fpCamListToggle');
+      const summary = document.getElementById('fpCamListSummary');
       const live = document.getElementById('fpLive');
       if (host) {
+        let html;
         if (this.liveSupported === false) {
-          host.innerHTML = '<span class="fp-badge fp-badge-note">live map endpoint not available on this server</span>';
+          html = '<span class="fp-badge fp-badge-note">live map endpoint not available on this server</span>';
         } else {
           const parts = this.detections.map((d) => {
             const cls = d.status !== 'ONLINE' ? 'fp-badge-off' : d.calibrated ? 'fp-badge-cal' : 'fp-badge-uncal';
             const state = d.status !== 'ONLINE' ? String(d.status || 'offline').toLowerCase() : d.calibrated ? 'calibrated' : 'uncalibrated';
-            return `<span class="fp-badge" data-cam="${escapeHtml(d.camera_id)}" title="Select this camera">
+            return `<button type="button" class="fp-badge" data-cam="${escapeHtml(d.camera_id)}" title="Select this camera on the map">
               <span class="fp-badge-swatch" style="background:${camColorFor(this.cameras, d.camera_id)}"></span>
-              ${escapeHtml(d.camera_name || d.camera_id)} · <b>${d.live_tracks}</b> live · <span class="${cls}">${state}</span></span>`;
+              ${escapeHtml(d.camera_name || d.camera_id)} · <b>${d.live_tracks}</b> live · <span class="${cls}">${state}</span></button>`;
           });
           if (this.uncalibratedTracks > 0) {
             parts.push(`<span class="fp-badge fp-badge-note">${this.uncalibratedTracks} ${this.uncalibratedTracks === 1 ? 'person' : 'people'} detected on uncalibrated cameras (not placeable)</span>`);
           }
-          host.innerHTML = parts.join('');
+          html = parts.join('');
+        }
+        if (html !== this._camListHtml) {
+          this._camListHtml = html;
+          host.innerHTML = html;
           host.querySelectorAll('[data-cam]').forEach((b) => b.addEventListener('click', () => this.selectCamera(b.dataset.cam)));
+        }
+        const count = this.liveSupported === false ? this.cameras.length : this.detections.length;
+        const open = this.camListOpen === null ? count <= CAM_LIST_AUTO_OPEN : this.camListOpen;
+        host.hidden = !open;
+        if (toggle) {
+          toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+          toggle.title = open ? 'Hide the camera list' : 'Show every camera';
+        }
+        if (summary) {
+          const calibrated = this.detections.filter((d) => d.calibrated).length;
+          const people = this.detections.reduce((n, d) => n + (Number.isFinite(d.live_tracks) ? d.live_tracks : 0), 0);
+          const piled = this.cameraFan().size;
+          const bits = [`${count} camera${count === 1 ? '' : 's'}`];
+          if (this.liveSupported !== false) bits.push(`${calibrated} calibrated`, `${people} ${people === 1 ? 'person' : 'people'} in view`);
+          if (piled) bits.push(`${piled} stacked on one spot (spread out on the map until dragged)`);
+          summary.textContent = bits.join(' · ');
         }
       }
       if (live) {
@@ -1930,10 +2014,21 @@
 
     drawCameras() {
       const ctx = this.ctx;
+      const pileLabels = new Map();   // one note per pile of fanned-out cameras
       this.cameras.forEach((cam) => {
-        const s = this.toScreen(cam.floor_x, cam.floor_y);
+        const s = this.cameraScreenPos(cam);
         const hovered = this.isHovered('camera', cam.camera_id);
         const selected = this.isSelected('camera', cam.camera_id);
+        // A fanned-out marker is not where the camera hangs: its wedge and
+        // name are drawn only while it is pointed at or selected.
+        const fanned = !!s.fanned;
+        const detailed = !fanned || hovered || selected;
+        if (fanned) {
+          const at = this.toScreen(cam.floor_x, cam.floor_y);
+          const k = `${Math.round(at.x)}:${Math.round(at.y)}`;
+          const top = Math.min(s.y, pileLabels.has(k) ? pileLabels.get(k).top : Infinity);
+          pileLabels.set(k, { x: at.x, top, size: s.fanned });
+        }
         const online = cam.status === 'ONLINE';
         const color = ink(camColorFor(this.cameras, cam.camera_id));
         const reach = this.cameraReachPx();
@@ -1941,17 +2036,19 @@
         const bearing = ((cam.azimuth_deg || 0) - 90) * Math.PI / 180;
 
         ctx.save();
-        ctx.beginPath();
-        ctx.moveTo(s.x, s.y);
-        ctx.arc(s.x, s.y, reach, bearing - half, bearing + half);
-        ctx.closePath();
-        ctx.fillStyle = hexToRgba(color, selected ? 0.22 : hovered ? 0.18 : 0.10);
-        ctx.fill();
-        ctx.lineWidth = selected ? 1.6 : 1;
-        if (!cam.has_homography) { ctx.setLineDash([4, 4]); ctx.strokeStyle = hexToRgba(T.warn, 0.85); }
-        else ctx.strokeStyle = hexToRgba(color, 0.6);
-        ctx.stroke();
-        ctx.setLineDash([]);
+        if (detailed) {
+          ctx.beginPath();
+          ctx.moveTo(s.x, s.y);
+          ctx.arc(s.x, s.y, reach, bearing - half, bearing + half);
+          ctx.closePath();
+          ctx.fillStyle = hexToRgba(color, selected ? 0.22 : hovered ? 0.18 : 0.10);
+          ctx.fill();
+          ctx.lineWidth = selected ? 1.6 : 1;
+          if (!cam.has_homography) { ctx.setLineDash([4, 4]); ctx.strokeStyle = hexToRgba(T.warn, 0.85); }
+          else ctx.strokeStyle = hexToRgba(color, 0.6);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
 
         if (selected) {
           const h = this.cameraHandlePos(cam);
@@ -1972,7 +2069,7 @@
 
         const r = selected ? 10 : 8;
         if (this._markers) this._markers.push({ x: s.x, y: s.y, r });
-        if (this.showLayers.labels) {
+        if (this.showLayers.labels && detailed) {
           const name = (cam.name || cam.camera_id);
           this.queueLabel(name.length > 22 ? `${name.slice(0, 21)}…` : name, s.x, s.y, r,
             { prio: 0, required: true, color: T.text2 });
@@ -1981,6 +2078,12 @@
         }
         ctx.restore();
       });
+      if (this.showLayers.labels) {
+        pileLabels.forEach((pile) => {
+          this.queueLabel(`${pile.size} cameras share this spot: drag each to where it hangs`, pile.x, pile.top - 4, 10,
+            { prio: 0, required: true, color: T.warn });
+        });
+      }
     }
 
     drawPersons() {

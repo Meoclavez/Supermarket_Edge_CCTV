@@ -521,17 +521,19 @@ function filterCamerasBySearch(query) {
 }
 
 const FPS_LABEL = { 1: 'Low', 5: 'Normal', 15: 'High' };
+// Pause between two pictures of one grid tile, by "Video smoothness".
+const TILE_REFRESH_MS = { 1: 5000, 5: 2000, 15: 1000 };
 
-/** Change the frame rate of every open tile stream by re-requesting it. */
+/** Video smoothness: how often grid tiles refresh, and the enlarged tile's stream rate. */
 function setDecimationFPS(fps) {
   currentDecimationFPS = fps;
   document.querySelectorAll('.fps-btn').forEach((btn) => {
     btn.classList.toggle('active', parseInt(btn.getAttribute('data-fps'), 10) === fps);
   });
-  document.querySelectorAll('img.camera-img[data-camera-id]').forEach((img) => {
-    if (img.getAttribute('src')) img.src = streamUrl(img.getAttribute('data-camera-id'));
-  });
-  showToast(`Video smoothness: ${FPS_LABEL[fps] || `${fps} pictures per second`}`, 'ok');
+  if (tileFeed.focusId) openFocusStream(tileFeed.focusId);
+  pumpTiles();
+  const every = (TILE_REFRESH_MS[fps] || 2000) / 1000;
+  showToast(`Video smoothness: ${FPS_LABEL[fps] || `${fps} pictures per second`} (tiles every ${every} s)`, 'ok');
 }
 
 function streamUrl(cameraId) {
@@ -542,6 +544,8 @@ function streamUrl(cameraId) {
 function renderCameraGrid() {
   const grid = el('cameraMatrixGrid');
   if (!grid) return;
+  const keepFocus = tileFeed.focusId;
+  tileFeedReset();
   grid.innerHTML = '';
 
   if (!allCamerasList.length) {
@@ -577,10 +581,12 @@ function renderCameraGrid() {
         <span class="badge ${online ? 'badge-green' : 'badge-danger'}" data-status-for="${escapeHtml(cam.id)}"${cam.status === 'AUTH_FAILED' ? ` title="${escapeHtml(AUTH_FAILED_TIP)}"` : ''}>● ${escapeHtml(cameraStatusLabel(cam.status || 'UNKNOWN'))}</span>
       </div>
 
-      <div class="camera-video-container">
+      <div class="camera-video-container" data-focus-for="${escapeHtml(cam.id)}" role="button" tabindex="0" aria-pressed="false"
+        title="Click to enlarge and watch this camera live" onclick="focusCameraTile('${escapeHtml(cam.id)}')"
+        onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); focusCameraTile('${escapeHtml(cam.id)}'); }">
         <img class="camera-img" data-camera-id="${escapeHtml(cam.id)}" alt="${escapeHtml(cam.name)} live picture" />
         <div class="camera-overlay-top">
-          <span class="cam-hud-badge ${online ? 'cam-hud-live' : 'cam-hud-offline'}" data-live-for="${escapeHtml(cam.id)}">${online ? '● LIVE' : '● ' + escapeHtml(cameraStatusLabel(cam.status))}</span>
+          <span class="cam-hud-badge ${online ? 'cam-hud-stale' : 'cam-hud-offline'}" data-live-for="${escapeHtml(cam.id)}">${online ? '● waiting for picture' : '● ' + escapeHtml(cameraStatusLabel(cam.status))}</span>
           <span class="cam-hud-badge" data-res-for="${escapeHtml(cam.id)}" title="Picture size">${DASH}</span>
         </div>
         <div class="camera-overlay-bottom">
@@ -598,8 +604,10 @@ function renderCameraGrid() {
         <a href="/dashboard/studio?camera_id=${encodeURIComponent(cam.id)}" class="btn btn-primary btn-sm" title="Draw counting lines, shelf areas, staff-only areas and privacy masks on this camera">Camera setup</a>
       </div>`;
     grid.appendChild(card);
+    tileFeedRegister(cam.id, card.querySelector('img.camera-img'));
   });
 
+  if (keepFocus && tileFeed.tiles.has(keepFocus)) tileFeed.focusId = keepFocus;
   if (pipelineSnapshot) updateMatrixHud(pipelineSnapshot);
   attachCameraStreams();
 }
@@ -636,13 +644,7 @@ function updateMatrixHud(pipe) {
       else age.textContent = '';
       age.title = age.textContent || 'Age of the newest picture';
     }
-    const live = document.querySelector(`[data-live-for="${CSS.escape(id)}"]`);
-    if (live) {
-      const online = c.status === 'ONLINE';
-      live.textContent = online ? '● LIVE' : `● ${cameraStatusLabel(c.status)}`;
-      live.classList.toggle('cam-hud-live', online);
-      live.classList.toggle('cam-hud-offline', !online);
-    }
+    renderTileLive(id);
     const status = document.querySelector(`[data-status-for="${CSS.escape(id)}"]`);
     if (status) {
       const online = c.status === 'ONLINE';
@@ -659,7 +661,7 @@ function updateMatrixHud(pipe) {
 
 /**
  * The tile's picture size, as measured from the camera's real frames by the
- * pipeline. The stream <img> cannot be measured instead: while there is no
+ * pipeline. The tile picture cannot be measured instead: while there is no
  * picture it shows the server's NO SIGNAL slate, whose own size is not the
  * camera's.
  */
@@ -671,46 +673,282 @@ function setResolutionBadge(id, c) {
   badge.title = measured ? 'Picture size the camera is sending' : 'Picture size: not measured, no picture received';
 }
 
-/**
- * Attach a live MJPEG stream (with the detector's real boxes drawn) to each
- * tile while the matrix is visible; drop it otherwise, because an <img>
- * with an MJPEG source keeps decoding forever and every open stream costs a
- * JPEG encode on the edge box.
+/*
+ * Camera tiles show single pictures, not streams.
+ *
+ * A browser opens at most 6 HTTP/1.1 connections to one server, and an MJPEG
+ * <img> holds one for as long as it is shown. With one stream per tile, 33
+ * cameras took every connection, so the Settings dialog, "Camera setup" and
+ * every poll queued behind video that never ends. Tiles now refresh from
+ * GET /api/v1/cameras/{id}/snapshot?annotate=false&overlay=1 (the tracker's
+ * own boxes, no inference): only tiles on screen, at most TILE_MAX_IN_FLIGHT
+ * requests at a time, and only while the Cameras view is shown in a visible
+ * tab. One tile at a time can be enlarged; only that one streams live.
+ *
+ * A tile says LIVE only when it received a real picture recently; otherwise
+ * it says how old its picture is, or that none has arrived.
  */
-function attachCameraStreams() {
-  if (!canPoll()) return;
-  const matrix = el('tab-matrix');
-  const matrixVisible = !document.hidden && !!matrix && matrix.classList.contains('active');
+const TILE_MAX_IN_FLIGHT = 2;
+const TILE_TIMEOUT_MS = 10000;
+const TILE_LIVE_MS = 10000;          // a picture older than this is not "LIVE"
+const tileFeed = {
+  tiles: new Map(),    // camera id -> {id, img, visible, ctl, url, lastTry, lastFrameAt, source, error, streamHash}
+  inFlight: 0,
+  observer: null,
+  focusId: null,       // the one enlarged tile that streams live
+};
 
-  document.querySelectorAll('img.camera-img[data-camera-id]').forEach((img) => {
-    const id = img.getAttribute('data-camera-id');
-    if (!matrixVisible) {
-      if (img.getAttribute('src')) img.removeAttribute('src');
-      clearTimeout(img._retryTimer);
-      return;
+function tileFeedActive() {
+  const matrix = el('tab-matrix');
+  return canPoll() && !document.hidden && !!matrix && matrix.classList.contains('active');
+}
+
+function tileObserver() {
+  if (!tileFeed.observer && typeof IntersectionObserver === 'function') {
+    tileFeed.observer = new IntersectionObserver((entries) => {
+      entries.forEach((e) => {
+        const t = tileFeed.tiles.get(e.target.getAttribute('data-camera-id'));
+        if (t && t.img === e.target) t.visible = e.isIntersecting;
+      });
+      pumpTiles();
+    }, { rootMargin: '150px 0px' });
+  }
+  return tileFeed.observer;
+}
+
+function tileFeedRegister(id, img) {
+  if (!img) return;
+  const obs = tileObserver();
+  tileFeed.tiles.set(id, {
+    id, img, visible: !obs, ctl: null, url: null, lastTry: 0, lastFrameAt: 0, source: null, error: null, streamHash: null,
+  });
+  if (obs) obs.observe(img);
+}
+
+/** Drop every tile: abort its request, free its picture. Before a re-render. */
+function tileFeedReset() {
+  closeFocusStream();
+  if (tileFeed.observer) tileFeed.observer.disconnect();
+  tileFeed.tiles.forEach((t) => {
+    if (t.ctl) t.ctl.abort();
+    if (t.url) URL.revokeObjectURL(t.url);
+    t.url = null;
+  });
+  tileFeed.tiles.clear();
+  tileFeed.focusId = null;
+}
+
+/** Stop all video traffic. Leaving the view also un-enlarges the focused tile. */
+function pauseTiles(leavingView) {
+  tileFeed.tiles.forEach((t) => { if (t.ctl) t.ctl.abort(); });
+  closeFocusStream();
+  if (leavingView && tileFeed.focusId) setTileFocus(null);
+}
+
+function pumpTiles() {
+  if (!tileFeedActive()) return;
+  const now = Date.now();
+  const every = TILE_REFRESH_MS[currentDecimationFPS] || 2000;
+  const due = [...tileFeed.tiles.values()]
+    .filter((t) => t.visible && !t.ctl && t.id !== tileFeed.focusId && t.img.isConnected && now - t.lastTry >= every)
+    .sort((a, b) => a.lastTry - b.lastTry);
+  while (tileFeed.inFlight < TILE_MAX_IN_FLIGHT && due.length) fetchTilePicture(due.shift());
+}
+
+async function fetchTilePicture(t) {
+  const ctl = new AbortController();
+  t.ctl = ctl;
+  t.lastTry = Date.now();
+  tileFeed.inFlight += 1;
+  const timer = setTimeout(() => ctl.abort(), TILE_TIMEOUT_MS);
+  try {
+    const url = `/api/v1/cameras/${encodeURIComponent(t.id)}/snapshot?annotate=false&overlay=1`;
+    const res = await fetch(url, { signal: ctl.signal, cache: 'no-store', priority: 'low' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const source = res.headers.get('X-Frame-Source') || 'live';
+    const blob = await res.blob();
+    if (ctl.signal.aborted || !t.img.isConnected || t.id === tileFeed.focusId) return;
+    const prev = t.url;
+    t.url = URL.createObjectURL(blob);
+    t.img.src = t.url;
+    if (prev) URL.revokeObjectURL(prev);
+    t.source = source;
+    t.error = null;
+    if (source === 'live') t.lastFrameAt = Date.now();
+  } catch (e) {
+    // An abort is a pause or a new page, not a camera fault; a timeout is.
+    if (!ctl.signal.aborted || Date.now() - t.lastTry >= TILE_TIMEOUT_MS) t.error = ctl.signal.aborted ? 'no answer' : e.message;
+  } finally {
+    clearTimeout(timer);
+    if (t.ctl === ctl) t.ctl = null;
+    tileFeed.inFlight -= 1;
+    renderTileLive(t.id);
+    pumpTiles();
+  }
+}
+
+/**
+ * The LIVE badge of a tile, from what the tile really received: LIVE only
+ * with a recent real picture, else its age, or why there is none.
+ */
+function renderTileLive(id) {
+  const badge = document.querySelector(`[data-live-for="${CSS.escape(id)}"]`);
+  if (!badge) return;
+  const t = tileFeed.tiles.get(id);
+  const pipe = ((pipelineSnapshot && pipelineSnapshot.cameras) || []).find((c) => c.camera_id === id);
+  const cam = allCamerasList.find((c) => c.id === id);
+  const status = pipe ? pipe.status : (cam && cam.status) || 'UNKNOWN';
+  // Age of the picture shown: since it arrived, plus how old the camera's
+  // newest frame already was then (a stalled camera still has a last frame).
+  const camAge = pipe && pipe.has_frame && isNum(pipe.seconds_since_frame) ? pipe.seconds_since_frame : 0;
+  const age = t && t.lastFrameAt ? (Date.now() - t.lastFrameAt) / 1000 + camAge : null;
+  let text;
+  let kind;
+  let tip = '';
+  if (status !== 'ONLINE') {
+    text = `● ${cameraStatusLabel(status)}`; kind = 'offline';
+  } else if (t && t.source === 'no-signal') {
+    text = '● NO PICTURE'; kind = 'offline'; tip = 'The server has no picture from this camera right now';
+  } else if (age !== null && age * 1000 <= TILE_LIVE_MS) {
+    text = '● LIVE'; kind = 'live';
+    tip = t && t.id === tileFeed.focusId ? 'Live video' : `Picture refreshed every ${(TILE_REFRESH_MS[currentDecimationFPS] || 2000) / 1000} s`;
+  } else if (age !== null) {
+    text = `● picture ${formatDuration(age)} old`; kind = 'stale';
+    tip = t.error ? `Last refresh failed: ${t.error}` : 'Refreshes while the tile is on screen';
+  } else {
+    text = t && t.error ? '● no picture yet' : '● waiting for picture'; kind = 'stale';
+    tip = t && t.error ? `Picture request failed: ${t.error}` : '';
+  }
+  if (badge.textContent !== text) badge.textContent = text;
+  badge.title = tip;
+  badge.classList.toggle('cam-hud-live', kind === 'live');
+  badge.classList.toggle('cam-hud-offline', kind === 'offline');
+  badge.classList.toggle('cam-hud-stale', kind === 'stale');
+}
+
+// ---- the one enlarged, live-streaming tile
+
+function setTileFocus(id) {
+  const prev = tileFeed.focusId;
+  if (prev && prev !== id) {
+    closeFocusStream();
+    const t = tileFeed.tiles.get(prev);
+    if (t) {
+      if (t.url) t.img.src = t.url; else t.img.removeAttribute('src');
+      t.lastFrameAt = 0;         // the stream's age says nothing about the next picture
+      t.lastTry = 0;
     }
-    if (!img.getAttribute('src')) {
-      img.onload = () => {
-        const live = ((pipelineSnapshot && pipelineSnapshot.cameras) || []).find((c) => c.camera_id === id);
-        setResolutionBadge(id, live);
-      };
-      img.onerror = () => {
-        const badge = document.querySelector(`[data-res-for="${CSS.escape(id)}"]`);
-        if (badge) badge.textContent = 'reconnecting…';
-        img.removeAttribute('src');
-        clearTimeout(img._retryTimer);
-        img._retryTimer = setTimeout(() => {
-          const m = el('tab-matrix');
-          if (!document.hidden && m && m.classList.contains('active') && !img.getAttribute('src')) {
-            img.src = `${streamUrl(id)}&_t=${Date.now()}`;
-          }
-        }, 1500);
-      };
-      img.src = streamUrl(id);
+  }
+  tileFeed.focusId = id;
+  document.querySelectorAll('.camera-card').forEach((card) => {
+    const on = !!id && card.getAttribute('data-camera-card') === id;
+    card.classList.toggle('camera-card-focus', on);
+    const box = card.querySelector('[data-focus-for]');
+    if (box) {
+      box.setAttribute('aria-pressed', on ? 'true' : 'false');
+      box.title = on ? 'Click to shrink back to the grid' : 'Click to enlarge and watch this camera live';
     }
   });
+  if (prev) renderTileLive(prev);
+  if (id) renderTileLive(id);
+}
+
+/** Tile click: enlarge that camera with a live stream; click again to shrink it. */
+function focusCameraTile(id) {
+  if (tileFeed.focusId === id) {
+    setTileFocus(null);
+    pumpTiles();
+    return;
+  }
+  setTileFocus(id);
+  const t = tileFeed.tiles.get(id);
+  if (t && t.ctl) t.ctl.abort();
+  if (tileFeedActive()) openFocusStream(id);
+  const card = document.querySelector(`[data-camera-card="${CSS.escape(id)}"]`);
+  if (card) card.scrollIntoView({ behavior: 'instant', block: 'nearest' });
+}
+
+function openFocusStream(id) {
+  const t = tileFeed.tiles.get(id);
+  if (!t) return;
+  const img = t.img;
+  img.onerror = () => {
+    img.removeAttribute('src');
+    t.error = 'live video interrupted';
+    renderTileLive(id);
+    clearTimeout(img._retryTimer);
+    img._retryTimer = setTimeout(() => {
+      if (tileFeed.focusId === id && tileFeedActive() && !img.getAttribute('src')) openFocusStream(id);
+    }, 1500);
+  };
+  t.streamHash = null;
+  img.src = `${streamUrl(id)}&_t=${Date.now()}`;
+}
+
+/** Drop the live stream (removing the src closes its connection). */
+function closeFocusStream() {
+  const t = tileFeed.focusId ? tileFeed.tiles.get(tileFeed.focusId) : null;
+  if (!t) return;
+  clearTimeout(t.img._retryTimer);
+  t.img.onerror = null;
+  if (/\/stream\?/.test(t.img.getAttribute('src') || '')) {
+    t.img.removeAttribute('src');
+    if (t.url) t.img.src = t.url;      // the last picture, until live again
+  }
+}
+
+/**
+ * An MJPEG <img> fires "load" only for its first picture, so the enlarged
+ * tile's freshness is read from the pixels: a changed sample is a new picture.
+ */
+const focusSampler = document.createElement('canvas');
+function sampleFocusStream() {
+  const t = tileFeed.focusId ? tileFeed.tiles.get(tileFeed.focusId) : null;
+  if (!t || !/\/stream\?/.test(t.img.getAttribute('src') || '') || !t.img.naturalWidth) return;
+  try {
+    focusSampler.width = 64; focusSampler.height = 36;
+    const g = focusSampler.getContext('2d', { willReadFrequently: true });
+    g.drawImage(t.img, 0, 0, 64, 36);
+    const d = g.getImageData(0, 0, 64, 36).data;
+    let h = 0;
+    for (let i = 0; i < d.length; i += 3) h = (h * 31 + d[i]) >>> 0;
+    if (h !== t.streamHash) {
+      t.streamHash = h;
+      t.lastFrameAt = Date.now();
+      t.source = 'live';
+      t.error = null;
+    }
+  } catch (_) { /* picture not decodable yet */ }
+}
+
+/**
+ * Start or stop tile traffic for the current view and tab visibility. Called
+ * on view switches, tab visibility changes and on a timer.
+ */
+function attachCameraStreams() {
+  if (!tileFeedActive()) {
+    const matrix = el('tab-matrix');
+    pauseTiles(!matrix || !matrix.classList.contains('active'));
+    return;
+  }
+  const focus = tileFeed.focusId ? tileFeed.tiles.get(tileFeed.focusId) : null;
+  if (focus && !/\/stream\?/.test(focus.img.getAttribute('src') || '')) openFocusStream(focus.id);
+  pumpTiles();
 }
 document.addEventListener('visibilitychange', attachCameraStreams);
+// Leaving the page (e.g. "Camera setup"): let no picture request outlive it.
+window.addEventListener('pagehide', () => pauseTiles(false));
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && tileFeed.focusId && currentView === 'cameras') { setTileFocus(null); pumpTiles(); }
+});
+
+/** Twice a second: keep tiles due for a picture moving and their LIVE badges honest. */
+function tileTick() {
+  if (!tileFeedActive()) return;
+  sampleFocusStream();
+  pumpTiles();
+  tileFeed.tiles.forEach((t) => { if (t.visible) renderTileLive(t.id); });
+}
 
 // ==========================================
 // 4. Visitors by hour (shared by Today and Insights > Shoppers & footfall)
@@ -1329,12 +1567,13 @@ async function runSelfTest() {
   const check = (name, ok, detail) => results.push(`${ok ? 'PASS' : 'FAIL'} ${name}${detail ? ` :: ${detail}` : ''}`);
 
   switchTab('cameras');
-  // Let the first polls, the stream attach and the first MJPEG frame arrive.
+  // Let the first polls and the first tile pictures arrive.
   await new Promise((r) => setTimeout(r, 4500));
 
   const cams = allCamerasList.length;
   check('cameras loaded from /api/v1/cameras', Array.isArray(allCamerasList), `${cams} camera(s)`);
   const tiles = document.querySelectorAll('img.camera-img[data-camera-id]');
+  const onScreen = (img) => { const r = img.getBoundingClientRect(); return r.bottom > 0 && r.top < window.innerHeight && r.width > 0; };
   if (cams === 0) {
     check('empty state rendered', !!document.querySelector('.matrix-empty'));
   } else {
@@ -1342,20 +1581,25 @@ async function runSelfTest() {
     tiles.forEach((img) => {
       const r = img.getBoundingClientRect();
       const id = img.getAttribute('data-camera-id');
-      check(`tile ${id} has src`, /\/stream\?camera_id=/.test(img.getAttribute('src') || ''), img.getAttribute('src'));
+      check(`tile ${id} never holds a stream`, !/\/stream\?/.test(img.getAttribute('src') || ''), img.getAttribute('src'));
       check(`tile ${id} rendered height > 100`, r.height > 100, `${r.width.toFixed(0)}x${r.height.toFixed(0)}`);
-      check(`tile ${id} naturalWidth > 0`, img.naturalWidth > 0, `${img.naturalWidth}x${img.naturalHeight}`);
+      if (onScreen(img)) check(`on-screen tile ${id} has a picture`, img.naturalWidth > 0, `${img.naturalWidth}x${img.naturalHeight}`);
     });
+    check('picture requests in flight within the cap', tileFeed.inFlight <= TILE_MAX_IN_FLIGHT, String(tileFeed.inFlight));
     const hud = document.querySelector('[data-hud-for]');
     check('per-tile HUD populated from pipeline', !!hud && hud.textContent.trim() !== DASH, hud && hud.textContent.trim());
     check('no fabricated HUD strings', !/Queue: 2|Dwell Alert|In: 142|Engagement: 64/.test(document.body.textContent));
   }
 
-  // Video smoothness really changes the stream URL.
+  // Enlarging a tile gives it the one live stream; video smoothness sets its rate.
   if (tiles.length) {
+    const id = tiles[0].getAttribute('data-camera-id');
+    focusCameraTile(id);
+    check('enlarged tile streams live', /\/stream\?camera_id=/.test(tiles[0].getAttribute('src') || ''), tiles[0].getAttribute('src'));
     setDecimationFPS(1);
-    check('video smoothness re-sets src', /fps=1&/.test(tiles[0].getAttribute('src') || ''), tiles[0].getAttribute('src'));
+    check('video smoothness re-sets the live stream', /fps=1&/.test(tiles[0].getAttribute('src') || ''), tiles[0].getAttribute('src'));
     setDecimationFPS(5);
+    check('only one stream open', [...tiles].filter((img) => /\/stream\?/.test(img.getAttribute('src') || '')).length === 1);
   }
 
   // Every route (old hashes included) lands on its view.
@@ -1366,9 +1610,12 @@ async function runSelfTest() {
     const subOk = view !== 'insights' || (el(INSIGHT_SUBS[sub]) && el(INSIGHT_SUBS[sub]).classList.contains('active'));
     check(`switchTab('${tab}') -> ${view}${sub ? '/' + sub : ''}`, !!section && section.classList.contains('active') && subOk);
   }
-  check('streams detached when matrix hidden', [...tiles].every((img) => !img.getAttribute('src')));
+  check('no stream and no picture request while the matrix is hidden',
+    [...tiles].every((img) => !/\/stream\?/.test(img.getAttribute('src') || '')) && tileFeed.tiles.size === tiles.length
+    && [...tileFeed.tiles.values()].every((t) => !t.ctl || t.ctl.signal.aborted) && !tileFeed.focusId);
   switchTab('cameras');
-  check('streams re-attached on the camera view', tiles.length === 0 || [...tiles].every((img) => !!img.getAttribute('src')));
+  await new Promise((r) => setTimeout(r, 1500));
+  check('pictures refresh again on the camera view', tiles.length === 0 || [...tiles].some((img) => onScreen(img) && img.naturalWidth > 0));
 
   // Modal opens with metres and closes without prompt/confirm.
   if (cams) {
@@ -1398,6 +1645,7 @@ window.jumpTo = jumpTo;
 window.filterCameras = filterCameras;
 window.filterCamerasBySearch = filterCamerasBySearch;
 window.setDecimationFPS = setDecimationFPS;
+window.focusCameraTile = focusCameraTile;
 window.openCameraConfigModal = openCameraConfigModal;
 window.reconnectCamera = reconnectCamera;
 window.closeCameraConfigModal = closeCameraConfigModal;
@@ -1418,6 +1666,7 @@ function initAnalytics() {
   setInterval(loadSystemHealth, 3000);          // Settings health, only while that view is open
   setInterval(loadCamerasMatrix, 5000);         // picks up added / removed cameras
   setInterval(attachCameraStreams, 2000);
+  setInterval(tileTick, 500);                   // tile pictures (visible tiles only) and LIVE badges
   setInterval(fitMapHeight, 1000);              // the theft banner can appear or go at any time
   setInterval(() => { if (currentView === 'insights' && currentSub === 'footfall' && !document.hidden) initOrUpdateCharts(); }, 60000);
 

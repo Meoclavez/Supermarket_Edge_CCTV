@@ -93,8 +93,11 @@ class Settings(BaseSettings):
     )
     # Per-frame latency budget for the pose model. 0 = derive it from the
     # number of enabled analytics cameras (POSE_BUDGET_STREAMS overrides the
-    # count), RECORDING_FPS / ANALYTICS_DETECT_EVERY_N_FRAMES analysed frames
-    # per camera per second, and POSE_BUDGET_UTILISATION of the accelerator.
+    # count), the analysed frames per camera per second (RECORDING_FPS /
+    # ANALYTICS_DETECT_EVERY_N_FRAMES, capped at ANALYTICS_TARGET_DETECT_FPS
+    # while the scheduler is on), and POSE_BUDGET_UTILISATION: the share of
+    # the accelerator's measured capacity that inference may plan for. The
+    # scheduler (ANALYTICS_SCHEDULER) holds the live load to the same share.
     POSE_LATENCY_BUDGET_MS: float = float(os.getenv("POSE_LATENCY_BUDGET_MS", "0"))
     POSE_BUDGET_STREAMS: int = int(os.getenv("POSE_BUDGET_STREAMS", "0"))
     POSE_BUDGET_UTILISATION: float = float(os.getenv("POSE_BUDGET_UTILISATION", "0.6"))
@@ -166,6 +169,25 @@ class Settings(BaseSettings):
     # Analytics runs on a decimated stream: detection every Nth frame is ample
     # for footfall and dwell, and leaves decode budget for the other channels.
     ANALYTICS_DETECT_EVERY_N_FRAMES: int = int(os.getenv("ANALYTICS_DETECT_EVERY_N_FRAMES", "5"))
+    # Global inference budget (services/inference_scheduler.py). Every Nth
+    # frame of every camera needs more accelerator time than one GPU has once
+    # there are dozens of cameras (33 x 5/s x 14 ms = 2.3 s of GPU per second),
+    # so the scheduler shares POSE_BUDGET_UTILISATION of the measured capacity
+    # fairly between the cameras that are analysing: a frame that arrives while
+    # its camera has no token is simply not inferred (video and recording are
+    # unaffected). Each camera gets at least ANALYTICS_MIN_DETECT_FPS and never
+    # more than its fps / ANALYTICS_DETECT_EVERY_N_FRAMES. The pose model (and
+    # the "auto" keypoint refiner, shed first) is re-fitted so every camera can
+    # get ANALYTICS_TARGET_DETECT_FPS, ANALYTICS_REFIT_DEBOUNCE_SEC after the
+    # camera set or the load last changed. Off = the old every-Nth-frame rule.
+    ANALYTICS_SCHEDULER: bool = os.getenv("ANALYTICS_SCHEDULER", "1").lower() not in ("0", "false", "no", "off")
+    ANALYTICS_MIN_DETECT_FPS: float = float(os.getenv("ANALYTICS_MIN_DETECT_FPS", "1.0"))
+    ANALYTICS_TARGET_DETECT_FPS: float = float(os.getenv("ANALYTICS_TARGET_DETECT_FPS", "2.0"))
+    ANALYTICS_REFIT_DEBOUNCE_SEC: float = float(os.getenv("ANALYTICS_REFIT_DEBOUNCE_SEC", "30"))
+    # Analysed frames in flight at once across all cameras (one on the
+    # accelerator, the rest in pre/post-processing); a camera whose turn comes
+    # while this many are in flight skips that frame instead of queueing.
+    ANALYTICS_MAX_INFLIGHT: int = int(os.getenv("ANALYTICS_MAX_INFLIGHT", "4"))
     TRACK_MAX_AGE_FRAMES: int = int(os.getenv("TRACK_MAX_AGE_FRAMES", "30"))
     TRACK_MIN_HITS: int = int(os.getenv("TRACK_MIN_HITS", "3"))
     # ByteTrack-style two-stage association. The engine asks the detector for
@@ -415,6 +437,11 @@ class Settings(BaseSettings):
     # Network camera open / read timeouts for the live workers (live_analytics_engine._open).
     CAMERA_OPEN_TIMEOUT_SEC: float = float(os.getenv("CAMERA_OPEN_TIMEOUT_SEC", "8"))
     CAMERA_READ_TIMEOUT_SEC: float = float(os.getenv("CAMERA_READ_TIMEOUT_SEC", "10"))
+    # FFmpeg (CPU) decode threads per camera. 0 = by stream resolution: 1 up to
+    # 1280x720, 2 up to 1920x1080, 4 above. OpenCV's default is one thread per
+    # CPU (plus helpers, ~31 threads per stream on a 16-CPU box); a 352x288
+    # sub-stream decodes at hundreds of fps on one.
+    CAMERA_DECODE_THREADS: int = int(os.getenv("CAMERA_DECODE_THREADS", "0"))
 
     # ---------------- Footfall track quality (services/retail_metrics_service.py) ----------------
     # Occlusion and detector flicker split one person into many ~1 s tracks.
