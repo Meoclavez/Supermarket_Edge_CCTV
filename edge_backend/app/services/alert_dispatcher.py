@@ -545,6 +545,16 @@ class AlertDispatcher:
                 logger.exception("push to %s failed", target.id)
                 outcome = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
         entry.update(outcome)
+        # Only real sends and failures feed the health endpoint's
+        # "notification" entry; no_token / not_configured say nothing about FCM.
+        if outcome["status"] in ("sent", "failed"):
+            from app.services.resilience import ServiceHealthTracker
+
+            ServiceHealthTracker.report_status(
+                "notification",
+                ServiceHealthTracker.HEALTHY if outcome["status"] == "sent" else ServiceHealthTracker.DEGRADED,
+                outcome.get("error"),
+            )
         if outcome["status"] == "unregistered":
             await self._clear_token(target.id, target.push_token)
         await self._record(target.id, entry)

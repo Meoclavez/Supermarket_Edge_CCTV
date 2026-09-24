@@ -582,12 +582,20 @@ async def discover_devices(
         row.last_seen = now
         row.adopted_camera_id = adopted_map.get(dev.id)
 
-    # Anything not seen this pass is marked unreachable rather than deleted,
-    # so a camera that is merely powered off keeps its configuration.
+    # An adopted device not seen this pass is marked unreachable rather than
+    # deleted, so a camera that is merely powered off keeps its configuration.
+    # An unadopted one of a kind this pass scanned for is dropped: the list is
+    # what the last scan found, and older scans offered devices without any
+    # evidence of video (a printer advertising _http._tcp over mDNS).
     seen_ids = {d.id for d in found}
     res = await db.execute(select(DiscoveredDeviceModel))
     for row in res.scalars().all():
-        if row.id not in seen_ids:
+        if row.id in seen_ids:
+            continue
+        scanned = req.include_usb if row.transport == "usb" else req.include_network
+        if row.adopted_camera_id is None and scanned:
+            await db.delete(row)
+        else:
             row.reachable = False
 
     await db.commit()
@@ -657,6 +665,11 @@ async def adopt_device(
     if not stream_url:
         raise HTTPException(status_code=400, detail="device has no usable stream address")
 
+    # Check the device really serves this stream before creating a camera
+    # that could never work (a printer was once adopted as
+    # rtsp://<printer>:80/onvif1). One RTSP handshake, at most one login.
+    stream_check = await _adopt_stream_check(stream_url, username, password)
+
     layout = await store_layout_service.get_active_layout(db)
     cam_id = f"cam_{uuid.uuid4().hex[:10]}"
     max_ch = await db.scalar(select(CameraModel.channel_number).order_by(CameraModel.channel_number.desc()).limit(1))
@@ -703,7 +716,25 @@ async def adopt_device(
         "floor_x": cam.floor_x,
         "floor_y": cam.floor_y,
         "role": cam.role,
+        "stream_check": stream_check,
     }
+
+
+async def _adopt_stream_check(stream_url: str, username: Optional[str], password: Optional[str]) -> Optional[str]:
+    """Reject an adoption the RTSP handshake proves cannot work (422).
+
+    Returns the handshake outcome for the response, or None for sources that
+    are not plain RTSP (USB, HTTP), which are not checked here.
+    """
+    from app.services import rtsp_probe
+
+    if not stream_url.lower().startswith("rtsp://"):
+        return None
+    target = camera_source.inject_credentials(stream_url, username, password)
+    verdict = await camera_source.rtsp_handshake_verdict(target, 5.0, strict=True)
+    if verdict is not None and not verdict.get("success"):
+        raise HTTPException(status_code=422, detail=f"Not added: {verdict['error']}")
+    return (verdict or {}).get("outcome") or rtsp_probe.RTSP_ERROR
 
 
 @router.delete("/cameras/{camera_id}")

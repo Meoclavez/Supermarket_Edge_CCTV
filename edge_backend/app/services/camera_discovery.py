@@ -7,6 +7,18 @@ present, and probed only nine fixed host suffixes rather than the subnet.
 Everything here reports only what actually answered. A scan on a network with
 no cameras returns an empty list -- it never invents a device so the UI has
 something to show.
+
+A device is offered as a camera only with evidence that it streams video:
+
+* it answered an RTSP request with an ``RTSP/1.0`` status line, or
+* it answered ONVIF WS-Discovery with a ProbeMatch whose Types include
+  ``NetworkVideoTransmitter``.
+
+An mDNS advertisement alone is not evidence: printers advertise ``_http._tcp``
+too (a Brother printer, ``BRWxxxxxxxxxxxx.local``, was once offered and
+adopted as ``rtsp://<printer>:80/onvif1``). mDNS hosts are therefore verified
+with an RTSP handshake, and printers are excluded outright. No stream URL is
+ever guessed on a port that did not answer RTSP.
 """
 
 from __future__ import annotations
@@ -106,12 +118,23 @@ async def _tcp_open(host: str, port: int, timeout: float) -> bool:
         return False
 
 
+def _vendor_from_realm(realm: str) -> Optional[str]:
+    """Vendor signature in an RTSP/HTTP auth realm (e.g. Dahua's "Login to <serial>")."""
+    low = (realm or "").lower()
+    if low.startswith("login to "):
+        return "Dahua"
+    if "hikvision" in low or low.startswith("ip camera("):
+        return "Hikvision"
+    return None
+
+
 async def rtsp_options(host: str, port: int, timeout: float = 1.5) -> Optional[str]:
-    """Speak RTSP OPTIONS and return the Server banner.
+    """Speak RTSP OPTIONS and return the Server banner, or None if it is not RTSP.
 
     A genuine handshake distinguishes a camera from any other service that
     happens to hold port 554 open, and the banner usually names the vendor,
-    which is what selects the right URL grammar.
+    which is what selects the right URL grammar. A reply must start with an
+    RTSP status line; an HTTP server that echoes the request is not RTSP.
     """
     try:
         fut = asyncio.open_connection(host, port)
@@ -128,11 +151,16 @@ async def rtsp_options(host: str, port: int, timeout: float = 1.5) -> Optional[s
         await writer.drain()
         data = await asyncio.wait_for(reader.read(1024), timeout=timeout)
         text = data.decode("utf-8", "ignore")
-        if "RTSP/1.0" not in text:
+        if not re.match(r"RTSP/\d\.\d \d{3}", text):
             return None
         m = re.search(r"Server:\s*([^\r\n]+)", text, re.IGNORECASE)
         # An RTSP-speaking device with no Server header is still a camera.
-        return (m.group(1).strip() if m else "RTSP")
+        banner = m.group(1).strip() if m else "RTSP"
+        realm = re.search(r'WWW-Authenticate:[^\r\n]*realm="([^"]*)"', text, re.IGNORECASE)
+        vendor = _vendor_from_realm(realm.group(1)) if realm else None
+        if vendor and vendor.lower() not in banner.lower():
+            banner = f"{banner} ({vendor})"
+        return banner
     except (OSError, asyncio.TimeoutError):
         return None
     finally:
@@ -251,35 +279,128 @@ async def scan_onvif_wsdiscovery(timeout: float = 3.0) -> list[DeviceProfile]:
 
     devices: dict[str, DeviceProfile] = {}
     for host, xml in raw:
-        # Scopes carry vendor/model, e.g. onvif://www.onvif.org/name/Dahua
-        scopes = " ".join(re.findall(r"onvif://[^\s<]+", xml))
-        driver = driver_for_hint(scopes)
-        name_m = re.search(r"onvif://www\.onvif\.org/name/([^\s<]+)", xml)
-        hw_m = re.search(r"onvif://www\.onvif\.org/hardware/([^\s<]+)", xml)
-        devices[host] = DeviceProfile(
-            id=f"onvif:{host}",
-            transport="rtsp",
-            driver=driver,
-            host=host,
-            port=554,
-            model_name=(hw_m.group(1) if hw_m else None),
-            manufacturer=(name_m.group(1) if name_m else "ONVIF"),
-            requires_credentials=True,
-            streams=build_stream_urls(driver, host),
-        )
+        dev = parse_ws_discovery_reply(host, xml)
+        if dev is not None:
+            devices[host] = dev
     return list(devices.values())
 
 
-async def scan_mdns(timeout: float = 2.5) -> list[DeviceProfile]:
-    """Browse mDNS for camera-ish services (RTSP / ONVIF advertisers)."""
+def parse_ws_discovery_reply(host: str, xml: str) -> Optional[DeviceProfile]:
+    """A camera profile from one WS-Discovery reply, or None if it is not a video transmitter.
 
-    def _browse() -> list[DeviceProfile]:
+    Other WS-Discovery devices (printers announce ``wprt:PrintDeviceType``,
+    Windows hosts ``pub:Computer``) can answer on the same multicast group;
+    only a ProbeMatch whose Types list ``NetworkVideoTransmitter`` is a camera.
+    """
+    if not re.search(r"ProbeMatch\b", xml or ""):
+        return None
+    types = " ".join(re.findall(r"<(?:\w+:)?Types[^>]*>([^<]*)</", xml))
+    if "networkvideotransmitter" not in types.lower():
+        return None
+    # Scopes carry vendor/model, e.g. onvif://www.onvif.org/name/Dahua
+    scopes = " ".join(re.findall(r"onvif://[^\s<]+", xml))
+    driver = driver_for_hint(scopes)
+    name_m = re.search(r"onvif://www\.onvif\.org/name/([^\s<]+)", xml)
+    hw_m = re.search(r"onvif://www\.onvif\.org/hardware/([^\s<]+)", xml)
+    return DeviceProfile(
+        id=f"onvif:{host}",
+        transport="rtsp",
+        driver=driver,
+        host=host,
+        port=554,
+        model_name=(hw_m.group(1) if hw_m else None),
+        manufacturer=(name_m.group(1) if name_m else "ONVIF"),
+        requires_credentials=True,
+        streams=build_stream_urls(driver, host),
+    )
+
+
+# mDNS services browsed. Camera-ish ones yield candidates (verified by an RTSP
+# handshake before being offered); printer ones only mark a host as a printer.
+MDNS_CAMERA_SERVICES = ("_rtsp._tcp.local.", "_onvif._tcp.local.", "_http._tcp.local.")
+MDNS_PRINTER_SERVICES = (
+    "_ipp._tcp.local.", "_ipps._tcp.local.", "_printer._tcp.local.",
+    "_pdl-datastream._tcp.local.", "_scanner._tcp.local.", "_uscan._tcp.local.",
+)
+# Brother's default hostnames: BRW (wireless) / BRN (wired) + MAC address.
+_PRINTER_NAME_RE = re.compile(r"(^|[\s.@])BR[WN][0-9A-F]{12}\b|\b(printer|laserjet|officejet|deskjet|"
+                              r"pixma|imageclass|ecotank|workforce|mfc-|dcp-|hl-l)", re.IGNORECASE)
+PRINTER_ONLY_PORTS = {515, 631, 9100}
+
+
+def is_printer_mdns(service_types: Iterable[str], names: Iterable[str], ports: Iterable[int] = ()) -> bool:
+    """True when mDNS says this host is a printer/scanner, not a camera."""
+    types = {t.lower() for t in service_types}
+    if types & set(MDNS_PRINTER_SERVICES):
+        return True
+    if any(_PRINTER_NAME_RE.search(n or "") for n in names):
+        return True
+    ports = set(ports)
+    return bool(ports) and ports <= PRINTER_ONLY_PORTS
+
+
+async def classify_mdns_records(records: list[dict], rtsp_check=None) -> list[DeviceProfile]:
+    """Turn raw mDNS records into camera profiles, keeping only verified RTSP devices.
+
+    ``records`` are ``{"host", "type", "name", "server", "port"}`` dicts. For
+    each host that is not a printer, RTSP is tried on the port it advertises
+    for ``_rtsp._tcp`` (if any) and then on the standard RTSP ports. Only a
+    host that answers RTSP is returned, with stream URLs on the port that
+    answered.
+    """
+    rtsp_check = rtsp_check or rtsp_options
+    hosts: dict[str, dict] = {}
+    for r in records:
+        h = hosts.setdefault(r["host"], {"types": set(), "names": [], "ports": set(), "rtsp_port": None})
+        h["types"].add(str(r.get("type") or "").lower())
+        h["names"] += [str(r.get("name") or ""), str(r.get("server") or "")]
+        if r.get("port"):
+            h["ports"].add(int(r["port"]))
+        if str(r.get("type") or "").lower() == "_rtsp._tcp.local." and r.get("port"):
+            h["rtsp_port"] = int(r["port"])
+
+    async def verify(host: str, h: dict) -> Optional[DeviceProfile]:
+        if is_printer_mdns(h["types"], h["names"], h["ports"]):
+            logger.info(f"mDNS: {host} ({', '.join(n for n in h['names'] if n)[:80]}) is a printer; not a camera")
+            return None
+        if not h["types"] & set(MDNS_CAMERA_SERVICES):
+            return None
+        candidates = [p for p in (h["rtsp_port"], *RTSP_PORTS) if p]
+        for port in dict.fromkeys(candidates):
+            banner = await rtsp_check(host, port)
+            if banner is None:
+                continue
+            label = " ".join([banner, *h["names"]])
+            driver = driver_for_hint(label)
+            server = next((n for n in h["names"][1::2] if n), "") or next((n for n in h["names"] if n), host)
+            return DeviceProfile(
+                id=f"mdns:{host}:{port}",
+                transport="rtsp",
+                driver=driver,
+                host=host,
+                port=port,
+                model_name=server.rstrip(".")[:120],
+                manufacturer=driver.upper() if driver != "onvif" else "mDNS",
+                requires_credentials=True,
+                streams=build_stream_urls(driver, host, port=port),
+            )
+        logger.debug(f"mDNS: {host} advertises {sorted(h['types'])} but does not answer RTSP; not offered")
+        return None
+
+    results = await asyncio.gather(*(verify(host, h) for host, h in hosts.items()))
+    return [d for d in results if d is not None]
+
+
+async def scan_mdns(timeout: float = 2.5) -> list[DeviceProfile]:
+    """Browse mDNS, then offer only hosts that answer RTSP and are not printers."""
+
+    def _browse() -> list[dict]:
         try:
             from zeroconf import ServiceBrowser, ServiceListener, Zeroconf
         except ImportError:
             return []
 
-        found: list[DeviceProfile] = []
+        found: list[dict] = []
 
         class _Listener(ServiceListener):
             def add_service(self, zc, type_, name):
@@ -289,22 +410,13 @@ async def scan_mdns(timeout: float = 2.5) -> list[DeviceProfile]:
                     return
                 if not info or not info.addresses:
                     return
-                host = socket.inet_ntoa(info.addresses[0])
-                label = f"{name} {info.server or ''}"
-                driver = driver_for_hint(label)
-                port = info.port or 554
-                found.append(
-                    DeviceProfile(
-                        id=f"mdns:{host}:{port}",
-                        transport="rtsp",
-                        driver=driver,
-                        host=host,
-                        port=port,
-                        model_name=(info.server or name).rstrip("."),
-                        manufacturer="mDNS",
-                        streams=build_stream_urls(driver, host, port=port),
-                    )
-                )
+                found.append({
+                    "host": socket.inet_ntoa(info.addresses[0]),
+                    "type": type_,
+                    "name": name,
+                    "server": info.server or "",
+                    "port": info.port,
+                })
 
             def update_service(self, zc, type_, name):
                 pass
@@ -315,19 +427,18 @@ async def scan_mdns(timeout: float = 2.5) -> list[DeviceProfile]:
         zc = Zeroconf()
         try:
             listener = _Listener()
-            for svc in ("_rtsp._tcp.local.", "_onvif._tcp.local.", "_http._tcp.local."):
+            for svc in (*MDNS_CAMERA_SERVICES, *MDNS_PRINTER_SERVICES):
                 ServiceBrowser(zc, svc, listener)
-            import time
-
             time.sleep(timeout)
         except Exception as e:
             logger.debug(f"mDNS browse failed: {e}")
         finally:
             with contextlib.suppress(Exception):
                 zc.close()
-        return found
+        return list(found)
 
-    return await asyncio.to_thread(_browse)
+    records = await asyncio.to_thread(_browse)
+    return await classify_mdns_records(records)
 
 
 async def scan_subnet(

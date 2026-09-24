@@ -128,6 +128,23 @@ class Settings(BaseSettings):
         os.getenv("TRT_ENGINE_CACHE_DIR", str(get_storage_root() / "trt_cache"))
     )
     TRT_FP16: bool = os.getenv("TRT_FP16", "1").lower() not in ("0", "false", "no")
+    # AMD GPUs (ONNX Runtime MIGraphX plugin EP, app/services/amd_migraphx.py).
+    # Compiled GPU programs are cached here, one subdirectory per GPU target,
+    # library versions and precision; scripts/bootstrap.py pre-compiles the
+    # models the service will load. On a cold cache the service starts on the
+    # CPU and compiles for the GPU in the background ("background"), or blocks
+    # start-up until compiled ("foreground").
+    MIGRAPHX_CACHE_DIR: Path = Path(
+        os.getenv("MIGRAPHX_CACHE_DIR", str(get_storage_root() / "migraphx_cache"))
+    )
+    MIGRAPHX_FP16: bool = os.getenv("MIGRAPHX_FP16", "0").lower() in ("1", "true", "yes")
+    MIGRAPHX_COMPILE_MODE: str = os.getenv("MIGRAPHX_COMPILE_MODE", "background")
+    # ONNX Runtime threads for sessions on the CPU provider, shared by the pose
+    # and object models (0 = half the CPUs this process may run on), so CPU
+    # inference cannot starve camera decoding and recording. Idle worker
+    # threads do not spin unless INFERENCE_CPU_SPINNING is on.
+    INFERENCE_CPU_THREADS: int = int(os.getenv("INFERENCE_CPU_THREADS", "0"))
+    INFERENCE_CPU_SPINNING: bool = os.getenv("INFERENCE_CPU_SPINNING", "0").lower() in ("1", "true", "yes")
     PERSON_CONF_THRESHOLD: float = float(os.getenv("PERSON_CONF_THRESHOLD", "0.50"))
     PERSON_NMS_IOU: float = float(os.getenv("PERSON_NMS_IOU", "0.45"))
     # A keypoint counts as seen when its visibility score reaches this.

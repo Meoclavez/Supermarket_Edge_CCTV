@@ -77,6 +77,29 @@ def probe_nvidia_gpu_utilisation() -> Optional[float]:
     return None
 
 
+def probe_amd_gpu_busy() -> Optional[float]:
+    """Busiest AMD GPU's ``gpu_busy_percent`` from the amdgpu driver, or None."""
+    import glob
+
+    values = []
+    for path in glob.glob("/sys/class/drm/card*/device/gpu_busy_percent"):
+        try:
+            with open(os.path.join(os.path.dirname(path), "vendor")) as f:
+                if f.read().strip() != "0x1002":
+                    continue
+            with open(path) as f:
+                values.append(float(f.read().strip()))
+        except (OSError, ValueError):
+            continue
+    return max(values) if values else None
+
+
+def probe_gpu_utilisation() -> Optional[float]:
+    """NVIDIA (nvidia-smi) or AMD (sysfs) GPU utilisation percent, or None."""
+    value = probe_nvidia_gpu_utilisation()
+    return value if value is not None else probe_amd_gpu_busy()
+
+
 def _probe_decoder() -> Tuple[str, str]:
     """(decoder_capability, device_name) from what the box physically has."""
     gpu_name = probe_nvidia_gpu_name()
@@ -162,6 +185,7 @@ class HardwareDetector:
             inference_error=infer.get("last_error"),
             inference_execution_provider=infer.get("execution_provider"),
             inference_model=infer.get("model"),
+            inference_gpu_compile=(infer.get("gpu_compile") or {}).get("state"),
             device_name=device_name,
             total_ram_gb=total_ram_gb,
             available_ram_gb=available_ram_gb,

@@ -175,8 +175,11 @@ class CameraRuntime:
     name: str
     source: str
     enabled: bool = True
-    status: str = "STARTING"        # STARTING | ONLINE | OFFLINE | DISABLED
+    status: str = "STARTING"        # STARTING | ONLINE | OFFLINE | AUTH_FAILED | DISABLED
     last_error: Optional[str] = None
+    # Wall-clock time of the next automatic connection attempt while the
+    # camera is not delivering video (None while ONLINE / not yet failed).
+    next_retry_at: Optional[float] = None
     frames_read: int = 0
     detections_last: int = 0
     live_track_count: int = 0
@@ -249,7 +252,33 @@ class CameraRuntime:
                 round(time.time() - self.last_frame_at, 1) if self.last_frame_at else None
             ),
             "last_error": self.last_error,
+            "next_retry_in_s": (
+                max(0, round(self.next_retry_at - time.time())) if self.next_retry_at else None
+            ),
         }
+
+
+# Reconnect policy. A camera that is unreachable is retried with exponential
+# backoff up to CAMERA_RETRY_MAX_SEC. A camera that REJECTS the login is not:
+# Dahua and most NVR/IP camera firmware lock the account after ~5 failed
+# logins, so retrying every 30 s kept the account locked forever (for the
+# operator too). After an auth failure the worker retries once after
+# AUTH_QUICK_RETRY_SEC, then only every AUTH_RETRY_SEC, and immediately when the
+# operator changes the credentials/URL (new worker) or presses Reconnect.
+CAMERA_RETRY_MAX_SEC = 30.0
+AUTH_QUICK_RETRIES = 1
+AUTH_QUICK_RETRY_SEC = 60.0
+AUTH_RETRY_SEC = 1800.0
+AUTH_FAILED_HINT = ("Check the username and password in this camera's settings. "
+                    "Automatic retries are paused so the camera does not lock the account.")
+
+
+class CameraAuthError(RuntimeError):
+    """The camera answered and rejected (or demanded) a login."""
+
+
+class CameraUnreachableError(RuntimeError):
+    """Nothing usable answered at the camera's address."""
 
 
 _FFMPEG_OPTIONS: Optional[str] = None
@@ -318,6 +347,9 @@ class CameraWorker(threading.Thread):
         self.engine = engine
         self.tracker = CentroidTracker(runtime.camera_id)
         self._stop = threading.Event()
+        # Set by wake() (operator pressed Reconnect) to cut a retry wait short.
+        self._wake = threading.Event()
+        self._auth_failures = 0
         self._frame_index = 0
         self._detect_index = 0
         # Latest retail objects; refreshed every OBJECT_DETECT_EVERY_N
@@ -326,6 +358,48 @@ class CameraWorker(threading.Thread):
 
     def stop(self) -> None:
         self._stop.set()
+        self._wake.set()
+
+    def wake(self) -> None:
+        """Retry the connection now, even while paused after an auth failure."""
+        self._auth_failures = 0
+        self._wake.set()
+
+    def _sleep(self, seconds: float) -> bool:
+        """Wait up to ``seconds``; return True if the worker is stopping."""
+        deadline = time.monotonic() + max(0.0, seconds)
+        while not self._stop.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            if self._wake.wait(min(remaining, 1.0)):
+                self._wake.clear()
+                return self._stop.is_set()
+        return True
+
+    def _preflight(self, src: str) -> None:
+        """RTSP handshake before handing the URL to OpenCV.
+
+        FFmpeg reports a rejected login only on stderr ("401 Unauthorized") and
+        OpenCV then just fails to open, which looked identical to a network
+        fault. This answers the question first, at the cost of at most one
+        login attempt. Only certain answers change behaviour: an auth
+        rejection raises CameraAuthError, a refused/unroutable address raises
+        CameraUnreachableError; anything else falls through to OpenCV.
+        """
+        if not src.lower().startswith("rtsp://"):
+            return
+        from app.services import rtsp_probe
+
+        # The probe's own DNS lookup would be unbounded; fail fast here instead.
+        _resolve_host_bounded(src, settings.CAMERA_OPEN_TIMEOUT_SEC)
+        res = rtsp_probe.probe_rtsp(src, timeout_s=min(5.0, max(1.0, settings.CAMERA_OPEN_TIMEOUT_SEC)))
+        if res.outcome == rtsp_probe.AUTH_FAILED:
+            raise CameraAuthError(f"camera rejected the username/password (RTSP {res.status_code})")
+        if res.outcome == rtsp_probe.AUTH_REQUIRED:
+            raise CameraAuthError("camera requires a username/password, but none is saved for it")
+        if res.outcome == rtsp_probe.UNREACHABLE:
+            raise CameraUnreachableError(res.detail)
 
     # ------------------------------------------------------------------ capture
 
@@ -368,7 +442,11 @@ class CameraWorker(threading.Thread):
         backoff = 1.0
         while not self._stop.is_set():
             cap = None
+            auth_paused = False
+            wait = backoff
             try:
+                self._preflight(self.rt.source)
+                self._auth_failures = 0
                 cap = self._open(self.rt.source)
                 active_source = self.rt.source
 
@@ -394,6 +472,7 @@ class CameraWorker(threading.Thread):
 
                 self.rt.status = "ONLINE"
                 self.rt.last_error = None
+                self.rt.next_retry_at = None
                 self.rt.connected_at = time.time()
                 backoff = 1.0
                 logger.info(f"Camera {self.rt.camera_id} connected (source: {redact_url(active_source)})")
@@ -427,8 +506,17 @@ class CameraWorker(threading.Thread):
 
             except Exception as e:
                 clean_err = redact_url(str(e))
-                self.rt.status = "OFFLINE"
-                self.rt.last_error = clean_err
+                if isinstance(e, CameraAuthError):
+                    auth_paused = True
+                    self._auth_failures += 1
+                    wait = AUTH_QUICK_RETRY_SEC if self._auth_failures <= AUTH_QUICK_RETRIES else AUTH_RETRY_SEC
+                    self.rt.status = "AUTH_FAILED"
+                    self.rt.last_error = f"{clean_err}. {AUTH_FAILED_HINT}"
+                else:
+                    wait = backoff
+                    self.rt.status = "OFFLINE"
+                    self.rt.last_error = clean_err
+                self.rt.next_retry_at = time.time() + wait
                 # A camera that drops out contributes nothing until it returns.
                 for t in self.tracker.flush_all():
                     self.engine.close_track(t, reason="camera_offline")
@@ -437,7 +525,14 @@ class CameraWorker(threading.Thread):
                 self.rt.detections_last = 0
                 self._objects = []
                 _reset_pose_camera(self.rt.camera_id)
-                logger.warning(f"Camera {self.rt.camera_id} error: {clean_err}; retrying in {backoff:.0f}s")
+                if isinstance(e, CameraAuthError):
+                    logger.warning(
+                        f"Camera {self.rt.camera_id} login failed: {clean_err}; not retrying for "
+                        f"{wait / 60:.0f} min to avoid locking the camera account "
+                        "(edit the credentials or press Reconnect to retry now)"
+                    )
+                else:
+                    logger.warning(f"Camera {self.rt.camera_id} error: {clean_err}; retrying in {wait:.0f}s")
             finally:
                 if cap is not None:
                     try:
@@ -445,9 +540,10 @@ class CameraWorker(threading.Thread):
                     except Exception:
                         pass
 
-            if self._stop.wait(backoff):
+            if self._sleep(wait):
                 break
-            backoff = min(backoff * 2, 30.0)
+            if not auth_paused:
+                backoff = min(backoff * 2, CAMERA_RETRY_MAX_SEC)
 
         self.rt.status = "DISABLED" if not self.rt.enabled else "OFFLINE"
         for t in self.tracker.flush_all():
@@ -789,6 +885,14 @@ class LiveAnalyticsEngine:
         worker = CameraWorker(rt, self)
         self.workers[camera_id] = worker
         worker.start()
+
+    def reconnect_camera(self, camera_id: str) -> bool:
+        """Cut the camera's retry wait short (also after an auth failure)."""
+        w = self.workers.get(camera_id)
+        if w is None:
+            return False
+        w.wake()
+        return True
 
     def stop_camera(self, camera_id: str) -> None:
         if (w := self.workers.pop(camera_id, None)) is not None:

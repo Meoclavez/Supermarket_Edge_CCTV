@@ -554,13 +554,13 @@ function renderCameraGrid() {
           <div class="camera-title">${escapeHtml(cam.name)}</div>
           <div class="cam-meta-text">${[cam.department && cam.department !== 'GENERAL' ? cam.department : '', cam.location || ''].filter(Boolean).map(escapeHtml).join(' · ')}</div>
         </div>
-        <span class="badge ${online ? 'badge-green' : 'badge-danger'}" data-status-for="${escapeHtml(cam.id)}">● ${online ? 'WORKING' : escapeHtml(cam.status || 'UNKNOWN')}</span>
+        <span class="badge ${online ? 'badge-green' : 'badge-danger'}" data-status-for="${escapeHtml(cam.id)}"${cam.status === 'AUTH_FAILED' ? ` title="${escapeHtml(AUTH_FAILED_TIP)}"` : ''}>● ${escapeHtml(cameraStatusLabel(cam.status || 'UNKNOWN'))}</span>
       </div>
 
       <div class="camera-video-container">
         <img class="camera-img" data-camera-id="${escapeHtml(cam.id)}" alt="${escapeHtml(cam.name)} live picture" />
         <div class="camera-overlay-top">
-          <span class="cam-hud-badge ${online ? 'cam-hud-live' : 'cam-hud-offline'}" data-live-for="${escapeHtml(cam.id)}">${online ? '● LIVE' : '● ' + escapeHtml(cam.status || 'OFFLINE')}</span>
+          <span class="cam-hud-badge ${online ? 'cam-hud-live' : 'cam-hud-offline'}" data-live-for="${escapeHtml(cam.id)}">${online ? '● LIVE' : '● ' + escapeHtml(cameraStatusLabel(cam.status))}</span>
           <span class="cam-hud-badge" data-res-for="${escapeHtml(cam.id)}" title="Picture size">${DASH}</span>
         </div>
         <div class="camera-overlay-bottom">
@@ -574,6 +574,7 @@ function renderCameraGrid() {
 
       <div class="camera-footer">
         <button type="button" class="btn btn-sm" onclick="openCameraConfigModal('${escapeHtml(cam.id)}')">⚙️ Settings</button>
+        <button type="button" class="btn btn-sm" data-reconnect-for="${escapeHtml(cam.id)}" onclick="reconnectCamera('${escapeHtml(cam.id)}')" title="Try to connect to this camera now" ${online ? 'hidden' : ''}>Reconnect</button>
         <a href="/dashboard/studio?camera_id=${encodeURIComponent(cam.id)}" class="btn btn-primary btn-sm" title="Draw counting lines, shelf areas, staff-only areas and privacy masks on this camera">Camera setup</a>
       </div>`;
     grid.appendChild(card);
@@ -609,24 +610,28 @@ function updateMatrixHud(pipe) {
     }
     const age = document.querySelector(`[data-age-for="${CSS.escape(id)}"]`);
     if (age) {
-      if (!c.has_frame) age.textContent = c.last_error ? `no picture: ${c.last_error}` : 'no picture';
+      if (c.status === 'AUTH_FAILED') age.textContent = 'wrong username/password: check them in Settings';
+      else if (!c.has_frame) age.textContent = c.last_error ? `no picture: ${c.last_error}` : 'no picture';
       else if (isNum(c.seconds_since_frame)) age.textContent = c.seconds_since_frame > 5 ? `picture ${c.seconds_since_frame.toFixed(0)} s old` : '';
       else age.textContent = '';
     }
     const live = document.querySelector(`[data-live-for="${CSS.escape(id)}"]`);
     if (live) {
       const online = c.status === 'ONLINE';
-      live.textContent = online ? '● LIVE' : `● ${c.status || 'OFFLINE'}`;
+      live.textContent = online ? '● LIVE' : `● ${cameraStatusLabel(c.status)}`;
       live.classList.toggle('cam-hud-live', online);
       live.classList.toggle('cam-hud-offline', !online);
     }
     const status = document.querySelector(`[data-status-for="${CSS.escape(id)}"]`);
     if (status) {
       const online = c.status === 'ONLINE';
-      status.textContent = `● ${online ? 'WORKING' : (c.status || 'OFFLINE')}`;
+      status.textContent = `● ${cameraStatusLabel(c.status)}`;
+      status.title = c.status === 'AUTH_FAILED' ? AUTH_FAILED_TIP : (online ? '' : (c.last_error || ''));
       status.classList.toggle('badge-green', online);
       status.classList.toggle('badge-danger', !online);
     }
+    const retry = document.querySelector(`[data-reconnect-for="${CSS.escape(id)}"]`);
+    if (retry) retry.hidden = c.status === 'ONLINE';
   });
 }
 
@@ -996,6 +1001,27 @@ function normaliseDepartment(v) {
   return s || 'GENERAL';
 }
 
+/** Operator-facing label for a worker status. */
+function cameraStatusLabel(status) {
+  if (status === 'ONLINE') return 'WORKING';
+  if (status === 'AUTH_FAILED') return 'WRONG PASSWORD';
+  return status || 'OFFLINE';
+}
+
+const AUTH_FAILED_TIP = 'The camera rejected the username/password. Fix them in Settings; '
+  + 'automatic retries are paused so the camera does not lock the account.';
+
+/** Retry a camera's connection now (also after a rejected login). */
+async function reconnectCamera(cameraId) {
+  try {
+    const res = await fetch(`/api/v1/cameras/${encodeURIComponent(cameraId)}/reconnect`, { method: 'POST' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    showToast('Reconnecting…');
+  } catch (e) {
+    showToast(`Reconnect failed: ${e.message}`, 'error');
+  }
+}
+
 async function openCameraConfigModal(cameraId) {
   const modal = el('modalCameraConfig');
   if (!modal) return;
@@ -1025,6 +1051,8 @@ async function openCameraConfigModal(cameraId) {
   populateDepartmentOptions(cam.department);
   safeSet('configLocation', cam.location || '');
   safeSet('configRtspUrl', cam.rtsp_url || '');
+  safeSet('configCamUser', '');
+  safeSet('configCamPass', '');
   // 0 means the frame rate is not known yet; leave the field empty rather than
   // pre-filling a value the input's own min="1" rejects (which blocked Save).
   safeSet('configFps', isNum(cam.fps) && cam.fps > 0 ? cam.fps : '');
@@ -1050,7 +1078,12 @@ async function openCameraConfigModal(cameraId) {
     ? Math.round(feats.person_max_frame_fraction * 1000) / 10 : '');
 
   const bounds = layoutSnapshot ? ` Store is ${layoutSnapshot.width_m} × ${layoutSnapshot.height_m} m.` : '';
-  setCameraConfigStatus(`Editing ${cam.id}.${bounds}`, false);
+  const live = ((pipelineSnapshot && pipelineSnapshot.cameras) || []).find((c) => c.camera_id === cameraId);
+  if (live && live.status === 'AUTH_FAILED') {
+    setCameraConfigStatus('This camera rejected the saved username/password. Enter the correct ones below and Save; it reconnects straight away.', true);
+  } else {
+    setCameraConfigStatus(`Editing ${cam.id}.${bounds}`, false);
+  }
   cancelDeleteCurrentCamera();
   modal.style.display = 'flex';
   modal.setAttribute('data-camera-object', JSON.stringify(cam));
@@ -1102,6 +1135,13 @@ async function handleCameraConfigSubmit(event) {
     personMaxFrac = Math.round(pct * 10) / 1000;
   }
 
+  const camUser = (el('configCamUser') ? el('configCamUser').value : '').trim();
+  const camPass = el('configCamPass') ? el('configCamPass').value : '';
+  if (camPass && !camUser) {
+    setCameraConfigStatus('Enter the camera username together with the new password.', true);
+    return;
+  }
+
   // Only the settings the server knows; keys from older builds are not echoed back.
   const features = {
     people_counting: el('featPeopleCounting').checked,
@@ -1141,6 +1181,19 @@ async function handleCameraConfigSubmit(event) {
       const err = await res.json().catch(() => ({}));
       setCameraConfigStatus(`Save failed (HTTP ${res.status}): ${JSON.stringify(err.detail || err)}`, true);
       return;
+    }
+    if (camPass) {
+      // Stored encrypted server-side; the worker reconnects with it at once.
+      const cres = await fetch(`/api/v1/cameras/${encodeURIComponent(camId)}/credentials`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: camUser, password: camPass }),
+      });
+      if (!cres.ok) {
+        const err = await cres.json().catch(() => ({}));
+        setCameraConfigStatus(`Camera saved, but the login was not (HTTP ${cres.status}): ${JSON.stringify(err.detail || err)}`, true);
+        return;
+      }
+      el('configCamPass').value = '';
     }
     // Feature toggles: stored on the camera row and pushed to the running pipeline.
     const fres = await fetch(`/api/v1/cameras/${encodeURIComponent(camId)}/features`, {
@@ -1301,6 +1354,7 @@ window.filterCameras = filterCameras;
 window.filterCamerasBySearch = filterCamerasBySearch;
 window.setDecimationFPS = setDecimationFPS;
 window.openCameraConfigModal = openCameraConfigModal;
+window.reconnectCamera = reconnectCamera;
 window.closeCameraConfigModal = closeCameraConfigModal;
 window.handleCameraConfigSubmit = handleCameraConfigSubmit;
 window.askDeleteCurrentCamera = askDeleteCurrentCamera;

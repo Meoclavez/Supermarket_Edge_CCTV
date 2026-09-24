@@ -142,21 +142,29 @@
         ? window.blueprintEditor.sel.id : null;
       host.innerHTML = this.cameras.map((c) => {
         const online = c.status === 'ONLINE';
+        const authFailed = c.status === 'AUTH_FAILED';
         const frame = c.frame_width && c.frame_height ? `${c.frame_width}×${c.frame_height}` : 'no frame yet';
         const id = esc(c.camera_id);
+        const label = authFailed ? 'WRONG PASSWORD' : c.status;
+        const problem = authFailed
+          ? '<div class="dev-hint">The camera rejected the username/password. Fix them in the camera\'s Settings (or on the camera), then Reconnect. Automatic retries are paused so the camera does not lock the account.</div>'
+          : (!online && c.last_error ? `<div class="dev-hint">${esc(String(c.last_error).slice(0, 160))}</div>` : '');
         return `
         <div class="dev-row dev-row-cam ${c.camera_id === selected ? 'is-selected' : ''}" data-cam-row="${id}">
           <span class="dev-dot ${online ? 'dot-on' : 'dot-off'}"></span>
           <div class="dev-main">
             <div class="dev-name">${esc(c.name)}</div>
-            <div class="dev-sub">${esc(c.status)} · ${(+c.floor_x || 0).toFixed(1)}, ${(+c.floor_y || 0).toFixed(1)} m · ${Math.round(c.azimuth_deg || 0)}°</div>
+            <div class="dev-sub">${esc(label)} · ${(+c.floor_x || 0).toFixed(1)}, ${(+c.floor_y || 0).toFixed(1)} m · ${Math.round(c.azimuth_deg || 0)}°</div>
             <div class="dev-meta">
               ${roleBadge(c.camera_id)}
               <span class="dev-tag ${c.frame_width ? '' : 'warn'}">${frame}</span>
               <span class="dev-tag ${c.has_homography ? 'ok' : 'warn'}">${c.has_homography ? 'calibrated' : 'uncalibrated'}</span>
+              ${authFailed ? '<span class="dev-tag err">wrong password</span>' : ''}
             </div>
+            ${problem}
           </div>
           <div class="dev-actions">
+            ${online ? '' : `<button class="btn btn-xs" onclick="deviceManager.reconnect('${id}')" title="Try to connect to this camera now">Reconnect</button>`}
             <button class="btn btn-xs" onclick="deviceManager.config('${id}')" title="Position, bearing, field of view">Config</button>
             <button class="btn btn-xs" data-role-action="open-checklist" data-camera="${id}" title="What is left to set up for this camera's purpose">Checklist</button>
             <button class="btn btn-xs ${c.has_homography ? '' : 'btn-primary'}" onclick="deviceManager.calibrate('${id}')" title="Map this camera's image onto the plan">Calibrate</button>
@@ -165,6 +173,17 @@
           </div>
         </div>`;
       }).join('');
+    },
+
+    async reconnect(cameraId) {
+      try {
+        const res = await fetch(`/api/v1/cameras/${encodeURIComponent(cameraId)}/reconnect`, { method: 'POST' });
+        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
+        status('Reconnecting… the status updates in a few seconds.', 'info');
+        setTimeout(() => this.refreshCameras(), 4000);
+      } catch (e) {
+        status(`Reconnect failed: ${e.message}`, 'error');
+      }
     },
 
     config(cameraId) {

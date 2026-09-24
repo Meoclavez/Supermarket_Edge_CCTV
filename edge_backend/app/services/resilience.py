@@ -109,12 +109,27 @@ def RetryWithBackoff(max_retries: int = 3, base_delay: float = 0.5, max_delay: f
 class ServiceHealthTracker:
     """
     Singleton tracker for health status of different backend subsystems.
+
+    Entries exist only for services that have reported something. Nothing is
+    seeded: a service nobody has checked is NOT_CHECKED with no success time,
+    never a default HEALTHY. Components that are absent, unconfigured or not
+    used are reported as such by the health route, which reads them at
+    request time.
     """
     _instance = None
-    
+
+    # Observed states.
     HEALTHY = "HEALTHY"
     DEGRADED = "DEGRADED"
     FAILED = "FAILED"
+    # Nothing observed yet, or nothing to observe.
+    NOT_CHECKED = "NOT_CHECKED"
+    NOT_PRESENT = "NOT_PRESENT"
+    NOT_CONFIGURED = "NOT_CONFIGURED"
+    NOT_IN_USE = "NOT_IN_USE"
+    DISABLED = "DISABLED"
+
+    FAILURE_STATES = (DEGRADED, FAILED)
 
     def __new__(cls):
         if cls._instance is None:
@@ -123,20 +138,21 @@ class ServiceHealthTracker:
         return cls._instance
 
     def _init(self):
-        self.services = {
-            "hailo": self._default_status(),
-            "rtsp_cam_0": self._default_status(),
-            "go2rtc": self._default_status(),
-            "database": self._default_status(),
-            "notification": self._default_status()
-        }
+        self.services: Dict[str, Dict[str, Any]] = {}
 
-    def _default_status(self) -> Dict[str, Any]:
+    @classmethod
+    def unchecked_status(cls, note: Optional[str] = None) -> Dict[str, Any]:
+        return cls.entry(cls.NOT_CHECKED, note)
+
+    @staticmethod
+    def entry(status: str, last_error: Optional[str] = None, last_success_time: Optional[float] = None,
+              consecutive_failures: Optional[int] = 0) -> Dict[str, Any]:
+        """One service entry in the shape the health endpoint has always returned."""
         return {
-            "status": self.HEALTHY,
-            "last_error": None,
-            "last_success_time": time.time(),
-            "consecutive_failures": 0
+            "status": status,
+            "last_error": last_error,
+            "last_success_time": last_success_time,
+            "consecutive_failures": consecutive_failures,
         }
 
     @classmethod
@@ -144,17 +160,22 @@ class ServiceHealthTracker:
         """Classmethod helper to report subsystem health status."""
         instance = cls()
         if service_name not in instance.services:
-            instance.services[service_name] = instance._default_status()
+            instance.services[service_name] = instance.unchecked_status()
         s = instance.services[service_name]
-        s["status"] = status_str.upper()
-        if message:
-            s["last_error"] = message
-        if status_str.lower() in ("healthy", "ok"):
+        status = status_str.upper()
+        if status == "OK":
+            status = cls.HEALTHY
+        s["status"] = status
+        if status == cls.HEALTHY:
             s["last_success_time"] = time.time()
             s["consecutive_failures"] = 0
             s["last_error"] = None
-        else:
-            s["consecutive_failures"] = s.get("consecutive_failures", 0) + 1
+        elif status in cls.FAILURE_STATES:
+            s["consecutive_failures"] = (s.get("consecutive_failures") or 0) + 1
+            if message:
+                s["last_error"] = message
+        elif message:
+            s["last_error"] = message
 
     def record_success(self, service_name: str):
         self.report_status(service_name, self.HEALTHY)
@@ -162,10 +183,19 @@ class ServiceHealthTracker:
     def record_failure(self, service_name: str, error: str):
         self.report_status(service_name, self.DEGRADED, error)
 
+    def get(self, service_name: str) -> Optional[Dict[str, Any]]:
+        """A copy of what has been reported for ``service_name``, or None."""
+        s = self.services.get(service_name)
+        return dict(s) if s is not None else None
+
+    def reset(self) -> None:
+        """Forget every report (tests)."""
+        self.services.clear()
+
     def get_system_health_report(self) -> Dict[str, Any]:
         return {
             "timestamp": datetime.utcnow().isoformat() + "Z",
-            "services": self.services
+            "services": {name: dict(s) for name, s in self.services.items()},
         }
 
 

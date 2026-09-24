@@ -339,6 +339,7 @@ async def update_camera(camera_id: str, cam_in: CameraFeed, db: AsyncSession = D
     res = await db.execute(select(CameraModel).where(CameraModel.id == camera_id))
     cam = res.scalar_one_or_none()
     payload = _writable_payload(cam_in)
+    source_changed = False
     if "rtsp_url" in payload:
         url = str(payload["rtsp_url"] or "")
         if camera_source.is_masked(url) or (cam is not None and not url):
@@ -348,10 +349,13 @@ async def update_camera(camera_id: str, cam_in: CameraFeed, db: AsyncSession = D
             # Credentials typed inline move to the encrypted store.
             try:
                 payload["rtsp_url"] = camera_source.detach_credentials(camera_id, url)
+                source_changed = True
             except Exception as exc:  # noqa: BLE001
                 logger.error("Could not store credentials for camera %s: %s", camera_id, type(exc).__name__)
                 raise HTTPException(status_code=500, detail="Could not store the camera credentials securely.") from None
 
+    if "rtsp_url" in payload and (cam is None or payload["rtsp_url"] != cam.rtsp_url):
+        source_changed = True
     if cam is not None and "features" in payload:
         _keep_unsent_settings(payload["features"], cam_in.features, cam.features)
     # Setting a role here stores it without touching the toggles; use
@@ -372,7 +376,66 @@ async def update_camera(camera_id: str, cam_in: CameraFeed, db: AsyncSession = D
     camera_roles.role_cache.invalidate()
     if "features" in payload:
         feature_manager.set_camera_features(camera_id, CameraFeatureConfig.model_validate(payload["features"]))
+    if source_changed:
+        # A new URL or inline credentials: reconnect now (also ends a pause
+        # after a rejected login) instead of on the next reconcile tick.
+        await _restart_worker(camera_id)
     return _model_to_feed(cam)
+
+
+async def _restart_worker(camera_id: str) -> dict:
+    """Apply a changed source now and wake the worker from any retry pause."""
+    try:
+        from ..services.pipeline_supervisor import pipeline_supervisor
+
+        if getattr(pipeline_supervisor, "_running", False):
+            await asyncio.wait_for(pipeline_supervisor.reconcile_cameras(), timeout=10)
+    except Exception as exc:  # noqa: BLE001 - the periodic reconcile picks it up
+        logger.debug("reconcile for %s: %s", camera_id, exc)
+    woke = live_engine.reconnect_camera(camera_id)
+    rt = live_engine.runtimes.get(camera_id)
+    return {"reconnecting": woke, "status": rt.status if rt is not None else "OFFLINE",
+            "last_error": rt.last_error if rt is not None else None}
+
+
+class CameraCredentialsRequest(BaseModel):
+    username: Optional[str] = Field(None, max_length=128)
+    password: Optional[str] = Field(None, max_length=256)
+
+
+@router.put("/{camera_id}/credentials")
+async def update_camera_credentials(camera_id: str, body: CameraCredentialsRequest,
+                                    db: AsyncSession = Depends(get_db)):
+    """Replace the camera's stored login and reconnect straight away.
+
+    This is how an operator clears AUTH_FAILED: the worker stops retrying a
+    rejected login (to keep the camera from locking the account) until the
+    credentials change or Reconnect is pressed. Empty username and password
+    remove the stored login. The password is never echoed back.
+    """
+    await _get_camera_or_404(camera_id, db)
+    try:
+        username = camera_source._check_text((body.username or "").strip(), "Username", 128) or None
+        password = camera_source._check_text(body.password or "", "Password", 256) or None
+    except camera_source.SourceError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    try:
+        if username or password:
+            camera_source.store_credentials(camera_id, username, password)
+        else:
+            camera_source.delete_credentials(camera_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Could not store credentials for camera %s: %s", camera_id, type(exc).__name__)
+        raise HTTPException(status_code=500, detail="Could not store the camera credentials securely.") from None
+    return {"camera_id": camera_id, "has_credentials": bool(username or password),
+            **(await _restart_worker(camera_id))}
+
+
+@router.post("/{camera_id}/reconnect")
+async def reconnect_camera(camera_id: str, db: AsyncSession = Depends(get_db)):
+    """Retry the connection now, including after a rejected login."""
+    await _get_camera_or_404(camera_id, db)
+    return {"camera_id": camera_id, **(await _restart_worker(camera_id))}
 
 
 @router.patch("/{camera_id}/position")

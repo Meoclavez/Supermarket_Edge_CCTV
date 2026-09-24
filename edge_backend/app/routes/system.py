@@ -16,7 +16,7 @@ from ..services.feature_manager import feature_manager
 from ..services.hardware_detector import (
     current_hardware_profile,
     get_ram_info,
-    probe_nvidia_gpu_utilisation,
+    probe_gpu_utilisation,
 )
 from ..services.live_analytics_engine import live_engine
 from ..services import preflight
@@ -88,7 +88,7 @@ def get_system_stats():
 
     return SystemStats(
         cpu_usage_percent=_cpu_percent(),
-        gpu_usage_percent=probe_nvidia_gpu_utilisation(),
+        gpu_usage_percent=probe_gpu_utilisation(),
         ram_used_gb=ram_used,
         ram_total_gb=total_ram,
         active_cameras=int(pipeline.get("cameras_online", 0)),

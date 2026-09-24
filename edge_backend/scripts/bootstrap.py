@@ -8,8 +8,16 @@ second run on a healthy machine changes nothing:
   2. installer     uv if available, else the venv's pip
   3. requirements  install requirements.txt (onnxruntime lines are handled by step 5)
   4. accelerators  nvidia-smi and /dev/nvidia*, /dev/kfd, /dev/dri, /dev/hailo0
-  5. onnxruntime   pick the flavour, remove conflicting ones, reinstall the winner
+  5. onnxruntime   pick the flavour, remove conflicting ones, reinstall the winner.
+                   Flavours: gpu (NVIDIA, onnxruntime-gpu), migraphx (AMD: pinned
+                   onnxruntime + ROCm + MIGraphX plugin EP from AMD's indexes, for
+                   the GPU target read from /sys/class/kfd at run time, plus the
+                   unversioned libmigraphx_*.so symlinks wheels cannot ship),
+                   openvino, cpu
   6. models        scripts/fetch_models.py (verify; export missing ones in an isolated venv)
+  6a. pre-warm     migraphx only: scripts/prewarm_inference.py loads the models the
+                   service will load and compiles them for the GPU into the cache
+                   (1-3 min per model the first time; seconds once cached)
   7. verify        create a real ORT session on a model, check get_providers()[0]
   8. preflight     app.services.preflight (read-only checks)
   8a. tunnel       only with --with-tunnel or when remote access is enabled in
@@ -46,11 +54,13 @@ REQUIREMENTS = EDGE_BACKEND_DIR / "requirements.txt"
 REQUIREMENTS_DEV = EDGE_BACKEND_DIR / "requirements-dev.txt"
 IS_WINDOWS = os.name == "nt"
 
-# ORT flavour -> (distribution, requirement spec)
+# ORT flavour -> (distribution, requirement spec). "migraphx" pins more than
+# this; see ensure_migraphx() and app/services/amd_migraphx.py.
 ORT_FLAVOURS = {
     "gpu": ("onnxruntime-gpu", "onnxruntime-gpu[cuda,cudnn]>=1.30"),
     "cpu": ("onnxruntime", "onnxruntime>=1.30"),
     "openvino": ("onnxruntime-openvino", "onnxruntime-openvino"),
+    "migraphx": ("onnxruntime", "onnxruntime==1.29.0"),
 }
 
 
@@ -63,6 +73,7 @@ def _load_preflight():
 
 
 pf = _load_preflight()
+amd = pf._amd()  # app/services/amd_migraphx.py, loaded by path (stdlib only)
 
 
 # --------------------------------------------------------------------------- #
@@ -313,10 +324,13 @@ def system_level_advice(accel: dict, py: Path) -> None:
         R.warn("/dev/hailo0 present but HailoRT's Python runtime is not installed (it is not on PyPI)",
                f"uv pip install --python {py} ./hailort-<ver>-cp<py>-linux_x86_64.whl   "
                "(wheel from https://hailo.ai/developer-zone/)")
-    if accel["amd"]["rocm_kfd"] and not nv["present"]:
-        R.info("AMD ROCm device found; onnxruntime-gpu has no ROCm provider. For GPU inference install AMD's "
-               "MIGraphX build of onnxruntime (https://onnxruntime.ai/docs/execution-providers/"
-               "MIGraphX-ExecutionProvider.html); until then the CPU provider is used")
+    if accel["amd"]["rocm_kfd"] and not nv["present"] and not accel["amd"].get("gfx_targets"):
+        R.warn("AMD ROCm device (/dev/kfd) found but no GPU target could be read from "
+               "/sys/class/kfd/kfd/topology (and rocm_agent_enumerator is absent): the MIGraphX flavour "
+               "cannot pick its device libraries",
+               "EDGE_ROCM_GFX=gfxNNNN <this command> --ort migraphx   (target from `rocminfo | grep gfx`)")
+    elif accel["amd"]["present"] and not accel["amd"]["rocm_kfd"] and not nv["present"]:
+        R.info("AMD GPU on the PCI bus but no /dev/kfd (amdgpu compute not available): CPU inference")
 
 
 def installed_ort(py: Path) -> dict[str, str]:
@@ -335,9 +349,22 @@ def ort_imports(py: Path) -> str | None:
     return None if res.returncode != 0 else res.stdout.strip()
 
 
+def amd_flavour_applicable(accel: dict) -> bool:
+    """An AMD GPU with ROCm compute and a readable target, and no NVIDIA GPU."""
+    x86 = platform.machine().lower() in ("x86_64", "amd64")
+    a = accel.get("amd", {})
+    return (sys.platform.startswith("linux") and x86 and not accel["nvidia"]["present"]
+            and bool(a.get("rocm_kfd")) and bool(a.get("gfx_targets")))
+
+
 def choose_flavour(requested: str, accel: dict) -> str:
     if requested != "auto":
         return requested
+    if amd_flavour_applicable(accel):
+        R.info(f"AMD GPU {accel['amd']['gfx_targets'][0]} with ROCm and no NVIDIA GPU: onnxruntime flavour "
+               f"migraphx (onnxruntime {amd.ORT_VERSION} + MIGraphX {amd.MIGRAPHX_VERSION} plugin EP, ~3.8 GB). "
+               "`--ort cpu` keeps the small CPU-only build")
+        return "migraphx"
     flavour = ort_default_flavour()
     if flavour == "gpu" and not accel["nvidia"]["present"]:
         R.info("no NVIDIA GPU: keeping onnxruntime-gpu as declared (its CPU provider is used; a GPU fitted later "
@@ -347,7 +374,73 @@ def choose_flavour(requested: str, accel: dict) -> str:
     return flavour
 
 
-def ensure_onnxruntime(inst: Installer, py: Path, flavour: str) -> None:
+def _migraphx_libs_dir(py: Path) -> Path | None:
+    res = sh([str(py), "-c", "import importlib.util as u; s = u.find_spec('migraphx_libs'); "
+                             "print(list(s.submodule_search_locations)[0] if s else '')"])
+    out = res.stdout.strip().splitlines()
+    return Path(out[-1]) if res.returncode == 0 and out and out[-1] else None
+
+
+def ensure_migraphx(inst: Installer, py: Path, accel: dict) -> bool:
+    """AMD: pinned onnxruntime + ROCm + MIGraphX + plugin EP, then the symlinks."""
+    targets = accel.get("amd", {}).get("gfx_targets") or amd.gfx_targets()
+    if not targets:
+        R.fail("--ort migraphx: no AMD GPU target found (no /sys/class/kfd topology, no rocm_agent_enumerator)",
+               "EDGE_ROCM_GFX=gfxNNNN <this command> --ort migraphx")
+        return False
+    gfx = targets[0]
+    specs = amd.install_specs(gfx)
+    idx = amd.index_args(bool(inst.uv))
+    have = installed_ort(py)
+    others = [d for d in have if d != "onnxruntime"]
+    if others:
+        R.fix(f"conflicting onnxruntime builds {', '.join(f'{d} {have[d]}' for d in others)}: uninstalling "
+              f"(the MIGraphX plugin EP loads into plain onnxruntime {amd.ORT_VERSION})")
+        res = inst.uninstall(others)
+        if res.returncode != 0:
+            R.fail(f"uninstall failed:\n{tail(res)}")
+            return False
+        # Removing the loser deleted files the winner shares; reinstall so its files are complete.
+        res = inst.install([f"onnxruntime=={amd.ORT_VERSION}", *idx], reinstall="onnxruntime")
+        if res.returncode != 0:
+            R.fail(f"install of onnxruntime=={amd.ORT_VERSION} failed:\n{tail(res)}")
+            return False
+    pending = inst.pending([*specs, *idx])
+    if pending == [] and ort_imports(py):
+        R.ok(f"AMD MIGraphX stack for {gfx} installed ({', '.join(specs)})")
+    else:
+        R.fix(f"installing the AMD MIGraphX stack for {gfx} from AMD's indexes (~3.8 GB, several minutes)"
+              + (f": {', '.join(pending[:8])}{' ...' if len(pending) > 8 else ''}" if pending else ""))
+        res = inst.install([*specs, *idx])
+        if res.returncode != 0:
+            R.fail(f"install of the MIGraphX stack for {gfx} failed (no wheels for this Python/target, or "
+                   f"offline):\n{tail(res)}", f"{REPO_DIR / 'run.sh'} --check-only --ort cpu   (CPU-only)")
+            return False
+    ldir = _migraphx_libs_dir(py)
+    if ldir is None:
+        R.fail("migraphx_libs is not importable after the install")
+        return False
+    for link in amd.ensure_symlinks(ldir):
+        R.fix(f"symlink {ldir / link.split(' -> ')[0]} -> {link.split(' -> ')[1]} (MIGraphX dlopens the "
+              "unversioned name; wheels cannot ship symlinks)")
+    missing = amd.missing_symlinks(ldir)
+    if missing:
+        R.fail(f"{', '.join(missing)} still missing in {ldir}")
+        return False
+    version = ort_imports(py)
+    if version != amd.ORT_VERSION:
+        R.fail(f"onnxruntime {version} imports, but the MIGraphX plugin needs {amd.ORT_VERSION}")
+        return False
+    R.ok(f"onnxruntime {version} + MIGraphX plugin EP for {gfx}; unversioned libraries linked in {ldir.name}")
+    return True
+
+
+def ensure_onnxruntime(inst: Installer, py: Path, flavour: str, accel: dict | None = None) -> None:
+    if flavour == "migraphx":
+        if ensure_migraphx(inst, py, accel or pf.detect_accelerators()) or ort_imports(py):
+            return
+        R.warn("installing the CPU build instead so the service can run (on the CPU) meanwhile")
+        flavour = "cpu"
     want_dist, want_spec = ORT_FLAVOURS[flavour]
     have = installed_ort(py)
     others = [d for d in have if d != want_dist]
@@ -401,22 +494,62 @@ def ensure_models(py: Path, cache_dir: str | None) -> None:
                f"{py} {EDGE_BACKEND_DIR / 'scripts' / 'fetch_models.py'}")
 
 
-def verify_session(py: Path, accel: dict) -> dict:
+def prewarm_gpu(py: Path) -> dict:
+    """Compile the models the service will load for the AMD GPU, as the service would."""
+    script = EDGE_BACKEND_DIR / "scripts" / "prewarm_inference.py"
+    R.info("pre-compiling the models the service will load for the AMD GPU (MIGraphX): 1-3 min per model "
+           "the first time, seconds when cached")
+    started = time.perf_counter()
+    summary: dict = {}
+    try:
+        proc = subprocess.Popen([str(py), str(script), "--require-gpu"], cwd=EDGE_BACKEND_DIR, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    except OSError as exc:
+        R.fail(f"pre-warm could not start: {exc}")
+        return summary
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        if line.startswith("@@PREWARM@@"):
+            try:
+                summary = json.loads(line[len("@@PREWARM@@"):])
+            except ValueError:
+                pass
+        elif (re.search(r"Compiling|GPU|MIGraphX|model chosen|ready|ERROR|WARNING", line)
+              and "/AMDMIGraphX/" not in line):  # MIGraphX's own compiler chatter
+            print(f"       {line.rstrip()}", flush=True)
+    rc = proc.wait()
+    secs = time.perf_counter() - started
+    gc = summary.get("gpu_compile") or {}
+    if rc == 0 and summary.get("provider") == "migraphx":
+        R.ok(f"GPU pre-warm: {summary.get('model')} {summary.get('input_size')} on {summary.get('device')} "
+             f"({summary.get('warmup_steady_ms')} ms/frame), refiner "
+             f"{'on' if (summary.get('refiner') or {}).get('enabled') else 'off'}, objects on "
+             f"{summary.get('object_provider')}; compiled {gc.get('compiled') or 'nothing new (cache warm)'} "
+             f"in {secs:.0f} s; cache {(summary.get('migraphx') or {}).get('cache_dir')}")
+    else:
+        R.fail(f"GPU pre-warm ended on {summary.get('provider') or 'nothing'} (exit {rc}): "
+               + "; ".join(f"{a.get('provider')}: {a.get('reason')}" for a in summary.get("provider_attempts") or []
+                           if not a.get("ok"))[:600])
+    return summary
+
+
+def verify_session(py: Path, accel: dict, migraphx_cache: str | None = None) -> dict:
     model = pf.probe_model_path()
     if model is None:
         R.fail("no model file available to verify inference with")
         return {}
     wanted = pf.preferred_gpu_providers(accel)
-    probe = pf.probe_session(str(py), model, wanted)
+    probe = pf.probe_session(str(py), model, wanted, migraphx_cache=migraphx_cache)
     provider = probe.get("provider")
     if not probe.get("ok"):
         R.fail(f"inference session could not be created on {model.name}: {probe.get('error')}")
         return probe
     detail = f"{provider} on {model.name} (session {probe.get('session_ms')} ms, {probe.get('infer_ms')} ms/inference)"
-    if provider in pf.GPU_PROVIDERS:
+    if provider in pf.GPU_PROVIDERS and not probe.get("fell_back"):
         R.ok(f"inference verified: {detail}")
     elif wanted:
-        reason = "; ".join(probe.get("stderr_tail") or []) or f"requested {wanted}, available {probe.get('available')}"
+        reason = ((probe.get("migraphx") or {}).get("reason") or "; ".join(probe.get("stderr_tail") or [])
+                  or f"requested {wanted}, available {probe.get('available')}")
         cmd = None
         if "CUDAExecutionProvider" in wanted:
             drv = accel["nvidia"].get("driver_version")
@@ -618,6 +751,9 @@ def main() -> None:
     ap.add_argument("--model-cache-dir", default=None,
                     help="where models are exported (default ~/.cache/edge-cctv/model-export)")
     ap.add_argument("--skip-models", action="store_true", help="do not verify/export models")
+    ap.add_argument("--skip-prewarm", action="store_true",
+                    help="migraphx: do not pre-compile the models for the GPU (the service then compiles "
+                         "them in the background on its first start, running on the CPU meanwhile)")
     ap.add_argument("--force", action="store_true", help="start uvicorn even if checks report errors")
     ap.add_argument("--with-tunnel", action="store_true",
                     help="fetch cloudflared into <repo>/bin for remote access (done automatically when "
@@ -640,11 +776,16 @@ def main() -> None:
     flavour = choose_flavour(args.ort, accel)
     if flavour != "gpu" and accel["nvidia"]["driver_loaded"]:
         R.warn(f"--ort {flavour} on a machine with an NVIDIA GPU: inference will not use the GPU")
-    ensure_onnxruntime(inst, py, flavour)
+    ensure_onnxruntime(inst, py, flavour, accel)
 
     if not args.skip_models:
         ensure_models(py, args.model_cache_dir)
-    probe = verify_session(py, accel)
+    mgx_cache = None
+    if flavour == "migraphx" and not args.skip_prewarm:
+        warm = prewarm_gpu(py)
+        cache_dir = (warm.get("migraphx") or {}).get("cache_dir")
+        mgx_cache = str(Path(cache_dir).parent) if cache_dir else None
+    probe = verify_session(py, accel, mgx_cache)
     run_preflight(py)
     ensure_cloudflared(args.with_tunnel)
 

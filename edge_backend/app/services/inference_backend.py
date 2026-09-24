@@ -10,16 +10,23 @@ that *really* takes the model:
                         fitted Hailo device is listed but never selected
     2. TensorRT  EP     (NVIDIA; fp16, engine cache under storage/)
     3. CUDA      EP     (NVIDIA)
-    4. ROCm / MIGraphX  (AMD)
+    4. MIGraphX  EP     (AMD; ONNX Runtime plugin EP, see amd_migraphx.py.
+                        A cold compiled-program cache is compiled in the
+                        background while the CPU serves, then swapped in)
     5. OpenVINO  EP     (Intel iGPU / NPU / CPU)
     6. DirectML / CoreML
     7. CPU       EP     (always present in a working ONNX Runtime)
     8. UNAVAILABLE      (no model file, or ONNX Runtime missing)
 
-A provider only counts when ``session.get_providers()[0]`` is that provider.
-ONNX Runtime silently falls back (for example TensorRT -> CUDA when libnvinfer
-is missing), so asking for a provider proves nothing; the reason every
-provider was passed over is recorded in ``status()["provider_attempts"]``.
+A provider only counts when ``session.get_providers()[0]`` is that provider
+and ONNX Runtime did not print its "Falling back" notice. ONNX Runtime
+silently falls back (for example TensorRT -> CUDA when libnvinfer is missing,
+or any plugin EP requested by name), so asking for a provider proves nothing;
+the reason every provider was passed over is recorded in
+``status()["provider_attempts"]``.
+
+Sessions on the CPU provider share ``INFERENCE_CPU_THREADS`` (default half the
+CPUs) and do not spin idle threads, so CPU inference cannot starve decoding.
 
 Model size and input resolution are chosen the same way, by measurement:
 on the selected provider the pose model ladder (``POSE_MODEL_LADDER_*``, most
@@ -60,6 +67,7 @@ from typing import Any, Optional
 import numpy as np
 
 from app.config import settings
+from app.services import amd_migraphx as amd
 
 logger = logging.getLogger(__name__)
 
@@ -90,8 +98,9 @@ _COCO_FALLBACK_NAMES = {
 _PROVIDER_PRIORITY: tuple[tuple[str, str, bool], ...] = (
     ("TensorrtExecutionProvider", "tensorrt", True),
     ("CUDAExecutionProvider", "cuda", True),
-    ("ROCMExecutionProvider", "rocm", True),
     ("MIGraphXExecutionProvider", "migraphx", True),
+    # Removed from ONNX Runtime in 1.23; only a legacy build still offers it.
+    ("ROCMExecutionProvider", "rocm", True),
     ("OpenVINOExecutionProvider", "openvino", False),
     ("DmlExecutionProvider", "directml", True),
     ("CoreMLExecutionProvider", "coreml", True),
@@ -443,6 +452,31 @@ def _probe_tensorrt_libs() -> str:
     return errors[0] if errors else "libnvinfer not found"
 
 
+def cpu_thread_budget() -> int:
+    """ORT threads all CPU-provider sessions may use together.
+
+    ``INFERENCE_CPU_THREADS`` > 0 is taken as is; otherwise half the CPUs this
+    process may run on (its affinity mask, so a cpuset/container limit counts).
+    """
+    fixed = int(settings.INFERENCE_CPU_THREADS)
+    if fixed > 0:
+        return fixed
+    try:
+        n = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        n = os.cpu_count() or 2
+    return max(1, n // 2)
+
+
+def cpu_threads_for(role: str) -> int:
+    """Share of the budget per session. Pose and object inference can run at
+    the same time (separate locks), so their shares add up to the budget."""
+    budget = cpu_thread_budget()
+    if role == "pose":
+        return max(1, budget - budget // 3)
+    return max(1, budget // 3)
+
+
 def _nvidia_device_name(device_id: int) -> Optional[str]:
     import shutil
     import subprocess
@@ -552,6 +586,11 @@ class PersonDetector:
         self.warmup_ms: Optional[float] = None
         self.warmup_steady_ms: Optional[float] = None
         self.load_ms: Optional[float] = None
+        # AMD MIGraphX plugin EP: prepare() result, and the state of compiling
+        # the models for the GPU (idle | compiling | done | failed).
+        self.migraphx: dict = {}
+        self.gpu_compile: dict = {"state": "idle"}
+        self.cpu_threads: dict = {}
         # How the pose model was chosen (budget, candidates measured).
         self.selection: dict = {}
 
@@ -719,6 +758,7 @@ class PersonDetector:
             except Exception as e:
                 tried.append({"model": path.name, "error": _short(str(e))})
                 continue
+            self._mark_compiled(path)
             tried.append({"model": path.name, "input_size": list(spec.input_size), "steady_ms": steady})
             if (steady or float("inf")) < best[0]:
                 best = (steady or float("inf"), sess, spec, path, first, steady)
@@ -771,40 +811,98 @@ class PersonDetector:
             chain.append("CPUExecutionProvider")
         return chain
 
-    def _create_session(self, ort, path: Path, ep: str):
+    @staticmethod
+    def _is_plugin(ep: Optional[str]) -> bool:
+        """``ep`` is the MIGraphX plugin EP, registered in this process."""
+        return ep == amd.PLUGIN_EP and bool(amd.devices())
+
+    def _limit_cpu_threads(self, opts, role: str) -> None:
+        n = cpu_threads_for(role)
+        opts.intra_op_num_threads = n
+        opts.inter_op_num_threads = 1
+        if not settings.INFERENCE_CPU_SPINNING and hasattr(opts, "add_session_config_entry"):
+            # A spinning pool keeps every worker at 100 % between frames.
+            opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
+            opts.add_session_config_entry("session.inter_op.allow_spinning", "0")
+        self.cpu_threads = {**self.cpu_threads, "budget": cpu_thread_budget(), role: n,
+                            "spinning": bool(settings.INFERENCE_CPU_SPINNING)}
+
+    def _mark_compiled(self, path: Path, tag: str = "default", ep: Optional[str] = None) -> None:
+        """Record in the MIGraphX cache manifest that ``path`` is compiled (after a real run)."""
+        if not self._is_plugin(ep or self.execution_provider) or amd.is_warm(amd.cache_dir(), path, tag):
+            return
+        if amd.mark_warm(amd.cache_dir(), path, tag):
+            done = self.gpu_compile.setdefault("compiled", [])
+            if path.name not in done:
+                done.append(path.name)
+
+    def _create_session(self, ort, path: Path, ep: str, role: str = "pose", tag: str = "default"):
         """Create a session on ``ep`` and return (session | None, reason | None).
 
         ORT prints its own fallback notice to stdout and silently lands on the
-        next provider, so success is decided only by ``get_providers()[0]``.
+        next provider, so success is decided by ``get_providers()[0]`` *and*
+        the absence of that notice. The MIGraphX plugin EP is attached through
+        its device objects: requested by name it would be ignored silently.
+        ``role`` picks the CPU thread share; ``tag`` names the input shape
+        for the MIGraphX compiled-program manifest.
         """
         opts = ort.SessionOptions()
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         opts.log_severity_level = 3
+        plugin = self._is_plugin(ep)
+        if ep == "CPUExecutionProvider" or plugin:
+            # A GPU session keeps a CPU pool for the few nodes left on the CPU.
+            self._limit_cpu_threads(opts, role)
+        if plugin and not amd.is_warm(amd.cache_dir(), path, tag):
+            self.gpu_compile["current"] = path.name
+            logger.warning(f"Compiling {path.name} for the AMD GPU (MIGraphX, first use of this model and "
+                           f"shape; typically 1-3 min). Cached in {amd.cache_dir()}")
         captured = io.StringIO()
         try:
             with contextlib.redirect_stdout(captured):
-                sess = ort.InferenceSession(str(path), sess_options=opts, providers=self._providers_for(ep))
+                if plugin:
+                    amd.add_to_session_options(opts, int(settings.INFERENCE_DEVICE_ID), bool(settings.MIGRAPHX_FP16))
+                    sess = ort.InferenceSession(str(path), sess_options=opts)
+                else:
+                    sess = ort.InferenceSession(str(path), sess_options=opts, providers=self._providers_for(ep))
         except Exception as e:
             return None, _short(f"{type(e).__name__}: {e}")
+        finally:
+            self.gpu_compile.pop("current", None)
         got = (sess.get_providers() or ["none"])[0]
-        if got == ep:
+        fell_back = "falling back" in captured.getvalue().lower()
+        if got == ep and not fell_back:
             return sess, None
         # ORT's banner: "*** EP Error *** EP Error <what> when using [...]".
         detail = " ".join(re.sub(r"\*+|EP Error", " ", captured.getvalue()).split())
         detail = re.sub(r"\s*when using \[.*$", "", detail)   # drop the echoed provider options
-        reason = f"session landed on {got}, not {ep}"
+        reason = (f"session landed on {got}, not {ep}" if got != ep
+                  else f"ONNX Runtime fell back from {ep} while creating the session")
         if ep == "TensorrtExecutionProvider":
             reason += f" ({_probe_tensorrt_libs()})"
         if detail:
             reason += f": {detail}"
         return None, _short(reason)
 
-    def _select(self, ort) -> None:
-        """Walk the provider chain; sets session/provider or leaves last_error."""
-        disabled = {t.strip().lower() for t in settings.INFERENCE_DISABLED_PROVIDERS.split(",") if t.strip()}
+    @staticmethod
+    def _disabled_labels() -> set[str]:
+        return {t.strip().lower() for t in settings.INFERENCE_DISABLED_PROVIDERS.split(",") if t.strip()}
+
+    def _first_selectable_ep(self) -> Optional[str]:
+        disabled = self._disabled_labels()
+        in_build = set(self.available_providers)
+        return next((ep for ep, label, _ in _PROVIDER_PRIORITY if ep in in_build and label not in disabled), None)
+
+    def _select(self, ort, skip: frozenset = frozenset(), only: Optional[set] = None) -> None:
+        """Walk the provider chain; sets session/provider or leaves last_error.
+
+        ``skip`` leaves providers out (a GPU still compiling in the
+        background); ``only`` restricts the walk (the background compile).
+        """
+        disabled = self._disabled_labels()
         in_build = set(self.available_providers)
         for ep, label, accel in _PROVIDER_PRIORITY:
-            if ep not in in_build:
+            if ep not in in_build or ep in skip or (only is not None and ep not in only):
                 continue
             if label in disabled:
                 self.provider_attempts.append({"provider": label, "ok": False,
@@ -847,6 +945,9 @@ class PersonDetector:
             if ep in ("TensorrtExecutionProvider", "CUDAExecutionProvider"):
                 name = _nvidia_device_name(int(settings.INFERENCE_DEVICE_ID))
                 self.device_name = f"{label.upper()}:{settings.INFERENCE_DEVICE_ID}" + (f" {name}" if name else "")
+            elif self._is_plugin(ep):
+                gfx = self.migraphx.get("gfx")
+                self.device_name = f"MIGRAPHX:{settings.INFERENCE_DEVICE_ID}" + (f" {gfx}" if gfx else "")
             else:
                 self.device_name = ep.replace("ExecutionProvider", "")
             return
@@ -887,7 +988,8 @@ class PersonDetector:
         if not path.exists():
             self.refiner_reason = f"model file not found: {path}"
             return
-        sess, reason = self._create_session(ort, path, self.execution_provider)
+        n = max(1, int(settings.POSE_REFINER_BUDGET_PERSONS))
+        sess, reason = self._create_session(ort, path, self.execution_provider, role="refiner", tag=f"b{n}")
         if sess is None:
             self.refiner_reason = f"could not load on {self.provider}: {reason}"
             return
@@ -897,7 +999,6 @@ class PersonDetector:
             self.refiner_reason = f"{path.name}: unexpected IO {inp.shape} -> {outs}"
             return
         h, w = int(inp.shape[2]), int(inp.shape[3])
-        n = max(1, int(settings.POSE_REFINER_BUDGET_PERSONS))
         x = np.zeros((n, 3, h, w), np.float32)
         times = []
         for _ in range(max(1, int(settings.INFERENCE_WARMUP_RUNS)) + 1):
@@ -905,6 +1006,7 @@ class PersonDetector:
             sess.run(None, {inp.name: x})
             times.append((time.perf_counter() - t) * 1000.0)
         batch_ms = round(sum(times[1:]) / len(times[1:]), 2) if len(times) > 1 else round(times[0], 2)
+        self._mark_compiled(path, f"b{n}")
         self.refiner_session, self.refiner_path, self.refiner_input_hw = sess, path, (h, w)
         self.refiner_batch_ms = batch_ms
         budget, _ = self.latency_budget()
@@ -925,7 +1027,8 @@ class PersonDetector:
         confidence x POSE_REFINER_SCORE_SCALE)`` clipped to 1, so a joint the
         pose model saw clearly never loses its visibility.
         """
-        sess = self.refiner_session
+        with self._refiner_lock:
+            sess, hw = self.refiner_session, self.refiner_input_hw
         if sess is None or not dets:
             return
         chosen = sorted((d for d in dets if d.keypoints is not None),
@@ -933,7 +1036,6 @@ class PersonDetector:
         if not chosen:
             return
         started = time.perf_counter()
-        hw = self.refiner_input_hw
         crops, metas = [], []
         for d in chosen:
             c, m = refiner_crop(frame, d.bbox, hw)
@@ -985,7 +1087,7 @@ class PersonDetector:
             eps.append("CPUExecutionProvider")
         reasons = []
         for ep in eps:
-            sess, reason = self._create_session(ort, path, ep)
+            sess, reason = self._create_session(ort, path, ep, role="object")
             if sess is None:
                 reasons.append(f"{ep}: {reason}")
                 continue
@@ -1004,6 +1106,7 @@ class PersonDetector:
             self.object_provider = ep.replace("ExecutionProvider", "").lower()
             self.object_class_ids = _parse_class_filter(settings.OBJECT_CLASSES, spec.names)
             self.object_warmup_ms, _ = self._warm_up(sess, spec, self._obj_run_lock)
+            self._mark_compiled(path, ep=ep)
             self.object_error = None
             return
         self.object_error = "; ".join(reasons) or "no provider"
@@ -1033,17 +1136,37 @@ class PersonDetector:
             else:
                 self.dlls_preloaded = "not supported by this onnxruntime"
             self.available_providers = list(ort.get_available_providers())
+            self._prepare_plugin_eps(ort)
 
             quiet = hasattr(ort, "set_default_logger_severity")
             if quiet:
                 ort.set_default_logger_severity(4)  # our own log carries the reasons
+            background = False
             try:
-                self._select(ort)
+                cold = self._migraphx_cold_models()
+                background = bool(cold) and settings.MIGRAPHX_COMPILE_MODE.strip().lower() != "foreground"
+                if background:
+                    # Compiling takes minutes per model: serve on the next
+                    # provider (normally the CPU) meanwhile, and say so.
+                    reason = (f"compiling {', '.join(cold)} for the GPU in the background (cold cache); "
+                              "the next provider serves until it is done")
+                    self.provider_attempts.append({"provider": "migraphx", "ok": False, "reason": reason})
+                    self.gpu_compile.update({"state": "compiling", "provider": "migraphx", "models": cold,
+                                             "started_at": time.time(), "mode": "background"})
+                    logger.warning(f"AMD GPU: {reason}")
+                    self._select(ort, skip=frozenset({amd.PLUGIN_EP}))
+                else:
+                    self._select(ort)
                 if self.session is not None:
                     self._finish_loading(ort)
             finally:
                 if quiet:
                     ort.set_default_logger_severity(3)
+            if self._is_plugin(self.execution_provider) and self.gpu_compile.get("state") == "idle":
+                self.gpu_compile.update({"state": "done", "provider": "migraphx", "mode": "foreground"})
+            if background:
+                threading.Thread(target=self._compile_gpu_in_background, args=(ort,),
+                                 name="migraphx-compile", daemon=True).start()
             if self.session is None:
                 self.backend = "unavailable"
                 self.last_error = self.last_error or "every execution provider failed to initialise"
@@ -1052,6 +1175,151 @@ class PersonDetector:
                     "No detections will be produced and no analytics will be fabricated."
                 )
             return self.status()
+
+    def _prepare_plugin_eps(self, ort) -> None:
+        """Register ONNX Runtime plugin EPs (AMD MIGraphX) that apply to this machine."""
+        if not amd.applicable() or amd.PLUGIN_EP in self.available_providers:
+            return  # nothing to register, or a build with MIGraphX compiled in (named path works)
+        if "migraphx" in self._disabled_labels():
+            self.migraphx = {"ok": False, "reason": "disabled by INFERENCE_DISABLED_PROVIDERS"}
+            return
+        self.migraphx = amd.prepare(ort, settings.MIGRAPHX_CACHE_DIR, bool(settings.MIGRAPHX_FP16))
+        if self.migraphx.get("ok"):
+            self.available_providers.append(amd.PLUGIN_EP)
+        else:
+            self.provider_attempts.append({"provider": "migraphx", "ok": False,
+                                           "reason": f"plugin EP not usable: {self.migraphx.get('reason')}"})
+
+    def _migraphx_cold_models(self) -> list[str]:
+        """Models the MIGraphX start would load that are not compiled in the cache yet."""
+        if not self._is_plugin(amd.PLUGIN_EP) or self._first_selectable_ep() != amd.PLUGIN_EP:
+            return []
+        needed: list[tuple[Path, str]] = []
+        pose = next((p for p in self._model_candidates(True) if p.exists()), None)
+        if pose is not None:
+            needed.append((pose, "default"))
+        if (settings.POSE_REFINER or "auto").strip().lower() not in ("off", "0", "false", "no", ""):
+            ref = Path(settings.POSE_REFINER_MODEL)
+            ref = ref if ref.is_absolute() else Path(settings.MODELS_DIR) / ref
+            if ref.exists():
+                needed.append((ref, f"b{max(1, int(settings.POSE_REFINER_BUDGET_PERSONS))}"))
+        if settings.OBJECT_DETECT_EVERY_N > 0 and self._object_model_path and self._object_model_path.exists():
+            needed.append((self._object_model_path, "default"))
+        cache = amd.cache_dir()
+        return [p.name for p, tag in needed if not amd.is_warm(cache, p, tag)]
+
+    # Everything a loaded detector consists of; swapped as one unit by _adopt().
+    _ADOPT_FIELDS = (
+        "session", "spec", "model_path", "provider", "execution_provider", "backend", "device_name",
+        "last_error", "warmup_ms", "warmup_steady_ms", "load_ms", "selection",
+        "object_session", "object_spec", "object_class_ids", "object_provider", "object_error",
+        "object_warmup_ms", "refiner_session", "refiner_path", "refiner_input_hw", "refiner_enabled",
+        "refiner_reason", "refiner_batch_ms",
+    )
+
+    def _compile_in_child(self) -> tuple[bool, Optional[str]]:
+        """Compile the GPU programs in a child process (scripts/prewarm_inference.py).
+
+        Creating an ONNX Runtime session holds the GIL for the whole MIGraphX
+        compile (measured: the process stood still for 142 s), so compiling
+        in a thread of this process would freeze every camera worker and the
+        API. The child runs the same selection code with the same settings and
+        fills the same cache; this process then loads from it in about a
+        second per model.
+        """
+        import subprocess
+        import sys
+
+        script = Path(__file__).resolve().parents[2] / "scripts" / "prewarm_inference.py"
+        env = dict(os.environ, MIGRAPHX_CACHE_DIR=str(settings.MIGRAPHX_CACHE_DIR),
+                   POSE_MODEL_PATH=str(self._forced_model or ""),
+                   OBJECT_MODEL_PATH=str(self._object_model_path or ""))
+        summary: dict = {}
+        tail: deque[str] = deque(maxlen=5)
+        try:
+            proc = subprocess.Popen([sys.executable, str(script), "--require-gpu"], env=env, text=True,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        except OSError as e:
+            return False, f"could not start the compiler process: {e}"
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            if line.startswith("@@PREWARM@@"):
+                try:
+                    import json
+
+                    summary = json.loads(line[len("@@PREWARM@@"):])
+                except ValueError:
+                    pass
+                continue
+            if "/AMDMIGraphX/" in line:  # MIGraphX's own compiler chatter
+                continue
+            tail.append(line.strip())
+            m = re.search(r"Compiling (\S+) for the AMD GPU", line)
+            if m:
+                self.gpu_compile["current"] = m.group(1)
+                logger.info(f"AMD GPU: compiling {m.group(1)} (background process {proc.pid})")
+        rc = proc.wait()
+        self.gpu_compile.pop("current", None)
+        self.gpu_compile["compiled"] = list((summary.get("gpu_compile") or {}).get("compiled") or [])
+        if rc == 0 and summary.get("provider") == "migraphx":
+            return True, None
+        why = "; ".join(f"{a.get('provider')}: {a.get('reason')}" for a in summary.get("provider_attempts") or []
+                        if not a.get("ok")) or " | ".join(tail) or f"exit {rc}"
+        return False, _short(f"compiler process ended on {summary.get('provider') or 'nothing'} (exit {rc}): {why}")
+
+    def _compile_gpu_in_background(self, ort) -> None:
+        """Compile out of process, then load on MIGraphX in a separate detector and swap it in."""
+        started = time.perf_counter()
+        ok, error = self._compile_in_child()
+        if not ok:
+            seconds = round(time.perf_counter() - started, 1)
+            self.gpu_compile.update({"state": "failed", "finished_at": time.time(), "seconds": seconds,
+                                     "error": error})
+            with self._stats_lock:
+                self.provider_attempts.append({"provider": "migraphx", "ok": False,
+                                               "reason": f"background compile failed: {error}"})
+            logger.error(f"AMD GPU background compile failed after {seconds} s, staying on {self.provider}: {error}")
+            return
+        staging = PersonDetector(model_path=self._forced_model, object_model_path=self._object_model_path or "")
+        staging._initialised = True
+        staging.hailo, staging.migraphx = self.hailo, self.migraphx
+        staging.available_providers = list(self.available_providers)
+        staging.ort_version, staging.dlls_preloaded = self.ort_version, self.dlls_preloaded
+        staging.gpu_compile = self.gpu_compile  # shared: status() shows the model being compiled
+        error = None
+        try:
+            staging._select(ort, only={amd.PLUGIN_EP})
+            if staging.session is not None:
+                staging._finish_loading(ort)
+        except Exception as e:  # noqa: BLE001 - keep serving on the CPU
+            error = _short(f"{type(e).__name__}: {e}")
+        seconds = round(time.perf_counter() - started, 1)
+        if error is None and staging.available and staging.execution_provider == amd.PLUGIN_EP:
+            self._adopt(staging)
+            self.gpu_compile.update({"state": "done", "finished_at": time.time(), "seconds": seconds})
+            logger.info(f"AMD GPU ready after {seconds} s of background compiling: person model "
+                        f"{self.model_path.name} now runs on {self.device_name} (was on the CPU)")
+            return
+        error = error or staging.last_error or "; ".join(
+            a.get("reason", "") for a in staging.provider_attempts if not a.get("ok")) or "unknown"
+        self.gpu_compile.update({"state": "failed", "finished_at": time.time(), "seconds": seconds,
+                                 "error": error})
+        with self._stats_lock:
+            self.provider_attempts.append({"provider": "migraphx", "ok": False,
+                                           "reason": f"background compile failed: {error}"})
+        logger.error(f"AMD GPU background compile failed after {seconds} s, staying on {self.provider}: {error}")
+
+    def _adopt(self, other: "PersonDetector") -> None:
+        """Swap in another detector's loaded sessions atomically w.r.t. inference."""
+        with self._run_lock, self._obj_run_lock, self._refiner_lock, self._stats_lock:
+            for name in self._ADOPT_FIELDS:
+                setattr(self, name, getattr(other, name))
+            self.provider_attempts = self.provider_attempts + [
+                {**a, "note": "background compile"} for a in other.provider_attempts]
+            self.cpu_threads = {**self.cpu_threads, **other.cpu_threads}
+            # Timings measured on the previous provider no longer describe this one.
+            for q in (self._infer_ms, self._total_ms, self._obj_infer_ms, self._refine_ms):
+                q.clear()
 
     def _finish_loading(self, ort) -> None:
         """Warm up the chosen session, then load the optional object model."""
@@ -1063,6 +1331,7 @@ class PersonDetector:
             self.session, self.spec = None, None
             self.backend = "unavailable"
             return
+        self._mark_compiled(self.model_path)
         try:
             self._load_refiner(ort)
         except Exception as e:
@@ -1176,11 +1445,15 @@ class PersonDetector:
             return []
         conf = settings.PERSON_CONF_THRESHOLD if conf_threshold is None else conf_threshold
         iou = settings.PERSON_NMS_IOU if iou_threshold is None else iou_threshold
-        spec = self.spec
+        # One consistent (session, spec) pair: a background GPU compile may swap both.
+        with self._run_lock:
+            session, spec = self.session, self.spec
+        if session is None or spec is None:
+            return []
 
         started = time.perf_counter()
         try:
-            raw, scale, px, py, infer_ms = self._run(self.session, spec, self._run_lock, frame)
+            raw, scale, px, py, infer_ms = self._run(session, spec, self._run_lock, frame)
             h, w = frame.shape[:2]
             boxes, scores, _cls, kpts = decode_output(raw, spec, conf, class_ids={PERSON_CLASS_ID})
             if len(boxes) == 0:
@@ -1222,13 +1495,14 @@ class PersonDetector:
         """Retail-context objects (configured COCO classes). Empty when unavailable."""
         if not self._initialised:
             self.initialise()
-        if self.object_session is None or frame is None or frame.size == 0 or not self.object_class_ids:
+        with self._obj_run_lock:
+            session, spec, class_ids = self.object_session, self.object_spec, self.object_class_ids
+        if session is None or spec is None or frame is None or frame.size == 0 or not class_ids:
             return []
-        spec = self.object_spec
         conf = settings.OBJECT_CONF_THRESHOLD if conf_threshold is None else conf_threshold
         try:
-            raw, scale, px, py, infer_ms = self._run(self.object_session, spec, self._obj_run_lock, frame)
-            boxes, scores, cls, _ = decode_output(raw, spec, conf, class_ids=self.object_class_ids)
+            raw, scale, px, py, infer_ms = self._run(session, spec, self._obj_run_lock, frame)
+            boxes, scores, cls, _ = decode_output(raw, spec, conf, class_ids=class_ids)
             if len(boxes) == 0:
                 out: list[ObjectDetection] = []
             else:
@@ -1305,6 +1579,13 @@ class PersonDetector:
             "onnxruntime_version": self.ort_version,
             "dlls_preloaded": self.dlls_preloaded,
             "hailo": dict(self.hailo),
+            # AMD MIGraphX: whether the plugin EP loaded, and whether the GPU
+            # is still being compiled for (``provider`` above is the truth of
+            # what runs *now*; while compiling that is the CPU).
+            "gpu_compile": dict(self.gpu_compile),
+            "migraphx": {k: self.migraphx.get(k) for k in ("ok", "reason", "gfx", "devices", "cache_dir",
+                                                          "cache_warning")} if self.migraphx else None,
+            "cpu_threads": dict(self.cpu_threads),
             "keypoint_refiner": {
                 "enabled": self.refiner_enabled,
                 "model": self.refiner_path.name if self.refiner_path else None,

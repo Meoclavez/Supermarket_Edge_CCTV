@@ -42,6 +42,8 @@ RestartSec=5
 # Recording and model loading are memory-hungry; fail loudly rather than
 # letting the OOM killer take an unrelated process. The CUDA/cuDNN libraries
 # alone map well over 1 GB, and their page cache is charged to this cgroup.
+# On AMD a first-time MIGraphX compile peaks at about 3 GB on top of the
+# running service (it runs one model at a time); see docs/DEPLOYMENT.md.
 MemoryHigh=6G
 MemoryMax=8G
 
@@ -52,8 +54,22 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/opt/edge-cctv/storage
+# The database holds password hashes and camera credentials: nothing it writes is world-readable.
+UMask=0027
 # CUDA writes its JIT/kernel cache under $HOME by default, which is read-only here.
 Environment=CUDA_CACHE_PATH=/opt/edge-cctv/storage/.nv-cache
+# AMD (ROCm / MIGraphX plugin EP): every compiler and program cache must live on
+# the writable storage volume too. MIGRAPHX_CACHE_DIR is the base of the
+# compiled-model cache; the backend derives ORT_MIGRAPHX_CACHE_DIR from it (one
+# subdirectory per GPU target, library versions and precision) and it must be
+# the same directory scripts/bootstrap.py pre-compiled into, which is why it is
+# not set to a per-precision path here. comgr and MIOpen write their kernel
+# caches under $XDG_CACHE_HOME (i.e. $HOME/.cache) unless told otherwise.
+Environment=MIGRAPHX_CACHE_DIR=/opt/edge-cctv/storage/migraphx_cache
+Environment=AMD_COMGR_CACHE_DIR=/opt/edge-cctv/storage/migraphx_cache/comgr
+Environment=MIOPEN_USER_DB_PATH=/opt/edge-cctv/storage/migraphx_cache/miopen
+Environment=MIOPEN_CUSTOM_CACHE_DIR=/opt/edge-cctv/storage/migraphx_cache/miopen
+Environment=XDG_CACHE_HOME=/opt/edge-cctv/storage/.cache
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true

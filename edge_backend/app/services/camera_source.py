@@ -662,6 +662,47 @@ async def resolve_source_url(src: CameraSource, timeout_s: float = DEFAULT_TIMEO
         raise SourceError("ONVIF device did not answer in time.") from None
 
 
+async def rtsp_handshake_verdict(open_target: str, timeout_s: float, *,
+                                 strict: bool = False) -> Optional[dict[str, Any]]:
+    """A failed-test result when the RTSP handshake alone is conclusive, else None.
+
+    OpenCV reports every failure as "could not open"; the handshake tells a
+    rejected login from an unreachable address from a device that does not
+    speak RTSP at all. Non-RTSP URLs and inconclusive answers return None so
+    the real frame grab decides. With ``strict`` (adoption, where no frame is
+    grabbed) a connection that never answers RTSP is a failure too, and a
+    passing handshake returns ``{"success": True, "outcome": ...}``.
+    """
+    from app.services import rtsp_probe
+
+    if not (open_target or "").lower().startswith("rtsp://"):
+        return None
+    res = await asyncio.to_thread(rtsp_probe.probe_rtsp, open_target, max(1.0, timeout_s))
+    if strict and res.outcome == rtsp_probe.TIMEOUT:
+        return {"success": False, "error_code": "NO_RTSP_REPLY",
+                "error": f"The device accepted the connection but never answered RTSP ({res.detail})."}
+    where = redact_url(rtsp_probe._split(open_target)[0])
+    if res.outcome == rtsp_probe.AUTH_FAILED:
+        return {"success": False, "error_code": "AUTH_FAILED",
+                "error": "Wrong username or password: the camera rejected the login. "
+                         "Check them before retrying; cameras lock the account after a few failed logins."}
+    if res.outcome == rtsp_probe.AUTH_REQUIRED:
+        return {"success": False, "error_code": "AUTH_REQUIRED",
+                "error": "The camera requires a username and password. Enter them and test again."}
+    if res.outcome == rtsp_probe.UNREACHABLE:
+        return {"success": False, "error_code": "UNREACHABLE",
+                "error": f"Nothing answered at {where}: {res.detail}. Check the address, port and network."}
+    if res.outcome == rtsp_probe.NOT_RTSP:
+        return {"success": False, "error_code": "NOT_RTSP",
+                "error": f"A device answered, but it does not speak RTSP on that port ({res.detail})."}
+    if res.outcome == rtsp_probe.NOT_FOUND:
+        return {"success": False, "error_code": "NOT_FOUND",
+                "error": "The camera answered, but has no stream at that path. Check the URL path/channel."}
+    if strict:
+        return {"success": True, "outcome": res.outcome, "status_code": res.status_code}
+    return None
+
+
 async def test_connection(src: CameraSource, timeout_s: float = DEFAULT_TIMEOUT_S) -> dict[str, Any]:
     """Open the source for real and return one frame's facts plus a preview."""
     timeout_s = max(1.0, min(float(timeout_s or DEFAULT_TIMEOUT_S), MAX_TIMEOUT_S))
@@ -691,6 +732,18 @@ async def test_connection(src: CameraSource, timeout_s: float = DEFAULT_TIMEOUT_
         per_try = remaining if len(targets) == 1 else min(4.0, remaining)
         open_target = inject_credentials(url, src.username, src.password) \
             if src.source_type in ("rtsp", "http", "onvif") else url
+        handshake = await rtsp_handshake_verdict(open_target, min(per_try, 5.0))
+        if handshake is not None:
+            result = handshake
+            if handshake["error_code"] in ("AUTH_FAILED", "AUTH_REQUIRED"):
+                # Every further candidate would be one more failed login, and
+                # cameras lock the account after a handful.
+                break
+            continue
+        remaining = timeout_s - (time.monotonic() - started)
+        if remaining <= 0.5:
+            break
+        per_try = remaining if len(targets) == 1 else min(4.0, remaining)
         try:
             result = await probe_stream_isolated(
                 open_target, "rtsp" if src.source_type == "onvif" else src.source_type, per_try,

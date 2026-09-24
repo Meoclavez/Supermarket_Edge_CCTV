@@ -153,6 +153,10 @@ class HardwareProfile(BaseModel):
     # (e.g. CUDAExecutionProvider) and the model file it runs.
     inference_execution_provider: Optional[str] = None
     inference_model: Optional[str] = None
+    # AMD MIGraphX: "compiling" while the models are compiled for the GPU in
+    # the background (inference_provider then says what runs meanwhile),
+    # "done", "failed", or "idle" when no GPU compile applies.
+    inference_gpu_compile: Optional[str] = None
     device_name: str
     total_ram_gb: Optional[float] = None
     available_ram_gb: Optional[float] = None

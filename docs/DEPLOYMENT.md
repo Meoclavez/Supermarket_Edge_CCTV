@@ -12,22 +12,86 @@ no analytics leave the premises.
 | OS | Linux with systemd | Ubuntu 22.04/24.04 LTS or Arch |
 | CPU | 4 cores | Detection runs here if no GPU is fitted |
 | RAM | 8 GB | 16 GB for more than ~12 cameras |
-| GPU | Optional | Any CUDA GPU is detected and used automatically |
+| GPU | Optional | NVIDIA (CUDA) or AMD (ROCm, via MIGraphX) is detected and used automatically |
 | Disk | 256 GB SSD + NAS | Recordings go to `STORAGE_DIR` |
 | Network | Wired gigabit | Cameras and the server on the same VLAN |
 
 **No hardware is selected at build time.** On startup the system probes for a
-Hailo NPU, then TensorRT, CUDA, ROCm, OpenVINO, and finally CPU, and uses the
-first that loads. Moving the install to a machine with a GPU needs no code
-change — only `pip install onnxruntime-gpu`.
+Hailo NPU, then TensorRT, CUDA, MIGraphX (AMD), OpenVINO, and finally CPU, and
+uses the first that really takes the model. Moving the install to a machine
+with a GPU needs no code change — re-run `deploy/install.sh` (or
+`run.sh --check-only`), which installs the matching onnxruntime build.
 
 ---
 
 ## 2. Install
 
+### Recommended: one command
+
 ```bash
-sudo useradd --system --create-home --home-dir /opt/edge-cctv edgecctv
+git clone https://github.com/Meoclavez/Supermarket_Edge_CCTV.git
+sudo bash Supermarket_Edge_CCTV/deploy/install.sh
+```
+
+`deploy/install.sh` does sections 2 to 4 below: creates the `edgecctv`
+service user, clones the code into `/opt/edge-cctv` (or pulls if it is
+already there), runs `edge_backend/scripts/bootstrap.py --check-only` as that
+user (venv, dependencies, the onnxruntime build for this machine's hardware,
+models), gates on the service's own preflight, creates `.env` from
+`.env.example` if there is none, installs and restarts the systemd unit, opens
+the firewall for Tailscale if `ufw` is active, waits for the health endpoint
+and prints the first-run setup code (section 4). It is safe to re-run; that is
+also how you update an installed box.
+
+Optional environment, passed through `sudo`:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `EDGE_REPO_URL` | the GitHub repo above | where to clone from |
+| `EDGE_ORT` | `auto` | onnxruntime build (`bootstrap.py --ort`) |
+| `EDGE_MODELS_FROM` | unset | a directory of `*.onnx` files to copy into `edge_backend/models/` instead of exporting them on this machine |
+
+```bash
+sudo EDGE_MODELS_FROM=/home/me/models bash Supermarket_Edge_CCTV/deploy/install.sh
+```
+
+### AMD GPUs (ROCm / MIGraphX)
+
+On a machine with an AMD GPU, `/dev/kfd` and no NVIDIA GPU, `bootstrap.py`
+picks the `migraphx` flavour by itself: onnxruntime 1.29 plus AMD's ROCm,
+MIGraphX and MIGraphX plugin-EP wheels from AMD's package indexes (about
+3.8 GB), with the device libraries for the GPU target read from the kernel at
+run time (for example `gfx1200` for an RX 9060 XT). No system ROCm install and
+no `sudo` are needed beyond the amdgpu kernel driver and the `render`/`video`
+groups, which `install.sh` grants. It then **pre-compiles** the models the
+service will load into `storage/migraphx_cache/` (1-3 min per model the first
+time, about 7 min for the default set; a few seconds on later runs), so the
+service starts on the GPU straight away.
+
+If the cache is cold at service start (a new model, a changed camera count
+that selects another model), the service starts on the CPU, compiles in a
+separate process, and switches to the GPU when done; `/api/v1/health` shows
+`inference_gpu_compile: "compiling"` and `inference_provider: "cpu"` until
+then. `MIGRAPHX_COMPILE_MODE=foreground` blocks start-up instead. A compile
+peaks at about 2.5 GB, within the unit's `MemoryMax=8G`.
+
+Measured on an RX 9060 XT (fp32, same detections as the CPU within 0.002):
+YOLO26m-pose 960x544 14 ms/frame vs about 315 ms on 6 CPU threads.
+`--ort cpu` (or `EDGE_ORT=cpu`) keeps the small CPU-only build.
+
+When inference does run on the CPU, ONNX Runtime is limited to
+`INFERENCE_CPU_THREADS` threads in total (default: half the CPUs) so it cannot
+starve video decoding and recording.
+
+### By hand
+
+```bash
+# No --create-home: the skeleton dotfiles it copies would make /opt/edge-cctv
+# non-empty, and git clone refuses to clone into a non-empty directory.
+sudo useradd --system --no-create-home --home-dir /opt/edge-cctv \
+     --shell /usr/sbin/nologin edgecctv
 sudo usermod -aG video,render edgecctv          # camera + GPU access
+sudo install -d -o edgecctv -g edgecctv /opt/edge-cctv
 
 sudo -u edgecctv git clone <repo> /opt/edge-cctv
 cd /opt/edge-cctv
@@ -57,6 +121,22 @@ Three values **must** change before the system goes on a store network:
 The service logs `INSECURE CONFIGURATION:` at startup for each of these that is
 still at its default. Check the journal after first start.
 
+**Where things live, and who can read them.** Code and `.env` are under
+`/opt/edge-cctv`; the database (`storage/cctv_core.db`), secrets, recordings,
+backups and the setup code are under `/opt/edge-cctv/storage` (or
+`STORAGE_DIR`). The database holds operator password hashes and camera
+credentials, so none of this is world-readable: the unit runs with
+`UMask=0027`, and `deploy/install.sh` sets `storage/` to `0750`, removes
+"other" access below it and sets `.env` to `0640`. Read these files as root
+or with `sudo -u edgecctv`; a backup job that copies `storage/backups/` must
+run as one of those too.
+
+```bash
+sudo chown edgecctv:edgecctv /opt/edge-cctv/edge_backend/.env
+sudo chmod 0640 /opt/edge-cctv/edge_backend/.env
+sudo chmod 0750 /opt/edge-cctv/storage && sudo chmod -R o-rwx /opt/edge-cctv/storage
+```
+
 ## 4. Run
 
 ```bash
@@ -68,6 +148,62 @@ journalctl -u edge-cctv -f
 
 Open `http://<server-ip>:8000/dashboard`. The first visit asks you to create
 the operator account; after that it asks for sign-in.
+
+### The first-run setup code
+
+Creating the operator account needs a one-time **setup code**, so that
+whoever reaches the dashboard first on the store LAN cannot make themselves
+the owner. While no operator account exists, the service issues one at every
+start. Find it in any of:
+
+- the end of the `deploy/install.sh` output;
+- the journal: `journalctl -u edge-cctv | grep -A1 'FIRST-RUN SETUP CODE'`;
+- the file `/opt/edge-cctv/storage/setup_code.txt` (mode `0600`, owned by
+  `edgecctv`): `sudo cat /opt/edge-cctv/storage/setup_code.txt`.
+
+The code is single use and the file is removed once the account exists.
+Setup is refused through the public remote-access hostname (section 7a), so
+do this on the store network or over Tailscale.
+
+To get a code again:
+
+- **no account created yet:** `sudo systemctl restart edge-cctv` logs the
+  current code again (and issues a new one if the file was deleted);
+- **locked out of an existing account:** reset to first-run. This deletes
+  every operator account (after backing up the database), signs out all
+  sessions and phones, and prints a new code; cameras, zones and analytics
+  are kept:
+
+  ```bash
+  sudo -u edgecctv -H bash -c 'cd /opt/edge-cctv/edge_backend && \
+      ../.venv/bin/python scripts/manage_operator.py reset-setup'
+  ```
+
+  `manage_operator.py reset-password --username <name>` changes one password
+  instead, and `list` shows the accounts.
+
+### Viewing the dashboard over Tailscale
+
+With Tailscale on the server, open `http://<tailscale-ip>:8000/dashboard` from
+any device on the same tailnet (`tailscale ip -4` on the server prints the
+address). Two firewall rules make this work without exposing the dashboard
+anywhere else; `deploy/install.sh` adds them when `ufw` is active:
+
+```bash
+sudo ufw allow in on tailscale0 to any port 8000 proto tcp   # dashboard, tailnet only
+sudo ufw allow 41641/udp                                      # Tailscale direct connections
+```
+
+Without UDP 41641 open, peers still connect but through a Tailscale DERP relay,
+which is slower and adds latency to live video. `tailscale ping <peer>` shows
+which you have: `via DERP(...)` is relayed, `via <ip>:<port>` is direct.
+
+Tailscale peers count as local, not remote: the app treats a request as
+remote only when it names the public remote-access hostname or arrives
+through the local tunnel proxy with Cloudflare headers
+(`is_remote_request` in `app/services/public_exposure.py`). A request to the
+`100.x` address therefore gets the same access as one from the store LAN,
+including first-run setup, so only add devices you trust to the tailnet.
 
 A fresh install is empty: no zones, no rooms or walls, no cameras and no
 metrics. The dashboard shows a data-state banner and the **Blueprint** tab

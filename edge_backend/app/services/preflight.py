@@ -98,6 +98,24 @@ logger = logging.getLogger("edge.preflight")
 
 _last_result: Optional[dict] = None
 
+AMD_HELPER_PATH = Path(__file__).resolve().parent / "amd_migraphx.py"
+
+
+def _amd():
+    """app.services.amd_migraphx, or the same file loaded by path when this
+    module runs standalone (bootstrap, before the app is importable)."""
+    try:
+        from app.services import amd_migraphx  # noqa: PLC0415
+        return amd_migraphx
+    except ImportError:
+        mod = sys.modules.get("edge_amd_migraphx_standalone")
+        if mod is None:
+            spec = importlib.util.spec_from_file_location("edge_amd_migraphx_standalone", AMD_HELPER_PATH)
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = mod
+            spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod
+
 
 # --------------------------------------------------------------------------- #
 # Fix commands
@@ -120,6 +138,10 @@ def _fix_ort_gpu(python: str, remove: list[str]) -> str:
         f"'onnxruntime-gpu[cuda,cudnn]>=1.30'"
     )
     return f"{_fix_run_sh()}   (or: {' && '.join(parts)})"
+
+
+def _fix_ort_migraphx() -> str:
+    return f"{sys.executable} {EDGE_BACKEND_DIR / 'scripts' / 'bootstrap.py'} --check-only --ort migraphx"
 
 
 def _fix_models() -> str:
@@ -235,6 +257,8 @@ def detect_accelerators() -> dict[str, Any]:
         "amd": {
             "present": any(v == _PCI_AMD for v, _ in display),
             "rocm_kfd": Path("/dev/kfd").exists(),
+            # Read from the KFD topology at run time (e.g. gfx1200), primary first.
+            "gfx_targets": _amd().gfx_targets() if Path("/dev/kfd").exists() else [],
         },
         "intel": {"present": any(v == _PCI_INTEL for v, _ in display)},
         "render_nodes": render_nodes,
@@ -252,8 +276,11 @@ def preferred_gpu_providers(accel: dict[str, Any]) -> list[str]:
     wanted: list[str] = []
     if accel.get("nvidia", {}).get("driver_loaded"):
         wanted.append("CUDAExecutionProvider")
-    if accel.get("amd", {}).get("rocm_kfd"):
-        wanted += ["MIGraphXExecutionProvider", "ROCMExecutionProvider"]
+    if accel.get("amd", {}).get("rocm_kfd") and not accel.get("nvidia", {}).get("driver_loaded"):
+        # Only without a working NVIDIA GPU, which the engine prefers (and an
+        # AMD APU's iGPU also exposes /dev/kfd). ROCMExecutionProvider was
+        # removed from ONNX Runtime in 1.23.
+        wanted.append("MIGraphXExecutionProvider")
     if accel.get("intel", {}).get("present") and accel.get("render_nodes"):
         wanted.append("OpenVINOExecutionProvider")
     if sys.platform == "win32":
@@ -401,11 +428,18 @@ def _ort_runtime() -> dict[str, Any]:
         import onnxruntime as ort  # noqa: PLC0415
     except Exception as exc:  # noqa: BLE001
         return {"importable": False, "error": f"{type(exc).__name__}: {exc}", "providers": []}
+    try:
+        plugin = _amd().plugin_status()
+    except Exception as exc:  # noqa: BLE001
+        plugin = {"installed": False, "error": f"{type(exc).__name__}: {exc}"}
     return {
         "importable": True,
         "version": getattr(ort, "__version__", None),
         "providers": list(ort.get_available_providers()),
         "has_preload_dlls": hasattr(ort, "preload_dlls"),
+        # Plugin EPs are not in get_available_providers() until registered;
+        # this is what is installed, not proof that it runs (see the probe).
+        "plugin_eps": {"migraphx": plugin},
     }
 
 
@@ -418,9 +452,18 @@ def evaluate_ort(dists: dict[str, str], runtime: dict[str, Any], accel: dict[str
     providers = list(runtime.get("providers") or [])
     gpu_providers = [p for p in providers if p in GPU_PROVIDERS]
     nvidia = accel.get("nvidia", {})
+    mgx = (runtime.get("plugin_eps") or {}).get("migraphx") or {}
+    mgx_usable = bool(mgx.get("installed")) and not mgx.get("missing_symlinks") \
+        and mgx.get("onnxruntime_compatible") is not False
+    if mgx_usable and "MIGraphXExecutionProvider" not in gpu_providers:
+        gpu_providers.append("MIGraphXExecutionProvider")
+    flavour = ",".join(ORT_DISTRIBUTIONS[d] for d in dists) or None
+    if mgx.get("installed"):
+        flavour = f"{flavour or '?'}+migraphx-plugin"
     info: dict[str, Any] = {
         "distributions": dists,
-        "flavour": ",".join(ORT_DISTRIBUTIONS[d] for d in dists) or None,
+        "flavour": flavour,
+        "plugin_eps": {"migraphx": mgx} if mgx else {},
         "version": runtime.get("version"),
         "available_providers": providers,
         "gpu_providers_available": gpu_providers,
@@ -461,12 +504,21 @@ def evaluate_ort(dists: dict[str, str], runtime: dict[str, Any], accel: dict[str
             f"onnxruntime ({installed}) offers only {providers}: inference is CPU-only",
             _fix_ort_gpu(python, [d for d in dists if d != "onnxruntime-gpu"]),
         ))
-    elif (accel.get("amd", {}).get("rocm_kfd") and not gpu_providers):
+    elif accel.get("amd", {}).get("rocm_kfd") and not nvidia.get("present") and not mgx_usable \
+            and "MIGraphXExecutionProvider" not in providers:
+        info["gpu_mismatch"] = True
+        gfx = ", ".join(accel.get("amd", {}).get("gfx_targets") or []) or "target unknown"
+        if not mgx.get("installed"):
+            why = "the MIGraphX plugin EP (onnxruntime-ep-migraphx) is not installed"
+        elif mgx.get("missing_symlinks"):
+            why = (f"MIGraphX is installed but {', '.join(mgx['missing_symlinks'])} is missing in "
+                   f"{mgx.get('libs_dir')} (wheels cannot ship symlinks)")
+        else:
+            why = (f"the MIGraphX plugin needs {mgx.get('onnxruntime_required')} but onnxruntime "
+                   f"{(mgx.get('versions') or {}).get('onnxruntime')} is installed")
         warnings.append(_issue(
-            "gpu",
-            "AMD ROCm device (/dev/kfd) present but onnxruntime has no ROCm/MIGraphX provider: CPU-only",
-            "install AMD's onnxruntime-migraphx build into this venv "
-            "(https://onnxruntime.ai/docs/execution-providers/MIGraphX-ExecutionProvider.html)",
+            "gpu", f"AMD GPU with ROCm (/dev/kfd, {gfx}) present but {why}: inference is CPU-only",
+            _fix_ort_migraphx(),
         ))
 
     hailo = accel.get("hailo", {})
@@ -582,12 +634,29 @@ try:
             res["preload_error"] = str(exc)
     avail = ort.get_available_providers()
     res["available"] = avail
-    wanted = [p for p in json.loads(sys.argv[2]) if p in avail]
+    requested = json.loads(sys.argv[2])
+    wanted = [p for p in requested if p in avail]
     wanted = list(dict.fromkeys(wanted + ["CPUExecutionProvider"]))
     so = ort.SessionOptions()
     so.log_severity_level = 3
+    plugin = False
+    if "MIGraphXExecutionProvider" in requested and "MIGraphXExecutionProvider" not in avail and len(sys.argv) > 3:
+        # Plugin EP: requested by name it is ignored silently, so register it
+        # and attach it through its device objects (app/services/amd_migraphx.py).
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("edge_amd_migraphx_probe", sys.argv[3])
+        amd = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(amd)
+        info = amd.prepare(ort, sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] else None)
+        res["migraphx"] = {k: info.get(k) for k in ("ok", "reason", "gfx", "devices", "cache_dir")}
+        plugin = bool(info.get("ok")) and amd.add_to_session_options(so)
+        if plugin:
+            wanted = ["MIGraphXExecutionProvider", "CPUExecutionProvider"]
     t0 = time.perf_counter()
-    sess = ort.InferenceSession(sys.argv[1], so, providers=wanted)
+    if plugin:
+        sess = ort.InferenceSession(sys.argv[1], so)
+    else:
+        sess = ort.InferenceSession(sys.argv[1], so, providers=wanted)
     res["session_ms"] = round((time.perf_counter() - t0) * 1000, 1)
     res["requested"] = wanted
     res["providers"] = sess.get_providers()
@@ -608,11 +677,20 @@ print("@@PROBE@@" + json.dumps(res))
 """
 
 
-def probe_session(python: str, model_path: Path, providers: list[str], timeout: float = 180) -> dict:
-    """Create a real ORT session with ``python`` (any venv) and report ``get_providers()[0]``."""
+def probe_session(python: str, model_path: Path, providers: list[str], timeout: Optional[float] = None,
+                  migraphx_cache: Optional[str] = None) -> dict:
+    """Create a real ORT session with ``python`` (any venv) and report ``get_providers()[0]``.
+
+    With MIGraphX requested the model may have to be compiled for the GPU
+    first (1-3 min unless the cache under ``migraphx_cache`` has it), so the
+    default timeout is longer then.
+    """
+    if timeout is None:
+        timeout = 420 if "MIGraphXExecutionProvider" in providers else 180
     try:
         res = subprocess.run(
-            [python, "-c", _PROBE_SCRIPT, str(model_path), json.dumps(providers)],
+            [python, "-c", _PROBE_SCRIPT, str(model_path), json.dumps(providers), str(AMD_HELPER_PATH),
+             str(migraphx_cache or "")],
             capture_output=True, text=True, timeout=timeout,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -620,6 +698,9 @@ def probe_session(python: str, model_path: Path, providers: list[str], timeout: 
     for line in res.stdout.splitlines():
         if line.startswith("@@PROBE@@"):
             data = json.loads(line[len("@@PROBE@@"):])
+            if "falling back" in res.stdout.lower():
+                # ORT's own notice: the requested EP failed and a later one took the session.
+                data["fell_back"] = True
             # ORT prints why a provider failed (e.g. a missing libcudnn) on stderr.
             tail = [ln for ln in res.stderr.strip().splitlines() if ln.strip()][-3:]
             if tail:
@@ -643,9 +724,10 @@ def evaluate_probe(probe: dict, accel: dict[str, Any]) -> list:
     wanted = preferred_gpu_providers(accel)
     if not wanted:
         return []
-    if probe.get("ok") and probe.get("provider") in GPU_PROVIDERS:
+    if probe.get("ok") and probe.get("provider") in GPU_PROVIDERS and not probe.get("fell_back"):
         return []
-    reason = probe.get("error") or "; ".join(probe.get("stderr_tail") or []) or "provider fell back to CPU"
+    reason = (probe.get("error") or (probe.get("migraphx") or {}).get("reason")
+              or "; ".join(probe.get("stderr_tail") or []) or "provider fell back to CPU")
     fix = _fix_run_sh()
     if in_container():
         fix = nvidia_driver_install_command() if "CUDAExecutionProvider" in wanted else "rebuild the image"
@@ -665,6 +747,15 @@ def evaluate_live_status(status: dict, accel: dict[str, Any]) -> list:
     provider = status.get("execution_provider") or status.get("provider") or ""
     if status.get("backend") == "hailo" or provider in GPU_PROVIDERS or "hailo" in str(provider).lower():
         return []
+    compile_state = (status.get("gpu_compile") or {}).get("state")
+    if compile_state == "compiling":
+        models = ", ".join((status.get("gpu_compile") or {}).get("models") or []) or "the models"
+        return [_issue(
+            "gpu",
+            f"the GPU is still being compiled for ({models}; first start with a cold cache, 1-3 min per "
+            f"model); the person detector runs on {provider or 'nothing'} until it is done",
+            None,
+        )]
     return [_issue(
         "gpu",
         f"GPU present ({', '.join(wanted)}) but the person detector runs on "
@@ -711,7 +802,12 @@ def run_preflight(session_probe: bool = False) -> dict:
     if session_probe:
         model = probe_model_path()
         if model is not None:
-            probe = probe_session(sys.executable, model, preferred_gpu_providers(accel))
+            try:
+                from app.config import settings  # noqa: PLC0415
+                mgx_cache = str(settings.MIGRAPHX_CACHE_DIR)
+            except Exception:  # noqa: BLE001 - standalone: the helper's default
+                mgx_cache = None
+            probe = probe_session(sys.executable, model, preferred_gpu_providers(accel), migraphx_cache=mgx_cache)
             probe["model"] = model.name
             checks["session_probe"] = probe
             if not ort_info.get("gpu_mismatch"):
@@ -764,6 +860,8 @@ def summary(result: Optional[dict]) -> Optional[dict]:
         "warnings": [i["message"] for i in result.get("warnings", [])],
         "onnxruntime": ort_info.get("distributions"),
         "available_providers": ort_info.get("available_providers"),
+        "flavour": ort_info.get("flavour"),
+        "gpu_providers": ort_info.get("gpu_providers_available"),
         "gpu_mismatch": ort_info.get("gpu_mismatch"),
         "models_verified": sum(1 for m in models if m.get("status") in ("ok", "local_export")),
         "models_total": len(models),
@@ -791,10 +889,16 @@ def format_report(result: dict) -> str:
     s = summary(result) or {}
     checks = result.get("checks", {})
     nv = checks.get("accelerators", {}).get("nvidia", {})
+    amd = checks.get("accelerators", {}).get("amd", {})
+    mgx = (checks.get("onnxruntime", {}).get("plugin_eps") or {}).get("migraphx") or {}
     lines = [
         f"preflight: {'OK' if result.get('ok') else 'FAILED'} ({result.get('duration_ms')} ms, {result.get('python')})",
         f"  onnxruntime : {s.get('onnxruntime')}  providers={s.get('available_providers')}",
         f"  nvidia      : {', '.join(nv.get('gpus') or []) or ('present, driver not loaded' if nv.get('present') else 'none')}",
+        "  amd         : " + (("ROCm " + (", ".join(amd.get("gfx_targets") or []) or "target unknown")
+                                + ("; MIGraphX plugin " + (mgx.get("versions") or {}).get("onnxruntime-ep-migraphx", "?")
+                                   if mgx.get("installed") else "; no MIGraphX plugin"))
+                               if amd.get("rocm_kfd") else ("present, no /dev/kfd" if amd.get("present") else "none")),
         f"  models      : {s.get('models_verified')}/{s.get('models_total')} verified",
     ]
     probe = checks.get("session_probe")

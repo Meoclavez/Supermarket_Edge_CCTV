@@ -80,7 +80,11 @@ def test_health_endpoint(client):
     response = client.get("/api/v1/health")
     assert response.status_code == 200
     data = response.json()
-    assert data["status"] == "healthy"
+    # The test camera points at a closed port, so it may already be FAILED;
+    # the overall status must follow the observed entries either way.
+    failing = [k for k, v in data["services"].items() if v["status"] in ("DEGRADED", "FAILED")]
+    assert data["status"] == ("degraded" if failing else "healthy")
+    assert data["services"]["database"]["status"] == "HEALTHY"
     assert "storage" in data
     assert "telemetry" in data
 

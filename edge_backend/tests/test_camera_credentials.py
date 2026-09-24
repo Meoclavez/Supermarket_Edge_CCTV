@@ -154,7 +154,14 @@ def test_dahua_adopt_stores_credentials_out_of_the_url(client):
     assert not any(camera_source.has_credentials(cid) for cid in ids)   # removed with the camera
 
 
-def test_scan_adopt_stores_credentials_out_of_the_url(client):
+def test_scan_adopt_stores_credentials_out_of_the_url(client, monkeypatch):
+    # Nothing listens on port 9; adoption now checks the RTSP handshake, so
+    # stand in a camera that accepts the login (covered for real in
+    # tests/test_camera_auth_and_discovery.py).
+    from app.services import rtsp_probe
+
+    monkeypatch.setattr(rtsp_probe, "probe_rtsp",
+                        lambda url, timeout_s=5.0, method="DESCRIBE": rtsp_probe.RtspProbeResult(rtsp_probe.OK, 200))
     dev_id = "rtsp:127.0.0.1:9"
     with sqlite3.connect(settings.DATABASE_PATH) as db:
         db.execute("DELETE FROM discovered_devices WHERE id=?", (dev_id,))

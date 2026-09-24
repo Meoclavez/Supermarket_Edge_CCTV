@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from app.config import settings
 from app.models.schemas import WebRtcOffer, WebRtcAnswer
 from app.services.auth_service import auth_service, general_rate_limiter
+from app.services.resilience import ServiceHealthTracker
 from app.services.turn_service import turn_service
 from app.routes import ResilientRoute
 
@@ -57,16 +58,26 @@ async def exchange_webrtc_offer(offer: WebRtcOffer):
                 timeout=5.0
             )
 
+            # A real negotiation is the only go2rtc check the health endpoint
+            # reports; until one happens go2rtc stays NOT_CHECKED there.
             if go2rtc_res.status_code != 200:
+                ServiceHealthTracker.report_status(
+                    "go2rtc", ServiceHealthTracker.DEGRADED, f"WebRTC negotiation HTTP {go2rtc_res.status_code}"
+                )
                 raise HTTPException(
                     status_code=go2rtc_res.status_code,
                     detail=f"go2rtc WebRTC negotiation error: {go2rtc_res.text}"
                 )
 
+            ServiceHealthTracker.report_status("go2rtc", ServiceHealthTracker.HEALTHY)
             answer_sdp = go2rtc_res.text
             return WebRtcAnswer(camera_id=stream_name, sdp=answer_sdp, type="answer")
 
         except httpx.RequestError as exc:
+            ServiceHealthTracker.report_status(
+                "go2rtc", ServiceHealthTracker.FAILED,
+                f"not reachable at {GO2RTC_API_URL} ({exc.__class__.__name__})",
+            )
             # No gateway means no negotiation. This used to hand back a
             # hand-written SDP "answer" that no peer could ever connect to.
             raise HTTPException(
