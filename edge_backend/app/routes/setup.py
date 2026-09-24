@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
 from pydantic import BaseModel
@@ -6,8 +8,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Dict, Any, Optional, List
 
 from app.database import get_db
-from app.services.setup_service import setup_service
-from app.services.auth_service import auth_service
+from app.services.setup_service import (
+    active_admin_exists,
+    ensure_setup_code_if_needed,
+    setup_code_manager,
+    setup_service,
+)
+from app.services.auth_service import auth_service, intrusion_detector
 from app.config import settings
 
 router = APIRouter()
@@ -15,12 +22,23 @@ router = APIRouter()
 class AdminCreateReq(BaseModel):
     username: str
     password: str
-    display_name: str
-    role: str = "owner"
+    display_name: str = ""
+    role: str = "owner"          # ignored: the first account is always the owner
+    setup_code: Optional[str] = None  # may also be sent as the X-Setup-Code header
+
+class PhoneInfo(BaseModel):
+    """A phone signing in: registers it as a paired device (see /api/v1/pairing)."""
+    name: str = ""
+    platform: str
+    app_instance_id: str
+    push_provider: Optional[str] = None
+    push_token: Optional[str] = None
+
 
 class LoginReq(BaseModel):
     username: str
     password: str
+    phone: Optional[PhoneInfo] = None
 
 class RefreshReq(BaseModel):
     refresh_token: str
@@ -29,10 +47,6 @@ class ChangePasswordReq(BaseModel):
     old_password: str
     new_password: str
     
-class PairReq(BaseModel):
-    pairing_code: Optional[str] = None
-    code: Optional[str] = None
-
 class TestCameraReq(BaseModel):
     url: str
 
@@ -40,14 +54,86 @@ class ScanNetworkReq(BaseModel):
     # None = let discovery derive the subnet from the host's own interfaces.
     subnet: Optional[str] = None
 
+_setup_log = logging.getLogger("edge.setup")
+# Serialises the "no admin yet -> create one" check-and-insert, so two
+# requests carrying the right code cannot both become owner.
+_first_admin_lock = asyncio.Lock()
+
+
+def _client_ip(request: Request) -> str:
+    from app.services.public_exposure import client_ip
+
+    return client_ip(request)
+
+
+def _raise_if_locked_out(ip: str) -> None:
+    now = time.time()
+    recent = [t for t in intrusion_detector.failed_attempts.get(ip, []) if now - t < intrusion_detector.window]
+    if len(recent) >= intrusion_detector.max_attempts:
+        raise HTTPException(
+            status_code=429,
+            detail=(f"Too many failed attempts from this address. Wait "
+                    f"{int(intrusion_detector.window // 60)} minutes and try again."),
+            headers={"Retry-After": str(int(intrusion_detector.window))},
+        )
+
+
+def _require_setup_code(request: Request, supplied: Optional[str]) -> None:
+    """Refuse a first-run request that does not carry the one-time setup code."""
+    ip = _client_ip(request)
+    _raise_if_locked_out(ip)
+    code = supplied or request.headers.get("X-Setup-Code")
+    # Make sure a code exists to be checked against (e.g. the file was deleted
+    # while the server was running); generating one logs it.
+    setup_code_manager.ensure("requested by the first-run form")
+    if not code or not setup_code_manager.verify(code):
+        intrusion_detector.record_failure(ip)
+        _raise_if_locked_out(ip)
+        raise HTTPException(
+            status_code=403,
+            detail=("Setup code is missing or incorrect. It is printed in the server log "
+                    "at startup and stored in storage/setup_code.txt on the server."),
+        )
+    intrusion_detector.record_success(ip, "setup_code")
+
+
+def _has_valid_credential(request: Request) -> bool:
+    import secrets as _secrets
+
+    api_key = request.headers.get("X-Edge-API-Key")
+    if api_key and _secrets.compare_digest(api_key, settings.INTERNAL_SERVICE_KEY):
+        return True
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.split(" ", 1)[1] if auth_header.startswith("Bearer ") else None
+    token = token or request.cookies.get("edge_cctv_token")
+    payload = auth_service.verify_session_token(token) if token else None
+    if payload:
+        request.state.user = payload
+        return True
+    return False
+
+
 async def verify_setup_or_admin_access(
     request: Request,
     session: AsyncSession = Depends(get_db),
 ):
-    is_completed = await setup_service.is_setup_completed(session)
-    if not is_completed:
+    """Gate for the setup wizard's step endpoints.
+
+    - Once an operator account exists: a real session (or the internal API
+      key) is required, exactly like any other API route.
+    - Before that: a session is accepted if one is presented, otherwise the
+      one-time setup code must be sent in the ``X-Setup-Code`` header.
+      Previously every step was open to any caller until setup was marked
+      complete, which exposed camera scanning and network config on the LAN.
+    """
+    if settings.AUTH_DISABLED:
         return True
-    return auth_service.verify_api_access(request)
+    if await active_admin_exists(session):
+        return auth_service.verify_api_access(request)
+    if _has_valid_credential(request):
+        return True
+    _require_setup_code(request, None)
+    return True
 
 @router.get("/setup/status")
 async def get_setup_status(session: AsyncSession = Depends(get_db)):
@@ -69,40 +155,59 @@ async def get_auth_status(request: Request, session: AsyncSession = Depends(get_
     setup and an ordinary sign-in. It is deliberately unauthenticated, and
     reveals only whether *an* account exists -- never who, or how many.
     """
-    from sqlalchemy import func, select
-
-    from app.models.db_models import AdminUserModel
-
-    count = await session.scalar(select(func.count(AdminUserModel.id)))
+    admin_exists = await active_admin_exists(session)
+    if not admin_exists:
+        # Normally issued at startup; this covers a code file removed at
+        # runtime. An existing code is not re-logged on every poll.
+        try:
+            await ensure_setup_code_if_needed(session, "requested by the dashboard", announce_existing=False)
+        except Exception as exc:
+            _setup_log.error("Could not issue a setup code: %s", exc)
 
     authenticated = False
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
-        payload = auth_service.verify_token(auth_header.split(" ", 1)[1])
-        authenticated = bool(payload and payload.get("type") == "user_session")
+        authenticated = auth_service.verify_session_token(auth_header.split(" ", 1)[1]) is not None
 
     return {
-        "admin_exists": bool(count),
+        "admin_exists": admin_exists,
         "authenticated": authenticated,
-        "debug_bypass_active": settings.DEBUG,
+        "setup_code_required": not admin_exists,
+        # Name kept for the dashboard/mobile clients; it now reflects the
+        # explicit AUTH_DISABLED switch, never DEBUG.
+        "debug_bypass_active": settings.AUTH_DISABLED,
     }
 
 
 @router.post("/setup/admin")
-async def create_first_admin(req: AdminCreateReq, session: AsyncSession = Depends(get_db)):
-    # Check if we can create admin
-    # Only allow if setup is not completed or if no admins exist
-    from app.models.db_models import AdminUserModel
-    from sqlalchemy import select
-    
-    stmt = select(AdminUserModel)
-    result = await session.execute(stmt)
-    if result.scalars().first():
-        raise HTTPException(status_code=403, detail="Admin user already exists")
-        
-    user = await auth_service.create_admin_user(session, req.username, req.password, req.display_name, req.role)
-    await setup_service.set_setup_step(session, 2)
-    return {"status": "success", "user_id": user.id}
+async def create_first_admin(req: AdminCreateReq, request: Request, session: AsyncSession = Depends(get_db)):
+    """Create the first operator account. Requires the one-time setup code.
+
+    Returns a session so the operator is signed in immediately.
+    """
+    async with _first_admin_lock:
+        if await active_admin_exists(session):
+            raise HTTPException(
+                status_code=403,
+                detail=("An operator account already exists. Sign in instead, or reset access "
+                        "on the server with scripts/manage_operator.py."),
+            )
+        _require_setup_code(request, req.setup_code)
+
+        # The first account is always the owner, whatever the client sent.
+        user = await auth_service.create_admin_user(
+            session, req.username, req.password, req.display_name, "owner"
+        )
+        setup_code_manager.invalidate()
+        from datetime import datetime, timezone
+        user.last_login = datetime.now(timezone.utc).replace(tzinfo=None)
+        await session.commit()
+        await setup_service.set_setup_step(session, 2)
+
+    _setup_log.warning("First operator account created: username=%s from %s. Setup code invalidated.",
+                       user.username, _client_ip(request))
+    tokens = auth_service.issue_session_tokens(user.id, user.role)
+    return {"status": "success", "user_id": user.id, "token_type": "bearer", **tokens}
 
 @router.post("/setup/hardware-scan")
 async def hardware_scan(
@@ -159,16 +264,26 @@ async def add_cameras(
     from app.services.pipeline_supervisor import pipeline_supervisor
     import uuid
 
+    from app.services import camera_source
+
     added = []
     for c in req.cameras:
         cam_id = f"cam_{uuid.uuid4().hex[:8]}"
         webrtc_url = f"{settings.EDGE_BASE_URL}/api/v1/webrtc/offer?camera_id={cam_id}"
+        # A user:pw@ typed into the URL is stored encrypted, not in rtsp_url.
+        try:
+            clean_url = camera_source.detach_credentials(cam_id, c.rtsp_url)
+        except Exception as exc:  # noqa: BLE001
+            for done in added:
+                camera_source.delete_credentials(done)
+            logging.getLogger("Setup").error("Could not store credentials for camera %s: %s", cam_id, type(exc).__name__)
+            raise HTTPException(status_code=500, detail="Could not store the camera credentials securely.") from None
 
         db_cam = CameraModel(
             id=cam_id,
             name=c.name,
             location=c.location,
-            rtsp_url=c.rtsp_url,
+            rtsp_url=clean_url,
             webrtc_url=webrtc_url,
             status="OFFLINE",
             fps=0,
@@ -182,7 +297,12 @@ async def add_cameras(
         session.add(db_cam)
         added.append(cam_id)
 
-    await session.commit()
+    try:
+        await session.commit()
+    except Exception:
+        for done in added:
+            camera_source.delete_credentials(done)
+        raise
     await setup_service.set_setup_step(session, 3)
     try:
         await pipeline_supervisor.reconcile_cameras()
@@ -219,16 +339,34 @@ async def complete_setup(
 
 # Auth routes
 @router.post("/auth/login")
-async def login(req: LoginReq, session: AsyncSession = Depends(get_db)):
+async def login(req: LoginReq, request: Request, session: AsyncSession = Depends(get_db)):
+    ip = _client_ip(request)
+    _raise_if_locked_out(ip)
     tokens = await auth_service.authenticate_user(session, req.username, req.password)
     if not tokens:
+        intrusion_detector.record_failure(ip)
+        _raise_if_locked_out(ip)
         raise HTTPException(status_code=401, detail="Invalid username or password")
-    return tokens
+    intrusion_detector.record_success(ip, "password")
+    if req.phone is None:
+        return tokens
+    # A phone signing in with the operator's password ends up exactly where a
+    # QR/code pairing does: a paired device and tokens bound to it.
+    from app.services import pairing_service
+
+    payload = auth_service.verify_token(tokens["access_token"]) or {}
+    try:
+        result = await pairing_service.register_phone(
+            session, req.phone.model_dump(), payload.get("sub"), "password", payload.get("role") or "owner")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return {**result, "urls": pairing_service.reachable_urls(request)}
 
 @router.post("/auth/refresh")
 async def refresh(req: RefreshReq):
-    new_access = auth_service.refresh_access_token(req.refresh_token)
-    return {"access_token": new_access}
+    # Sync DB checks for phone tokens (revocation, stored refresh hash).
+    new_access = await asyncio.to_thread(auth_service.refresh_access_token, req.refresh_token)
+    return {"access_token": new_access, "token_type": "bearer"}
 
 @router.post("/auth/change-password")
 async def change_password(
@@ -243,21 +381,17 @@ async def change_password(
     await auth_service.change_password(session, request.state.user["sub"], req.old_password, req.new_password)
     return {"status": "success"}
 
-@router.get("/auth/pairing-code")
-async def get_pairing_code(
-    has_access: bool = Depends(auth_service.verify_api_access)
-):
-    code = auth_service.generate_app_pairing_code()
-    return {"pairing_code": code, "expires_in": 300}
+# The old in-memory 6-digit pairing code (/auth/pairing-code, /auth/pair) issued
+# owner tokens bound to no device and impossible to revoke. It is replaced by
+# /api/v1/pairing (sessions, claim, paired devices).
+_PAIR_GONE = "Replaced by POST /api/v1/pairing/sessions (dashboard) and POST /api/v1/pairing/claim (phone)."
 
-@router.post("/auth/pair")
-async def pair_app(req: PairReq, session: AsyncSession = Depends(get_db)):
-    code_val = req.pairing_code or req.code
-    if not code_val:
-        raise HTTPException(status_code=400, detail="Missing pairing code")
 
-    tokens = await auth_service.verify_app_pairing_code(session, code_val.strip())
-    if not tokens:
-        raise HTTPException(status_code=401, detail="Invalid or expired 6-digit pairing code")
+@router.get("/auth/pairing-code", status_code=410)
+async def get_pairing_code_gone():
+    raise HTTPException(status_code=410, detail=_PAIR_GONE)
 
-    return tokens
+
+@router.post("/auth/pair", status_code=410)
+async def pair_app_gone():
+    raise HTTPException(status_code=410, detail=_PAIR_GONE)

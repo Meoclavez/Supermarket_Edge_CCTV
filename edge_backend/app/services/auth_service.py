@@ -11,6 +11,14 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, APIKeyQue
 
 from app.config import settings
 
+
+def _client_ip(request) -> str:
+    """Real client address: trusts proxy headers only from a loopback peer
+    (cloudflared / local Caddy). See services/public_exposure.py."""
+    from app.services.public_exposure import client_ip
+
+    return client_ip(request)
+
 # --- password hashing -------------------------------------------------------
 #
 # Calls the bcrypt library directly rather than going through passlib.
@@ -42,6 +50,121 @@ def verify_password(password: str, stored_hash: str) -> bool:
         )
     except (ValueError, TypeError):
         return False
+
+
+# --- account policy -----------------------------------------------------------
+#
+# One definition shared by the API (first-run, change-password) and the local
+# recovery CLI (scripts/manage_operator.py), so neither can set a password the
+# other would refuse.
+
+PASSWORD_MIN_LENGTH = 8
+PASSWORD_MAX_LENGTH = 256
+USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$")
+
+
+def password_policy_error(password: str, username: Optional[str] = None) -> Optional[str]:
+    """Return why ``password`` is unacceptable, or None when it is fine."""
+    if not isinstance(password, str) or len(password) < PASSWORD_MIN_LENGTH:
+        return f"Password must be at least {PASSWORD_MIN_LENGTH} characters."
+    if len(password) > PASSWORD_MAX_LENGTH:
+        return f"Password must be at most {PASSWORD_MAX_LENGTH} characters."
+    if not password.strip():
+        return "Password cannot be only spaces."
+    if username and password.strip().lower() == username.strip().lower():
+        return "Password must not be the same as the username."
+    return None
+
+
+def username_policy_error(username: str) -> Optional[str]:
+    if not isinstance(username, str) or not USERNAME_RE.match(username):
+        return ("Username must be 3-64 characters: letters, digits, dot, dash or "
+                "underscore, starting with a letter or digit.")
+    return None
+
+
+# --- session epoch ------------------------------------------------------------
+#
+# JWT sessions are stateless, so deleting or re-keying an operator account
+# would otherwise leave every already-issued token valid until it expires.
+# Each session token carries the "auth epoch" current when it was issued
+# (claim "ep"); the recovery CLI bumps the epoch stored in system_setup, and a
+# token from an older epoch is refused. The CLI runs out of process, hence the
+# value is read from the database file rather than held in memory; it is
+# cached briefly so the per-request cost is negligible.
+
+AUTH_EPOCH_KEY = "auth_epoch"
+_EPOCH_TTL_S = 2.0
+_epoch_cache: Dict[str, Any] = {"value": 0, "at": 0.0}
+
+
+def current_auth_epoch(force: bool = False) -> int:
+    now = time.monotonic()
+    if not force and now - _epoch_cache["at"] < _EPOCH_TTL_S:
+        return _epoch_cache["value"]
+    value = 0
+    try:
+        import sqlite3
+
+        db_path = Path(settings.DATABASE_PATH)
+        if db_path.exists():
+            conn = sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True, timeout=2.0)
+            try:
+                row = conn.execute(
+                    "SELECT value FROM system_setup WHERE key = ?", (AUTH_EPOCH_KEY,)
+                ).fetchone()
+            finally:
+                conn.close()
+            if row and str(row[0]).isdigit():
+                value = int(row[0])
+    except Exception:
+        # Table not created yet, or the file is momentarily locked: keep the
+        # last known value rather than failing every request.
+        value = _epoch_cache["value"]
+    _epoch_cache.update(value=value, at=now)
+    return value
+
+
+def token_epoch_is_current(payload: Dict[str, Any]) -> bool:
+    try:
+        return int(payload.get("ep", 0)) == current_auth_epoch()
+    except (TypeError, ValueError):
+        return False
+
+
+async def bump_auth_epoch(session) -> int:
+    """Invalidate every issued session and refresh token. Returns the new epoch."""
+    from sqlalchemy import select
+    from app.models.db_models import SystemSetupModel
+
+    rec = (await session.execute(
+        select(SystemSetupModel).where(SystemSetupModel.key == AUTH_EPOCH_KEY)
+    )).scalar_one_or_none()
+    new = (int(rec.value) + 1) if rec and str(rec.value).isdigit() else 1
+    if rec:
+        rec.value = str(new)
+    else:
+        session.add(SystemSetupModel(key=AUTH_EPOCH_KEY, value=str(new)))
+    await session.commit()
+    _epoch_cache.update(value=new, at=time.monotonic())
+    return new
+
+def phone_claims_ok(payload: Optional[Dict[str, Any]]) -> bool:
+    """Tokens issued to a paired phone carry ``dev`` and ``pd`` claims.
+
+    Refuse one minted for another edge device (``dev`` mismatch) or for a
+    phone that has been revoked; note the phone as seen. Tokens without these
+    claims (dashboard sessions) pass unchanged. See pairing_service.
+    """
+    if not payload or ("dev" not in payload and "pd" not in payload):
+        return bool(payload)
+    try:
+        from app.services.pairing_service import phone_claims_valid
+        return phone_claims_valid(payload)
+    except Exception as exc:  # fail closed for phone tokens
+        logging.getLogger("AuthService").error(f"phone token check failed: {exc}")
+        return False
+
 
 """Authentication, token validation, and path traversal protection service."""
 
@@ -82,7 +205,7 @@ class RateLimiter:
             self.last_cleanup = now
 
     def __call__(self, request: Request):
-        ip = request.client.host if request.client else "unknown"
+        ip = _client_ip(request)
         now = time.time()
         self.cleanup(now)
         
@@ -178,6 +301,29 @@ class AuthService:
         except jwt.PyJWTError:
             return None
 
+    def verify_session_token(self, token: str) -> Optional[Dict[str, Any]]:
+        """A signed, unexpired operator session from the current auth epoch."""
+        payload = self.verify_token(token) if token else None
+        if not payload or payload.get("type") != "user_session":
+            return None
+        if not token_epoch_is_current(payload):
+            return None
+        if not phone_claims_ok(payload):
+            return None
+        return payload
+
+    def issue_session_tokens(self, user_id: str, role: str) -> Dict[str, str]:
+        now = int(time.time())
+        ep = current_auth_epoch(force=True)
+        access_payload = {"sub": user_id, "type": "user_session", "role": role,
+                          "ep": ep, "iat": now, "exp": now + 24 * 3600}
+        refresh_payload = {"sub": user_id, "type": "refresh", "role": role,
+                           "ep": ep, "iat": now, "exp": now + 30 * 24 * 3600}
+        return {
+            "access_token": jwt.encode(access_payload, self.secret, algorithm=self.algorithm),
+            "refresh_token": jwt.encode(refresh_payload, self.secret, algorithm=self.algorithm),
+        }
+
     def verify_stream_access(
         self,
         camera_id: str,
@@ -186,13 +332,13 @@ class AuthService:
         bearer: Optional[HTTPAuthorizationCredentials] = Depends(security_bearer)
     ) -> Dict[str, Any]:
         """FastAPI dependency: Enforces valid token for WebRTC / live video feeds."""
-        ip = request.client.host if request.client else "unknown"
+        ip = _client_ip(request)
         intrusion_detector.check_lockout(ip)
         
         raw_token = token or (bearer.credentials if bearer else None)
         if not raw_token:
             # Allow open access if development mode, but log warning
-            if settings.DEBUG:
+            if settings.AUTH_DISABLED:
                 return {"sub": "dev_client", "camera_id": camera_id}
             intrusion_detector.record_failure(ip)
             raise HTTPException(
@@ -201,7 +347,8 @@ class AuthService:
             )
 
         payload = self.verify_token(raw_token)
-        if not payload or payload.get("type") != "stream_access" or payload.get("camera_id") != camera_id:
+        if (not payload or payload.get("type") != "stream_access" or payload.get("camera_id") != camera_id
+                or not phone_claims_ok(payload)):
             intrusion_detector.record_failure(ip)
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -217,12 +364,12 @@ class AuthService:
         bearer: Optional[HTTPAuthorizationCredentials] = Depends(security_bearer)
     ) -> Dict[str, Any]:
         """FastAPI dependency: Enforces valid token for event clips and snapshots."""
-        ip = request.client.host if request.client else "unknown"
+        ip = _client_ip(request)
         intrusion_detector.check_lockout(ip)
         
         raw_token = token or (bearer.credentials if bearer else None)
         if not raw_token:
-            if settings.DEBUG:
+            if settings.AUTH_DISABLED:
                 return {"sub": "dev_client", "type": "clip_access"}
             intrusion_detector.record_failure(ip)
             raise HTTPException(
@@ -231,7 +378,7 @@ class AuthService:
             )
 
         payload = self.verify_token(raw_token)
-        if not payload or payload.get("type") != "clip_access":
+        if not payload or payload.get("type") != "clip_access" or not phone_claims_ok(payload):
             intrusion_detector.record_failure(ip)
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -246,11 +393,11 @@ class AuthService:
         api_key: Optional[str] = Security(api_key_header)
     ) -> bool:
         """FastAPI dependency: Verifies internal vision engine API key on /events/trigger."""
-        ip = request.client.host if request.client else "unknown"
+        ip = _client_ip(request)
         intrusion_detector.check_lockout(ip)
         
         if not api_key:
-            if settings.DEBUG:
+            if settings.AUTH_DISABLED:
                 return True
             intrusion_detector.record_failure(ip)
             raise HTTPException(
@@ -287,7 +434,7 @@ class AuthService:
         seconds of opening the page. Brute force requires presenting a
         credential, so only an *invalid* one counts against the limit.
         """
-        ip = request.client.host if request.client else "unknown"
+        ip = _client_ip(request)
 
         # Safely resolve API key from dependency or request header
         resolved_api_key = api_key if isinstance(api_key, str) else request.headers.get("X-Edge-API-Key")
@@ -308,12 +455,16 @@ class AuthService:
 
         if raw_bearer:
             payload = self.verify_token(raw_bearer)
+            if payload and payload.get("type") == "user_session" and not token_epoch_is_current(payload):
+                payload = None  # issued before an operator reset
+            if payload and not phone_claims_ok(payload):
+                payload = None  # phone token for another device, or a revoked phone
             if payload and payload.get("type") in ("user_session", "stream_access", "clip_access"):
                 intrusion_detector.record_success(ip, "bearer_token")
                 request.state.user = payload
                 return True
 
-        if settings.DEBUG:
+        if settings.AUTH_DISABLED:
             return True
 
         presented_credential = bool(resolved_api_key or raw_bearer)
@@ -350,126 +501,79 @@ class AuthService:
         if not target_resolved.is_file():
             raise HTTPException(status_code=404, detail="Requested file not found")
 
-    _pairing_codes: Dict[str, Dict[str, Any]] = {}
-
-    def generate_app_pairing_code(self, user_id: str = "primary_admin") -> str:
-        code = "".join([str(secrets.randbelow(10)) for _ in range(6)])
-        self._pairing_codes[code] = {
-            "user_id": user_id,
-            "expires_at": time.time() + 300,  # 5 minutes
-        }
-        return code
-
-    async def verify_app_pairing_code(self, session, code: str) -> Optional[Dict[str, str]]:
-        now = time.time()
-        # Clean expired codes
-        expired = [c for c, data in self._pairing_codes.items() if data["expires_at"] < now]
-        for c in expired:
-            del self._pairing_codes[c]
-
-        if code not in self._pairing_codes:
-            return None
-
-        entry = self._pairing_codes.pop(code)
-        user_id = entry["user_id"]
-
-        # Generate tokens
-        access_payload = {
-            "sub": user_id,
-            "type": "user_session",
-            "role": "owner",
-            "iat": int(time.time()),
-            "exp": int(time.time()) + (24 * 3600),
-        }
-        refresh_payload = {
-            "sub": user_id,
-            "type": "refresh",
-            "iat": int(time.time()),
-            "exp": int(time.time()) + (30 * 24 * 3600),
-        }
-
-        return {
-            "access_token": jwt.encode(access_payload, self.secret, algorithm=self.algorithm),
-            "refresh_token": jwt.encode(refresh_payload, self.secret, algorithm=self.algorithm),
-        }
-
     async def create_admin_user(self, session, username, password, display_name, role="owner"):
         from app.models.db_models import AdminUserModel
         import uuid
         from sqlalchemy import select
+
+        username = (username or "").strip()
+        problem = username_policy_error(username) or password_policy_error(password, username)
+        if problem:
+            raise HTTPException(status_code=400, detail=problem)
 
         stmt = select(AdminUserModel).where(AdminUserModel.username == username)
         result = await session.execute(stmt)
         if result.scalar_one_or_none():
             raise HTTPException(status_code=400, detail="User already exists")
 
-        hashed = hash_password(password)
         new_user = AdminUserModel(
             id=str(uuid.uuid4()),
             username=username,
-            password_hash=hashed,
-            display_name=display_name,
-            role=role
+            password_hash=hash_password(password),
+            display_name=(display_name or username).strip()[:128],
+            role=role,
+            is_active=True,
         )
         session.add(new_user)
         await session.commit()
         return new_user
 
     async def authenticate_user(self, session, username, password):
+        from datetime import datetime, timezone
         from app.models.db_models import AdminUserModel
         from sqlalchemy import select
 
-        stmt = select(AdminUserModel).where(AdminUserModel.username == username)
+        stmt = select(AdminUserModel).where(AdminUserModel.username == (username or "").strip())
         result = await session.execute(stmt)
         user = result.scalar_one_or_none()
 
         if not user or not verify_password(password, user.password_hash):
             return None
+        if user.is_active is False:
+            return None
 
-        # Create JWT access and refresh tokens
-        access_payload = {
-            "sub": user.id,
-            "type": "user_session",
-            "role": user.role,
-            "iat": int(time.time()),
-            "exp": int(time.time()) + (24 * 3600),
-        }
-        refresh_payload = {
-            "sub": user.id,
-            "type": "refresh",
-            "iat": int(time.time()),
-            "exp": int(time.time()) + (30 * 24 * 3600),
-        }
-        
-        return {
-            "access_token": jwt.encode(access_payload, self.secret, algorithm=self.algorithm),
-            "refresh_token": jwt.encode(refresh_payload, self.secret, algorithm=self.algorithm)
-        }
-        
+        user.last_login = datetime.now(timezone.utc).replace(tzinfo=None)
+        await session.commit()
+        return self.issue_session_tokens(user.id, user.role)
+
     def refresh_access_token(self, refresh_token: str):
         payload = self.verify_token(refresh_token)
-        if not payload or payload.get("type") != "refresh":
+        if not payload or payload.get("type") != "refresh" or not token_epoch_is_current(payload):
             raise HTTPException(status_code=401, detail="Invalid refresh token")
-            
-        access_payload = {
-            "sub": payload.get("sub"),
-            "type": "user_session",
-            "iat": int(time.time()),
-            "exp": int(time.time()) + (24 * 3600),
-        }
-        return jwt.encode(access_payload, self.secret, algorithm=self.algorithm)
+        if "dev" in payload or "pd" in payload:
+            # Paired phone: same device, not revoked, and the refresh token
+            # the phone currently holds (only its hash is stored).
+            from app.services import pairing_service
+            if (not phone_claims_ok(payload) or not payload.get("pd")
+                    or not pairing_service.refresh_token_matches(str(payload["pd"]), refresh_token)):
+                raise HTTPException(status_code=401, detail="Invalid refresh token")
+            return pairing_service.reissue_phone_access(payload)
+        return self.issue_session_tokens(payload.get("sub"), payload.get("role", "owner"))["access_token"]
 
     async def change_password(self, session, user_id, old_password, new_password):
         from app.models.db_models import AdminUserModel
         from sqlalchemy import select
-        
+
         stmt = select(AdminUserModel).where(AdminUserModel.id == user_id)
         result = await session.execute(stmt)
         user = result.scalar_one_or_none()
-        
+
         if not user or not verify_password(old_password, user.password_hash):
             raise HTTPException(status_code=403, detail="Invalid old password")
-            
+        problem = password_policy_error(new_password, user.username)
+        if problem:
+            raise HTTPException(status_code=400, detail=problem)
+
         user.password_hash = hash_password(new_password)
         await session.commit()
         return True

@@ -39,6 +39,7 @@ from app.models.db_models import (
 )
 from app.services.auth_service import auth_service
 from app.services.camera_discovery import camera_discovery_service
+from app.services import camera_source
 from app.services.camera_drivers import build_stream_urls, redact_url
 from app.services.live_analytics_engine import live_engine
 from app.services.pipeline_supervisor import pipeline_supervisor
@@ -615,16 +616,25 @@ async def adopt_device(
     if device is None:
         raise HTTPException(status_code=404, detail="device not found; run a scan first")
 
+    # Credentials never go into the stored URL: the profile is built without
+    # them and they are kept encrypted per camera (camera_source).
+    username, password = req.username, req.password
     if device.transport == "usb":
         stream_url = device.device_path or ""
+        username = password = None
     elif req.stream_url:
         stream_url = req.stream_url
     else:
+        if not password and device.host:
+            # Credentials the operator saved for this host (NVR panel) apply here.
+            from app.services.nvr_credential_service import nvr_credential_service
+
+            saved_u, saved_p = nvr_credential_service.get_auth_for_host(device.host)
+            if saved_p:
+                username, password = username or saved_u, saved_p
         profiles = build_stream_urls(
             device.driver,
             device.host or "",
-            username=req.username,
-            password=req.password,
             channel=req.channel,
             port=device.port,
         )
@@ -639,6 +649,11 @@ async def adopt_device(
     layout = await store_layout_service.get_active_layout(db)
     cam_id = f"cam_{uuid.uuid4().hex[:10]}"
     max_ch = await db.scalar(select(CameraModel.channel_number).order_by(CameraModel.channel_number.desc()).limit(1))
+    try:
+        stream_url = camera_source.detach_credentials(cam_id, stream_url, username, password)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Could not store credentials for camera {cam_id}: {type(exc).__name__}")
+        raise HTTPException(status_code=500, detail="Could not store the camera credentials securely.") from None
 
     cam = CameraModel(
         id=cam_id,
@@ -658,7 +673,11 @@ async def adopt_device(
     )
     db.add(cam)
     device.adopted_camera_id = cam_id
-    await db.commit()
+    try:
+        await db.commit()
+    except Exception:
+        camera_source.delete_credentials(cam_id)
+        raise
 
     # Bring the new camera online immediately rather than waiting for the
     # next reconcile tick, so the operator sees video straight away.
@@ -692,6 +711,7 @@ async def remove_camera(
 
     await db.delete(cam)
     await db.commit()
+    camera_source.delete_credentials(camera_id)
     live_engine.stop_camera(camera_id)
     return {"removed": camera_id}
 
@@ -748,7 +768,8 @@ async def _reset_store(db: AsyncSession) -> dict[str, int]:
         live_engine.stop_camera(cam_id)
         floor_projector.set_homography(cam_id, None)
     res = await db.execute(select(CameraModel.id))
-    for (cam_id,) in res.all():
+    removed_camera_ids = [cam_id for (cam_id,) in res.all()]
+    for cam_id in removed_camera_ids:
         floor_projector.set_homography(cam_id, None)
 
     removed: dict[str, int] = {}
@@ -764,6 +785,8 @@ async def _reset_store(db: AsyncSession) -> dict[str, int]:
     layout.height_m = settings.DEFAULT_STORE_HEIGHT_M
     layout.updated_at = datetime.utcnow()
     await db.commit()
+    for cam_id in removed_camera_ids:
+        camera_source.delete_credentials(cam_id)
 
     # In-memory per-camera feature flags belong to cameras that no longer exist.
     with feature_manager._lock:

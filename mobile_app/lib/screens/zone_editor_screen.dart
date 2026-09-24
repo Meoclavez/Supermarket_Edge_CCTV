@@ -14,9 +14,10 @@ class ZoneEditorScreen extends StatefulWidget {
 
 class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
   List<CameraFeed> _cameras = [];
-  String _selectedCameraId = 'cam_01';
+  String? _selectedCameraId;
   bool _isLoading = false;
-  ZoneType _selectedTool = ZoneType.intrusion;
+  String? _loadError;
+  ZoneType _selectedTool = ZoneType.restrictedArea;
   TripwireDirection _tripwireDir = TripwireDirection.bidirectional;
   MaskMode _maskMode = MaskMode.blackout;
 
@@ -33,7 +34,10 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
   }
 
   Future<void> _loadCamerasAndZones() async {
-    setState(() => _isLoading = true);
+    setState(() {
+      _isLoading = true;
+      _loadError = null;
+    });
     try {
       final cams = await ApiService().getCameras();
       setState(() {
@@ -44,73 +48,45 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
       });
       await _fetchZonesForSelectedCamera();
     } catch (e) {
-      _loadSampleZones();
+      if (mounted) setState(() => _loadError = 'Cannot reach the edge server: $e');
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
   }
 
   Future<void> _fetchZonesForSelectedCamera() async {
+    final cameraId = _selectedCameraId;
+    if (cameraId == null) return;
     try {
-      final zones = await ApiService().fetchCameraZones(_selectedCameraId);
+      final zones = await ApiService().fetchCameraZones(cameraId);
       if (mounted) {
         setState(() {
-          _savedZones.clear();
-          _savedZones.addAll(zones);
+          _loadError = null;
+          _savedZones
+            ..clear()
+            ..addAll(zones);
         });
       }
     } catch (e) {
-      // Fall back to sample if offline
-      if (_savedZones.isEmpty) {
-        _loadSampleZones();
+      // Show nothing rather than sample geometry: a zone list that is not
+      // from the server would mislead the operator.
+      if (mounted) {
+        setState(() {
+          _savedZones.clear();
+          _loadError = 'Could not load zones: $e';
+        });
       }
     }
   }
 
-  void _loadSampleZones() {
-    _savedZones.addAll([
-      ZoneConfig(
-        id: 'zone_1',
-        cameraId: 'cam_01',
-        name: 'Driveway Intrusion Polygon',
-        zoneType: ZoneType.intrusion,
-        polygonPoints: [
-          Point2D(x: 0.15, y: 0.35),
-          Point2D(x: 0.65, y: 0.30),
-          Point2D(x: 0.85, y: 0.75),
-          Point2D(x: 0.20, y: 0.80),
-        ],
-      ),
-      ZoneConfig(
-        id: 'zone_2',
-        cameraId: 'cam_01',
-        name: 'Front Gate Tripwire',
-        zoneType: ZoneType.tripwire,
-        lineStart: Point2D(x: 0.1, y: 0.2),
-        lineEnd: Point2D(x: 0.9, y: 0.2),
-        direction: TripwireDirection.aToB,
-      ),
-      ZoneConfig(
-        id: 'zone_3',
-        cameraId: 'cam_01',
-        name: 'Neighbor Window Mask',
-        zoneType: ZoneType.privacyMask,
-        polygonPoints: [
-          Point2D(x: 0.70, y: 0.05),
-          Point2D(x: 0.95, y: 0.05),
-          Point2D(x: 0.95, y: 0.25),
-          Point2D(x: 0.70, y: 0.25),
-        ],
-      ),
-    ]);
-  }
-
   void _startNewZone() {
+    final cameraId = _selectedCameraId;
+    if (cameraId == null) return;
     setState(() {
       _activeDraftZone = ZoneConfig(
         id: 'zone_${DateTime.now().millisecondsSinceEpoch}',
-        cameraId: _selectedCameraId,
-        name: 'New ${_selectedTool.name.toUpperCase()} Zone',
+        cameraId: cameraId,
+        name: 'New ${_selectedTool.label}',
         zoneType: _selectedTool,
         direction: _tripwireDir,
         maskMode: _maskMode,
@@ -164,33 +140,44 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
   }
 
   Future<void> _saveDraftZone() async {
-    if (_activeDraftZone == null) return;
+    final cameraId = _selectedCameraId;
+    if (_activeDraftZone == null || cameraId == null) return;
     final draft = _activeDraftZone!;
     setState(() {
-      _savedZones.add(draft);
       _activeDraftZone = null;
       _selectedVertexIndex = null;
     });
 
     try {
-      await ApiService().saveCameraZone(_selectedCameraId, draft);
+      final saved = await ApiService().saveCameraZone(cameraId, draft);
+      if (!mounted) return;
+      setState(() => _savedZones.add(saved));
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Zone saved and synchronized with HailoRT AI pipeline'), backgroundColor: AppTheme.liveGreen),
+        SnackBar(content: Text('Zone saved on the edge server'), backgroundColor: context.palette.live),
       );
     } catch (e) {
+      if (!mounted) return;
+      // Keep the draft open so the operator can retry instead of losing it.
+      setState(() => _activeDraftZone = draft);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Saved locally (Offline): $e'), backgroundColor: AppTheme.warningOrange),
+        SnackBar(content: Text('Zone not saved: $e'), backgroundColor: context.palette.alert),
       );
     }
   }
 
   Future<void> _deleteZone(int index) async {
+    final cameraId = _selectedCameraId;
+    if (cameraId == null) return;
     final zone = _savedZones[index];
-    setState(() => _savedZones.removeAt(index));
-
     try {
-      await ApiService().deleteCameraZone(_selectedCameraId, zone.id);
-    } catch (_) {}
+      await ApiService().deleteCameraZone(cameraId, zone.id);
+      if (mounted) setState(() => _savedZones.remove(zone));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Zone not deleted: $e'), backgroundColor: context.palette.alert),
+      );
+    }
   }
 
   Point2D _toNormalized(Offset local, Size size) {
@@ -207,19 +194,14 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: AppTheme.darkBackground,
+      backgroundColor: context.palette.background,
       appBar: AppBar(
-        title: const Text('Interactive Zone & Privacy Mask Canvas', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+        title: const Text('Camera Zones & Privacy Masks', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
         actions: [
           IconButton(
-            tooltip: 'Sync Zones with Backend',
-            icon: const Icon(Icons.cloud_upload_outlined, color: AppTheme.cyberBlue),
-            onPressed: () async {
-              await _fetchZonesForSelectedCamera();
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text('Synchronized ${_savedZones.length} zones with HailoRT edge service.')),
-              );
-            },
+            tooltip: 'Reload zones from the edge server',
+            icon: Icon(Icons.refresh_rounded, color: context.palette.accent),
+            onPressed: _loadCamerasAndZones,
           ),
         ],
       ),
@@ -227,9 +209,9 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
         children: [
           Container(
             width: 320,
-            decoration: const BoxDecoration(
-              color: AppTheme.cardSurface,
-              border: Border(right: BorderSide(color: AppTheme.borderHighlight, width: 1)),
+            decoration: BoxDecoration(
+              color: context.palette.card,
+              border: Border(right: BorderSide(color: context.palette.border, width: 1)),
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -237,20 +219,18 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
                 Padding(
                   padding: const EdgeInsets.all(12),
                   child: DropdownButtonFormField<String>(
-                    value: _selectedCameraId,
+                    isExpanded: true,
+                    initialValue: _selectedCameraId,
                     decoration: InputDecoration(
                       labelText: 'Select Camera Stream',
                       filled: true,
-                      fillColor: AppTheme.darkBackground,
+                      fillColor: context.palette.background,
                       border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
                       contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                     ),
-                    items: (_cameras.isNotEmpty
-                            ? _cameras.map((c) => DropdownMenuItem(value: c.id, child: Text('${c.name} (${c.location})', style: const TextStyle(fontSize: 12))))
-                            : [
-                                const DropdownMenuItem(value: 'cam_01', child: Text('Camera 01 - Main Gate', style: TextStyle(fontSize: 12))),
-                                const DropdownMenuItem(value: 'cam_02', child: Text('Camera 02 - Backyard Patio', style: TextStyle(fontSize: 12))),
-                              ])
+                    hint: const Text('No cameras available', style: TextStyle(fontSize: 12)),
+                    items: _cameras
+                        .map((c) => DropdownMenuItem(value: c.id, child: Text('${c.name} (${c.location})', style: const TextStyle(fontSize: 12))))
                         .toList(),
                     onChanged: (val) {
                       if (val != null) {
@@ -260,9 +240,15 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
                     },
                   ),
                 ),
-                const Padding(
+                if (_isLoading) const LinearProgressIndicator(minHeight: 2),
+                if (_loadError != null)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                    child: Text(_loadError!, style: TextStyle(color: context.palette.alert, fontSize: 11)),
+                  ),
+                Padding(
                   padding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                  child: Text('DRAWING TOOL', style: TextStyle(color: Colors.white54, fontSize: 11, fontWeight: FontWeight.bold, letterSpacing: 1)),
+                  child: Text('DRAWING TOOL', style: TextStyle(color: context.palette.dim(0.54), fontSize: 11, fontWeight: FontWeight.bold, letterSpacing: 1)),
                 ),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -270,19 +256,17 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
                     spacing: 8,
                     runSpacing: 8,
                     children: [
-                      _buildToolChip(ZoneType.intrusion, 'Intrusion', Icons.security_rounded, AppTheme.emergencyRed),
-                      _buildToolChip(ZoneType.tripwire, 'Tripwire', Icons.timeline_rounded, AppTheme.warningOrange),
-                      _buildToolChip(ZoneType.privacyMask, 'Blur & Exclude Area', Icons.blur_on_rounded, Colors.grey),
-                      _buildToolChip(ZoneType.door, 'Door ROI', Icons.door_front_door_outlined, AppTheme.cyberBlue),
-                      _buildToolChip(ZoneType.package, 'Package Zone', Icons.inventory_2_outlined, AppTheme.liveGreen),
+                      _buildToolChip(ZoneType.restrictedArea, Icons.lock_outline_rounded, context.palette.alert),
+                      _buildToolChip(ZoneType.tripwire, Icons.timeline_rounded, context.palette.warning),
+                      _buildToolChip(ZoneType.privacyMask, Icons.blur_on_rounded, context.palette.muted),
                     ],
                   ),
                 ),
                 const SizedBox(height: 12),
                 if (_selectedTool == ZoneType.privacyMask) ...[
-                  const Padding(
+                  Padding(
                     padding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                    child: Text('MASK MODE', style: TextStyle(color: Colors.white54, fontSize: 11, fontWeight: FontWeight.bold, letterSpacing: 1)),
+                    child: Text('MASK MODE', style: TextStyle(color: context.palette.dim(0.54), fontSize: 11, fontWeight: FontWeight.bold, letterSpacing: 1)),
                   ),
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -304,12 +288,12 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
                     children: [
                       Expanded(
                         child: ElevatedButton.icon(
-                          onPressed: _activeDraftZone == null ? _startNewZone : null,
+                          onPressed: _activeDraftZone == null && _selectedCameraId != null ? _startNewZone : null,
                           icon: const Icon(Icons.add, size: 16),
                           label: const Text('New Zone', style: TextStyle(fontSize: 12)),
                           style: ElevatedButton.styleFrom(
-                            backgroundColor: AppTheme.cyberBlue,
-                            foregroundColor: Colors.black,
+                            backgroundColor: context.palette.accent,
+                            foregroundColor: context.palette.onAccent,
                             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                           ),
                         ),
@@ -318,22 +302,22 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
                         const SizedBox(width: 8),
                         IconButton(
                           tooltip: 'Done / Save Zone',
-                          icon: const Icon(Icons.check_circle_rounded, color: AppTheme.liveGreen),
+                          icon: Icon(Icons.check_circle_rounded, color: context.palette.live),
                           onPressed: _saveDraftZone,
                         ),
                         IconButton(
                           tooltip: 'Cancel Draft',
-                          icon: const Icon(Icons.cancel_rounded, color: AppTheme.emergencyRed),
+                          icon: Icon(Icons.cancel_rounded, color: context.palette.alert),
                           onPressed: () => setState(() => _activeDraftZone = null),
                         ),
                       ],
                     ],
                   ),
                 ),
-                const Divider(height: 24, color: AppTheme.borderHighlight),
+                Divider(height: 24, color: context.palette.border),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                  child: Text('CONFIGURED ZONES (${_savedZones.length})', style: const TextStyle(color: Colors.white54, fontSize: 11, fontWeight: FontWeight.bold, letterSpacing: 1)),
+                  child: Text('CONFIGURED ZONES (${_savedZones.length})', style: TextStyle(color: context.palette.dim(0.54), fontSize: 11, fontWeight: FontWeight.bold, letterSpacing: 1)),
                 ),
                 Expanded(
                   child: ListView.builder(
@@ -344,18 +328,19 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
                         margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                         padding: const EdgeInsets.all(10),
                         decoration: BoxDecoration(
-                          color: AppTheme.darkBackground,
+                          color: context.palette.background,
                           borderRadius: BorderRadius.circular(8),
-                          border: Border.all(color: AppTheme.borderHighlight),
+                          border: Border.all(color: context.palette.border),
                         ),
                         child: Row(
                           children: [
                             Switch(
                               value: zone.enabled,
-                              activeColor: AppTheme.liveGreen,
+                              activeColor: context.palette.live,
                               onChanged: (val) {
                                 setState(() => zone.enabled = val);
-                                ApiService().saveCameraZone(_selectedCameraId, zone);
+                                final cameraId = _selectedCameraId;
+                                if (cameraId != null) ApiService().saveCameraZone(cameraId, zone);
                               },
                             ),
                             const SizedBox(width: 8),
@@ -364,13 +349,13 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Text(zone.name, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
-                                  Text('${zone.zoneType.name.toUpperCase()} • ${zone.polygonPoints.length} pts',
-                                      style: const TextStyle(color: Colors.white54, fontSize: 10)),
+                                  Text('${zone.zoneType.label} • ${zone.polygonPoints.length} pts',
+                                      style: TextStyle(color: context.palette.dim(0.54), fontSize: 10)),
                                 ],
                               ),
                             ),
                             IconButton(
-                              icon: const Icon(Icons.delete_outline, size: 18, color: Colors.white38),
+                              icon: Icon(Icons.delete_outline, size: 18, color: context.palette.dim(0.38)),
                               onPressed: () => _deleteZone(index),
                             ),
                           ],
@@ -436,20 +421,21 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
     );
   }
 
-  Widget _buildToolChip(ZoneType type, String label, IconData icon, Color color) {
+  Widget _buildToolChip(ZoneType type, IconData icon, Color color) {
+    final label = type.label;
     final isSelected = _selectedTool == type;
     return ChoiceChip(
       label: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, size: 14, color: isSelected ? Colors.black : color),
+          Icon(icon, size: 14, color: isSelected ? context.palette.onAccent : color),
           const SizedBox(width: 6),
-          Text(label, style: TextStyle(fontSize: 11, color: isSelected ? Colors.black : Colors.white)),
+          Text(label, style: TextStyle(fontSize: 11, color: isSelected ? context.palette.onAccent : context.palette.text)),
         ],
       ),
       selected: isSelected,
       selectedColor: color,
-      backgroundColor: AppTheme.darkBackground,
+      backgroundColor: context.palette.background,
       onSelected: (val) {
         if (val) {
           setState(() {
@@ -466,10 +452,10 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
   Widget _buildMaskModeChip(MaskMode mode, String label) {
     final isSelected = _maskMode == mode;
     return ChoiceChip(
-      label: Text(label, style: TextStyle(fontSize: 11, color: isSelected ? Colors.black : Colors.white)),
+      label: Text(label, style: TextStyle(fontSize: 11, color: isSelected ? context.palette.onAccent : context.palette.text)),
       selected: isSelected,
-      selectedColor: AppTheme.cyberBlue,
-      backgroundColor: AppTheme.darkBackground,
+      selectedColor: context.palette.accent,
+      backgroundColor: context.palette.background,
       onSelected: (val) {
         if (val) {
           setState(() {

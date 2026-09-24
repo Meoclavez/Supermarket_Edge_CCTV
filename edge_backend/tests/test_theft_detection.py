@@ -1,4 +1,4 @@
-"""Comprehensive Unit & Integration Tests for Loss Prevention & Theft Detection Engine."""
+"""Loss-prevention rules (pure functions over evidence) and the incident API."""
 
 import pytest
 import asyncio
@@ -13,7 +13,22 @@ from app.models.schemas import (
     TheftType,
     TheftIncidentStatus,
 )
-from app.services.theft_detection_service import theft_detection_service
+from app.services.auth_service import auth_service
+from app.services.theft_detection_service import (
+    detect_concealment,
+    detect_exit_without_checkout,
+    detect_shelf_sweeping,
+    detect_suspicious_loitering,
+    detect_sweethearting,
+    estimate_head_yaw,
+    evidence_confidence,
+    theft_detection_service,
+)
+
+
+def _auth_headers() -> dict:
+    token = auth_service.create_access_token({"sub": "test_admin", "role": "admin", "type": "user_session"})
+    return {"Authorization": f"Bearer {token}"}
 
 
 def insert_incident(**overrides) -> str:
@@ -72,165 +87,142 @@ def init_test_database():
 # ============================================================================
 
 class TestTheftDetectionAlgorithms:
-    def test_shelf_sweeping_positive(self):
-        """Test bulk sweep detection: 4 items picked within 3.5 seconds."""
-        t_base = datetime(2026, 9, 5, 14, 0, 0)
-        interactions = [
-            {"timestamp": t_base, "sku": "WHISKY_01", "name": "Single Malt", "zone": "Liquor Shelf A"},
-            {"timestamp": t_base + timedelta(seconds=1.0), "sku": "WHISKY_02", "name": "Bourbon", "zone": "Liquor Shelf A"},
-            {"timestamp": t_base + timedelta(seconds=2.2), "sku": "GIN_01", "name": "Gin", "zone": "Liquor Shelf A"},
-            {"timestamp": t_base + timedelta(seconds=3.5), "sku": "VODKA_01", "name": "Vodka", "zone": "Liquor Shelf A"},
-        ]
+    """The rules are pure functions over observed evidence; confidence is derived, never constant."""
 
-        res = theft_detection_service.detect_shelf_sweeping(interactions, window_sec=5.0, min_picks=3)
-        assert res["detected"] is True
-        assert res["theft_type"] == TheftType.SHELF_SWEEPING.value
-        assert res["count"] == 4
-        assert res["confidence"] >= 0.85
-        assert len(res["window_interactions"]) == 4
-
-    def test_shelf_sweeping_negative_below_min_picks(self):
-        """Test insufficient picks (< 3) within window."""
-        t_base = datetime(2026, 9, 5, 14, 0, 0)
-        interactions = [
-            {"timestamp": t_base, "sku": "WHISKY_01"},
-            {"timestamp": t_base + timedelta(seconds=2.0), "sku": "WHISKY_02"},
-        ]
-        res = theft_detection_service.detect_shelf_sweeping(interactions, window_sec=5.0, min_picks=3)
-        assert res["detected"] is False
-        assert res["count"] == 0
-
-    def test_shelf_sweeping_negative_spread_out(self):
-        """Test picks spread out over 20 seconds (> 5s window)."""
-        t_base = datetime(2026, 9, 5, 14, 0, 0)
-        interactions = [
-            {"timestamp": t_base, "sku": "WHISKY_01"},
-            {"timestamp": t_base + timedelta(seconds=8.0), "sku": "WHISKY_02"},
-            {"timestamp": t_base + timedelta(seconds=18.0), "sku": "WHISKY_03"},
-        ]
-        res = theft_detection_service.detect_shelf_sweeping(interactions, window_sec=5.0, min_picks=3)
-        assert res["detected"] is False
+    @staticmethod
+    def _conceal_samples(hold=4, returned=False, after=12, dt=0.2, vis=0.9, target="pocket_band"):
+        t = 0.0
+        s = [{"t": t, "in_shelf": False, "in_conceal": False, "vis": vis, "reach_vis": vis}]
+        for _ in range(hold):
+            t += dt
+            s.append({"t": t, "in_shelf": False, "in_conceal": True, "vis": vis, "target": target})
+        for i in range(after):
+            t += dt
+            s.append({"t": t, "in_shelf": returned and i == 2, "in_conceal": False, "vis": vis})
+        return s
 
     def test_concealment_positive(self):
-        """Test concealment kinematics: wrist touches shelf ROI then directly touches body pocket."""
-        shelf_roi = (0.2, 0.2, 0.4, 0.4)
-        body_bbox = (0.45, 0.5, 0.7, 0.9)
-        cart_bbox = (0.05, 0.6, 0.35, 0.95)
-
-        # Trajectory: starts near shelf, touches shelf, moves to body torso/pocket, bypasses cart
-        wrist_traj = [
-            (0.15, 0.25),
-            (0.25, 0.30),  # In shelf_roi
-            (0.35, 0.40),
-            (0.50, 0.60),  # In body_bbox
-            (0.55, 0.65),  # In body_bbox
-        ]
-
-        res = theft_detection_service.detect_concealment(
-            wrist_trajectory=wrist_traj,
-            shelf_roi=shelf_roi,
-            body_bbox=body_bbox,
-            cart_bbox=cart_bbox,
-        )
+        res = detect_concealment(self._conceal_samples(), window_sec=4.0, min_hold_frames=3, no_return_sec=2.0)
         assert res["detected"] is True
-        assert res["theft_type"] == TheftType.CONCEALMENT.value
-        assert res["confidence"] >= 0.90
+        assert res["rule"] == "CONCEALMENT"
+        assert 0.0 < res["confidence"] <= 1.0
+        assert res["no_return_verified"] is True
+        assert len(res["evidence"]) >= 3
 
-    def test_concealment_negative_deposited_in_cart(self):
-        """Test normal shopper motion: wrist touches shelf then deposits in cart."""
-        shelf_roi = (0.2, 0.2, 0.4, 0.4)
-        body_bbox = (0.45, 0.5, 0.7, 0.9)
-        cart_bbox = (0.05, 0.6, 0.35, 0.95)
+    def test_concealment_confidence_tracks_visibility(self):
+        hi = detect_concealment(self._conceal_samples(vis=0.95), window_sec=4.0, min_hold_frames=3, no_return_sec=2.0)
+        lo = detect_concealment(self._conceal_samples(vis=0.4), window_sec=4.0, min_hold_frames=3, no_return_sec=2.0)
+        assert hi["detected"] and lo["detected"]
+        assert hi["confidence"] > lo["confidence"]
 
-        # Trajectory: touches shelf then touches cart
-        wrist_traj = [
-            (0.25, 0.30),  # In shelf_roi
-            (0.20, 0.50),
-            (0.15, 0.70),  # In cart_bbox
-        ]
+    def test_concealment_into_bag_is_reported(self):
+        res = detect_concealment(self._conceal_samples(target="bag"), window_sec=4.0, min_hold_frames=3, no_return_sec=2.0)
+        assert res["detected"] and res["target"] == "bag"
+        assert any("bag" in e for e in res["evidence"])
 
-        res = theft_detection_service.detect_concealment(
-            wrist_trajectory=wrist_traj,
-            shelf_roi=shelf_roi,
-            body_bbox=body_bbox,
-            cart_bbox=cart_bbox,
-        )
+    def test_concealment_negative_returned_to_shelf(self):
+        res = detect_concealment(self._conceal_samples(returned=True), window_sec=4.0, min_hold_frames=3, no_return_sec=2.0)
         assert res["detected"] is False
-        assert "cart" in res["reason"].lower()
+        assert res["state"] == "returned"
+
+    def test_concealment_waits_for_no_return_window(self):
+        res = detect_concealment(self._conceal_samples(after=3), window_sec=4.0, min_hold_frames=3, no_return_sec=2.0)
+        assert res["detected"] is False and res["state"] == "held"
+        ended = detect_concealment(self._conceal_samples(after=3), window_sec=4.0, min_hold_frames=3,
+                                   no_return_sec=2.0, track_ended=True)
+        assert ended["detected"] is True and ended["no_return_verified"] is False
+
+    def test_concealment_negative_brief_touch(self):
+        res = detect_concealment(self._conceal_samples(hold=2), window_sec=4.0, min_hold_frames=3, no_return_sec=2.0)
+        assert res["detected"] is False
+
+    def test_shelf_sweeping_positive(self):
+        t_base = datetime(2026, 9, 5, 14, 0, 0)
+        reaches = [{"timestamp": t_base + timedelta(seconds=s), "zone_id": "liquor_a", "vis": 0.9}
+                   for s in (0.0, 1.0, 2.2, 3.5)]
+        res = detect_shelf_sweeping(reaches, window_sec=5.0, min_reaches=3)
+        assert res["detected"] is True
+        assert res["rule"] == "SHELF_SWEEPING"
+        assert res["count"] == 4
+        assert res["span_sec"] == pytest.approx(3.5)
+        assert 0.0 < res["confidence"] <= 1.0
+
+    def test_shelf_sweeping_negative_slow_picking(self):
+        t_base = datetime(2026, 9, 5, 14, 0, 0)
+        reaches = [{"timestamp": t_base + timedelta(seconds=s), "zone_id": "z", "vis": 0.9} for s in (0, 10, 20)]
+        assert detect_shelf_sweeping(reaches, window_sec=5.0, min_reaches=3)["detected"] is False
+
+    def test_shelf_sweeping_counts_per_zone(self):
+        reaches = [{"timestamp": float(i), "zone_id": ("a" if i % 2 else "b"), "vis": 0.9} for i in range(4)]
+        assert detect_shelf_sweeping(reaches, window_sec=5.0, min_reaches=3)["detected"] is False
+
+    def test_head_yaw_proxy(self):
+        kps = [[0, 0, 0]] * 17
+        kps = [list(k) for k in kps]
+        kps[0] = [100, 50, 0.9]; kps[3] = [90, 52, 0.9]; kps[4] = [110, 52, 0.9]
+        assert abs(estimate_head_yaw(kps, 0.5)) < 0.05
+        kps[0] = [108, 50, 0.9]
+        assert estimate_head_yaw(kps, 0.5) > 0.5
+        kps[4] = [110, 52, 0.1]   # right ear hidden: profile
+        assert estimate_head_yaw(kps, 0.5) == 1.0
+        kps[0] = [100, 50, 0.1]
+        assert estimate_head_yaw(kps, 0.5) is None
+
+    def test_loitering_requires_all_signals(self):
+        base = dict(dwell_sec=90, reaches=3, head_turns=8, head_samples=200, visibility=0.8,
+                    min_dwell_sec=60, min_reaches=2, min_head_turns=6)
+        assert detect_suspicious_loitering(**base)["detected"] is True
+        assert detect_suspicious_loitering(**{**base, "head_turns": 2})["detected"] is False
+        assert detect_suspicious_loitering(**{**base, "reaches": 0})["detected"] is False
+        assert detect_suspicious_loitering(**{**base, "dwell_sec": 30})["detected"] is False
+
+    def test_exit_without_checkout(self):
+        seq = [{"t": 0, "zone_id": "a", "category": "AISLE"}, {"t": 20, "zone_id": "x", "category": "EXIT"}]
+        res = detect_exit_without_checkout(seq, first_interaction_t=5.0, interaction_count=2,
+                                           interaction_vis=0.9, floor_coverage=1.0)
+        assert res["detected"] is True and res["rule"] == "EXIT_WITHOUT_CHECKOUT"
+        assert any("Single-camera" in e for e in res["evidence"])
+
+    def test_exit_after_checkout_is_normal(self):
+        seq = [{"t": 10, "zone_id": "c", "category": "CHECKOUT"}, {"t": 20, "zone_id": "x", "category": "ENTRANCE"}]
+        res = detect_exit_without_checkout(seq, first_interaction_t=5.0, interaction_count=2,
+                                           interaction_vis=0.9, floor_coverage=1.0)
+        assert res["detected"] is False
+
+    def test_exit_without_interaction_is_normal(self):
+        seq = [{"t": 20, "zone_id": "x", "category": "EXIT"}]
+        assert detect_exit_without_checkout(seq, first_interaction_t=None, interaction_count=0,
+                                            interaction_vis=0.0, floor_coverage=1.0)["detected"] is False
 
     def test_sweethearting_positive(self):
-        """Test cashier scanning bypass: 3 visual passes, only 1 valid barcode scan."""
-        t_base = datetime(2026, 9, 5, 14, 0, 0)
-
-        # Visual item passes
+        t_base = datetime(2026, 9, 5, 15, 0, 0)
+        scans = [{"timestamp": t_base, "sku": "A"}, {"timestamp": t_base + timedelta(seconds=3), "sku": "B"}]
         passes = [
-            {"id": "p1", "timestamp": t_base + timedelta(seconds=1.0), "item_description": "Milk 2L"},
-            {"id": "p2", "timestamp": t_base + timedelta(seconds=5.0), "item_description": "Steak 500g"},
-            {"id": "p3", "timestamp": t_base + timedelta(seconds=9.0), "item_description": "Salmon 400g"},
+            {"id": "p1", "timestamp": t_base + timedelta(seconds=0.5), "vis": 0.9},
+            {"id": "p2", "timestamp": t_base + timedelta(seconds=3.2), "vis": 0.9},
+            {"id": "p3", "timestamp": t_base + timedelta(seconds=7.0), "vis": 0.9},
         ]
-
-        # POS transactions recorded (only Milk scanned, Steak and Salmon bypassed)
-        scans = [
-            {"id": "tx1", "timestamp": t_base + timedelta(seconds=1.2), "sku": "MILK_2L"},
-        ]
-
-        res = theft_detection_service.detect_sweethearting(
-            pos_transactions=scans,
-            cashier_hand_passes=passes,
-            tolerance_sec=2.0,
-        )
-        assert res["detected"] is True
-        assert res["theft_type"] == TheftType.SWEETHEARTING.value
-        assert res["unmatched_count"] == 2
-        assert len(res["unmatched_passes"]) == 2
-        assert res["unmatched_passes"][0]["pass_id"] == "p2"
+        res = detect_sweethearting(scans, passes, tolerance_sec=2.0)
+        assert res["detected"] is True and res["evaluable"] is True
+        assert res["unmatched_count"] == 1
+        assert res["unmatched_passes"][0]["pass_id"] == "p3"
+        assert 0.0 < res["confidence"] < 1.0
 
     def test_sweethearting_negative_all_scanned(self):
-        """Test cashier scanning compliant: all passes match scans within 1.5s."""
-        t_base = datetime(2026, 9, 5, 14, 0, 0)
-        passes = [
-            {"id": "p1", "timestamp": t_base + timedelta(seconds=2.0)},
-            {"id": "p2", "timestamp": t_base + timedelta(seconds=6.0)},
-        ]
-        scans = [
-            {"timestamp": t_base + timedelta(seconds=2.3)},
-            {"timestamp": t_base + timedelta(seconds=5.8)},
-        ]
+        t_base = datetime(2026, 9, 5, 15, 0, 0)
+        scans = [{"timestamp": t_base}, {"timestamp": t_base + timedelta(seconds=2)}]
+        passes = [{"timestamp": t_base + timedelta(seconds=0.2)}, {"timestamp": t_base + timedelta(seconds=2.1)}]
+        res = detect_sweethearting(scans, passes, tolerance_sec=2.0)
+        assert res["detected"] is False and res["unmatched_passes"] == []
 
-        res = theft_detection_service.detect_sweethearting(scans, passes, tolerance_sec=2.0)
-        assert res["detected"] is False
-        assert res["unmatched_count"] == 0
+    def test_sweethearting_not_evaluable_without_pos(self):
+        res = detect_sweethearting([], [{"timestamp": 1.0}], tolerance_sec=2.0)
+        assert res["detected"] is False and res["evaluable"] is False
 
-    def test_pushout_exit_bypass_positive(self):
-        """Test pushout: cart crosses exit boundary with 0.0s checkout dwell."""
-        exit_polygon = [(0.0, 0.8), (0.3, 0.8), (0.3, 1.0), (0.0, 1.0)]
-        track_traj = [
-            {"x": 0.5, "y": 0.5, "timestamp": datetime(2026, 9, 5, 14, 0, 0)},
-            {"x": 0.3, "y": 0.7, "timestamp": datetime(2026, 9, 5, 14, 0, 10)},
-            {"x": 0.1, "y": 0.9, "timestamp": datetime(2026, 9, 5, 14, 0, 20)},  # Inside exit
-        ]
-
-        res = theft_detection_service.detect_pushout_exit_bypass(
-            track_trajectory=track_traj,
-            exit_zone_polygon=exit_polygon,
-            checkout_visit_duration=0.0,
-        )
-        assert res["detected"] is True
-        assert res["theft_type"] == TheftType.PUSHOUT_EXIT_BYPASS.value
-        assert res["confidence"] >= 0.90
-
-    def test_pushout_exit_bypass_negative_normal_checkout(self):
-        """Test normal shopper: cart crosses exit after 45s dwell in checkout."""
-        exit_box = (0.0, 0.8, 0.3, 1.0)
-        track_traj = [{"x": 0.1, "y": 0.9, "timestamp": datetime.utcnow()}]
-
-        res = theft_detection_service.detect_pushout_exit_bypass(
-            track_trajectory=track_traj,
-            exit_zone_polygon=exit_box,
-            checkout_visit_duration=45.0,
-        )
-        assert res["detected"] is False
-
+    def test_evidence_confidence_is_derived(self):
+        assert evidence_confidence(0.0, [1.0, 1.0]) == 0.0
+        assert evidence_confidence(1.0, [0.0]) == 0.0
+        assert evidence_confidence(0.8, [0.5, 1.0]) == pytest.approx(0.6)
 
 # ============================================================================
 # 2. Integration API Tests
@@ -239,7 +231,7 @@ class TestTheftDetectionAlgorithms:
 class TestTheftAPIIntegration:
     @pytest.fixture(autouse=True)
     def setup_client(self):
-        self.client = TestClient(app)
+        self.client = TestClient(app, headers=_auth_headers())
 
     def test_simulate_endpoint_is_gone(self):
         """POST /api/v1/theft/simulate no longer exists: incidents are never invented."""
@@ -258,6 +250,35 @@ class TestTheftAPIIntegration:
         assert "total" in data
         assert data["total"] >= 1
         assert all(inc["department"] == "Cosmetics" for inc in data["incidents"])
+        inc = data["incidents"][0]
+        # Every incident carries its rule, evidence and review framing.
+        assert inc["rule"] == "CONCEALMENT"
+        assert isinstance(inc["evidence"], list)
+        assert inc["review_label"] == "Suspicious behaviour for staff review"
+        # No evidence image was recorded for a directly inserted row.
+        assert inc["snapshot_url"] is None and inc["evidence_snapshot_url"] is None
+
+    def test_evidence_endpoint_requires_auth(self, monkeypatch):
+        from app.config import settings
+        monkeypatch.setattr(settings, "AUTH_DISABLED", False, raising=False)
+        monkeypatch.setattr(settings, "DEBUG", False)
+        incident_id = insert_incident(theft_type="CONCEALMENT", rule="CONCEALMENT", evidence=["e1"])
+        anon = TestClient(app)
+        assert anon.get(f"/api/v1/theft/incidents/{incident_id}/evidence").status_code == 401
+        assert anon.get("/api/v1/theft/incidents").status_code == 401
+        # Same credentials the camera snapshot endpoints accept: bearer header or ?token=
+        token = _auth_headers()["Authorization"].split(" ", 1)[1]
+        res = anon.get(f"/api/v1/theft/incidents/{incident_id}/evidence?token={token}")
+        assert res.status_code == 404   # authorised, but no image recorded
+        res = self.client.get(f"/api/v1/theft/incidents/{incident_id}/evidence")
+        assert res.status_code == 404
+
+    def test_evidence_endpoint_refuses_paths_outside_evidence_dir(self, tmp_path):
+        outside = tmp_path / "secret.jpg"
+        outside.write_bytes(b"\xff\xd8not really")
+        incident_id = insert_incident(snapshot_path=str(outside))
+        res = self.client.get(f"/api/v1/theft/incidents/{incident_id}/evidence")
+        assert res.status_code == 404
 
     def test_theft_statistics_endpoint(self):
         """Test GET /api/v1/theft/statistics."""

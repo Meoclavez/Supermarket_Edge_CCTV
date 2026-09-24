@@ -19,6 +19,7 @@ from ..services.hardware_detector import (
     probe_nvidia_gpu_utilisation,
 )
 from ..services.live_analytics_engine import live_engine
+from ..services import preflight
 
 router = APIRouter(
     prefix="/api/v1/system",
@@ -45,10 +46,32 @@ def _cpu_percent() -> Optional[float]:
     return None
 
 
-@router.get("/hardware", response_model=HardwareProfile)
+@router.get("/hardware")
 def get_hardware_profile():
-    """Decoder capability (probed) and the inference backend the detector actually runs."""
-    return current_hardware_profile()
+    """Decoder capability (probed), the inference backend the detector actually
+    runs, and the summary of the most recent startup preflight."""
+    profile = HardwareProfile.model_validate(current_hardware_profile()).model_dump()
+    profile["preflight"] = preflight.summary(preflight.last_result())
+    return profile
+
+
+@router.get("/preflight")
+def get_preflight(probe: bool = False):
+    """Re-run the read-only installation checks now.
+
+    ``probe=true`` additionally creates a real ONNX Runtime session in a child
+    process and reports which provider it landed on (takes a second or two).
+    The loaded detector's own provider is always folded in, so a GPU machine
+    that ended up on the CPU is reported with the command that fixes it.
+    """
+    result = preflight.run_preflight(session_probe=probe)
+    try:
+        from ..services.inference_backend import person_detector
+
+        preflight.add_live_status(result, person_detector.status())
+    except Exception:  # detector module unavailable: the static checks still stand
+        pass
+    return result
 
 
 @router.get("/stats", response_model=SystemStats)

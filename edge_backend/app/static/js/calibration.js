@@ -532,4 +532,7 @@
   }
 
   window.calibrationTool = calibrationTool;
+  // The markers sit on the live frame, so their colours are the same in both
+  // themes; the overlay is still redrawn on a theme switch like every canvas.
+  window.addEventListener('edge:theme', () => { if (calibrationTool.cameraId) calibrationTool.fitOverlay(); });
 })();

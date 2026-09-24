@@ -70,7 +70,7 @@ class _BiometricGateState extends State<BiometricGate> with WidgetsBindingObserv
     if (_unlocked) return widget.child;
 
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: context.palette.background,
       body: Center(
         child: Padding(
           padding: const EdgeInsets.all(32.0),
@@ -80,29 +80,29 @@ class _BiometricGateState extends State<BiometricGate> with WidgetsBindingObserv
               Container(
                 padding: const EdgeInsets.all(24),
                 decoration: BoxDecoration(
-                  color: AppTheme.cardSurface,
+                  color: context.palette.card,
                   shape: BoxShape.circle,
-                  border: Border.all(color: AppTheme.cyberBlue.withOpacity(0.5), width: 2),
+                  border: Border.all(color: context.palette.accent.withValues(alpha: 0.5), width: 2),
                 ),
-                child: const Icon(Icons.fingerprint_rounded, size: 64, color: AppTheme.cyberBlue),
+                child: Icon(Icons.fingerprint_rounded, size: 64, color: context.palette.accent),
               ),
               const SizedBox(height: 24),
-              const Text(
+              Text(
                 'Biometric Authentication Required',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white),
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: context.palette.text),
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: 8),
               Text(
                 widget.promptReason,
-                style: const TextStyle(fontSize: 13, color: Colors.white60),
+                style: TextStyle(fontSize: 13, color: context.palette.dim(0.60)),
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: 32),
               ElevatedButton.icon(
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: AppTheme.cyberBlue,
-                  foregroundColor: Colors.black,
+                  backgroundColor: context.palette.accent,
+                  foregroundColor: context.palette.onAccent,
                   padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 14),
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                 ),

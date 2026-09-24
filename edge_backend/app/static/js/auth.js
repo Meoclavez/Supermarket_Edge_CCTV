@@ -1,14 +1,14 @@
 /**
  * Sign-in gate for the dashboard.
  *
- * Every analytics endpoint requires a bearer token, but nothing in the
- * frontend ever sent one -- the dashboard worked only because the backend was
- * started with DEBUG=true, which bypasses authentication entirely. That is an
- * open API on a store network.
+ * Every API endpoint requires a bearer token. (The server's AUTH_DISABLED
+ * switch is the only way to turn that off; DEBUG no longer does.)
  *
  * This module closes the gap:
  *   - wraps window.fetch so every same-origin API call carries the token,
- *   - shows a first-run account form when no operator account exists yet,
+ *   - shows a first-run account form when no operator account exists yet;
+ *     it needs the one-time setup code the server prints at startup, so a
+ *     stranger on the store LAN cannot claim the system first,
  *   - shows a sign-in form otherwise, and re-opens it on any 401.
  *
  * Loaded before every other script so no request escapes unauthenticated.
@@ -18,6 +18,10 @@
 
   const TOKEN_KEY = 'edge_cctv_token';
 
+  // Over https (e.g. the remote-access tunnel) the session cookie must never be
+  // sent on a plain-http request, so it is marked Secure there.
+  const COOKIE_ATTRS = `path=/; SameSite=Lax; max-age=604800${location.protocol === 'https:' ? '; Secure' : ''}`;
+
   function getToken() {
     try { return localStorage.getItem(TOKEN_KEY); } catch (_) { return null; }
   }
@@ -25,7 +29,7 @@
     try {
       if (t) {
         localStorage.setItem(TOKEN_KEY, t);
-        document.cookie = `${TOKEN_KEY}=${encodeURIComponent(t)}; path=/; SameSite=Lax; max-age=604800`;
+        document.cookie = `${TOKEN_KEY}=${encodeURIComponent(t)}; ${COOKIE_ATTRS}`;
       } else {
         localStorage.removeItem(TOKEN_KEY);
         document.cookie = `${TOKEN_KEY}=; path=/; max-age=0`;
@@ -79,6 +83,43 @@
   const EYE_OPEN_ICON = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>`;
   const EYE_CLOSED_ICON = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>`;
 
+  function escapeHtml(v) {
+    return String(v == null ? '' : v).replace(/[&<>"']/g, (c) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[c]));
+  }
+
+  // Turn an API error response into one readable sentence for the inline
+  // error line. Never uses alert(): the operator must be able to correct the
+  // field and resubmit without the page being blocked.
+  async function apiError(res, fallback) {
+    let data = {};
+    try { data = await res.json(); } catch (_) { /* non-JSON body */ }
+    let detail = data && data.detail;
+    if (Array.isArray(detail)) {
+      detail = detail.map((d) => (d && d.msg) ? `${(d.loc || []).slice(-1)[0] || 'field'}: ${d.msg}` : String(d)).join('; ');
+    }
+    if (res.status === 429) {
+      return detail || 'Too many failed attempts from this device. Wait a few minutes and try again.';
+    }
+    return detail || fallback;
+  }
+
+  const SETUP_CODE_HINT = `
+    The one-time setup code is printed by the server when it starts with no operator account.
+    Find it in the terminal running <code>./run.sh</code>, in
+    <code>journalctl -u edge-cctv</code> on a systemd install, or in the file
+    <code>storage/setup_code.txt</code> on the server.`;
+
+  const FORGOT_HELP = `
+    There is no e-mail recovery on an offline edge box. On the server itself, from the
+    <code>edge_backend</code> folder, run:
+    <pre>../.venv/bin/python scripts/manage_operator.py reset-password --username YOUR_NAME</pre>
+    To see the account names: <code>scripts/manage_operator.py list</code>.
+    To start over with a new owner account (all operator accounts are removed, cameras and
+    data are kept): <code>scripts/manage_operator.py reset-setup</code>, then use the setup
+    code it prints.`;
+
   function gateMarkup(adminExists) {
     const first = !adminExists;
     return `
@@ -86,17 +127,23 @@
         <div class="auth-brand">EDGE AI CCTV</div>
         <div class="auth-title">${first ? 'Create the operator account' : 'Sign in'}</div>
         <div class="auth-sub">${first
-          ? 'This is the first run. Choose the credentials that will control this store’s system.'
+          ? 'No operator account exists yet. Enter the setup code shown on the server, then choose the credentials that will control this store’s system.'
           : 'Enter your operator credentials to view the store dashboard.'}</div>
-        <form id="authForm" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+        <form id="authForm" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" novalidate>
           ${first ? `
-          <div class="fp-field"><label for="auDisplay">Your name</label>
-            <input id="auDisplay" name="op_display" type="text" required value="Store Manager"
+          <div class="fp-field"><label for="auCode">Setup code</label>
+            <input id="auCode" name="op_setup_code" type="text" required maxlength="16"
+                   class="auth-code-input" placeholder="XXXX-XXXX"
+                   autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false"
+                   data-lpignore="true" data-1p-ignore="true" data-form-type="other">
+            <div class="auth-hint" id="auCodeHint">${SETUP_CODE_HINT}</div></div>
+          <div class="fp-field"><label for="auDisplay">Your name (optional)</label>
+            <input id="auDisplay" name="op_display" type="text" value="" placeholder="e.g. Store Manager"
                    autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true"></div>` : ''}
           <div class="fp-field"><label for="auUser">Username</label>
-            <input id="auUser" name="op_user" type="text" required
+            <input id="auUser" name="op_user" type="text" required value=""
                    autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
-                   data-lpignore="true" value="${first ? 'admin' : ''}" placeholder="e.g. admin"></div>
+                   data-lpignore="true" placeholder="e.g. manager"></div>
           <div class="fp-field">
             <label for="auPass">Password</label>
             <div class="auth-input-group">
@@ -122,11 +169,16 @@
               </button>
             </div>
           </div>` : ''}
-          <div class="auth-helper-note">💡 Click 👁️ to view password while typing</div>
-          <div class="auth-error" id="authError"></div>
+          <div class="auth-helper-note">Use the eye button to show the password while typing.</div>
+          <div class="auth-error" id="authError" role="alert" aria-live="assertive"></div>
           <button class="btn btn-primary" type="submit" id="authSubmit" style="width:100%">
             ${first ? 'Create account' : 'Sign in'}
           </button>
+          ${first ? '' : `
+          <details class="auth-forgot" id="authForgot">
+            <summary>Forgot password?</summary>
+            <div class="auth-hint">${FORGOT_HELP}</div>
+          </details>`}
         </form>
       </div>`;
   }
@@ -194,7 +246,7 @@
 
     // Auto-focus the first appropriate field
     setTimeout(() => {
-      const target = gate.querySelector('#auUser') || gate.querySelector('#auPass');
+      const target = gate.querySelector('#auCode') || gate.querySelector('#auUser') || gate.querySelector('#auPass');
       if (target) {
         target.focus();
       }
@@ -210,35 +262,42 @@
       const password = gate.querySelector('#auPass').value || '';
 
       try {
+        if (!username) throw new Error('Enter a username.');
+        if (!password) throw new Error('Enter a password.');
+        let data = null;
         if (!adminExists) {
-          const confirm = (gate.querySelector('#auPass2') ? gate.querySelector('#auPass2').value : '') || '';
-          if (password !== confirm) throw new Error('Passwords do not match.');
+          const code = (gate.querySelector('#auCode').value || '').trim();
+          const confirmPw = (gate.querySelector('#auPass2') ? gate.querySelector('#auPass2').value : '') || '';
+          if (!code) throw new Error('Enter the setup code shown on the server.');
           if (password.length < 8) throw new Error('Password must be at least 8 characters.');
+          if (password !== confirmPw) throw new Error('Passwords do not match.');
           const r = await nativeFetch('/api/v1/setup/admin', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               username, password,
+              setup_code: code,
               display_name: (gate.querySelector('#auDisplay') ? gate.querySelector('#auDisplay').value.trim() : '') || username,
-              role: 'owner',
             }),
           });
-          if (!r.ok) {
-            const errData = await r.json().catch(() => ({}));
-            throw new Error(errData.detail || 'Could not create the account.');
-          }
+          if (!r.ok) throw new Error(await apiError(r, 'Could not create the account.'));
+          data = await r.json();
         }
 
-        const r = await nativeFetch('/api/v1/auth/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username, password }),
-        });
-        if (!r.ok) {
-          const errData = await r.json().catch(() => ({}));
-          throw new Error(errData.detail || 'Sign-in failed. Please check credentials.');
+        if (!data || !data.access_token) {
+          // Ordinary sign-in (or an older server that did not return a session).
+          const r = await nativeFetch('/api/v1/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password }),
+          });
+          if (!r.ok) {
+            throw new Error(await apiError(r, r.status === 401
+              ? 'Username or password is incorrect.'
+              : 'Sign-in failed.'));
+          }
+          data = await r.json();
         }
-        const data = await r.json();
         if (!data.access_token) throw new Error('No session token was returned.');
 
         setToken(data.access_token);
@@ -250,6 +309,21 @@
         btn.disabled = false;
       }
     });
+  }
+
+  // A sign-out control in the page header, shown only with a live session.
+  function mountSignOut() {
+    if (document.getElementById('authSignOut')) return;
+    const host = document.querySelector('.header-actions') || document.querySelector('header');
+    if (!host) return;
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.id = 'authSignOut';
+    b.className = 'btn btn-sm';
+    b.textContent = 'Sign out';
+    b.title = 'Sign out of the dashboard';
+    b.addEventListener('click', () => window.edgeAuth.signOut());
+    host.appendChild(b);
   }
 
   window.edgeAuth = {
@@ -277,19 +351,22 @@
     try {
       const currentToken = getToken();
       if (currentToken) {
-        try { document.cookie = `${TOKEN_KEY}=${encodeURIComponent(currentToken)}; path=/; SameSite=Lax; max-age=604800`; } catch (_) {}
+        try { document.cookie = `${TOKEN_KEY}=${encodeURIComponent(currentToken)}; ${COOKIE_ATTRS}`; } catch (_) {}
       }
       const res = await nativeFetch('/api/v1/auth/status', {
         headers: currentToken ? { Authorization: `Bearer ${currentToken}` } : {},
       });
       const s = await res.json();
 
-      if (s.authenticated) return;                 // valid session, carry on
+      if (s.authenticated) { mountSignOut(); return; }   // valid session, carry on
+      // A stored token the server no longer accepts (expired, or the operator
+      // accounts were reset on the server): discard it.
+      if (currentToken) setToken(null);
       if (s.debug_bypass_active && s.admin_exists === false) {
         // Development convenience only: the backend is not enforcing auth and
         // no account has been created yet, so do not block the dashboard.
-        // A deployed instance must run without DEBUG, which makes this false.
-        console.warn('DEBUG bypass active: the API is currently unauthenticated.');
+        // Driven by the server's AUTH_DISABLED switch (never by DEBUG).
+        console.warn('AUTH_DISABLED is set on the server: the API is currently unauthenticated.');
         return;
       }
       showGate(s.admin_exists);

@@ -22,13 +22,17 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
 
-from sqlalchemy import Float, and_, case, func, select
+from sqlalchemy import Float, and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config import settings
+from app.services.timeutil import local_day_bounds_utc, to_local, utcnow
 
 from app.models.db_models import (
     CameraModel,
     CustomerTrackModel,
     POSTransactionModel,
+    ShelfInteractionModel,
     StoreZoneModel,
     ZoneVisitModel,
 )
@@ -37,10 +41,44 @@ logger = logging.getLogger(__name__)
 
 
 def day_bounds(day: Optional[datetime] = None) -> tuple[datetime, datetime]:
-    """Midnight-to-midnight window for a trading day."""
-    d = day or datetime.now()
-    start = d.replace(hour=0, minute=0, second=0, microsecond=0)
-    return start, start + timedelta(days=1)
+    """Store-local midnight-to-midnight window for a trading day, as naive UTC.
+
+    Stored observation times are naive UTC (services/timeutil.py); the trading
+    day is the store's (SITE_TIMEZONE, else the host zone). ``day`` may be
+    aware or naive store-local; None means today.
+    """
+    return local_day_bounds_utc(day)
+
+
+def _visit_is_real():
+    """A zone visit long enough to be a shopper, not a flickering track fragment.
+
+    Visits already need ZONE_DWELL_MIN_SECONDS to open; this additionally
+    applies FOOTFALL_MIN_TRACK_SECONDS so footfall, dwell and funnel figures
+    ignore fragments if the dwell floor is lowered. Closed visits need that
+    dwell; open ones must have started at least that long ago.
+    """
+    min_s = float(settings.FOOTFALL_MIN_TRACK_SECONDS)
+    return or_(
+        and_(ZoneVisitModel.exited_at.isnot(None), ZoneVisitModel.dwell_seconds >= min_s),
+        and_(ZoneVisitModel.exited_at.is_(None),
+             ZoneVisitModel.entered_at <= utcnow() - timedelta(seconds=min_s)),
+    )
+
+
+def _track_is_real():
+    """A finished track that lasted FOOTFALL_MIN_TRACK_SECONDS with FOOTFALL_MIN_TRACK_HITS hits.
+
+    Occlusion and detector flicker split one person into many ~1 s tracks;
+    counting each as a shopper inflated footfall roughly thirtyfold on a live
+    test. Rows written before ``hits`` existed (NULL) are judged on duration.
+    """
+    duration = (func.julianday(CustomerTrackModel.end_time) - func.julianday(CustomerTrackModel.start_time)) * 86400.0
+    return and_(
+        CustomerTrackModel.end_time.isnot(None),
+        duration >= float(settings.FOOTFALL_MIN_TRACK_SECONDS),
+        or_(CustomerTrackModel.hits.is_(None), CustomerTrackModel.hits >= int(settings.FOOTFALL_MIN_TRACK_HITS)),
+    )
 
 
 @dataclass
@@ -97,26 +135,66 @@ class RetailMetricsService:
     async def footfall(
         self, db: AsyncSession, start: datetime, end: datetime
     ) -> Optional[int]:
-        """Distinct people observed in the window.
+        """People who came into the store in the window.
 
-        Counted as distinct track ids rather than visit rows, so one shopper
-        walking through six aisles is one person, not six.
+        Source precedence (never summed, so nobody is counted twice):
+
+        1. **Entrance tripwires** -- when any footfall-counting tripwire
+           recorded a crossing in the window, footfall is the number of "in"
+           crossings on those lines. A line at the door counts each entry once,
+           whereas track ids fragment when a shopper is occluded and one person
+           walking past several cameras gets several ids. Every entrance needs
+           a line for this to be complete.
+        2. **Zone visits** -- distinct track ids with a zone visit, so one
+           shopper walking through six aisles is one person, not six.
+        3. **Raw tracks** -- a store with no zones drawn still sees people.
+
+        ``footfall_source`` reports which one produced the figure.
         """
+        entries = await self._tripwire_entries(db, start, end)
+        if entries is not None:
+            return entries
         count = await db.scalar(
             select(func.count(func.distinct(ZoneVisitModel.track_id))).where(
-                and_(ZoneVisitModel.entered_at >= start, ZoneVisitModel.entered_at < end)
+                and_(ZoneVisitModel.entered_at >= start, ZoneVisitModel.entered_at < end,
+                     _visit_is_real())
             )
         )
         if count:
             return int(count)
         # Fall back to raw tracks: a store with no zones drawn yet still sees
         # people, and reporting nothing at all would hide a working camera.
+        # Short fragments are not people (see _track_is_real).
         track_count = await db.scalar(
             select(func.count(func.distinct(CustomerTrackModel.track_id))).where(
-                and_(CustomerTrackModel.start_time >= start, CustomerTrackModel.start_time < end)
+                and_(CustomerTrackModel.start_time >= start, CustomerTrackModel.start_time < end,
+                     _track_is_real())
             )
         )
         return int(track_count) if track_count else None
+
+    @staticmethod
+    async def _tripwire_entries(db: AsyncSession, start: datetime, end: datetime) -> Optional[int]:
+        try:
+            from app.services.tripwire_engine import tripwire_entries
+
+            return await tripwire_entries(db, start, end)
+        except Exception as e:  # table missing on an unmigrated DB, etc.
+            logger.debug(f"tripwire footfall unavailable: {e}")
+            return None
+
+    async def footfall_source(self, db: AsyncSession, start: datetime, end: datetime) -> Optional[str]:
+        """Which signal ``footfall`` used for this window: tripwire | zone_visits | tracks | None."""
+        if await self._tripwire_entries(db, start, end) is not None:
+            return "tripwire"
+        if await db.scalar(select(func.count(ZoneVisitModel.id)).where(
+                and_(ZoneVisitModel.entered_at >= start, ZoneVisitModel.entered_at < end, _visit_is_real()))):
+            return "zone_visits"
+        if await db.scalar(select(func.count(CustomerTrackModel.id)).where(
+                and_(CustomerTrackModel.start_time >= start, CustomerTrackModel.start_time < end,
+                     _track_is_real()))):
+            return "tracks"
+        return None
 
     async def active_shoppers(self, db: AsyncSession) -> int:
         """People currently inside a zone, from visits with no exit time yet."""
@@ -138,6 +216,7 @@ class RetailMetricsService:
                     ZoneVisitModel.entered_at < end,
                     ZoneVisitModel.exited_at.isnot(None),
                     ZoneVisitModel.dwell_seconds > 0,
+                    _visit_is_real(),
                 )
             )
         )
@@ -198,7 +277,8 @@ class RetailMetricsService:
                     func.sum(case((ZoneVisitModel.interacted.is_(True), 1), else_=0)),
                 )
                 .where(
-                    and_(ZoneVisitModel.entered_at >= start, ZoneVisitModel.entered_at < end)
+                    and_(ZoneVisitModel.entered_at >= start, ZoneVisitModel.entered_at < end,
+                         _visit_is_real())
                 )
                 .group_by(ZoneVisitModel.zone_id)
             )
@@ -255,6 +335,7 @@ class RetailMetricsService:
                     ZoneVisitModel.entered_at >= start,
                     ZoneVisitModel.entered_at < end,
                     ZoneVisitModel.dwell_seconds > 0,
+                    _visit_is_real(),
                 )
             )
         )
@@ -264,6 +345,7 @@ class RetailMetricsService:
                     ZoneVisitModel.entered_at >= start,
                     ZoneVisitModel.entered_at < end,
                     ZoneVisitModel.interacted.is_(True),
+                    _visit_is_real(),
                 )
             )
         )
@@ -299,6 +381,11 @@ class RetailMetricsService:
 
     # -------------------------------------------------------------- heatmap
 
+    HEATMAP_KINDS = ("presence", "dwell", "interaction")
+    # Gaps longer than this between two trajectory points of one track are
+    # not credited as dwell: the person was not observed in between.
+    HEATMAP_DWELL_MAX_GAP_SEC = 5.0
+
     async def heatmap(
         self,
         db: AsyncSession,
@@ -309,58 +396,124 @@ class RetailMetricsService:
         height_m: float,
         grid_w: int = 50,
         grid_h: int = 30,
+        kind: str = "presence",
     ) -> dict:
-        """Occupancy density built from real trajectories.
+        """Floor density built from real observations.
 
-        Each recorded floor point drops into a grid cell. The result is a count
-        of observations per cell, normalised to 0-1 for rendering. With no
-        trajectories the matrix is omitted entirely rather than returned as a
-        smooth synthetic blob around four hand-picked hotspots.
+        ``kind``:
+
+        * ``presence``    -- one count per recorded floor point (where people were).
+        * ``dwell``       -- seconds spent per cell: each trajectory point is
+          weighted by the time to the track's next point (gaps over
+          ``HEATMAP_DWELL_MAX_GAP_SEC`` are not credited).
+        * ``interaction`` -- shelf interactions from the pose pipeline, binned
+          at the shopper's floor position when the reach started. Only
+          interactions seen by a calibrated camera have a floor position.
+
+        The matrix is normalised to 0-1 for rendering; ``peak_value`` and
+        ``unit`` give the absolute scale. With nothing observed the matrix is
+        omitted entirely rather than returned as a synthetic blob.
         """
-        rows = (
-            await db.execute(
-                select(CustomerTrackModel.trajectory_points).where(
-                    and_(
-                        CustomerTrackModel.start_time >= start,
-                        CustomerTrackModel.start_time < end,
-                    )
-                )
-            )
-        ).scalars().all()
+        kind = (kind or "presence").lower()
+        if kind not in self.HEATMAP_KINDS:
+            raise ValueError(f"unknown heatmap kind '{kind}'; expected one of {', '.join(self.HEATMAP_KINDS)}")
 
         grid = [[0.0] * grid_w for _ in range(grid_h)]
         samples = 0
-        for points in rows:
-            for p in points or []:
-                try:
-                    x, y = float(p["x"]), float(p["y"])
-                except (KeyError, TypeError, ValueError):
+
+        def drop(x: float, y: float, weight: float) -> bool:
+            if not (0 <= x <= width_m and 0 <= y <= height_m):
+                return False
+            gx = min(int(x / max(width_m, 1e-6) * grid_w), grid_w - 1)
+            gy = min(int(y / max(height_m, 1e-6) * grid_h), grid_h - 1)
+            grid[gy][gx] += weight
+            return True
+
+        if kind == "interaction":
+            rows = (
+                await db.execute(
+                    select(ShelfInteractionModel.floor_x, ShelfInteractionModel.floor_y).where(
+                        and_(
+                            ShelfInteractionModel.timestamp >= start,
+                            ShelfInteractionModel.timestamp < end,
+                        )
+                    )
+                )
+            ).all()
+            unplaced = 0
+            for fx, fy in rows:
+                if fx is None or fy is None:
+                    unplaced += 1
                     continue
-                if not (0 <= x <= width_m and 0 <= y <= height_m):
-                    continue
-                gx = min(int(x / max(width_m, 1e-6) * grid_w), grid_w - 1)
-                gy = min(int(y / max(height_m, 1e-6) * grid_h), grid_h - 1)
-                grid[gy][gx] += 1.0
-                samples += 1
+                if drop(float(fx), float(fy), 1.0):
+                    samples += 1
+            unit = "interactions"
+            empty_msg = (
+                f"{unplaced} shelf interaction(s) recorded today, but none from a calibrated camera, "
+                "so none can be placed on the floor plan."
+                if unplaced else
+                "No shelf interactions recorded today. Draw product zones on a camera and let the pose pipeline run."
+            )
+            extra = {"unplaced_interactions": unplaced, "interactions_total": len(rows)}
+        else:
+            rows = (
+                await db.execute(
+                    select(CustomerTrackModel.trajectory_points).where(
+                        and_(
+                            CustomerTrackModel.start_time >= start,
+                            CustomerTrackModel.start_time < end,
+                        )
+                    )
+                )
+            ).scalars().all()
+            for points in rows:
+                pts = []
+                for p in points or []:
+                    try:
+                        pts.append((float(p["x"]), float(p["y"]), p.get("t")))
+                    except (KeyError, TypeError, ValueError, AttributeError):
+                        continue
+                for i, (x, y, t) in enumerate(pts):
+                    if kind == "dwell":
+                        if i + 1 >= len(pts) or t is None or pts[i + 1][2] is None:
+                            continue
+                        dt = float(pts[i + 1][2]) - float(t)
+                        if dt <= 0 or dt > self.HEATMAP_DWELL_MAX_GAP_SEC:
+                            continue
+                        weight = dt
+                    else:
+                        weight = 1.0
+                    if drop(x, y, weight):
+                        samples += 1
+            unit = "seconds" if kind == "dwell" else "observations"
+            empty_msg = "No trajectories recorded. Calibrate a camera to place people on the floor plan."
+            extra = {}
 
         if not samples:
             return {
+                "kind": kind,
+                "unit": unit,
                 "grid_width": grid_w,
                 "grid_height": grid_h,
                 "density_matrix": None,
                 "samples": 0,
                 "observed": False,
-                "message": "No trajectories recorded. Calibrate a camera to place people on the floor plan.",
+                "message": empty_msg,
+                **extra,
             }
 
         peak = max(max(row) for row in grid) or 1.0
         return {
+            "kind": kind,
+            "unit": unit,
             "grid_width": grid_w,
             "grid_height": grid_h,
             "density_matrix": [[round(v / peak, 4) for v in row] for row in grid],
             "samples": samples,
-            "peak_count": int(peak),
+            "peak_count": int(round(peak)),
+            "peak_value": round(peak, 2),
             "observed": True,
+            **extra,
         }
 
     # --------------------------------------------------------------- queues
@@ -417,33 +570,32 @@ class RetailMetricsService:
 
     # -------------------------------------------------------------- forecast
 
+    async def _visit_times(self, db: AsyncSession, since: Optional[datetime] = None) -> list[tuple]:
+        """(track_id, entered_at) of real visits, entered_at as naive UTC."""
+        q = select(ZoneVisitModel.track_id, ZoneVisitModel.entered_at).where(_visit_is_real())
+        if since is not None:
+            q = q.where(ZoneVisitModel.entered_at >= since)
+        return (await db.execute(q)).all()
+
     async def hourly_history(
         self, db: AsyncSession, days_back: int = 28
     ) -> dict[int, list[int]]:
-        """Distinct visitors per clock hour, per day, over recent history."""
-        since = datetime.now() - timedelta(days=days_back)
-        rows = (
-            await db.execute(
-                select(
-                    func.strftime("%Y-%m-%d", ZoneVisitModel.entered_at),
-                    func.strftime("%H", ZoneVisitModel.entered_at),
-                    func.count(func.distinct(ZoneVisitModel.track_id)),
-                )
-                .where(ZoneVisitModel.entered_at >= since)
-                .group_by(
-                    func.strftime("%Y-%m-%d", ZoneVisitModel.entered_at),
-                    func.strftime("%H", ZoneVisitModel.entered_at),
-                )
-            )
-        ).all()
+        """Distinct visitors per store-local clock hour, per local day, over recent history.
+
+        Grouped in Python after converting each stored UTC time to store time,
+        so hours stay right across DST and in half-hour time zones.
+        """
+        since = utcnow() - timedelta(days=days_back)
+        buckets: dict[tuple[str, int], set] = {}
+        for track_id, entered in await self._visit_times(db, since):
+            if entered is None:
+                continue
+            local = to_local(entered)
+            buckets.setdefault((local.date().isoformat(), local.hour), set()).add(track_id)
 
         by_hour: dict[int, list[int]] = {}
-        for _day, hour, count in rows:
-            try:
-                h = int(hour)
-            except (TypeError, ValueError):
-                continue
-            by_hour.setdefault(h, []).append(int(count or 0))
+        for (_day, h), tracks in sorted(buckets.items()):
+            by_hour.setdefault(h, []).append(len(tracks))
         return by_hour
 
     async def forecast_hourly(
@@ -461,10 +613,12 @@ class RetailMetricsService:
         than extrapolating from one afternoon.
         """
         by_hour = await self.hourly_history(db)
-        distinct_days = await db.scalar(
-            select(func.count(func.distinct(func.strftime("%Y-%m-%d", ZoneVisitModel.entered_at))))
-        )
-        days = int(distinct_days or 0)
+        # Store-local days with at least one real visit (UTC hours folded to local dates).
+        utc_hours = (await db.execute(
+            select(func.distinct(func.strftime("%Y-%m-%d %H:00", ZoneVisitModel.entered_at)))
+            .where(_visit_is_real())
+        )).scalars().all()
+        days = len({to_local(datetime.strptime(h, "%Y-%m-%d %H:%M")).date() for h in utc_hours if h})
 
         if days < min_days or not by_hour:
             return {
@@ -522,6 +676,7 @@ class RetailMetricsService:
             "window": {"start": start.isoformat(), "end": end.isoformat()},
             # None means not observed. The UI must render a dash, never a zero.
             "today_footfall": footfall,
+            "footfall_source": await self.footfall_source(db, start, end),
             "active_shoppers_now": active,
             "avg_dwell_seconds": dwell,
             "avg_dwell_minutes": round(dwell / 60.0, 1) if dwell else None,

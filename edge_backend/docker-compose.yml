@@ -1,8 +1,18 @@
-version: '3.8'
+# CPU / Intel / Hailo hosts:  docker compose up -d
+# NVIDIA hosts (needs nvidia-container-toolkit on the host):
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+# Optional TURN relay for WebRTC off the store LAN (not needed for the online
+# dashboard, which goes over HTTPS through the remote-access tunnel):
+#   set TURN_ENABLED=true, COTURN_SECRET and COTURN_PUBLIC_IP in .env, then
+#   docker compose --profile turn up -d
+# See docs/DEPLOYMENT.md "Remote access".
 
 services:
-  # 1. Coturn TURN/STUN Relay Server (RFC 5766 Dynamic Secret Auth)
+  # 1. Coturn TURN relay (RFC 5766 dynamic secret auth). OPTIONAL: only
+  # started with `--profile turn`. It relays WebRTC media for phones that
+  # cannot reach the store directly, and needs public UDP 3478 + 49152-49252.
   coturn:
+    profiles: ["turn"]
     image: coturn/coturn:latest
     container_name: cctv_coturn
     restart: unless-stopped
@@ -13,7 +23,10 @@ services:
       - ./coturn/entrypoint.sh:/entrypoint.sh:ro
     environment:
       - TZ=UTC
-      - COTURN_SECRET=${COTURN_SECRET:-cctv_turn_super_secret_dynamic_key_change_me_in_prod}
+      # Required for this profile: set COTURN_SECRET in .env (see .env.example).
+      # The same variable is passed to edge_api so both sides share it; the
+      # entrypoint refuses to start when it is empty or a placeholder.
+      - COTURN_SECRET=${COTURN_SECRET:-}
     security_opt:
       - no-new-privileges:true
 
@@ -48,26 +61,36 @@ services:
     network_mode: host
     security_opt:
       - no-new-privileges:true
+    # Only devices every x86 host has. A missing device path makes compose
+    # refuse to start, so optional accelerators go in override files:
+    #   NVIDIA -> docker-compose.gpu.yml
+    #   Hailo  -> add `devices: ["/dev/hailo0:/dev/hailo0"]` in a
+    #             docker-compose.override.yml on machines that have one.
     devices:
       - /dev/dri:/dev/dri       # Intel QuickSync / VA-API for fast frame grabber
-      - /dev/hailo0:/dev/hailo0 # Hailo-8 / 8L PCIe accelerator for YOLOv8 & Pose inference
     volumes:
-      - ./storage:/app/storage   # Persistent mount for SQLite DB + clips + snapshots + DVR
-      - ./models_hef:/app/models_hef
-      - ./certs:/app/certs
+      # SQLite DB + clips + snapshots + DVR. The image mirrors the repo layout,
+      # so the storage root is /opt/edge-cctv/storage (see Dockerfile).
+      - ./storage:/opt/edge-cctv/storage
+      # Models are verified against models/manifest.json by the preflight;
+      # mounting them lets you update models without rebuilding the image.
+      - ./models:/opt/edge-cctv/edge_backend/models:ro
+      - ./certs:/opt/edge-cctv/edge_backend/certs
     environment:
       - HOST=0.0.0.0
       - PORT=8000
       - GO2RTC_API_URL=http://127.0.0.1:1984
-      - JWT_SECRET=${JWT_SECRET:-""}
-      - INTERNAL_SERVICE_KEY=${INTERNAL_SERVICE_KEY:-"edge_ai_vision_internal_secret"}
-      - COTURN_SECRET=${COTURN_SECRET:-"cctv_turn_super_secret_dynamic_key_change_me_in_prod"}
+      # Empty means "use the per-machine store": the app generates these on
+      # first start in ./storage/secrets/device_secrets.json (mode 0600).
+      - JWT_SECRET=${JWT_SECRET:-}
+      - INTERNAL_SERVICE_KEY=${INTERNAL_SERVICE_KEY:-}
+      - NVR_CREDENTIAL_KEY=${NVR_CREDENTIAL_KEY:-}
+      # TURN is opt-in (profile "turn"). Without it the ICE endpoint returns
+      # STUN only and WebRTC is LAN-only; empty COTURN_SECRET = per-machine.
+      - TURN_ENABLED=${TURN_ENABLED:-false}
+      - COTURN_SECRET=${COTURN_SECRET:-}
       - COTURN_REALM=cctv.local
-      - COTURN_PUBLIC_IP=${COTURN_PUBLIC_IP:-"192.168.1.100"}
-      - FCM_SERVER_KEY=${FCM_SERVER_KEY:-""}
-      - APNS_KEY_ID=${APNS_KEY_ID:-""}
-      - APNS_TEAM_ID=${APNS_TEAM_ID:-""}
-      - APNS_BUNDLE_ID=${APNS_BUNDLE_ID:-"com.cctv.edgeAiCctv"}
+      - COTURN_PUBLIC_IP=${COTURN_PUBLIC_IP:-}
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://127.0.0.1:8000/api/v1/health || exit 1"]
       interval: 10s
@@ -104,7 +127,7 @@ services:
     volumes:
       - ./tailscale_state:/var/lib/tailscale
     environment:
-      - TS_AUTHKEY=${TS_AUTHKEY:-""}
+      - TS_AUTHKEY=${TS_AUTHKEY:-}
       - TS_ROUTES=192.168.1.0/24
       - TS_EXTRA_ARGS=--advertise-tags=tag:cctv-edge
       - TS_STATE_DIR=/var/lib/tailscale

@@ -26,11 +26,20 @@
     e.className = `fp-status fp-${kind || 'info'}`;
   }
 
+  // Inline messages for the Dahua NVR panel (no alert()/confirm()/prompt()).
+  function dahuaStatus(msg, kind) {
+    const e = el('dahuaProbeStatus');
+    if (!e) return;
+    e.textContent = msg || '';
+    e.className = `fp-status fp-${kind || 'info'}`;
+  }
+
   const deviceManager = {
     devices: [],
     cameras: [],
 
     async init() {
+      this.bindAddPanel();
       await this.refresh();
       // Keep camera status fresh so an operator sees a feed drop out.
       setInterval(() => this.refreshCameras(), 6000);
@@ -308,6 +317,246 @@
       }
     },
 
+    // ------------------------------------------------- Add camera by address
+    //
+    // Manual entry for cameras a scan cannot find (other subnets, MJPEG
+    // encoders, USB capture, a test video file). "Test connection" opens the
+    // stream on the server and shows the frame it got; "Save camera" posts to
+    // the camera create API, which validates the source again and stores any
+    // credentials encrypted, never inside the URL.
+
+    SOURCE_HELP: {
+      rtsp: { label: 'Stream URL', ph: 'rtsp://192.168.1.64:554/stream1', creds: true,
+        hint: 'RTSP address of the camera or NVR channel. Put the login in the fields below, not in the URL.' },
+      http: { label: 'MJPEG URL', ph: 'http://192.168.1.70:8080/video.mjpg', creds: true,
+        hint: 'HTTP(S) Motion-JPEG stream, e.g. an encoder or ESP32 camera.' },
+      onvif: { label: 'ONVIF device address', ph: '192.168.1.64 or 192.168.1.64:8080', creds: true,
+        hint: 'The server asks the device for its stream address (ONVIF Media service).' },
+      usb: { label: 'USB device', ph: '0  or  /dev/video0', creds: false,
+        hint: 'Capture device on this server: an index (0, 1, …) or a /dev path.' },
+      file: { label: 'Video file path', ph: '/home/operator/test-footage.mp4', creds: false,
+        hint: 'A video file on this server, for testing an installation without a camera. Plays in a loop.' },
+    },
+
+    _addTested: null,
+
+    bindAddPanel() {
+      const panel = el('addCameraPanel');
+      if (!panel || panel.dataset.bound) return;
+      panel.dataset.bound = '1';
+      el('acClose').addEventListener('click', () => this.toggleAddPanel(false));
+      el('acType').addEventListener('change', () => { this.applySourceType(); this.clearPreview(); });
+      el('acTest').addEventListener('click', () => this.testAddCamera());
+      el('acSave').addEventListener('click', () => this.saveAddCamera());
+      el('acPassToggle').addEventListener('click', (ev) => {
+        const input = el('acPass');
+        const show = input.type === 'password';
+        input.type = show ? 'text' : 'password';
+        ev.currentTarget.textContent = show ? 'Hide' : 'Show';
+        ev.currentTarget.setAttribute('aria-pressed', String(show));
+        ev.currentTarget.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+      });
+      ['acUrl', 'acUser', 'acPass'].forEach((id) => el(id).addEventListener('input', () => {
+        el(id).removeAttribute('aria-invalid');
+        if (this._addTested) { this._addTested = null; this.markPreviewStale(); }
+      }));
+      el('acName').addEventListener('input', () => el('acName').removeAttribute('aria-invalid'));
+      panel.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter' && ev.target.tagName === 'INPUT') { ev.preventDefault(); this.saveAddCamera(); }
+        if (ev.key === 'Escape') this.toggleAddPanel(false);
+      });
+      this.applySourceType();
+    },
+
+    toggleAddPanel(force) {
+      const panel = el('addCameraPanel');
+      const btn = el('btnToggleAddCamera');
+      if (!panel) return;
+      this.bindAddPanel();
+      const open = typeof force === 'boolean' ? force : panel.hidden;
+      panel.hidden = !open;
+      if (btn) btn.setAttribute('aria-expanded', String(open));
+      if (open) {
+        const dahua = el('dahuaNvrPanel');
+        if (dahua) dahua.style.display = 'none';
+        el('acName').focus();
+      }
+    },
+
+    applySourceType() {
+      const type = el('acType').value;
+      const help = this.SOURCE_HELP[type] || this.SOURCE_HELP.rtsp;
+      el('acUrlLabel').textContent = help.label;
+      el('acUrl').placeholder = help.ph;
+      el('acUrlHint').textContent = help.hint;
+      el('acCredRow').hidden = !help.creds;
+    },
+
+    addStatus(msg, kind) {
+      const e = el('acStatus');
+      if (!e) return;
+      e.textContent = msg || '';
+      e.className = `fp-status dev-add-status fp-${kind || 'info'}`;
+    },
+
+    clearPreview() {
+      const fig = el('acPreview');
+      if (fig) { fig.hidden = true; fig.classList.remove('is-stale'); }
+      const img = el('acPreviewImg');
+      if (img) img.removeAttribute('src');
+      this._addTested = null;
+    },
+
+    markPreviewStale() {
+      const fig = el('acPreview');
+      if (fig && !fig.hidden) {
+        fig.classList.add('is-stale');
+        el('acPreviewCap').textContent = 'Settings changed since this test. Test again to confirm.';
+      }
+    },
+
+    /** Read the form; mark the first missing field inline. Returns null if invalid. */
+    readAddForm(requireName) {
+      const type = el('acType').value;
+      const creds = (this.SOURCE_HELP[type] || {}).creds;
+      const body = {
+        name: el('acName').value.trim(),
+        source_type: type,
+        url: el('acUrl').value.trim(),
+        department: el('acDept').value,
+        location: el('acLoc').value.trim(),
+        username: creds ? el('acUser').value.trim() : '',
+        password: creds ? el('acPass').value : '',
+      };
+      if (requireName && !body.name) {
+        el('acName').setAttribute('aria-invalid', 'true');
+        el('acName').focus();
+        this.addStatus('Enter a name for this camera.', 'error');
+        return null;
+      }
+      if (!body.url) {
+        el('acUrl').setAttribute('aria-invalid', 'true');
+        el('acUrl').focus();
+        this.addStatus(`Enter the ${(this.SOURCE_HELP[type] || {}).label || 'stream URL'}.`, 'error');
+        return null;
+      }
+      return body;
+    },
+
+    async _errorText(res) {
+      if (res.status === 401) return 'Your session has expired. Sign in again.';
+      if (res.status === 403) return 'This account is not allowed to add cameras.';
+      try {
+        const data = await res.json();
+        const d = data && data.detail;
+        if (typeof d === 'string') return d;
+        if (Array.isArray(d) && d.length) {
+          return d.map((x) => `${(x.loc || []).slice(-1)[0] || 'field'}: ${x.msg}`).join('; ');
+        }
+      } catch (_) { /* not JSON */ }
+      return `${res.status} ${res.statusText}`;
+    },
+
+    async testAddCamera() {
+      const body = this.readAddForm(false);
+      if (!body) return;
+      const btn = el('acTest');
+      btn.disabled = true;
+      btn.textContent = 'Testing…';
+      this.addStatus('Opening the stream on the server and waiting for a frame…', 'info');
+      try {
+        const res = await fetch('/api/v1/cameras/test-connection', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            source_type: body.source_type, url: body.url,
+            username: body.username || null, password: body.password || null,
+          }),
+        });
+        if (!res.ok) {
+          const msg = await this._errorText(res);
+          if (res.status === 422) el('acUrl').setAttribute('aria-invalid', 'true');
+          this.clearPreview();
+          this.addStatus(msg, 'error');
+          return;
+        }
+        const data = await res.json();
+        if (!data.success) {
+          this.clearPreview();
+          this.addStatus(data.error || 'No video received.', 'error');
+          return;
+        }
+        this._addTested = data;
+        const img = el('acPreviewImg');
+        const fig = el('acPreview');
+        fig.classList.remove('is-stale');
+        img.width = data.preview_width || data.width;
+        img.height = data.preview_height || data.height;
+        img.src = data.preview_jpeg;
+        fig.hidden = false;
+        const fps = data.fps != null
+          ? `${data.fps} fps${data.fps_source === 'measured' ? ' (measured)' : ''}`
+          : (data.fps_reported != null ? `${data.fps_reported} fps (reported by stream)` : 'fps unknown');
+        const via = data.resolved_via === 'onvif' ? ` · resolved ${data.resolved_url}` : '';
+        el('acPreviewCap').textContent = `${data.width}×${data.height} · ${fps} · ${data.elapsed_ms} ms${via}`;
+        this.addStatus('Connected. This is the frame the server received.', 'ok');
+      } catch (e) {
+        this.clearPreview();
+        this.addStatus(`Test failed: ${e.message}`, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Test connection';
+      }
+    },
+
+    async saveAddCamera() {
+      const body = this.readAddForm(true);
+      if (!body) return;
+      const btn = el('acSave');
+      btn.disabled = true;
+      btn.textContent = 'Saving…';
+      this.addStatus('Saving…', 'info');
+      try {
+        const payload = {
+          name: body.name, department: body.department, location: body.location,
+          source_type: body.source_type, rtsp_url: body.url,
+        };
+        if (body.username) payload.username = body.username;
+        if (body.password) payload.password = body.password;
+        const res = await fetch('/api/v1/cameras', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) {
+          const msg = await this._errorText(res);
+          if (res.status === 422 && /name/i.test(msg) && !/url|stream|path|device|host/i.test(msg)) {
+            el('acName').setAttribute('aria-invalid', 'true');
+          } else if (res.status === 422) {
+            el('acUrl').setAttribute('aria-invalid', 'true');
+          }
+          this.addStatus(`Not saved: ${msg}`, 'error');
+          return;
+        }
+        const cam = await res.json();
+        // Clear the secret fields and the form for the next camera.
+        ['acName', 'acUrl', 'acUser', 'acPass', 'acLoc'].forEach((id) => { el(id).value = ''; });
+        this.clearPreview();
+        this.addStatus('', 'info');
+        this.toggleAddPanel(false);
+        status(`Added "${cam.name}". It streams in the Live matrix once the first frame arrives; place and calibrate it on the plan.`, 'ok');
+        if (window.blueprintEditor) await window.blueprintEditor.load();
+        await this.refresh();
+        if (typeof window.loadCamerasMatrix === 'function') window.loadCamerasMatrix();
+        window.dispatchEvent(new CustomEvent('edge:cameras-changed', { detail: { camera_id: cam.id } }));
+      } catch (e) {
+        this.addStatus(`Not saved: ${e.message}`, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Save camera';
+      }
+    },
+
     // ---------------------------------------------------- Dahua NVR Support
     dahuaConfig: null,
 
@@ -317,6 +566,7 @@
       const isHidden = panel.style.display === 'none';
       panel.style.display = isHidden ? 'block' : 'none';
       if (isHidden) {
+        this.toggleAddPanel(false);
         this.loadNvrConfig();
       }
     },
@@ -395,10 +645,12 @@
     async probeNvr() {
       const host = (el('nvrHost')?.value || '').trim();
       if (!host) {
-        alert('Please enter the Dahua NVR IP address (e.g. 192.168.1.108)');
+        dahuaStatus('Enter the Dahua NVR IP address first (e.g. 192.168.1.108).', 'error');
+        el('nvrHost')?.setAttribute('aria-invalid', 'true');
         el('nvrHost')?.focus();
         return;
       }
+      el('nvrHost')?.removeAttribute('aria-invalid');
       const port = parseInt(el('nvrPort')?.value, 10) || 554;
       const username = (el('nvrUser')?.value || 'admin').trim();
       const password = el('nvrPass')?.value || '';
@@ -415,7 +667,7 @@
       }
 
       const listHost = el('dahuaChannelsList');
-      if (listHost) listHost.innerHTML = '<div style="font-size:11px; color:#8b949e; padding:8px;">Probing RTSP streams, please wait…</div>';
+      if (listHost) listHost.innerHTML = '<div style="font-size:11px; color: var(--text-dim); padding:8px;">Probing RTSP streams, please wait…</div>';
 
       try {
         const res = await fetch('/api/v1/dahua/probe', {
@@ -477,7 +729,7 @@
 
       let html = `
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-          <span style="font-size: 11px; font-weight: 700; color: #e6edf3;">Channels on ${esc(host)}:</span>
+          <span style="font-size: 11px; font-weight: 700; color: var(--text-soft);">Channels on ${esc(host)}:</span>
           <button class="btn btn-xs btn-primary" id="btnAdoptDahuaBatch">Adopt Selected</button>
         </div>
         <div style="display: flex; flex-direction: column; gap: 4px;">
@@ -486,12 +738,12 @@
       channels.forEach((c) => {
         const isActive = c.active;
         html += `
-          <div class="dev-row" style="padding: 5px 8px; ${isActive ? 'border-color: rgba(0,255,157,0.3); background: rgba(0,255,157,0.03);' : 'opacity: 0.6;'}">
+          <div class="dev-row" style="padding: 5px 8px; ${isActive ? 'border-color: rgba(var(--green-rgb), 0.3); background: rgba(var(--green-rgb), 0.03);' : 'opacity: 0.6;'}">
             <input type="checkbox" class="dahua-ch-cb" data-channel="${c.channel}" ${isActive ? 'checked' : ''} style="cursor: pointer;">
             <div class="dev-main">
               <div class="dev-name" style="font-size: 11px;">Channel ${c.channel}: Dahua NVR Ch ${c.channel}</div>
               <div class="dev-sub" style="font-size: 9.5px;">
-                ${isActive ? `<span style="color:#00ff9d; font-weight:bold;">● LIVE</span> · ${c.resolution || '720p'} · ${c.fps || 25} FPS` : '<span style="color:#8b949e;">○ No Signal</span>'}
+                ${isActive ? `<span style="color: var(--accent-green); font-weight:bold;">● LIVE</span> · ${c.resolution || '720p'} · ${c.fps || 25} FPS` : '<span style="color: var(--text-dim);">○ No Signal</span>'}
               </div>
             </div>
             <div class="dev-actions">
@@ -515,12 +767,13 @@
           }));
 
           if (!checked.length) {
-            alert('Please select at least one channel to adopt.');
+            dahuaStatus('Select at least one channel to adopt.', 'warn');
             return;
           }
 
           adoptBtn.disabled = true;
           adoptBtn.textContent = 'Adopting…';
+          dahuaStatus(`Adopting ${checked.length} channel(s)…`, 'info');
 
           try {
             const res = await fetch('/api/v1/dahua/adopt', {
@@ -537,13 +790,14 @@
             await this.refresh();
             this.toggleDahuaPanel();
           } catch (e) {
-            alert(`Failed to adopt channels: ${e.message}`);
+            dahuaStatus(`Failed to adopt channels: ${e.message}`, 'error');
             adoptBtn.disabled = false;
             adoptBtn.textContent = 'Adopt Selected';
           }
         });
       }
     },
+  };
 
   window.deviceManager = deviceManager;
   function initDevices() {

@@ -92,8 +92,12 @@ OVERVIEW_KEYS = {
     "store_name", "timestamp", "window", "today_footfall", "active_shoppers_now",
     "avg_dwell_seconds", "avg_dwell_minutes", "daily_revenue", "transactions",
     "conversion_rate_pct", "zones_total", "zones_with_data", "top_zones",
-    "coverage", "has_data", "pos_connected",
+    "coverage", "has_data", "pos_connected", "footfall_source",
 }
+
+# Which signal today's footfall came from (entrance tripwires win; see
+# RetailMetricsService.footfall); null when nothing was observed.
+FOOTFALL_SOURCES = {None, "tripwire", "zone_visits", "tracks"}
 
 # Keys that only ever existed because they were fabricated.
 OVERVIEW_REMOVED_KEYS = {
@@ -123,6 +127,9 @@ def test_analytics_overview_endpoint(client):
     assert isinstance(data["top_zones"], list)
     assert isinstance(data["has_data"], bool)
     assert isinstance(data["pos_connected"], bool)
+    assert data["footfall_source"] in FOOTFALL_SOURCES
+    # A figure always names its source, and no source means no figure.
+    assert (data["today_footfall"] is None) == (data["footfall_source"] is None)
     assert set(data["coverage"]) == {
         "cameras_total", "cameras_calibrated", "cameras_uncalibrated",
         "floor_tracking_possible",
@@ -422,7 +429,7 @@ def test_analytics_daily_report_json(client):
     assert set(data) == {
         "report_title", "date", "generated_at", "data_available", "kpi_scorecard",
         "coverage", "funnel", "queues", "findings", "findings_count",
-        "analysis_message", "executive_summary",
+        "analysis_message", "executive_summary", "shelf_reach",
     }
     for gone in ("store_id", "generated_by", "overview", "decisions",
                  "total_lost_sales_estimated", "overall_queue_sla_percent"):
@@ -430,7 +437,7 @@ def test_analytics_daily_report_json(client):
 
     assert isinstance(data["data_available"], bool)
     assert set(data["kpi_scorecard"]) == {
-        "total_footfall", "shoppers_now", "avg_dwell", "conversion", "daily_revenue",
+        "total_footfall", "shoppers_now", "avg_dwell", "conversion", "daily_revenue", "shelf_reaches",
     }
     # An unmeasured KPI reads "Not observed" -- never "$0" or "0%".
     if not data["data_available"]:
@@ -487,6 +494,28 @@ def test_analytics_pos_ingest(client):
     assert data["ingested_count"] == 2
     assert data["total_amount"] == 12.20
     assert "tx_test_101" in data["transaction_ids"]
+
+
+def test_pos_ingest_stores_offset_timestamps_as_utc_and_rejects_garbage(client):
+    import sqlite3
+    from app.config import settings
+
+    ok = client.post("/api/v1/analytics/pos/ingest", json={"transactions": [{
+        "transaction_id": "tx_tz_1", "register_id": "pos_1", "sku_id": "SKU_TZ",
+        "quantity": 1, "amount": 1.0, "timestamp": "2026-09-23T15:30:00+05:30",
+    }]})
+    assert ok.status_code == 200
+    with sqlite3.connect(settings.DATABASE_PATH) as db:
+        (stored,) = db.execute(
+            "SELECT timestamp FROM pos_transactions WHERE transaction_id = 'tx_tz_1'"
+        ).fetchone()
+    assert stored.startswith("2026-09-23 10:00:00")
+
+    bad = client.post("/api/v1/analytics/pos/ingest", json={"transactions": [{
+        "transaction_id": "tx_tz_2", "register_id": "pos_1", "sku_id": "SKU_TZ",
+        "quantity": 1, "amount": 1.0, "timestamp": "yesterday-ish",
+    }]})
+    assert bad.status_code == 422
 
 
 def test_analytics_sync_endpoint(client):

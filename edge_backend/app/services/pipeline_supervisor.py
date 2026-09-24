@@ -30,12 +30,14 @@ from app.models.db_models import CameraModel, CustomerTrackModel, ZoneVisitModel
 from app.services.camera_drivers import redact_url
 from app.services.live_analytics_engine import live_engine
 from app.services.store_layout_service import store_layout_service
+from app.services.timeutil import utc_from_ts
 from app.services.tracking_service import floor_projector
 
 logger = logging.getLogger(__name__)
 
 FLUSH_INTERVAL_SECONDS = 5.0
 RECONCILE_INTERVAL_SECONDS = 15.0
+WORKER_STOP_TIMEOUT_SECONDS = 3.0
 
 
 def _camera_source(cam: CameraModel) -> str:
@@ -44,8 +46,18 @@ def _camera_source(cam: CameraModel) -> str:
     Analytics prefers the vendor sub-stream when one is configured, because
     running detection on a 1080p main stream costs several times the decode
     budget for no measurable gain in person detection accuracy.
+
+    Cameras added by URL store a credential-free URL; their username and
+    password live in the encrypted secret store and are injected here, at
+    open time only (app/services/camera_source.py).
     """
-    return cam.rtsp_url
+    try:
+        from app.services.camera_source import stream_source_for
+
+        return stream_source_for(cam.id, cam.rtsp_url)
+    except Exception as exc:  # noqa: BLE001 - never block a worker on the store
+        logger.warning(f"Could not load stored credentials for {cam.id}: {type(exc).__name__}")
+        return cam.rtsp_url
 
 
 class PipelineSupervisor:
@@ -58,6 +70,10 @@ class PipelineSupervisor:
         if self._running:
             return
         self._running = True
+        # Tripwire / restricted-area alerts are scheduled onto this loop.
+        from app.services.tripwire_engine import tripwire_engine
+
+        tripwire_engine.bind_loop()
         await self._close_orphaned_visits()
         await self.reload_layout()
         await self.reconcile_cameras()
@@ -78,7 +94,8 @@ class PipelineSupervisor:
             except (asyncio.CancelledError, Exception):
                 pass
         self._tasks.clear()
-        live_engine.stop_all()
+        # Bounded join off the event loop (a worker may sit in an RTSP read).
+        await asyncio.to_thread(live_engine.stop_all, WORKER_STOP_TIMEOUT_SECONDS)
         # Persist whatever the workers produced before shutdown so a restart
         # does not silently discard the last few seconds of real observations.
         await self.flush_once()
@@ -164,32 +181,47 @@ class PipelineSupervisor:
 
     async def flush_once(self) -> int:
         """Write buffered facts to the database. Returns rows written."""
+        # Tripwire crossings go to tripwire_events (their own session, so a
+        # failure there cannot lose zone visits or tracks, and vice versa).
+        from app.services.tripwire_engine import flush_tripwire_events
+
+        crossings = await flush_tripwire_events(async_session_factory)
         visits, tracks = live_engine.drain()
         if not visits and not tracks:
-            return 0
+            return crossings
 
-        written = 0
+        written = crossings
         try:
             async with async_session_factory() as db:
+                # Rows added in this drain, so a later phase of the same visit
+                # finds them without depending on autoflush.
+                added: dict[str, ZoneVisitModel] = {}
                 for v in visits:
                     if v.phase == "open":
                         # The person is in the zone now; the row exists with no
                         # exit time so live occupancy is a plain SQL question.
-                        db.add(
-                            ZoneVisitModel(
-                                id=v.visit_id,
-                                zone_id=v.zone_id,
-                                track_id=v.track_id,
-                                camera_id=v.camera_id,
-                                entered_at=v.entered_at,
-                                exited_at=None,
-                                dwell_seconds=0.0,
-                                interacted=False,
-                            )
+                        row = ZoneVisitModel(
+                            id=v.visit_id,
+                            zone_id=v.zone_id,
+                            track_id=v.track_id,
+                            camera_id=v.camera_id,
+                            entered_at=v.entered_at,
+                            exited_at=None,
+                            dwell_seconds=0.0,
+                            interacted=bool(v.interacted),
                         )
+                        db.add(row)
+                        added[v.visit_id] = row
                         written += 1
+                    elif v.phase == "interact":
+                        # A shelf interaction seen by pose analytics while the
+                        # visit is still open.
+                        row = added.get(v.visit_id) or await db.get(ZoneVisitModel, v.visit_id)
+                        if row is not None:
+                            row.interacted = True
+                            written += 1
                     else:
-                        row = await db.get(ZoneVisitModel, v.visit_id)
+                        row = added.get(v.visit_id) or await db.get(ZoneVisitModel, v.visit_id)
                         if row is None:
                             # The open phase and close phase can land in the
                             # same drain; insert the completed visit directly.
@@ -217,8 +249,10 @@ class PipelineSupervisor:
                             id=f"ct_{uuid.uuid4().hex[:14]}",
                             track_id=t.track_id,
                             camera_id=t.camera_id,
-                            start_time=datetime.fromtimestamp(t.first_seen),
-                            end_time=datetime.fromtimestamp(t.last_seen),
+                            # Naive UTC, like created_at (services/timeutil.py).
+                            start_time=utc_from_ts(t.first_seen),
+                            end_time=utc_from_ts(t.last_seen),
+                            hits=int(t.hits),
                             trajectory_points=t.floor_points[:500],
                         )
                     )

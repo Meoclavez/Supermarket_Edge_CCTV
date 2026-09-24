@@ -221,5 +221,9 @@ def setup_structured_logging():
     stdout_handler = logging.StreamHandler(sys.stdout)
     stdout_handler.setFormatter(formatter)
     logger.addHandler(stdout_handler)
-    
+
+    from app.services.log_redaction import install_log_redaction
+
+    install_log_redaction()  # tokens and passwords never reach the log file
+
     logging.info("Structured logging initialized.")

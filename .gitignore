@@ -102,4 +102,65 @@ mobile_app/ios/Runner/GeneratedPluginRegistrant.m
 # Environment Variables & Secrets
 .env
 .env.local
+.env.*
 *.env
+!.env.example
+!**/.env.example
+
+# Machine-local secrets and site state. Each machine generates its own secrets
+# (app/services/secret_store.py); none of this may ever be committed.
+storage/secrets/
+storage/setup_code.txt
+storage/setup_code.txt.*
+storage/nvr_credentials.json*
+storage/*.tmp
+storage/.*.tmp
+storage/logs/
+storage/theft_evidence/
+storage/trt_cache/
+storage/recordings/
+edge_backend/storage/secrets/
+edge_backend/storage/setup_code.txt
+edge_backend/storage/setup_code.txt.*
+edge_backend/storage/nvr_credentials.json*
+edge_backend/storage/*.tmp
+edge_backend/storage/.*.tmp
+edge_backend/storage/logs/
+edge_backend/storage/theft_evidence/
+edge_backend/storage/trt_cache/
+edge_backend/storage/recordings/
+# Catch-all: everything else the running system writes under storage/ is
+# site data too (zones, shelf layouts, databases). Only .gitkeep is tracked.
+storage/*
+!storage/backups/
+!storage/backups/.gitkeep
+edge_backend/storage/*
+!edge_backend/storage/backups/
+!edge_backend/storage/backups/.gitkeep
+# Locally exported / cached models and their bookkeeping
+models/.local_exports.json
+edge_backend/models/.local_exports.json
+# Docker volumes holding node keys / state
+edge_backend/tailscale_state/
+edge_backend/certs/*
+!edge_backend/certs/.gitkeep
+# Private keys, keystores and mobile signing / push credentials
+*.key
+*.pem
+*.p8
+*.p12
+*.pfx
+*.jks
+*.keystore
+mobile_app/android/key.properties
+mobile_app/android/app/google-services.json
+mobile_app/ios/Runner/GoogleService-Info.plist
+
+# Downloaded tool binaries (cloudflared, fetched by edge_backend/scripts/bootstrap.py)
+/bin/
+
+# Model binaries (70-220 MB) are not versioned: models/manifest.json pins each
+# file by sha256 and ./run.sh (scripts/fetch_models.py) downloads or re-exports
+# them on a fresh machine.
+edge_backend/models/*.onnx
+edge_backend/models/*.zip

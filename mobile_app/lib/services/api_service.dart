@@ -3,52 +3,35 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:developer' as developer;
-import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 import '../core/constants/api_constants.dart';
 import '../models/camera_feed.dart';
+import '../models/feature_config.dart';
 import '../models/security_event.dart';
+import '../models/theft_incident.dart';
 import '../models/zone_model.dart';
+import 'server_registry.dart';
+import '../core/server_time.dart';
 
 class ApiService {
   static final ApiService _instance = ApiService._internal();
   factory ApiService() => _instance;
   ApiService._internal();
 
-  static const String _prefKeyBaseUrl = 'edge_server_base_url';
-  String _baseUrl = ApiConstants.defaultBaseUrl;
-  
   final Duration _normalTimeout = const Duration(seconds: 10);
-  final Duration _downloadTimeout = const Duration(seconds: 30);
   
   final List<Map<String, dynamic>> _offlineQueue = [];
 
-  String get baseUrl => _baseUrl;
+  /// Base URL of the active server: the last address that proved (through
+  /// `GET /api/v1/device/identity`) that it is that server. See
+  /// [ServerRegistry] and [ConnectionResolver].
+  String get baseUrl => ServerRegistry().activeUrl ?? ApiConstants.defaultBaseUrl;
+  String get _baseUrl => baseUrl;
 
+  /// Loads the paired servers (kept for callers that initialise the API
+  /// client directly, such as background isolates).
   Future<void> init() async {
-    final prefs = await SharedPreferences.getInstance();
-    final savedUrl = prefs.getString(_prefKeyBaseUrl);
-    if (savedUrl != null && savedUrl.isNotEmpty) {
-      _baseUrl = _normalizeUrl(savedUrl);
-    }
-  }
-
-  Future<void> setBaseUrl(String newUrl) async {
-    _baseUrl = _normalizeUrl(newUrl);
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_prefKeyBaseUrl, _baseUrl);
-  }
-
-  String _normalizeUrl(String url) {
-    var trimmed = url.trim();
-    if (!trimmed.startsWith('http://') && !trimmed.startsWith('https://')) {
-      trimmed = 'http://$trimmed';
-    }
-    if (trimmed.endsWith('/')) {
-      trimmed = trimmed.substring(0, trimmed.length - 1);
-    }
-    return trimmed;
+    if (!ServerRegistry().isLoaded) await ServerRegistry().load();
   }
 
   Future<http.Response> _sendRequestWithRetry(
@@ -57,11 +40,21 @@ class ApiService {
     {int maxRetries = 3}
   ) async {
     int attempts = 0;
+    bool refreshed = false;
     while (attempts < maxRetries) {
       try {
         developer.log('API Request: $endpoint', name: 'ApiService');
         final response = await requestFunc();
-        
+
+        // Expired session: refresh once and repeat the request (the request
+        // closures read the auth header when they run). A refresh that is
+        // itself rejected sends the app back to pairing (onSessionLost).
+        if (response.statusCode == 401 && !refreshed && ServerRegistry().activeId != null) {
+          refreshed = true;
+          final outcome = await ServerRegistry().refreshSession(ServerRegistry().activeId!);
+          if (outcome == RefreshOutcome.refreshed) continue;
+        }
+
         if (response.statusCode >= 200 && response.statusCode < 300) {
           return response;
         } else {
@@ -71,11 +64,17 @@ class ApiService {
       } on SocketException catch (e) {
         developer.log('SocketException on $endpoint: $e', name: 'ApiService', level: 900);
         attempts++;
-        if (attempts >= maxRetries) throw const SocketException('Cannot reach Edge Server.');
+        if (attempts >= maxRetries) {
+          unawaited(ServerRegistry().resolveActive());
+          throw const SocketException('Cannot reach Edge Server.');
+        }
       } on TimeoutException catch (e) {
         developer.log('TimeoutException on $endpoint: $e', name: 'ApiService', level: 900);
         attempts++;
-        if (attempts >= maxRetries) throw TimeoutException('Request timed out');
+        if (attempts >= maxRetries) {
+          unawaited(ServerRegistry().resolveActive());
+          throw TimeoutException('Request timed out');
+        }
       } catch (e) {
         developer.log('Exception on $endpoint: $e', name: 'ApiService', level: 900);
         rethrow;
@@ -97,9 +96,7 @@ class ApiService {
     
     for (var item in queueCopy) {
       try {
-        if (item['type'] == 'register_device') {
-          await registerDevice(item['token'], item['platform']);
-        } else if (item['type'] == 'acknowledge_event') {
+        if (item['type'] == 'acknowledge_event') {
           await acknowledgeEvent(item['eventId']);
         }
       } catch (e) {
@@ -116,7 +113,7 @@ class ApiService {
   Future<List<CameraFeed>> getCameras() async {
     final endpoint = '$_baseUrl${ApiConstants.camerasEndpoint}';
     final response = await _sendRequestWithRetry(
-      () => http.get(Uri.parse(endpoint)).timeout(_normalTimeout),
+      () async => http.get(Uri.parse(endpoint), headers: await authHeaders()).timeout(_normalTimeout),
       endpoint
     );
     final Map<String, dynamic> data = jsonDecode(response.body);
@@ -130,7 +127,7 @@ class ApiService {
       endpoint += '?severity=$severity';
     }
     final response = await _sendRequestWithRetry(
-      () => http.get(Uri.parse(endpoint)).timeout(_normalTimeout),
+      () async => http.get(Uri.parse(endpoint), headers: await authHeaders()).timeout(_normalTimeout),
       endpoint
     );
     final Map<String, dynamic> data = jsonDecode(response.body);
@@ -138,48 +135,28 @@ class ApiService {
     return list.map((e) => SecurityEvent.fromJson(e)).toList();
   }
 
-  Future<void> registerDevice(String token, String platform) async {
-    final endpoint = '$_baseUrl${ApiConstants.registerDeviceEndpoint}';
-    try {
-      await _sendRequestWithRetry(
-        () => http.post(
-          Uri.parse(endpoint),
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({
-            'device_token': token,
-            'platform': platform,
-            'device_name': kIsWeb ? 'web' : Platform.operatingSystem,
-          }),
-        ).timeout(_normalTimeout),
-        endpoint,
-        maxRetries: 2
-      );
-    } catch (e) {
-      developer.log('Device token registration failed, queueing offline: $e', name: 'ApiService');
-      _offlineQueue.add({'type': 'register_device', 'token': token, 'platform': platform});
-    }
-  }
-
-  Future<void> muteCameraAlerts(String cameraId, {int durationMinutes = 5}) async {
-    final endpoint = '$_baseUrl/api/v1/cameras/$cameraId/mute';
-    try {
-      await _sendRequestWithRetry(
-        () => http.post(
-          Uri.parse(endpoint),
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({'duration_minutes': durationMinutes}),
-        ).timeout(_normalTimeout),
-        endpoint
-      );
-    } catch (e) {
-      developer.log('Mute alerts notice: $e', name: 'ApiService');
-    }
+  /// Holds loss-prevention phone pushes for one camera (alerts are still
+  /// logged and still reach the dashboard). `durationMinutes: 0` resumes
+  /// pushes. Returns the server's `muted_until` (null when resumed).
+  Future<DateTime?> holdCameraPushes(String cameraId, {required int durationMinutes}) async {
+    final endpoint = '$_baseUrl${ApiConstants.camerasEndpoint}/$cameraId/mute';
+    final response = await _sendRequestWithRetry(
+      () async => http
+          .post(Uri.parse(endpoint), headers: {'Content-Type': 'application/json', ...await authHeaders()}, body: jsonEncode({'duration_minutes': durationMinutes}))
+          .timeout(_normalTimeout),
+      endpoint,
+      maxRetries: 2,
+    );
+    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    final until = data['muted_until']?.toString();
+    if (until == null || until.isEmpty) return null;
+    return parseServerTime(until);
   }
 
   Future<Map<String, dynamic>> getCameraTimeline(String cameraId, String dateStr) async {
     final endpoint = '$_baseUrl/api/v1/cameras/$cameraId/timeline?date=$dateStr';
     final response = await _sendRequestWithRetry(
-      () => http.get(Uri.parse(endpoint)).timeout(_normalTimeout),
+      () async => http.get(Uri.parse(endpoint), headers: await authHeaders()).timeout(_normalTimeout),
       endpoint
     );
     return jsonDecode(response.body);
@@ -188,54 +165,17 @@ class ApiService {
   Future<Map<String, dynamic>> getStorageHealth() async {
     final endpoint = '$_baseUrl/api/v1/storage/health';
     final response = await _sendRequestWithRetry(
-      () => http.get(Uri.parse(endpoint)).timeout(_normalTimeout),
+      () async => http.get(Uri.parse(endpoint), headers: await authHeaders()).timeout(_normalTimeout),
       endpoint
     );
     return jsonDecode(response.body);
-  }
-
-  Future<SecurityEvent> triggerSimulatedEvent({
-    required String cameraId,
-    required String eventType,
-    required String severity,
-  }) async {
-    final endpoint = '$_baseUrl${ApiConstants.triggerEventEndpoint}';
-    final response = await _sendRequestWithRetry(
-      () => http.post(
-        Uri.parse(endpoint),
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Edge-API-Key': 'edge_ai_vision_internal_secret'
-        },
-        body: jsonEncode({
-          'camera_id': cameraId,
-          'event_type': eventType,
-          'severity': severity,
-          'confidence': 0.95,
-          'bounding_box': {
-            'x_min': 0.2, 'y_min': 0.5, 'x_max': 0.8, 'y_max': 0.9,
-            'confidence': 0.95, 'label': 'simulated_event'
-          },
-          'kinematics': {
-            'hip_descent_velocity': 2.1,
-            'aspect_ratio_initial': 1.8,
-            'aspect_ratio_final': 0.55,
-            'transition_duration_ms': 380,
-            'immobility_duration_sec': 5.0,
-            'floor_proximity_score': 0.9
-          }
-        }),
-      ).timeout(_normalTimeout),
-      endpoint
-    );
-    return SecurityEvent.fromJson(jsonDecode(response.body));
   }
 
   Future<void> acknowledgeEvent(String eventId) async {
     final endpoint = '$_baseUrl${ApiConstants.eventsEndpoint}/$eventId/acknowledge';
     try {
       await _sendRequestWithRetry(
-        () => http.post(Uri.parse(endpoint)).timeout(_normalTimeout),
+        () async => http.post(Uri.parse(endpoint), headers: await authHeaders()).timeout(_normalTimeout),
         endpoint,
         maxRetries: 2
       );
@@ -248,7 +188,7 @@ class ApiService {
   Future<List<ZoneConfig>> fetchCameraZones(String cameraId) async {
     final endpoint = '$_baseUrl/api/v1/cameras/$cameraId/zones';
     final response = await _sendRequestWithRetry(
-      () => http.get(Uri.parse(endpoint)).timeout(_normalTimeout),
+      () async => http.get(Uri.parse(endpoint), headers: await authHeaders()).timeout(_normalTimeout),
       endpoint
     );
     final List<dynamic> list = jsonDecode(response.body);
@@ -258,9 +198,9 @@ class ApiService {
   Future<ZoneConfig> saveCameraZone(String cameraId, ZoneConfig zone) async {
     final endpoint = '$_baseUrl/api/v1/cameras/$cameraId/zones';
     final response = await _sendRequestWithRetry(
-      () => http.post(
+      () async => http.post(
         Uri.parse(endpoint),
-        headers: {'Content-Type': 'application/json'},
+        headers: {'Content-Type': 'application/json', ...await authHeaders()},
         body: jsonEncode(zone.toJson()),
       ).timeout(_normalTimeout),
       endpoint
@@ -271,7 +211,7 @@ class ApiService {
   Future<void> deleteCameraZone(String cameraId, String zoneId) async {
     final endpoint = '$_baseUrl/api/v1/cameras/$cameraId/zones/$zoneId';
     await _sendRequestWithRetry(
-      () => http.delete(Uri.parse(endpoint)).timeout(_normalTimeout),
+      () async => http.delete(Uri.parse(endpoint), headers: await authHeaders()).timeout(_normalTimeout),
       endpoint
     );
   }
@@ -279,7 +219,7 @@ class ApiService {
   Future<Map<String, dynamic>> diagnoseCamera(String cameraId) async {
     final endpoint = '$_baseUrl/api/v1/cameras/$cameraId/diagnostics';
     final response = await _sendRequestWithRetry(
-      () => http.get(Uri.parse(endpoint)).timeout(_normalTimeout),
+      () async => http.get(Uri.parse(endpoint), headers: await authHeaders()).timeout(_normalTimeout),
       endpoint
     );
     return jsonDecode(response.body) as Map<String, dynamic>;
@@ -288,7 +228,7 @@ class ApiService {
   Future<Map<String, dynamic>> triggerAutoRecover(String cameraId) async {
     final endpoint = '$_baseUrl/api/v1/cameras/$cameraId/auto-recover';
     final response = await _sendRequestWithRetry(
-      () => http.post(Uri.parse(endpoint)).timeout(const Duration(seconds: 20)),
+      () async => http.post(Uri.parse(endpoint), headers: await authHeaders()).timeout(const Duration(seconds: 20)),
       endpoint
     );
     return jsonDecode(response.body) as Map<String, dynamic>;
@@ -297,10 +237,125 @@ class ApiService {
   Future<List<Map<String, dynamic>>> fetchNetworkInterfaces() async {
     final endpoint = '$_baseUrl/api/v1/cameras/network/interfaces';
     final response = await _sendRequestWithRetry(
-      () => http.get(Uri.parse(endpoint)).timeout(_normalTimeout),
+      () async => http.get(Uri.parse(endpoint), headers: await authHeaders()).timeout(_normalTimeout),
       endpoint
     );
     final data = jsonDecode(response.body);
     return List<Map<String, dynamic>>.from(data['interfaces'] ?? []);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Auth and media helpers
+  // ---------------------------------------------------------------------------
+
+  /// Bearer header for the active server's session (tokens are stored per
+  /// server device id), or an empty map when signed out.
+  Future<Map<String, String>> authHeaders() => ServerRegistry().authHeadersFor(ServerRegistry().activeId);
+
+  /// Turns a server-relative media path (e.g. `/api/v1/...`) into an absolute
+  /// URL on the configured edge server. Returns null for null/empty input.
+  String? resolveMediaUrl(String? pathOrUrl) {
+    if (pathOrUrl == null || pathOrUrl.trim().isEmpty) return null;
+    final v = pathOrUrl.trim();
+    if (v.startsWith('http://') || v.startsWith('https://')) return v;
+    return v.startsWith('/') ? '$_baseUrl$v' : '$_baseUrl/$v';
+  }
+
+  // ---------------------------------------------------------------------------
+  // Camera analytics feature flags
+  // ---------------------------------------------------------------------------
+
+  Future<FeatureConfig> updateCameraFeatures(String cameraId, FeatureConfig config) async {
+    final endpoint = '$_baseUrl${ApiConstants.camerasEndpoint}/$cameraId/features';
+    final response = await _sendRequestWithRetry(
+      () async => http.put(Uri.parse(endpoint), headers: {'Content-Type': 'application/json', ...await authHeaders()}, body: jsonEncode(config.toJson())).timeout(_normalTimeout),
+      endpoint,
+    );
+    return FeatureConfig.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Loss prevention (theft) incidents: /api/v1/theft/...
+  // ---------------------------------------------------------------------------
+
+  Future<List<TheftIncident>> getTheftIncidents({String? status, int limit = 50}) async {
+    final uri = Uri.parse('$_baseUrl${ApiConstants.theftIncidentsEndpoint}').replace(queryParameters: {
+      if (status != null) 'status': status,
+      'limit': '$limit',
+    });
+    final response = await _sendRequestWithRetry(
+      () async => http.get(uri, headers: await authHeaders()).timeout(_normalTimeout),
+      uri.toString(),
+    );
+    final Map<String, dynamic> data = jsonDecode(response.body);
+    final List<dynamic> list = data['incidents'] ?? [];
+    return list.map((e) => TheftIncident.fromJson(e as Map<String, dynamic>)).toList();
+  }
+
+  /// `GET /api/v1/theft/incidents/{id}`. Returns null on 404.
+  Future<TheftIncident?> findTheftIncident(String incidentId) async {
+    final endpoint = '$_baseUrl${ApiConstants.theftIncidentsEndpoint}/${Uri.encodeComponent(incidentId)}';
+    final id = ServerRegistry().activeId;
+    final response = id == null
+        ? await http.get(Uri.parse(endpoint)).timeout(_normalTimeout)
+        : await ServerRegistry()
+            .authorizedSend(id, (h) => http.get(Uri.parse(endpoint), headers: h).timeout(_normalTimeout));
+    if (response.statusCode == 404) return null;
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw HttpException('Server returned HTTP ${response.statusCode}');
+    }
+    return TheftIncident.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+  }
+
+  Future<TheftIncident> acknowledgeTheftIncident(String incidentId) async {
+    final endpoint = '$_baseUrl${ApiConstants.theftIncidentsEndpoint}/$incidentId/acknowledge';
+    final response = await _sendRequestWithRetry(
+      () async => http.post(Uri.parse(endpoint), headers: await authHeaders()).timeout(_normalTimeout),
+      endpoint,
+      maxRetries: 2,
+    );
+    return TheftIncident.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+  }
+
+  /// [resolution] is one of the values `TheftResolveRequest` documents:
+  /// RECOVERED_GOODS, POLICE_DISPATCHED, SUSPECT_FLED, FALSE_ALARM.
+  Future<TheftIncident> resolveTheftIncident(String incidentId, {required String resolution, String? notes}) async {
+    final endpoint = '$_baseUrl${ApiConstants.theftIncidentsEndpoint}/$incidentId/resolve';
+    final response = await _sendRequestWithRetry(
+      () async => http
+          .post(
+            Uri.parse(endpoint),
+            headers: {'Content-Type': 'application/json', ...await authHeaders()},
+            body: jsonEncode({
+              'resolution': resolution,
+              if (notes != null && notes.trim().isNotEmpty) 'notes': notes.trim(),
+            }),
+          )
+          .timeout(_normalTimeout),
+      endpoint,
+      maxRetries: 2,
+    );
+    return TheftIncident.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+  }
+
+  /// Runtime-probed inference/decode capabilities (`HardwareProfile`).
+  Future<Map<String, dynamic>> getHardwareProfile() async {
+    final endpoint = '$_baseUrl/api/v1/system/hardware';
+    final response = await _sendRequestWithRetry(
+      () async => http.get(Uri.parse(endpoint), headers: await authHeaders()).timeout(_normalTimeout),
+      endpoint,
+      maxRetries: 1,
+    );
+    return jsonDecode(response.body) as Map<String, dynamic>;
+  }
+
+  Future<List<Map<String, dynamic>>> getArchives() async {
+    final endpoint = '$_baseUrl/api/v1/dvr/archives';
+    final response = await _sendRequestWithRetry(
+      () async => http.get(Uri.parse(endpoint), headers: await authHeaders()).timeout(_normalTimeout),
+      endpoint,
+    );
+    final data = jsonDecode(response.body);
+    return List<Map<String, dynamic>>.from(data['archives'] ?? []);
   }
 }

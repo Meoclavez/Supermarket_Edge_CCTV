@@ -88,9 +88,9 @@ class _TimelineScrubberWidgetState extends State<TimelineScrubberWidget> {
 
     return Container(
       decoration: BoxDecoration(
-        color: AppTheme.cardSurface,
+        color: context.palette.card,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppTheme.borderHighlight),
+        border: Border.all(color: context.palette.border),
       ),
       padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
       child: Column(
@@ -99,15 +99,20 @@ class _TimelineScrubberWidgetState extends State<TimelineScrubberWidget> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Row(
-                children: [
-                  const Icon(Icons.history_toggle_off, color: AppTheme.cyberBlue, size: 18),
-                  const SizedBox(width: 6),
-                  Text(
-                    timeStr,
-                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
-                  ),
-                ],
+              Flexible(
+                child: Row(
+                  children: [
+                    Icon(Icons.history_toggle_off, color: context.palette.accent, size: 18),
+                    const SizedBox(width: 6),
+                    Flexible(
+                      child: Text(
+                        timeStr,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(color: context.palette.text, fontWeight: FontWeight.bold, fontSize: 13),
+                      ),
+                    ),
+                  ],
+                ),
               ),
               Row(
                 children: [
@@ -143,12 +148,13 @@ class _TimelineScrubberWidgetState extends State<TimelineScrubberWidget> {
             },
           ),
           const SizedBox(height: 8),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
+          Wrap(
+            alignment: WrapAlignment.center,
+            spacing: 20,
+            runSpacing: 4,
             children: [
               _buildLegendItem(AppTheme.liveGreen, 'Continuous Recording'),
-              const SizedBox(width: 20),
-              _buildLegendItem(AppTheme.emergencyRed, 'AI Detection Event'),
+              _buildLegendItem(AppTheme.alertRed, 'AI Detection Event'),
             ],
           ),
         ],
@@ -169,7 +175,7 @@ class _TimelineScrubberWidgetState extends State<TimelineScrubberWidget> {
         margin: const EdgeInsets.only(left: 4),
         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
         decoration: BoxDecoration(
-          color: isSelected ? AppTheme.cyberBlue : Colors.white10,
+          color: isSelected ? context.palette.accent : context.palette.hairline(0.10),
           borderRadius: BorderRadius.circular(4),
         ),
         child: Text(
@@ -177,7 +183,7 @@ class _TimelineScrubberWidgetState extends State<TimelineScrubberWidget> {
           style: TextStyle(
             fontSize: 10,
             fontWeight: FontWeight.bold,
-            color: isSelected ? Colors.black : Colors.white70,
+            color: isSelected ? context.palette.onAccent : context.palette.dim(0.70),
           ),
         ),
       ),
@@ -186,10 +192,12 @@ class _TimelineScrubberWidgetState extends State<TimelineScrubberWidget> {
 
   Widget _buildLegendItem(Color color, String label) {
     return Row(
+      mainAxisSize: MainAxisSize.min,
       children: [
+        // Same constant colours the timeline painter uses for its bars.
         Container(width: 8, height: 8, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
         const SizedBox(width: 4),
-        Text(label, style: const TextStyle(fontSize: 10, color: Colors.white54)),
+        Text(label, style: TextStyle(fontSize: 10, color: context.palette.dim(0.54))),
       ],
     );
   }

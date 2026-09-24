@@ -15,7 +15,7 @@
 'use strict';
 
 const DASH = '—';
-const VALID_TABS = ['matrix', 'floorplan', 'analytics', 'actions', 'market_ai', 'theft', 'digest'];
+const VALID_TABS = ['matrix', 'floorplan', 'analytics', 'actions', 'market_ai', 'theft', 'digest', 'settings'];
 
 let activeCameraFilter = 'ALL';
 let currentDecimationFPS = 5;
@@ -115,6 +115,9 @@ function switchTab(tabId) {
     history.replaceState(null, '', `#${tabId}`);
   }
 
+  // Lets tab-specific scripts (settings panels) load their data on demand.
+  window.dispatchEvent(new CustomEvent('edge:tab', { detail: { tab: tabId } }));
+
   // The blueprint canvas is sized from its container, which has no size
   // while its tab is hidden, so it must be measured again once visible.
   if (tabId === 'floorplan' && window.blueprintEditor) {
@@ -169,7 +172,7 @@ async function fetchSystemTelemetry() {
         inference.title = d.model ? `Model: ${d.model}` : '';
       } else {
         inference.textContent = 'NO DETECTOR';
-        inference.style.color = 'var(--accent-red, #ff5b6b)';
+        inference.style.color = 'var(--accent-red)';
         inference.title = d.reason || 'No inference backend is available on this machine.';
       }
     }
@@ -550,10 +553,45 @@ async function initOrUpdateCharts() {
   }
 }
 
+// Chart colours are theme tokens (style.css --chart-*), read at draw time so
+// a chart drawn in one theme can be recoloured when the operator switches.
+function chartTheme() {
+  const tok = (name) => {
+    try { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); } catch (_) { return ''; }
+  };
+  return { line: tok('--chart-line'), fill: tok('--chart-fill'), grid: tok('--chart-grid'), tick: tok('--chart-tick') };
+}
+
+function applyChartDefaults(ct) {
+  if (typeof Chart === 'undefined' || !Chart.defaults) return;
+  if (ct.tick) Chart.defaults.color = ct.tick;
+  if (ct.grid) Chart.defaults.borderColor = ct.grid;
+}
+
+function recolourCharts() {
+  const ct = chartTheme();
+  applyChartDefaults(ct);
+  const chart = hourlyChartInstance;
+  if (!chart) return;
+  chart.data.datasets.forEach((ds) => { ds.borderColor = ct.line; ds.backgroundColor = ct.fill; });
+  const o = chart.options;
+  if (o.plugins && o.plugins.legend && o.plugins.legend.labels) o.plugins.legend.labels.color = ct.tick;
+  ['x', 'y'].forEach((k) => {
+    const sc = o.scales && o.scales[k];
+    if (!sc) return;
+    if (sc.grid) sc.grid.color = ct.grid;
+    if (sc.ticks) sc.ticks.color = ct.tick;
+  });
+  chart.update('none');
+}
+window.addEventListener('edge:theme', recolourCharts);
+
 function renderHourlyChart(points) {
   const canvas = el('hourlyFootfallChart');
   if (!canvas || typeof Chart === 'undefined') return;
   if (hourlyChartInstance) hourlyChartInstance.destroy();
+  const ct = chartTheme();
+  applyChartDefaults(ct);
   hourlyChartInstance = new Chart(canvas.getContext('2d'), {
     type: 'line',
     data: {
@@ -561,8 +599,8 @@ function renderHourlyChart(points) {
       datasets: [{
         label: 'Expected shoppers per hour (from this store\'s history)',
         data: points.map((p) => p.footfall),
-        borderColor: '#00f0ff',
-        backgroundColor: 'rgba(0, 240, 255, 0.1)',
+        borderColor: ct.line,
+        backgroundColor: ct.fill,
         borderWidth: 2.5,
         fill: true,
         tension: 0.35,
@@ -572,10 +610,10 @@ function renderHourlyChart(points) {
     options: {
       responsive: true,
       maintainAspectRatio: false,
-      plugins: { legend: { labels: { color: '#8b949e', font: { family: 'JetBrains Mono', size: 10 } } } },
+      plugins: { legend: { labels: { color: ct.tick, font: { family: 'JetBrains Mono', size: 10 } } } },
       scales: {
-        x: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#8b949e', font: { size: 9.5 } } },
-        y: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#8b949e', font: { size: 9.5 } }, beginAtZero: true },
+        x: { grid: { color: ct.grid }, ticks: { color: ct.tick, font: { size: 9.5 } } },
+        y: { grid: { color: ct.grid }, ticks: { color: ct.tick, font: { size: 9.5 } }, beginAtZero: true },
       },
     },
   });
@@ -641,7 +679,10 @@ function playTheftAlertSound() {
 
 function formatTimestamp(ts) {
   if (!ts) return DASH;
-  const d = new Date(ts);
+  // The API stores and returns naive UTC; without an offset JS would read it as local.
+  const iso = typeof ts === 'string' && /T?\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(ts) && !/[zZ]|[+-]\d{2}:?\d{2}$/.test(ts)
+    ? `${ts.replace(' ', 'T')}Z` : ts;
+  const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? String(ts) : d.toLocaleString();
 }
 
@@ -674,10 +715,10 @@ async function fetchTheftIncidents() {
     activeTheftIncidentId = activeInc.id;
     if (banner) {
       banner.style.display = 'flex';
-      el('theftBannerHeadline').textContent = `THEFT ALERT: ${activeInc.theft_type} on ${activeInc.camera_name} (${activeInc.department})`;
-      el('theftBannerConfidence').textContent = isNum(activeInc.confidence) ? `Confidence: ${Math.round(activeInc.confidence * 100)}%` : `Confidence: ${DASH}`;
+      el('theftBannerHeadline').textContent = `REVIEW: ${theftRuleLabel(activeInc)} on ${activeInc.camera_name} (${activeInc.department})`;
+      el('theftBannerConfidence').textContent = isNum(activeInc.confidence) ? `Evidence confidence: ${Math.round(activeInc.confidence * 100)}%` : `Confidence: ${DASH}`;
       el('theftBannerTime').textContent = `Time: ${formatTimestamp(activeInc.timestamp)}`;
-      el('theftBannerDetails').textContent = activeInc.evidence_summary || '';
+      el('theftBannerDetails').textContent = 'Suspicious behaviour for staff review, not a finding of theft.';
     }
     if (lastAlertedTheftId !== activeInc.id) {
       lastAlertedTheftId = activeInc.id;
@@ -690,59 +731,130 @@ async function fetchTheftIncidents() {
   renderTheftIncidentsList(incidents, data === null);
 }
 
+function theftRuleLabel(inc) {
+  return inc.rule_label || inc.rule || inc.theft_type || 'Suspicious behaviour';
+}
+
+function theftAuthUrl(url) {
+  if (!url) return url;
+  return (window.edgeAuth && typeof window.edgeAuth.authUrl === 'function') ? window.edgeAuth.authUrl(url) : url;
+}
+
+let lastTheftListSignature = null;
+
 function renderTheftIncidentsList(incidents, unavailable) {
   const container = el('theftIncidentsList');
   if (!container) return;
   if (unavailable) {
+    lastTheftListSignature = null;
     container.innerHTML = emptyState('Incident log unavailable: the theft service did not respond.');
     return;
   }
   if (!incidents.length) {
-    container.innerHTML = emptyState('No theft incidents recorded. Incidents are written by the detection pipeline when it observes a shelf-sweep, concealment or exit-without-payment pattern; none has been observed.');
+    lastTheftListSignature = null;
+    container.innerHTML = emptyState('Nothing to review. The pose pipeline raises an incident only when it observes a concealment, shelf-sweep, loitering or exit-without-checkout pattern; none has been observed.');
     return;
   }
+  // The list is polled every few seconds; rebuilding identical cards would
+  // reload every evidence thumbnail and reset the operator's scroll.
+  const signature = JSON.stringify(incidents.map((i) => [i.id, i.status, i.confidence, i.snapshot_url, (i.evidence || []).length]));
+  if (signature === lastTheftListSignature && container.children.length) return;
+  lastTheftListSignature = signature;
+
   container.innerHTML = '';
   incidents.forEach((inc) => {
     const card = document.createElement('div');
     card.id = `incident-${inc.id}`;
     card.className = 'incident-card';
     let statusPill = '<span class="badge badge-green">● RESOLVED</span>';
-    if (inc.status === 'ACTIVE') statusPill = '<span class="badge badge-danger" style="animation: bounceAlert 1s infinite alternate;">🚨 ACTIVE</span>';
+    if (inc.status === 'ACTIVE') statusPill = '<span class="badge badge-danger">● NEEDS REVIEW</span>';
     else if (inc.status === 'ACKNOWLEDGED') statusPill = '<span class="badge badge-warning">👁️ ACKNOWLEDGED</span>';
-    else if (inc.status === 'DISPATCHED') statusPill = '<span class="badge" style="background: #9d4edd; color:#fff;">🚔 GUARD DISPATCHED</span>';
+    else if (inc.status === 'DISPATCHED') statusPill = '<span class="badge badge-dispatched">GUARD DISPATCHED</span>';
     else if (inc.status === 'FALSE_ALARM') statusPill = '<span class="badge">FALSE ALARM</span>';
 
-    const conf = isNum(inc.confidence) ? `${Math.round(inc.confidence * 100)}% conf` : `${DASH} conf`;
+    const conf = isNum(inc.confidence) ? `${Math.round(inc.confidence * 100)}%` : DASH;
     const value = isNum(inc.estimated_loss_value) && inc.estimated_loss_value > 0 ? `$${inc.estimated_loss_value.toFixed(2)}` : DASH;
+    const evidence = Array.isArray(inc.evidence) && inc.evidence.length
+      ? inc.evidence
+      : (inc.evidence_summary ? [inc.evidence_summary] : []);
+    const bullets = evidence.length
+      ? `<ul style="margin: 4px 0 0 16px; padding: 0; font-size: 11.5px; color: var(--text-steps); line-height: 1.45;">${evidence.map((e) => `<li>${escapeHtml(e)}</li>`).join('')}</ul>`
+      : '<div style="font-size: 11.5px; color: var(--text-dim);">No evidence recorded.</div>';
+    const thumbUrl = inc.snapshot_url || inc.evidence_snapshot_url || null;
+    const thumb = thumbUrl
+      ? `<a data-theft-thumb="1" href="${escapeHtml(theftAuthUrl(thumbUrl))}" target="_blank" rel="noopener" data-evidence-url="${escapeHtml(thumbUrl)}" title="Open the full evidence image" style="flex: 0 0 auto; display: block;">
+           <img src="${escapeHtml(theftAuthUrl(thumbUrl))}" alt="Evidence snapshot for incident ${escapeHtml(inc.id)}" loading="lazy"
+                class="evidence-thumb">
+         </a>`
+      : '<div class="evidence-thumb-empty">No evidence image recorded</div>';
+
     card.innerHTML = `
       <div class="incident-head">
         <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-          <span style="font-size: 14px; font-weight: 800; color: #fff;">${escapeHtml(inc.theft_type)}</span>
+          <span style="font-size: 14px; font-weight: 800; color: var(--text-strong);">${escapeHtml(theftRuleLabel(inc))}</span>
+          <span class="badge badge-warning" style="font-size: 10px;" title="Flagged for a person to check the footage; not a finding of theft">Suspicious behaviour for review</span>
           <span class="badge" style="font-size: 10px;">${escapeHtml(inc.department)}</span>
           <span style="font-family: var(--font-mono); font-size: 11px; color: var(--accent-cyan); font-weight: 700;">${escapeHtml(inc.camera_name)}</span>
         </div>
         <div style="display: flex; align-items: center; gap: 8px;">
-          <span style="font-family: var(--font-mono); font-size: 11px; color: #ffaa00;">${conf}</span>
+          <span style="font-family: var(--font-mono); font-size: 11px; color: var(--accent-orange);" title="Derived from keypoint visibility, duration and the number of agreeing signals">confidence ${conf}</span>
           ${statusPill}
         </div>
       </div>
-      <div style="font-size: 11.5px; color: #cbd5e1; line-height: 1.4;">${escapeHtml(inc.evidence_summary || 'No evidence summary recorded.')}</div>
+      <div style="display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; margin-top: 6px;">
+        ${thumb}
+        <div style="flex: 1 1 240px; min-width: 0;">
+          <div style="font-size: 10.5px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .04em;">Rule: ${escapeHtml(inc.rule || inc.theft_type)} · Evidence</div>
+          ${bullets}
+        </div>
+      </div>
       <div class="incident-foot">
-        <span style="font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dim);">Logged: ${escapeHtml(formatTimestamp(inc.timestamp))} · Estimated value: <b style="color: var(--accent-green);">${value}</b></span>
+        <span style="font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dim);">Logged: ${escapeHtml(formatTimestamp(inc.timestamp))} · Track ${escapeHtml(inc.person_track_id || DASH)} · Item value: <b style="color: var(--accent-green);">${value}</b></span>
         <div style="display: flex; gap: 6px;">
           ${inc.status === 'ACTIVE' ? `<button type="button" class="btn btn-sm" onclick="acknowledgeTheft('${escapeHtml(inc.id)}')">Acknowledge</button>` : ''}
-          ${(inc.status === 'ACTIVE' || inc.status === 'ACKNOWLEDGED') ? `<button type="button" class="btn btn-danger btn-sm" onclick="dispatchGuard('${escapeHtml(inc.id)}')">🚨 Dispatch Guard</button>` : ''}
+          ${(inc.status === 'ACTIVE' || inc.status === 'ACKNOWLEDGED') ? `<button type="button" class="btn btn-danger btn-sm" onclick="dispatchGuard('${escapeHtml(inc.id)}')">Dispatch Guard</button>` : ''}
           ${(inc.status !== 'RESOLVED' && inc.status !== 'FALSE_ALARM') ? `<button type="button" class="btn btn-primary btn-sm" onclick="resolveTheft('${escapeHtml(inc.id)}')">✅ Resolve</button>` : ''}
         </div>
       </div>`;
+    const link = card.querySelector("[data-theft-thumb]");
+    if (link) {
+      link.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        openTheftEvidence(link.dataset.evidenceUrl, `${theftRuleLabel(inc)} · ${inc.camera_name} · ${formatTimestamp(inc.timestamp)}`);
+      });
+    }
     container.appendChild(card);
   });
 }
 
+function openTheftEvidence(url, caption) {
+  const viewer = el('theftEvidenceViewer');
+  const img = el('theftEvidenceFull');
+  if (!viewer || !img || !url) return;
+  const full = theftAuthUrl(url);
+  img.src = full;
+  const open = el('theftEvidenceOpen');
+  if (open) open.href = full;
+  const cap = el('theftEvidenceCaption');
+  if (cap) cap.textContent = `${caption || ''} · suspicious behaviour for staff review`;
+  viewer.style.display = 'flex';
+  const close = el('theftEvidenceClose');
+  if (close) close.focus();
+}
+
+function closeTheftEvidence() {
+  const viewer = el('theftEvidenceViewer');
+  if (viewer) viewer.style.display = 'none';
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeTheftEvidence();
+});
+
 async function theftAction(id, action, label) {
   try {
     const res = await fetch(`/api/v1/theft/incidents/${encodeURIComponent(id)}/${action}`, { method: 'POST' });
-    if (res.ok) { showToast(`${label} ${id}`); fetchTheftIncidents(); }
+    if (res.ok) { showToast(`${label} ${id}`); lastTheftListSignature = null; fetchTheftIncidents(); }
     else showToast(`Failed to ${action} ${id} (HTTP ${res.status})`);
   } catch (e) { showToast(`Failed to ${action}: ${e.message}`); }
 }
@@ -809,7 +921,9 @@ async function openCameraConfigModal(cameraId) {
   populateDepartmentOptions(cam.department);
   safeSet('configLocation', cam.location || '');
   safeSet('configRtspUrl', cam.rtsp_url || '');
-  safeSet('configFps', isNum(cam.fps) ? cam.fps : '');
+  // 0 means the frame rate is not known yet; leave the field empty rather than
+  // pre-filling a value the input's own min="1" rejects (which blocked Save).
+  safeSet('configFps', isNum(cam.fps) && cam.fps > 0 ? cam.fps : '');
   safeSet('configResolution', cam.resolution || '');
 
   const num = (v) => (isNum(v) ? v : '');
@@ -824,11 +938,9 @@ async function openCameraConfigModal(cameraId) {
   if (azVal) azVal.textContent = `${azimuth}°`;
 
   const feats = cam.features || {};
-  safeCheck('featDwellTracking', feats.dwell_tracking);
+  safeCheck('featPeopleCounting', feats.people_counting);
   safeCheck('featShelfInteraction', feats.shelf_interaction);
   safeCheck('featTheftDetection', feats.theft_detection);
-  safeCheck('featFallDetection', feats.fall_detection);
-  safeCheck('featQueueMonitoring', feats.queue_monitoring);
 
   const bounds = layoutSnapshot ? ` Store is ${layoutSnapshot.width_m} × ${layoutSnapshot.height_m} m.` : '';
   setCameraConfigStatus(`Editing ${cam.id}.${bounds}`, false);
@@ -871,13 +983,12 @@ async function handleCameraConfigSubmit(event) {
     return;
   }
 
-  const features = Object.assign({}, existing.features || {}, {
-    dwell_tracking: el('featDwellTracking').checked,
+  // Only the flags the server knows; keys from older builds are not echoed back.
+  const features = {
+    people_counting: el('featPeopleCounting').checked,
     shelf_interaction: el('featShelfInteraction').checked,
     theft_detection: el('featTheftDetection').checked,
-    fall_detection: el('featFallDetection').checked,
-    queue_monitoring: el('featQueueMonitoring').checked,
-  });
+  };
 
   // PUT replaces the whole row, so every field the API knows is sent back
   // from the object we loaded; otherwise schema defaults (floor 100 m, no
@@ -911,10 +1022,16 @@ async function handleCameraConfigSubmit(event) {
       setCameraConfigStatus(`Save failed (HTTP ${res.status}): ${JSON.stringify(err.detail || err)}`, true);
       return;
     }
-    // Feature toggles are held by the feature manager, not the camera row.
-    await fetch(`/api/v1/cameras/${encodeURIComponent(camId)}/features`, {
+    // Feature toggles: stored on the camera row and pushed to the running pipeline.
+    const fres = await fetch(`/api/v1/cameras/${encodeURIComponent(camId)}/features`, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(features),
-    }).catch(() => null);
+    });
+    if (!fres.ok) {
+      const err = await fres.json().catch(() => ({}));
+      setCameraConfigStatus(`Camera saved, but feature toggles failed (HTTP ${fres.status}): ${JSON.stringify(err.detail || err)}`, true);
+      await afterCameraChange();
+      return;
+    }
 
     const placement = { floor_x: floorX, floor_y: floorY };
     if (Number.isFinite(floorZ)) placement.floor_z = floorZ;
@@ -1027,7 +1144,7 @@ function renderActionCenter(unavailable) {
           <span class="badge" style="font-size: 10px;">${escapeHtml(item.category || DASH)}</span>
           <span class="action-title">${escapeHtml(item.zone || 'Store')}: ${escapeHtml(item.finding || '')}</span>
         </div>
-        <span class="badge" style="background: rgba(255,255,255,0.1);">${escapeHtml(item.status || DASH)}</span>
+        <span class="badge badge-neutral">${escapeHtml(item.status || DASH)}</span>
       </div>
       <div class="action-desc"><b>Why:</b> ${escapeHtml(item.root_cause || DASH)}<br><b>Do:</b> ${escapeHtml(item.action_item || DASH)}</div>
       <div class="action-footer">
@@ -1107,7 +1224,7 @@ async function runLLMOptimizations() {
     parts.push(`<div class="fp-empty">${escapeHtml(data.message || '')} Zones assessed: ${data.zones_assessed ?? DASH} of ${data.zones_total ?? DASH}.</div>`);
     const n = data.narrative;
     if (n && n.summary) {
-      parts.push(`<div class="digest-narrative" style="padding:10px 12px; border:1px solid rgba(120,140,170,0.18); border-radius:9px;">${escapeHtml(n.summary)}<div class="action-meta" style="margin-top:6px">Narrated by ${escapeHtml(n.model_used)} in ${n.elapsed_seconds ?? DASH}s</div></div>`);
+      parts.push(`<div class="digest-narrative" style="padding:10px 12px; border:1px solid rgba(var(--slate-rgb), 0.18); border-radius:9px;">${escapeHtml(n.summary)}<div class="action-meta" style="margin-top:6px">Narrated by ${escapeHtml(n.model_used)} in ${n.elapsed_seconds ?? DASH}s</div></div>`);
     } else if (n && n.reason) {
       parts.push(`<div class="fp-empty">No narrative: ${escapeHtml(n.reason)}</div>`);
     }
@@ -1161,7 +1278,7 @@ async function runSelfTest() {
 
   const out = document.createElement('pre');
   out.id = 'selftestResults';
-  out.style.cssText = 'position:fixed; bottom:0; left:0; right:0; max-height:45vh; overflow:auto; margin:0; padding:10px; background:#000; color:#0f0; font:11px ui-monospace, monospace; z-index:99999; white-space:pre-wrap;';
+  out.className = 'selftest-results';
   document.body.appendChild(out);
   const results = [];
   const check = (name, ok, detail) => results.push(`${ok ? 'PASS' : 'FAIL'} ${name}${detail ? ` :: ${detail}` : ''}`);

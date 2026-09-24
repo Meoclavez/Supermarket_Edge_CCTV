@@ -27,14 +27,13 @@ from app.services.camera_drivers import (
     build_stream_urls,
     driver_for_hint,
 )
-from app.services.nvr_credential_service import nvr_credential_service
 
 logger = logging.getLogger(__name__)
 
 # Ports worth probing. 554 is RTSP; 80/8000 carry the ONVIF and web services
-# that let us identify the vendor; 81 is the ESP32-CAM stream port; 37777 is Dahua private.
+# that let us identify the vendor; 37777 is Dahua private.
 RTSP_PORTS = (554, 8554)
-HTTP_PORTS = (80, 8000, 81)
+HTTP_PORTS = (80, 8000)
 DAHUA_PRIVATE_PORT = 37777
 
 WS_DISCOVERY_ADDR = ("239.255.255.250", 3702)
@@ -272,7 +271,7 @@ async def scan_onvif_wsdiscovery(timeout: float = 3.0) -> list[DeviceProfile]:
 
 
 async def scan_mdns(timeout: float = 2.5) -> list[DeviceProfile]:
-    """Browse mDNS for camera-ish services (ESP32-CAM and ONVIF advertisers)."""
+    """Browse mDNS for camera-ish services (RTSP / ONVIF advertisers)."""
 
     def _browse() -> list[DeviceProfile]:
         try:
@@ -293,11 +292,11 @@ async def scan_mdns(timeout: float = 2.5) -> list[DeviceProfile]:
                 host = socket.inet_ntoa(info.addresses[0])
                 label = f"{name} {info.server or ''}"
                 driver = driver_for_hint(label)
-                port = info.port or (81 if driver == "esp32" else 554)
+                port = info.port or 554
                 found.append(
                     DeviceProfile(
                         id=f"mdns:{host}:{port}",
-                        transport="mjpeg" if driver == "esp32" else "rtsp",
+                        transport="rtsp",
                         driver=driver,
                         host=host,
                         port=port,
@@ -388,15 +387,10 @@ async def scan_subnet(
                     driver = driver_for_hint(hint)
                     model_name = banner[:120]
 
-                # If we have saved credentials for this host/driver, pre-inject them
-                saved_user, saved_pass = nvr_credential_service.get_auth_for_host(host)
-                streams = build_stream_urls(
-                    driver,
-                    host,
-                    username=saved_user if saved_pass else None,
-                    password=saved_pass if saved_pass else None,
-                    port=port,
-                )
+                # Candidate URLs are kept credential-free: they are persisted in
+                # discovered_devices.stream_urls. Saved NVR credentials are
+                # applied at adoption and stored encrypted per camera.
+                streams = build_stream_urls(driver, host, port=port)
 
                 found.append(
                     DeviceProfile(

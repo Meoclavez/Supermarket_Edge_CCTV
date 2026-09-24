@@ -12,7 +12,7 @@ if _EDGE_BACKEND_DIR not in sys.path:
     sys.path.insert(0, _EDGE_BACKEND_DIR)
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Response, Request
+from fastapi import Depends, FastAPI, Response, Request
 from fastapi.responses import HTMLResponse, StreamingResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,9 +21,16 @@ import numpy as np
 
 import logging
 
+# Redact tokens/passwords from every log record (uvicorn.access included)
+# before anything else can log.
+from .services.log_redaction import install_log_redaction
+
+install_log_redaction()
+
 from .config import settings
 from .database import init_db
 from .routes import cameras, events, webrtc, system, zones, health, setup, dvr, analytics, theft, layout, dahua
+from .services.auth_service import auth_service
 from .services.live_analytics_engine import live_engine
 from .services.pipeline_supervisor import pipeline_supervisor
 
@@ -37,35 +44,141 @@ def _check_deployment_safety() -> list[str]:
     later.
     """
     problems: list[str] = []
-    if settings.DEBUG:
+    # DEBUG only raises log verbosity; it no longer touches authentication.
+    if settings.AUTH_DISABLED:
         problems.append(
-            "DEBUG=true disables authentication on every API route. "
-            "Set DEBUG=false before putting this on a store network."
+            "\n" + "!" * 72 + "\n"
+            "  AUTH_DISABLED=true: AUTHENTICATION IS OFF ON EVERY API ROUTE.\n"
+            "  Anyone who can reach this port can view cameras and change settings.\n"
+            "  Use only on an isolated development machine; unset it for a store.\n"
+            + "!" * 72
         )
-    if "change_in_prod" in settings.JWT_SECRET or settings.JWT_SECRET.startswith("CHANGE_ME"):
-        problems.append(
-            "JWT_SECRET is still the shipped default, so anyone can mint a "
-            "valid session. Generate one with: "
-            'python3 -c "import secrets; print(secrets.token_urlsafe(64))"'
-        )
-    if settings.INTERNAL_SERVICE_KEY == "edge_ai_vision_internal_secret":
-        problems.append("INTERNAL_SERVICE_KEY is still the shipped default.")
+    # Secrets never have a shipped default any more: placeholders are treated
+    # as unset and replaced from the machine-local store (secret_store.py).
+    # What can still go wrong is a weak value supplied through env/.env, or a
+    # store that could not be written (secrets then change on every restart).
+    from .services.secret_store import secret_sources
+
+    for name, source in sorted(secret_sources().items()):
+        if source == "ephemeral":
+            problems.append(
+                f"{name} could not be saved under STORAGE_DIR/secrets, so it changes on every "
+                "restart (sessions drop, stored NVR passwords become unreadable). "
+                "Make STORAGE_DIR writable."
+            )
+        elif source == "env" and len(getattr(settings, name, "") or "") < 32:
+            problems.append(
+                f"{name} from the environment/.env is shorter than 32 characters. "
+                "Remove it to use the generated per-machine secret, or generate one with: "
+                'python3 -c "import secrets; print(secrets.token_urlsafe(64))"'
+            )
     return problems
+
+
+async def _announce_setup_code() -> None:
+    """When no operator account exists, issue and log the one-time setup code.
+
+    Never fatal: the code is also issued lazily on the first /auth/status call.
+    """
+    try:
+        from .services.setup_service import ensure_setup_code_if_needed
+
+        await ensure_setup_code_if_needed(reason="server start", announce_existing=True)
+    except Exception as exc:
+        logging.getLogger("edge.setup").error(f"Could not issue the first-run setup code: {exc}")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    edge_root = logging.getLogger("edge")
+    if not edge_root.handlers and not logging.getLogger().handlers:
+        # Nothing configures logging under uvicorn, so INFO lines would be dropped.
+        _handler = logging.StreamHandler()
+        _handler.setFormatter(logging.Formatter("%(levelname)s:     [%(name)s] %(message)s"))
+        edge_root.addHandler(_handler)
+        edge_root.setLevel(logging.INFO)
+
     for problem in _check_deployment_safety():
         logging.getLogger("edge.security").warning(f"INSECURE CONFIGURATION: {problem}")
 
+    # Startup order: preflight -> init_db -> initialise_inference -> pipeline.
+    # 1. Preflight is read-only and never blocks startup: it logs each problem
+    #    with the command that fixes it (./run.sh does the fixing).
+    startup_log = logging.getLogger("edge.startup")
+    from .services import preflight
+
+    try:
+        preflight_report = await asyncio.to_thread(preflight.run_preflight)
+        preflight.log_report(preflight_report, startup_log)
+    except Exception as exc:  # a broken check must not take the service down
+        preflight_report = None
+        startup_log.exception(f"Preflight crashed: {exc}")
+
     await init_db()
-    # Bring up the capture/detect/track pipeline. Without this the database
+    # Stable device id (generated once, never changes) + store name: phones and
+    # the remote-access check use it to be sure they reach THIS box.
+    try:
+        from .services.device_identity import ensure_identity
+
+        _ident = await asyncio.to_thread(ensure_identity)
+        startup_log.info(f"Device identity: {_ident['device_id']} ({_ident['device_name']})")
+    except Exception as exc:
+        startup_log.error(f"Could not initialise the device identity: {exc}")
+    await _announce_setup_code()  # first run only: prints the one-time setup code
+
+    # 2. Load and warm up the models explicitly, so the provider actually in
+    #    use is known (and logged) before any camera worker starts.
+    try:
+        from .services.inference_backend import initialise_inference
+    except ImportError:
+        initialise_inference = None
+        startup_log.warning("inference_backend.initialise_inference not available; models load lazily")
+    if initialise_inference is not None:
+        try:
+            status = await asyncio.to_thread(initialise_inference)
+            if status.get("available"):
+                startup_log.info(
+                    f"Inference: provider={status.get('execution_provider') or status.get('provider')} "
+                    f"model={status.get('model')} warmup_ms={status.get('warmup_steady_ms') or status.get('warmup_ms')}"
+                )
+            else:
+                startup_log.error(f"Inference UNAVAILABLE: {status.get('error')} (no detections will be produced)")
+            if preflight_report is not None:
+                before = len(preflight_report["warnings"])
+                preflight.add_live_status(preflight_report, status)
+                for issue in preflight_report["warnings"][before:]:
+                    startup_log.warning(f"PREFLIGHT WARNING [{issue['check']}] {issue['message']} | fix: {issue['fix']}")
+        except Exception as exc:
+            startup_log.exception(f"Inference initialisation failed: {exc}")
+
+    # 3. Bring up the capture/detect/track pipeline. Without this the database
     # never receives an observation and every metric would have to be faked.
     await pipeline_supervisor.start()
+
+    # 4. Bind pose analytics to this loop so loss-prevention alerts go out as
+    # soon as an incident is detected, not after the first theft API request.
+    from .services.pose_analytics import pose_analytics
+    await pose_analytics.start()
+
+    # 5. Remote access (online dashboard): runs cloudflared only when enabled,
+    # a hostname and a token are configured, and authentication is on.
+    from .services.remote_access_service import remote_access_service
+    try:
+        await remote_access_service.start()
+    except Exception as exc:  # never block the store system on the tunnel
+        startup_log.exception(f"Remote access failed to start: {exc}")
+    # Learn about SIGTERM/SIGINT when it arrives, not after uvicorn has drained
+    # connections: open /stream responses poll this flag and end, otherwise
+    # the drain waits for them forever (see services/shutdown_signal.py).
+    from .services import shutdown_signal
+    shutdown_signal.install()
     try:
         yield
     finally:
+        shutdown_signal.request_shutdown()
         await pipeline_supervisor.stop()
+        await asyncio.to_thread(pose_analytics.stop)
+        await remote_access_service.stop()
 
 
 app = FastAPI(
@@ -75,13 +188,11 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS for this device's own origins only, security headers, and refusal of
+# first-run setup / API docs through the public hostname (public_exposure.py).
+from .services import public_exposure
+
+public_exposure.install(app)
 
 
 @app.middleware("http")
@@ -99,6 +210,7 @@ async def add_no_cache_headers(request: Request, call_next):
 app.include_router(cameras.router)
 app.include_router(zones.router)
 app.include_router(events.router)
+app.include_router(events.ws_router)
 app.include_router(webrtc.router)
 app.include_router(system.router)
 app.include_router(health.router)
@@ -109,10 +221,27 @@ app.include_router(analytics.system_router)
 app.include_router(theft.router)
 app.include_router(layout.router)
 app.include_router(dahua.router)
+from .routes import pairing as pairing_routes  # noqa: E402
+
+app.include_router(pairing_routes.device_router)
+app.include_router(pairing_routes.pairing_router)
+app.include_router(pairing_routes.push_router)
+from .routes import remote_access as remote_access_routes  # noqa: E402
+
+app.include_router(remote_access_routes.router)
 
 # Mount Static Files
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    """Browsers request /favicon.ico regardless of <link rel="icon">."""
+    from fastapi.responses import FileResponse
+
+    return FileResponse(STATIC_DIR / "favicon.svg", media_type="image/svg+xml",
+                        headers={"Cache-Control": "public, max-age=86400"})
 
 @app.get("/")
 def root(request: Request):
@@ -179,7 +308,8 @@ def _placeholder_frame(message: str, width: int = 960, height: int = 540) -> byt
 
 
 @app.get("/stream")
-async def mjpeg_stream(request: Request, camera_id: str | None = None, fps: int = 0, overlay: int = 0):
+async def mjpeg_stream(request: Request, camera_id: str | None = None, fps: int = 0, overlay: int = 0,
+                       _auth: bool = Depends(auth_service.verify_api_access)):
     """Stream real frames captured by the live pipeline.
 
     This used to synthesise a bouncing "PERSON 0.94" rectangle with OpenCV and
@@ -192,11 +322,14 @@ async def mjpeg_stream(request: Request, camera_id: str | None = None, fps: int 
     exactly what is being counted. The default is the raw frame.
     """
     from .services.live_analytics_engine import render_overlay
+    from .services.shutdown_signal import shutdown_requested
 
     async def iter_frames():
         delay = 1.0 / max(1, min(fps or 25, 30))
         try:
-            while True:
+            # Ends when the server is asked to stop; an endless response would
+            # otherwise hold uvicorn's graceful shutdown open indefinitely.
+            while not shutdown_requested.is_set():
                 cam = camera_id
                 if cam is None:
                     # No camera named: show the first one that is actually online.

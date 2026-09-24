@@ -198,8 +198,10 @@ def test_analytics_overview_live_db(client, auth_headers):
         "store_name", "timestamp", "window", "today_footfall", "active_shoppers_now",
         "avg_dwell_seconds", "avg_dwell_minutes", "daily_revenue", "transactions",
         "conversion_rate_pct", "zones_total", "zones_with_data", "top_zones",
-        "coverage", "has_data", "pos_connected",
+        "coverage", "has_data", "pos_connected", "footfall_source",
     }
+    assert data["footfall_source"] in (None, "tripwire", "zone_visits", "tracks")
+    assert (data["today_footfall"] is None) == (data["footfall_source"] is None)
     # Renamed/removed because they reported numbers nothing measured.
     for gone in ("total_footfall", "conversion_rate", "conversion_rate_percent",
                  "active_shoppers", "store_id", "hot_zones", "edge_uptime_percent"):

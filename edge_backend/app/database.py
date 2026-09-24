@@ -19,7 +19,7 @@ DATABASE_URL = f"sqlite+aiosqlite:///{settings.DATABASE_PATH.resolve()}"
 # Configure engine with connection pool, timeout, and recycle
 engine = create_async_engine(
     DATABASE_URL,
-    echo=settings.DEBUG,
+    echo=settings.SQL_ECHO,
     connect_args={
         "check_same_thread": False,
         "timeout": 15.0  # Busy timeout
@@ -34,6 +34,7 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA synchronous=NORMAL")
     cursor.execute("PRAGMA busy_timeout=15000")
+    cursor.execute("PRAGMA foreign_keys=ON")
     cursor.close()
 
 async_session_factory = async_sessionmaker(
@@ -121,111 +122,23 @@ async def init_db():
 
     Deliberately seeds no cameras, recommendations or incidents.
     """
-    from app.models.db_models import Base
     from app.services.backup_service import backup_service
     from sqlalchemy import select, func
 
     logger.info("Initializing database schema...")
-    def _run_migrations_sync(sync_conn):
-        from sqlalchemy import text
-        # 1. Ensure ai_decisions columns
-        try:
-            res = sync_conn.execute(text("PRAGMA table_info(ai_decisions);")).fetchall()
-            cols = {row[1] for row in res}
-            needed_cols = {
-                "date": "VARCHAR(32)",
-                "severity": "VARCHAR(32) DEFAULT 'MEDIUM'",
-                "zone": "VARCHAR(128)",
-                "finding": "VARCHAR(1024)",
-                "root_cause": "VARCHAR(1024)",
-                "action_item": "VARCHAR(1024)",
-                "title": "VARCHAR(256)",
-                "description": "VARCHAR(1024)",
-                "impact": "VARCHAR(32) DEFAULT 'MEDIUM'",
-                "confidence": "FLOAT DEFAULT 0.85",
-                "action_type": "VARCHAR(64) DEFAULT 'OPEN_REGISTER'",
-                "target_zone": "VARCHAR(128)",
-                "payload_json": "JSON",
-                "updated_at": "DATETIME",
-                "applied_at": "DATETIME"
-            }
-            for col, col_type in needed_cols.items():
-                if cols and col not in cols:
-                    try:
-                        sync_conn.execute(text(f"ALTER TABLE ai_decisions ADD COLUMN {col} {col_type};"))
-                    except Exception:
-                        pass
-        except Exception as e:
-            logger.debug(f"Table ai_decisions migration check skipped: {e}")
+    # Versioned migrations (app/migrations/mNNNN_*.py) followed by the additive
+    # reconcile against the models. Runs under a file lock, backs up a database
+    # holding data before changing it, and raises SchemaTooNewError -- refusing
+    # to start -- if the file was migrated by a newer build.
+    from app.migrations import run_migrations
 
-        # 2. Ensure pos_transactions columns
-        try:
-            res_pos = sync_conn.execute(text("PRAGMA table_info(pos_transactions);")).fetchall()
-            pos_cols = {row[1] for row in res_pos}
-            if pos_cols:
-                if "amount" not in pos_cols:
-                    try:
-                        sync_conn.execute(text("ALTER TABLE pos_transactions ADD COLUMN amount FLOAT DEFAULT 0.0;"))
-                    except Exception:
-                        pass
-                if "total_amount" not in pos_cols:
-                    try:
-                        sync_conn.execute(text("ALTER TABLE pos_transactions ADD COLUMN total_amount FLOAT DEFAULT 0.0;"))
-                    except Exception:
-                        pass
-        except Exception as e:
-            logger.debug(f"Table pos_transactions migration check skipped: {e}")
-
-        # 3. Ensure cameras columns
-        try:
-            res_cam = sync_conn.execute(text("PRAGMA table_info(cameras);")).fetchall()
-            cam_cols = {row[1] for row in res_cam}
-            needed_cam_cols = {
-                "channel_number": "INTEGER DEFAULT 1",
-                "department": "VARCHAR(64) DEFAULT 'GENERAL'",
-                "floor_x": "FLOAT DEFAULT 100.0",
-                "floor_y": "FLOAT DEFAULT 100.0",
-                "floor_z": "FLOAT DEFAULT 3.2",
-                "azimuth_deg": "FLOAT DEFAULT 0.0",
-                "fov_deg": "FLOAT DEFAULT 85.0",
-                "homography_matrix": "JSON",
-                "calibration_points": "JSON",
-                "features": "JSON"
-            }
-            for col, col_type in needed_cam_cols.items():
-                if cam_cols and col not in cam_cols:
-                    try:
-                        sync_conn.execute(text(f"ALTER TABLE cameras ADD COLUMN {col} {col_type};"))
-                    except Exception:
-                        pass
-        except Exception as e:
-            logger.debug(f"Table cameras migration check skipped: {e}")
-
-        # 4. Ensure theft_incidents columns
-        try:
-            res_theft = sync_conn.execute(text("PRAGMA table_info(theft_incidents);")).fetchall()
-            theft_cols = {row[1] for row in res_theft}
-            needed_theft_cols = {
-                "camera_name": "VARCHAR(128) DEFAULT 'Camera'",
-                "shelf_zone_id": "VARCHAR(64)",
-                "evidence_summary": "VARCHAR(1024) DEFAULT ''",
-                "snapshot_path": "VARCHAR(512)",
-                "clip_path": "VARCHAR(512)",
-                "officer_notes": "VARCHAR(1024)",
-                "updated_at": "DATETIME"
-            }
-            for col, col_type in needed_theft_cols.items():
-                if theft_cols and col not in theft_cols:
-                    try:
-                        sync_conn.execute(text(f"ALTER TABLE theft_incidents ADD COLUMN {col} {col_type};"))
-                    except Exception:
-                        pass
-        except Exception as e:
-            logger.debug(f"Table theft_incidents migration check skipped: {e}")
-
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        await conn.run_sync(_run_migrations_sync)
+    report = await asyncio.to_thread(run_migrations, settings.DATABASE_PATH)
+    reconcile = report.get("reconcile") or {}
+    logger.info(
+        f"Database schema v{report.get('to_version')} (head v{report.get('head')}); "
+        f"migrations applied: {report.get('applied') or 'none'}; "
+        f"reconcile added: {reconcile.get('applied') or 'none'}"
+    )
 
     # NOTE: No camera / recommendation / theft-incident seeding happens here.
     # Cameras are created only by network discovery or explicit operator action,
@@ -234,13 +147,20 @@ async def init_db():
     await _ensure_default_store_layout()
 
 
-    # Trigger startup backup and prune old backups
+    # Startup snapshot (skipped when the content equals the newest backup),
+    # then retention: last N startup + one per day for 14 days, pre-migration
+    # and operator backups kept, older snapshots gzip-compressed.
     try:
-        backup_res = backup_service.create_backup("startup")
-        logger.info(f"Startup backup created: {backup_res.get('filename')}")
-        pruned_count = backup_service.prune_backups(keep_days=7, min_keep=3)
-        if pruned_count > 0:
-            logger.info(f"Pruned {pruned_count} old backups during startup.")
+        backup_res = await asyncio.to_thread(backup_service.create_backup, "startup")
+        if backup_res.get("status") == "skipped":
+            logger.info(f"Startup backup skipped ({backup_res.get('reason')}): "
+                        f"{backup_res.get('duplicate_of') or 'no source database'}")
+        else:
+            logger.info(f"Startup backup created: {backup_res.get('filename')}")
+        retention = await asyncio.to_thread(backup_service.apply_retention)
+        if retention["deleted"] or retention["compressed"]:
+            logger.info(f"Backup retention: deleted {len(retention['deleted'])}, "
+                        f"compressed {len(retention['compressed'])}")
     except Exception as e:
         logger.error(f"Startup backup or prune error: {e}")
 

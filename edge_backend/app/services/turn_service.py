@@ -15,12 +15,24 @@ class TurnCredentialService:
         self.turn_host = turn_host
         self.turn_port = turn_port
 
+    def turn_configured(self) -> bool:
+        """TURN is offered only when the operator opted into the compose `turn` profile."""
+        host = (self.turn_host or "").strip()
+        return bool(settings.TURN_ENABLED and self.secret and host and host not in ("127.0.0.1", "localhost", "::1"))
+
     def generate_ice_servers(self, client_id: str = "mobile_client", ttl_seconds: int = 86400) -> List[Dict[str, Any]]:
-        """Generates dynamic ICE server dictionary with STUN + HMAC-SHA1 authenticated TURN."""
+        """STUN always; HMAC-SHA1 time-limited TURN credentials only when TURN is enabled.
+
+        Without TURN, WebRTC works on the store LAN only. Phones off-site view
+        cameras over HTTPS through the remote-access tunnel instead (MJPEG).
+        """
+        stun: Dict[str, Any] = {"urls": ["stun:stun.l.google.com:19302"]}
+        if not self.turn_configured():
+            return [stun]
+        stun["urls"].append(f"stun:{self.turn_host}:{self.turn_port}")
+
         expiry = int(time.time()) + ttl_seconds
         username = f"{expiry}:{client_id}"
-
-        # Calculate HMAC-SHA1 signature using static auth secret
         digest = hmac.new(
             self.secret.encode("utf-8"),
             username.encode("utf-8"),
@@ -29,12 +41,7 @@ class TurnCredentialService:
         password = base64.b64encode(digest).decode("utf-8")
 
         return [
-            {
-                "urls": [
-                    "stun:stun.l.google.com:19302",
-                    f"stun:{self.turn_host}:{self.turn_port}"
-                ]
-            },
+            stun,
             {
                 "urls": [
                     f"turn:{self.turn_host}:{self.turn_port}?transport=udp",

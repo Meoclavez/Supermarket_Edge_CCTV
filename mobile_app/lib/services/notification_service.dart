@@ -1,425 +1,263 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-import 'package:audioplayers/audioplayers.dart';
-import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-import 'package:url_launcher/url_launcher.dart';
-import '../models/camera_feed.dart';
-import '../models/security_event.dart';
-import '../screens/emergency_alert_screen.dart';
-import '../screens/live_view_screen.dart';
-import 'api_service.dart';
+import 'package:http/http.dart' as http;
 
-const String kActionViewLive = 'ACTION_VIEW_LIVE';
-const String kActionMute5m = 'ACTION_MUTE_5M';
-const String kActionCallContact = 'ACTION_CALL_CONTACT';
-const String kCategoryEmergency = 'CATEGORY_EMERGENCY_ALARM';
+import '../screens/app_shell.dart';
+import '../screens/loss_prevention_alert_screen.dart';
+import '../screens/loss_prevention_screen.dart';
+import 'push_router.dart';
+import 'push_service.dart';
+import 'server_registry.dart';
 
-/// Top-level background action handler executed when user taps an action button on lockscreen
-@pragma('vm:entry-point')
-void notificationTapBackground(NotificationResponse notificationResponse) async {
-  WidgetsFlutterBinding.ensureInitialized();
-  debugPrint('Notification background action received: ${notificationResponse.actionId}');
+export 'push_router.dart' show kCategoryLossPrevention;
 
-  final String? payloadStr = notificationResponse.payload;
-  Map<String, dynamic> payload = {};
-  if (payloadStr != null) {
-    try {
-      payload = jsonDecode(payloadStr);
-    } catch (_) {}
-  }
+/// Android channel for loss-prevention alerts. Must equal the server's
+/// `ANDROID_CHANNEL_ID`; it is also the FCM default channel in
+/// AndroidManifest.xml.
+const String kLossPreventionChannelId = 'loss_prevention_alerts';
+const String kLossPreventionChannelName = 'Loss prevention';
+const String kActionViewAlert = 'ACTION_VIEW_ALERT';
+const String kActionAcknowledge = 'ACTION_ACKNOWLEDGE';
 
-  final String cameraId = payload['camera_id'] ?? '';
-
-  switch (notificationResponse.actionId) {
-    case kActionMute5m:
-      try {
-        final apiService = ApiService();
-        await apiService.init();
-        await apiService.muteCameraAlerts(cameraId, durationMinutes: 5);
-      } catch (e) {
-        debugPrint('Failed to mute alerts in background: $e');
-      }
-      break;
-
-    case kActionCallContact:
-      final Uri phoneUri = Uri.parse('tel:${payload['emergency_phone'] ?? '911'}');
-      if (await canLaunchUrl(phoneUri)) {
-        await launchUrl(phoneUri);
-      }
-      break;
+Map<String, dynamic> _decodePayload(String? payload) {
+  if (payload == null) return {};
+  try {
+    final decoded = jsonDecode(payload);
+    return decoded is Map<String, dynamic> ? decoded : {};
+  } catch (_) {
+    return {};
   }
 }
 
+/// Acknowledges an incident on the server that raised it (not necessarily
+/// the one currently selected in the app).
+Future<void> _acknowledgeOn(ServerRegistry registry, PushRoute route) async {
+  final id = route.incidentId;
+  if (id == null) return;
+  final url = registry.urlFor(route.deviceId);
+  if (url == null) return;
+  final headers = await registry.authHeadersFor(route.deviceId);
+  await http
+      .post(Uri.parse('$url/api/v1/theft/incidents/${Uri.encodeComponent(id)}/acknowledge'), headers: headers)
+      .timeout(const Duration(seconds: 10));
+}
+
+/// Runs in a background isolate when the operator taps "Acknowledge" on the
+/// notification without opening the app.
+@pragma('vm:entry-point')
+void notificationTapBackground(NotificationResponse response) async {
+  WidgetsFlutterBinding.ensureInitialized();
+  if (response.actionId != kActionAcknowledge) return;
+  try {
+    final registry = ServerRegistry();
+    await registry.load();
+    final route = routeForPush(_decodePayload(response.payload), registry.isKnown);
+    if (route != null) await _acknowledgeOn(registry, route);
+  } catch (e) {
+    debugPrint('Background acknowledge failed: $e');
+  }
+}
+
+/// Local notifications and alert routing for every paired store.
+///
+/// Alerts come from FCM (when this build has a Firebase config) and, while
+/// the app is open, from the server's websocket live channel. Both carry the
+/// sending server's `device_id`; alerts from servers this phone does not know
+/// are dropped, and a tap opens the alert on the server that raised it.
 class NotificationService {
   static final NotificationService _instance = NotificationService._internal();
   factory NotificationService() => _instance;
   NotificationService._internal();
 
   final FlutterLocalNotificationsPlugin _localNotifications = FlutterLocalNotificationsPlugin();
-  final MethodChannel _androidChannel = const MethodChannel('com.cctv.edge_ai_cctv/emergency_channel');
-  final MethodChannel _iosChannel = const MethodChannel('com.cctv.edge_ai_cctv/ios_critical_alert');
-  final AudioPlayer _alarmPlayer = AudioPlayer();
+  final Map<String, DateTime> _recent = {};
   GlobalKey<NavigatorState>? navigatorKey;
-  Timer? _vibrationTimer;
+  bool _localReady = false;
 
   Future<void> initialize(GlobalKey<NavigatorState> navKey) async {
     navigatorKey = navKey;
 
-    // 1. Configure AudioSession for Critical Alarm Playback (Ducking + Loudspeaker)
-    try {
-      await AudioPlayer.global.setAudioContext(AudioContext(
-        iOS: AudioContextIOS(
-          category: AVAudioSessionCategory.playback,
-          options: [
-            AVAudioSessionOptions.duckOthers,
-            AVAudioSessionOptions.defaultToSpeaker,
-          ],
-        ),
-        android: AudioContextAndroid(
-          isSpeakerphoneOn: true,
-          stayAwake: true,
-          contentType: AndroidContentType.sonification,
-          usageType: AndroidUsageType.alarm,
-          audioFocus: AndroidAudioFocus.gainTransientMayDuck,
-        ),
-      ));
-    } catch (e) {
-      debugPrint('AudioContext config notice: $e');
-    }
-
-    // 2. Configure Local Notification Categories & Actions
-    const AndroidInitializationSettings androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
-
-    final List<DarwinNotificationCategory> darwinCategories = [
+    final darwinCategories = <DarwinNotificationCategory>[
       DarwinNotificationCategory(
-        kCategoryEmergency,
+        kCategoryLossPrevention,
         actions: <DarwinNotificationAction>[
           DarwinNotificationAction.plain(
-            kActionViewLive,
-            '👁️ View Live',
-            options: <DarwinNotificationActionOption>{
-              DarwinNotificationActionOption.foreground,
-            },
+            kActionViewAlert,
+            'View alert',
+            options: <DarwinNotificationActionOption>{DarwinNotificationActionOption.foreground},
           ),
-          DarwinNotificationAction.plain(
-            kActionMute5m,
-            '🔕 Mute 5m',
-            options: <DarwinNotificationActionOption>{
-              DarwinNotificationActionOption.destructive,
-            },
-          ),
-          DarwinNotificationAction.plain(
-            kActionCallContact,
-            '📞 Call Contact',
-            options: <DarwinNotificationActionOption>{
-              DarwinNotificationActionOption.foreground,
-            },
-          ),
+          DarwinNotificationAction.plain(kActionAcknowledge, 'Acknowledge'),
         ],
-        options: <DarwinNotificationCategoryOption>{
-          DarwinNotificationCategoryOption.customDismissAction,
-          DarwinNotificationCategoryOption.allowInCarPlay,
-        },
       ),
     ];
 
-    final DarwinInitializationSettings darwinSettings = DarwinInitializationSettings(
-      requestAlertPermission: true,
-      requestBadgePermission: true,
-      requestSoundPermission: true,
-      requestCriticalPermission: true,
-      notificationCategories: darwinCategories,
+    final initSettings = InitializationSettings(
+      android: const AndroidInitializationSettings('@mipmap/ic_launcher'),
+      iOS: DarwinInitializationSettings(
+        requestAlertPermission: true,
+        requestBadgePermission: true,
+        requestSoundPermission: true,
+        notificationCategories: darwinCategories,
+      ),
     );
 
-    final InitializationSettings initSettings = InitializationSettings(
-      android: androidSettings,
-      iOS: darwinSettings,
-    );
-
-    await _localNotifications.initialize(
-      initSettings,
-      onDidReceiveNotificationResponse: _handleForegroundNotificationResponse,
-      onDidReceiveBackgroundNotificationResponse: notificationTapBackground,
-    );
-
-    // 3. Initialize Platform Notification Channels
-    if (!kIsWeb) {
-      if (Platform.isAndroid) {
-        try {
-          await _androidChannel.invokeMethod('createEmergencyChannel');
-        } catch (e) {
-          debugPrint('Android emergency channel notice: $e');
-        }
-      } else if (Platform.isIOS) {
-        try {
-          await _iosChannel.invokeMethod('requestCriticalPermissions');
-        } catch (e) {
-          debugPrint('iOS Critical Alert notice: $e');
-        }
-      }
-    }
-
-    // 4. Register Firebase Messaging & Listeners
     try {
-      final messaging = FirebaseMessaging.instance;
-      NotificationSettings settings = await messaging.requestPermission(
-        alert: true,
-        announcement: true,
-        badge: true,
-        criticalAlert: true,
-        sound: true,
+      await _localNotifications.initialize(
+        initSettings,
+        onDidReceiveNotificationResponse: _handleNotificationResponse,
+        onDidReceiveBackgroundNotificationResponse: notificationTapBackground,
       );
-
-      if (settings.authorizationStatus == AuthorizationStatus.authorized ||
-          settings.authorizationStatus == AuthorizationStatus.provisional) {
-        final token = await messaging.getToken();
-        if (token != null) {
-          debugPrint('FCM Device Token: $token');
-          await ApiService().registerDevice(token, kIsWeb ? 'web' : (Platform.isIOS ? 'ios' : 'android'));
-        }
-        
-        messaging.onTokenRefresh.listen((token) async {
-          debugPrint('FCM Token Refreshed: $token');
-          await ApiService().registerDevice(token, kIsWeb ? 'web' : (Platform.isIOS ? 'ios' : 'android'));
-        });
-      } else {
-        debugPrint('Notification permissions denied.');
-        // Wait a frame for navigation context to be ready
-        Future.delayed(const Duration(seconds: 2), () {
-          _showPermissionDeniedDialog();
-        });
-      }
-
-      FirebaseMessaging.onMessage.listen((RemoteMessage message) {
-        debugPrint('FCM Message Received: ${message.messageId}');
-        if (message.data['is_emergency'] == 'true' || message.data['type'] == 'CRITICAL_ALERT') {
-          _navigateToEventFromPayload(message.data);
-        }
-      });
-
-      FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
-        debugPrint('FCM Message Tapped: ${message.messageId}');
-        _navigateToEventFromPayload(message.data);
-      });
-
-      final initialMessage = await messaging.getInitialMessage();
-      if (initialMessage != null) {
-        debugPrint('FCM Initial Message Tapped: ${initialMessage.messageId}');
-        _navigateToEventFromPayload(initialMessage.data);
-      }
+      _localReady = true;
     } catch (e) {
-      debugPrint('Firebase messaging listener notice: $e');
+      debugPrint('Local notifications unavailable: $e');
     }
-  }
-  
-  void _showPermissionDeniedDialog() {
-    if (navigatorKey?.currentState?.overlay?.context != null) {
-      final context = navigatorKey!.currentState!.overlay!.context;
-      showDialog(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('Notifications Disabled'),
-          content: const Text('Critical security alerts may not reach you in time. Please enable notifications in your device settings.'),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(context), child: const Text('Dismiss')),
-          ],
-        ),
-      );
-    }
-  }
 
-  void _navigateToEventFromPayload(Map<String, dynamic> data) {
-    final event = SecurityEvent(
-      id: data['event_id'] ?? DateTime.now().millisecondsSinceEpoch.toString(),
-      cameraId: data['camera_id'] ?? 'cam_unknown',
-      cameraName: data['camera_name'] ?? 'Camera',
-      location: data['location'] ?? 'Monitored Zone',
-      eventType: data['event_type'] ?? 'EMERGENCY_DETECTED',
-      severity: 'CRITICAL',
-      confidence: 0.95,
-      timestamp: DateTime.tryParse(data['timestamp'] ?? '') ?? DateTime.now(),
-      clipUrl: data['clip_url'],
-      snapshotUrl: data['snapshot_url'],
-      acknowledged: false,
+    if (_localReady && !kIsWeb && Platform.isAndroid) {
+      try {
+        final android =
+            _localNotifications.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+        await android?.createNotificationChannel(const AndroidNotificationChannel(
+          kLossPreventionChannelId,
+          kLossPreventionChannelName,
+          description: 'Suspicious behaviour flagged for staff review',
+          importance: Importance.high,
+        ));
+        await android?.requestNotificationsPermission();
+      } catch (e) {
+        debugPrint('Android notification channel notice: $e');
+      }
+    }
+
+    await PushService().init(
+      onForegroundMessage: _onForegroundPush,
+      onMessageOpened: (RemoteMessage m) => openAlert(m.data),
     );
-    triggerEmergencyTakeover(event);
   }
 
-  Future<void> showInteractiveAlert({
-    required SecurityEvent event,
-    String emergencyPhone = '911',
-  }) async {
-    final payload = jsonEncode({
-      'event_id': event.id,
-      'camera_id': event.cameraId,
-      'camera_name': event.cameraName,
-      'location': event.location,
-      'event_type': event.eventType,
-      'emergency_phone': emergencyPhone,
-      'timestamp': event.timestamp.toIso8601String(),
-    });
+  // FCM does not display notifications while the app is in the foreground,
+  // so show a local one instead of taking over the screen.
+  void _onForegroundPush(RemoteMessage message) {
+    showAlert(
+      title: message.notification?.title ?? message.data['title']?.toString() ?? 'Store alert',
+      body: message.notification?.body ?? message.data['body']?.toString() ?? '',
+      data: message.data,
+    );
+  }
 
-    final AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
-      'cctv_emergency_channel',
-      'CCTV Critical Emergency Alarms',
-      channelDescription: 'Lockscreen actionable emergency alerts',
-      importance: Importance.max,
+  /// Returns true when [data] is new (not shown in the last few minutes),
+  /// so an alert arriving by both FCM and the websocket is shown once.
+  @visibleForTesting
+  bool markIfNew(Map<String, dynamic> data) {
+    final now = DateTime.now();
+    _recent.removeWhere((_, t) => now.difference(t) > const Duration(minutes: 5));
+    final ident = data['alert_id'] ?? data['incident_id'] ?? data['id'] ?? '${data['event_type']}:${data['camera_id']}';
+    final key = '${data['device_id']}|$ident';
+    if (_recent.containsKey(key)) return false;
+    _recent[key] = now;
+    return true;
+  }
+
+  /// Shows a high-priority local notification for an alert from a paired
+  /// server. Alerts for unknown servers are ignored.
+  Future<void> showAlert({required String title, required String body, required Map<String, dynamic> data}) async {
+    final registry = ServerRegistry();
+    final route = routeForPush(data, registry.isKnown);
+    if (route == null) {
+      debugPrint('Ignoring alert for unknown server ${data['device_id']}');
+      return;
+    }
+    if (!markIfNew(data) || !_localReady) return;
+    final entry = registry.byId(route.deviceId);
+    final storeName = entry?.name ?? data['device_name']?.toString();
+    final shownTitle = registry.servers.length > 1 && storeName != null ? '$storeName: $title' : title;
+    final payload = jsonEncode({
+      'device_id': route.deviceId,
+      if (route.incidentId != null) 'incident_id': route.incidentId,
+      if (route.eventType != null) 'event_type': route.eventType,
+      if (data['type'] != null) 'type': data['type'],
+    });
+    final canAcknowledge = route.destination == PushDestination.incident;
+
+    final androidDetails = AndroidNotificationDetails(
+      kLossPreventionChannelId,
+      kLossPreventionChannelName,
+      channelDescription: 'Suspicious behaviour flagged for staff review',
+      importance: Importance.high,
       priority: Priority.high,
-      category: AndroidNotificationCategory.alarm,
-      visibility: NotificationVisibility.public,
-      fullScreenIntent: true,
-      ongoing: true,
-      autoCancel: false,
+      category: AndroidNotificationCategory.message,
+      visibility: NotificationVisibility.private,
+      autoCancel: true,
       actions: <AndroidNotificationAction>[
-        const AndroidNotificationAction(
-          kActionViewLive,
-          'View Live',
-          showsUserInterface: true,
-          cancelNotification: false,
-        ),
-        const AndroidNotificationAction(
-          kActionMute5m,
-          'Mute 5m',
-          showsUserInterface: false,
-          cancelNotification: true,
-        ),
-        const AndroidNotificationAction(
-          kActionCallContact,
-          'Call Contact',
-          showsUserInterface: true,
-          cancelNotification: true,
-        ),
+        const AndroidNotificationAction(kActionViewAlert, 'View alert', showsUserInterface: true),
+        if (canAcknowledge) const AndroidNotificationAction(kActionAcknowledge, 'Acknowledge', cancelNotification: true),
       ],
     );
 
-    final DarwinNotificationDetails darwinDetails = DarwinNotificationDetails(
-      categoryIdentifier: kCategoryEmergency,
+    const darwinDetails = DarwinNotificationDetails(
+      categoryIdentifier: kCategoryLossPrevention,
       presentAlert: true,
       presentBadge: true,
       presentSound: true,
-      interruptionLevel: InterruptionLevel.critical,
+      interruptionLevel: InterruptionLevel.timeSensitive,
     );
 
-    final NotificationDetails platformDetails = NotificationDetails(
-      android: androidDetails,
-      iOS: darwinDetails,
-    );
-
-    await _localNotifications.show(
-      event.id.hashCode,
-      '🚨 CRITICAL: ${event.eventType.replaceAll('_', ' ')}',
-      '${event.location} (${event.cameraName}) - Tap to act immediately',
-      platformDetails,
-      payload: payload,
-    );
+    try {
+      await _localNotifications.show(
+        '${route.deviceId}${route.incidentId ?? data['alert_id'] ?? '$title$body'}'.hashCode,
+        shownTitle,
+        body,
+        NotificationDetails(android: androidDetails, iOS: darwinDetails),
+        payload: payload,
+      );
+    } catch (e) {
+      debugPrint('Local notification failed: $e');
+    }
   }
 
-  void _handleForegroundNotificationResponse(NotificationResponse response) async {
-    final String? payloadStr = response.payload;
-    if (payloadStr == null) return;
-    final payload = jsonDecode(payloadStr);
-    final String cameraId = payload['camera_id'] ?? '';
-    final String cameraName = payload['camera_name'] ?? 'Camera';
-    final String location = payload['location'] ?? 'Zone';
+  void _handleNotificationResponse(NotificationResponse response) async {
+    final data = _decodePayload(response.payload);
+    if (response.actionId == kActionAcknowledge) {
+      final route = routeForPush(data, ServerRegistry().isKnown);
+      if (route == null) return;
+      try {
+        await _acknowledgeOn(ServerRegistry(), route);
+      } catch (e) {
+        debugPrint('Acknowledge from notification failed: $e');
+      }
+      return;
+    }
+    openAlert(data);
+  }
 
-    switch (response.actionId) {
-      case kActionViewLive:
-        navigatorKey?.currentState?.push(
-          MaterialPageRoute(
-            builder: (context) => LiveViewScreen(
-              camera: CameraFeed(
-                id: cameraId,
-                name: cameraName,
-                location: location,
-                rtspUrl: '',
-                webrtcUrl: '',
-                status: 'ONLINE',
-                fps: 30,
-                resolution: '1080p',
-                isAiEnabled: true,
-                aiModels: [],
-              ),
-            ),
-          ),
+  /// Switches to the server that raised the alert and opens its screen:
+  /// the incident, the incident list, or the event centre.
+  Future<void> openAlert(Map<String, dynamic> data) async {
+    final registry = ServerRegistry();
+    final route = routeForPush(data, registry.isKnown);
+    if (route == null) return;
+    await registry.setActive(route.deviceId);
+    unawaited(registry.resolve(route.deviceId));
+    final nav = navigatorKey?.currentState;
+    if (nav == null) return;
+    switch (route.destination) {
+      case PushDestination.incident:
+        nav.push(MaterialPageRoute(builder: (_) => LossPreventionAlertScreen(incidentId: route.incidentId!)));
+        break;
+      case PushDestination.incidentList:
+        nav.push(MaterialPageRoute(builder: (_) => const LossPreventionScreen()));
+        break;
+      case PushDestination.events:
+        nav.pushAndRemoveUntil(
+          MaterialPageRoute(builder: (_) => const AppShell(initialSection: NavSection.eventsCenter)),
+          (_) => false,
         );
         break;
-
-      case kActionMute5m:
-        await stopAlarm();
-        break;
-
-      case kActionCallContact:
-        final Uri phoneUri = Uri.parse('tel:${payload['emergency_phone'] ?? '911'}');
-        if (await canLaunchUrl(phoneUri)) {
-          await launchUrl(phoneUri);
-        }
-        break;
-
-      default:
-        final event = SecurityEvent.fromJson(payload);
-        triggerEmergencyTakeover(event);
-        break;
-    }
-  }
-
-  Future<void> triggerEmergencyTakeover(SecurityEvent event) async {
-    await showInteractiveAlert(event: event);
-
-    if (!kIsWeb && Platform.isAndroid) {
-      try {
-        await _androidChannel.invokeMethod('wakeScreenForEmergency');
-      } catch (e) {
-        debugPrint('Failed to wake screen: $e');
-      }
-    }
-
-    try {
-      await _alarmPlayer.setReleaseMode(ReleaseMode.loop);
-      await _alarmPlayer.play(AssetSource('sounds/emergency_siren.mp3'));
-    } catch (e) {
-      if (!kIsWeb) {
-        if (Platform.isAndroid) {
-          await _androidChannel.invokeMethod('playFallbackAlarmSound');
-        } else if (Platform.isIOS) {
-          await _iosChannel.invokeMethod('playFallbackAlarmSound');
-        }
-      }
-    }
-
-    _vibrationTimer?.cancel();
-    _vibrationTimer = Timer.periodic(const Duration(milliseconds: 600), (_) {
-      HapticFeedback.heavyImpact();
-    });
-
-    if (navigatorKey?.currentState != null) {
-      navigatorKey!.currentState!.push(
-        MaterialPageRoute(
-          fullscreenDialog: true,
-          builder: (context) => EmergencyAlertScreen(
-            event: event,
-            onDismiss: stopAlarm,
-          ),
-        ),
-      );
-    }
-  }
-
-  Future<void> stopAlarm() async {
-    _vibrationTimer?.cancel();
-    _vibrationTimer = null;
-    try {
-      await _alarmPlayer.stop();
-    } catch (_) {}
-
-    if (!kIsWeb && Platform.isAndroid) {
-      try {
-        await _androidChannel.invokeMethod('clearEmergencyWakeLock');
-      } catch (_) {}
     }
   }
 }

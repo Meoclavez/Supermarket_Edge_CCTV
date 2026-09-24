@@ -272,16 +272,12 @@ class ZoneCanvasPainter extends CustomPainter {
 
   Color _getZoneColor(ZoneType type) {
     switch (type) {
-      case ZoneType.intrusion:
-        return AppTheme.emergencyRed;
+      case ZoneType.restrictedArea:
+        return AppTheme.alertRed;
       case ZoneType.tripwire:
         return AppTheme.warningOrange;
       case ZoneType.privacyMask:
         return Colors.white70;
-      case ZoneType.door:
-        return AppTheme.cyberBlue;
-      case ZoneType.package:
-        return AppTheme.liveGreen;
     }
   }
 

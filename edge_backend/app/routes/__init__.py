@@ -30,7 +30,9 @@ class ResilientRoute(APIRoute):
                 return JSONResponse(status_code=status_code, content={"error": "File System Error", "error_id": request_id, "detail": str(e)})
             except Exception as e:
                 from fastapi import HTTPException
-                if isinstance(e, HTTPException):
+                from fastapi.exceptions import RequestValidationError
+                # Client errors keep their own status (4xx / 422), not a 500.
+                if isinstance(e, (HTTPException, RequestValidationError)):
                     raise e
                 logger.error(f"[{request_id}] Unhandled Error: {e}", exc_info=True)
                 return JSONResponse(status_code=500, content={"error": "Internal Server Error", "error_id": request_id, "detail": str(e)})

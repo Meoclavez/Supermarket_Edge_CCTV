@@ -1,4 +1,4 @@
-"""Pydantic schemas for Edge CCTV AI data validation, camera feeds, events, zones, DVR, and telemetry."""
+"""Pydantic schemas for the supermarket edge system: camera feeds, loss-prevention alerts, zones, DVR and telemetry."""
 
 from enum import Enum
 from typing import List, Optional, Dict, Any, Tuple
@@ -15,24 +15,26 @@ class CameraStatus(str, Enum):
 
 
 class EventType(str, Enum):
-    FALL_DETECTED = "FALL_DETECTED"
-    INTRUSION_DETECTED = "INTRUSION_DETECTED"
-    ZONE_INTRUSION = "ZONE_INTRUSION"
-    TRIPWIRE_CROSSED = "TRIPWIRE_CROSSED"
-    WEAPON_DETECTED = "WEAPON_DETECTED"
-    PERIMETER_BREACH = "PERIMETER_BREACH"
-    DOOR_LEFT_OPEN = "DOOR_LEFT_OPEN"
-    PACKAGE_INTERACTION = "PACKAGE_INTERACTION"
-    PACKAGE_THEFT = "PACKAGE_THEFT"
-    INACTIVITY_ALARM = "INACTIVITY_ALARM"
-    TAMPERING_DETECTED = "TAMPERING_DETECTED"
-    HUMAN_DETECTED = "HUMAN_DETECTED"
-    VEHICLE_DETECTED = "VEHICLE_DETECTED"
-    MOTION = "MOTION"
+    """Loss-prevention alert types a store operator is notified about.
+
+    Behavioural types describe *suspicious behaviour for staff review*, never
+    a finding of guilt. ``CAMERA_OFFLINE`` is operational.
+    """
+    THEFT_SUSPECTED = "THEFT_SUSPECTED"
+    CONCEALMENT = "CONCEALMENT"
+    SHELF_SWEEP = "SHELF_SWEEP"
+    EXIT_WITHOUT_CHECKOUT = "EXIT_WITHOUT_CHECKOUT"
+    LOITERING = "LOITERING"
+    QUEUE_ALERT = "QUEUE_ALERT"
+    CAMERA_OFFLINE = "CAMERA_OFFLINE"
+    # Retail zone rules (services/tripwire_engine.py): a person inside a
+    # restricted area (stockroom, cash office, after-hours floor) while its
+    # schedule is active, and an alerting tripwire crossed in its alert direction.
+    RESTRICTED_AREA = "RESTRICTED_AREA"
+    TRIPWIRE_ALERT = "TRIPWIRE_ALERT"
 
 
 class EventSeverity(str, Enum):
-    CRITICAL = "CRITICAL"
     HIGH = "HIGH"
     WARNING = "WARNING"
     INFO = "INFO"
@@ -44,10 +46,6 @@ class ZoneType(str, Enum):
     TRIPWIRE = "TRIPWIRE"
     INTRUSION = "INTRUSION"
     RESTRICTED_ZONE = "RESTRICTED_ZONE"
-    DOOR = "DOOR"
-    PACKAGE = "PACKAGE"
-    DOOR_MONITOR = "DOOR_MONITOR"
-    PACKAGE_ZONE = "PACKAGE_ZONE"
 
 
 class MaskMode(str, Enum):
@@ -73,7 +71,7 @@ class Point2D(BaseModel):
 
 class ZoneConfig(BaseModel):
     id: str
-    camera_id: str = "cam_living_room"
+    camera_id: str = ""
     name: str
     zone_type: ZoneType = ZoneType.TRIPWIRE
     enabled: bool = True
@@ -88,12 +86,12 @@ class ZoneConfig(BaseModel):
     blur_kernel_size: int = 51
     mosaic_scale: int = 16
     dwell_time_seconds: float = 0.5
-    allowed_classes: List[str] = Field(default_factory=lambda: ["person", "vehicle"])
+    allowed_classes: List[str] = Field(default_factory=lambda: ["person"])
     in_count: int = 0
     out_count: int = 0
 
 
-# ---------------- Vision & Kinematics ----------------
+# ---------------- Vision ----------------
 
 class BoundingBox(BaseModel):
     x_min: float
@@ -113,37 +111,21 @@ class Keypoint(BaseModel):
     confidence: float = 1.0
 
 
-class KinematicTelemetry(BaseModel):
-    hip_descent_velocity: float
-    aspect_ratio_initial: float
-    aspect_ratio_final: float
-    transition_duration_ms: float
-    immobility_duration_sec: float
-    floor_proximity_score: float
-    torso_angle_deg: Optional[float] = None
-
-
-KinematicMetrics = KinematicTelemetry
-
-
 # ---------------- Feature Toggles & Hardware Profile ----------------
 
 class CameraFeatureConfig(BaseModel):
-    motion_tracking: bool = True
-    fall_detection: bool = True
-    door_monitoring: bool = False
-    package_theft_tracking: bool = False
-    inactivity_alerts: bool = False
-    tripwires_enabled: bool = True
-    intrusion_zones_enabled: bool = True
-    privacy_masks_enabled: bool = True
-    dvr_recording_24_7: bool = True
-    dwell_tracking: bool = True
-    shelf_interaction: bool = True
-    theft_detection: bool = True
-    queue_monitoring: bool = True
-    sub_stream_fps: int = 5
-    main_stream_fps: int = 25
+    """Per-camera analytics switches.
+
+    Only flags that a pipeline stage checks belong here (see
+    ``feature_manager.is_enabled``). Stored camera rows written by older
+    builds may still carry keys such as ``fall_detection`` or
+    ``door_monitoring``; ``extra="ignore"`` drops them instead of failing.
+    """
+    model_config = ConfigDict(extra="ignore")
+
+    people_counting: bool = Field(True, description="Zone visits, dwell, queues and footfall from tracked people")
+    shelf_interaction: bool = Field(True, description="Hand-to-shelf interaction events from pose keypoints")
+    theft_detection: bool = Field(True, description="Suspicious-behaviour incidents for staff review")
 
 
 class HardwareProfile(BaseModel):
@@ -161,6 +143,10 @@ class HardwareProfile(BaseModel):
     inference_available: bool
     inference_device: Optional[str] = None
     inference_error: Optional[str] = None
+    # The ONNX Runtime execution provider the session actually landed on
+    # (e.g. CUDAExecutionProvider) and the model file it runs.
+    inference_execution_provider: Optional[str] = None
+    inference_model: Optional[str] = None
     device_name: str
     total_ram_gb: Optional[float] = None
     available_ram_gb: Optional[float] = None
@@ -185,17 +171,17 @@ class SystemStats(BaseModel):
     uptime_seconds: float
 
 
-# ---------------- Security Events ----------------
+# ---------------- Loss-prevention alerts ----------------
 
 class SecurityEventBase(BaseModel):
     camera_id: str
     event_type: EventType
-    severity: EventSeverity
-    confidence: float
+    severity: EventSeverity = EventSeverity.HIGH
+    # Only a measured model confidence; null when the producer had none.
+    confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
     description: Optional[str] = None
     bounding_box: Optional[BoundingBox] = None
     keypoints: Optional[List[Keypoint]] = None
-    kinematics: Optional[KinematicTelemetry] = None
     metadata_json: Optional[Dict[str, Any]] = None
     metadata: Optional[Dict[str, Any]] = None
 
@@ -239,7 +225,7 @@ class CameraFeed(BaseModel):
     fps: int = 25
     resolution: str = "1920x1080"
     is_ai_enabled: bool = True
-    ai_models: List[str] = Field(default_factory=lambda: ["yolov5n", "kinematic_pose"])
+    ai_models: List[str] = Field(default_factory=list)
     features: Any = Field(default_factory=CameraFeatureConfig)
     dvr_enabled: bool = True
     dvr_retention_days: int = 7
@@ -458,7 +444,8 @@ DeviceTokenRegistration = DeviceRegistration
 
 
 class MuteCameraRequest(BaseModel):
-    duration_minutes: int = 5
+    """Mute loss-prevention pushes for one camera; 0 unmutes."""
+    duration_minutes: int = Field(5, ge=0, le=24 * 60)
 
 
 # ---------------- Retail Analytics Schemas ----------------

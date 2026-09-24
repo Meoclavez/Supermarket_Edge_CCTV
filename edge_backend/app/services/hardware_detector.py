@@ -119,7 +119,12 @@ def _probe_decoder() -> Tuple[str, str]:
 
 
 def _inference_status() -> dict:
-    """What the detector actually runs. Imported lazily: the detector loads a model."""
+    """What the detector actually runs, read lazily on every call.
+
+    ``person_detector.status()`` never loads a model; loading happens once in
+    ``initialise_inference()`` from the application lifespan. Before that has
+    run the backend is reported as ``not_initialised`` rather than guessed.
+    """
     try:
         from .inference_backend import person_detector
 
@@ -155,6 +160,8 @@ class HardwareDetector:
             inference_available=bool(infer.get("available", False)),
             inference_device=infer.get("device"),
             inference_error=infer.get("last_error"),
+            inference_execution_provider=infer.get("execution_provider"),
+            inference_model=infer.get("model"),
             device_name=device_name,
             total_ram_gb=total_ram_gb,
             available_ram_gb=available_ram_gb,
@@ -169,4 +176,14 @@ def current_hardware_profile() -> HardwareProfile:
     return HardwareDetector.detect_hardware()
 
 
-hardware_profile = HardwareDetector.detect_hardware()
+def __getattr__(name: str):
+    """``hardware_profile`` is probed on first access, not at import time.
+
+    Importing this module used to run nvidia-smi/vainfo and snapshot the
+    detector status before the models were loaded, freezing an
+    ``unavailable`` inference backend into the profile. Prefer
+    ``current_hardware_profile()``, which re-probes on every call.
+    """
+    if name == "hardware_profile":
+        return current_hardware_profile()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

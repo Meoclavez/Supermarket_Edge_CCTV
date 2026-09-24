@@ -14,6 +14,7 @@
  *
  * Public surface (window.blueprintEditor):
  *   resize(), resetView(), zoom(f), toggleLayer(name, on), toggleSnap(on)
+ *   setHeatmapKind('presence'|'dwell'|'interaction')
  *   setTool('view'), startDraw(kind), startDrawZone(), finishPolygon(),
  *   undoPoint(), cancelDraw(), resizeStore(), startPlaceCamera(),
  *   selectCamera(id), selectShape(type, id), load(),
@@ -47,12 +48,53 @@
 
   const GRID_SNAP_M = 0.5;
   const TRAIL_LEN = 10;
+
+  // Canvas colours come from the theme tokens in style.css (--plan-*), read
+  // at draw time. They are re-read on 'edge:theme' and the render loop picks
+  // them up on its next frame. The category / kind / camera palettes above are
+  // data colours; ink() darkens them by --plan-ink-mix so they stay legible
+  // on the light plan (0% in the dark theme, i.e. unchanged).
+  let T = readPlanTheme();
+  window.addEventListener('edge:theme', () => { T = readPlanTheme(); });
+
+  function readPlanTheme() {
+    let cs = null;
+    try { cs = getComputedStyle(document.documentElement); } catch (_) { /* no CSSOM */ }
+    const tok = (name) => (cs ? cs.getPropertyValue(name).trim() : '');
+    return {
+      bg: tok('--plan-bg'), inner: tok('--plan-inner'), grid: tok('--plan-grid-rgb'),
+      text: tok('--plan-text'), text2: tok('--plan-text-2'), muted: tok('--plan-muted'),
+      placeholder: tok('--plan-placeholder'), outline: tok('--plan-outline'), marker: tok('--plan-marker'),
+      select: tok('--plan-select'), warn: tok('--plan-warn'), danger: tok('--plan-danger'),
+      origin: tok('--plan-origin'), heatBlend: tok('--plan-heat-blend') || 'lighter',
+      inkMix: (parseFloat(tok('--plan-ink-mix')) || 0) / 100,
+    };
+  }
+
+  /** Darken a #rgb/#rrggbb data colour toward black by the theme's ink mix. */
+  function ink(color) {
+    if (!T.inkMix || typeof color !== 'string' || color[0] !== '#') return color;
+    const h = color.slice(1);
+    const n = parseInt(h.length === 3 ? h.split('').map((c) => c + c).join('') : h, 16);
+    if (!isFinite(n)) return color;
+    const k = 1 - T.inkMix;
+    const c = (v) => Math.round(v * k).toString(16).padStart(2, '0');
+    return `#${c((n >> 16) & 255)}${c((n >> 8) & 255)}${c(n & 255)}`;
+  }
   const TRACK_TTL_MS = 3000;
   const LIVE_POLL_MS = 1000;
   const METRICS_POLL_MS = 4000;
   const HIT_PX = 7;
 
   const MODE = { VIEW: 'view', DRAW: 'draw', PLACE_CAMERA: 'place-camera', PICK: 'pick-point' };
+
+  // Heatmap kinds served by GET /api/v1/analytics/heatmaps?kind=...
+  const HEATMAP_KINDS = [
+    { kind: 'presence', label: 'Presence', title: 'Where people were (tracked floor positions)' },
+    { kind: 'dwell', label: 'Dwell', title: 'Seconds spent per cell' },
+    { kind: 'interaction', label: 'Interactions', title: 'Shelf reaches, at the shopper\'s floor position' },
+  ];
+  const HEATMAP_KIND_KEY = 'edge_cctv_heatmap_kind';
 
   class BlueprintEditor {
     constructor(canvas) {
@@ -70,6 +112,11 @@
       this.zoneMetrics = {};
       this.heatmap = null;
       this.heatmapMessage = null;
+      this.heatmapKind = 'presence';
+      try {
+        const saved = window.localStorage.getItem(HEATMAP_KIND_KEY);
+        if (HEATMAP_KINDS.some((k) => k.kind === saved)) this.heatmapKind = saved;
+      } catch (_) { /* storage unavailable: default kind */ }
       this.coverage = null;
       this.activeNow = null;
 
@@ -105,6 +152,7 @@
       this._statusTimer = null;
 
       this._bindEvents();
+      this._mountHeatmapKindToggle();
       this.resize();
       this.load();
 
@@ -212,10 +260,11 @@
     async refreshMetrics() {
       if (!this.isVisible() || !this.layout) return;
       if (window.edgeAuth && typeof window.edgeAuth.isAuthenticated === 'function' && !window.edgeAuth.isAuthenticated()) return;
+      const kind = this.heatmapKind;
       try {
         const [fpRes, hmRes] = await Promise.all([
           fetch('/api/v1/analytics/floorplan'),
-          fetch('/api/v1/analytics/heatmaps?resolution_w=60&resolution_h=40'),
+          fetch(`/api/v1/analytics/heatmaps?resolution_w=60&resolution_h=40&kind=${encodeURIComponent(kind)}`),
         ]);
         if (fpRes.ok) {
           const fp = await fpRes.json();
@@ -224,10 +273,11 @@
           (fp.zones || []).forEach((z) => { this.zoneMetrics[z.id] = z.metrics; });
           this.activeNow = (fp.active_shoppers_now === undefined) ? null : fp.active_shoppers_now;
         }
-        if (hmRes.ok) {
+        if (hmRes.ok && kind === this.heatmapKind) {
           const hm = await hmRes.json();
           this.heatmap = hm.observed ? hm : null;
           this.heatmapMessage = hm.observed ? null : hm.message;
+          this._renderHeatmapNote(hm);
         }
         this.emitState();
       } catch (_) { /* transient; next tick retries */ }
@@ -1275,6 +1325,72 @@
     }
 
     toggleLayer(name, on) { this.showLayers[name] = !!on; }
+
+    /**
+     * Inline presence / dwell / interaction switch placed right after the
+     * existing "Heatmap" layer checkbox. Styled inline so it depends on no
+     * stylesheet class beyond the shared .btn/.btn-sm/.btn-primary.
+     */
+    _mountHeatmapKindToggle() {
+      const cb = document.getElementById('layerHeatmap');
+      const anchor = cb ? (cb.closest('label') || cb) : null;
+      if (!anchor || document.getElementById('fpHeatmapKind')) return;
+      const group = document.createElement('span');
+      group.id = 'fpHeatmapKind';
+      group.setAttribute('role', 'group');
+      group.setAttribute('aria-label', 'Heatmap kind');
+      group.style.cssText = 'display:inline-flex;align-items:center;gap:2px;';
+      HEATMAP_KINDS.forEach((k) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'btn btn-sm';
+        b.dataset.heatmapKind = k.kind;
+        b.textContent = k.label;
+        b.title = k.title;
+        b.style.cssText = 'padding:1px 6px;font-size:10px;line-height:1.4;';
+        b.addEventListener('click', () => this.setHeatmapKind(k.kind));
+        group.appendChild(b);
+      });
+      const note = document.createElement('span');
+      note.id = 'fpHeatmapNote';
+      note.style.cssText = 'font-size:10px;color:var(--text-dim);margin-left:4px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+      group.appendChild(note);
+      anchor.insertAdjacentElement('afterend', group);
+      this._syncHeatmapKindButtons();
+    }
+
+    _syncHeatmapKindButtons() {
+      document.querySelectorAll('#fpHeatmapKind [data-heatmap-kind]').forEach((b) => {
+        const on = b.dataset.heatmapKind === this.heatmapKind;
+        b.classList.toggle('btn-primary', on);
+        b.setAttribute('aria-pressed', on ? 'true' : 'false');
+      });
+    }
+
+    _renderHeatmapNote(hm) {
+      const note = document.getElementById('fpHeatmapNote');
+      if (!note) return;
+      if (hm && hm.observed) {
+        const peak = hm.peak_value !== undefined ? hm.peak_value : hm.peak_count;
+        note.textContent = `peak ${peak} ${hm.unit || ''} · ${hm.samples} samples`;
+        note.title = note.textContent;
+      } else {
+        note.textContent = (hm && hm.message) || '';
+        note.title = note.textContent;
+      }
+    }
+
+    setHeatmapKind(kind) {
+      if (!HEATMAP_KINDS.some((k) => k.kind === kind)) return;
+      this.heatmapKind = kind;
+      try { window.localStorage.setItem(HEATMAP_KIND_KEY, kind); } catch (_) { /* not persisted */ }
+      this.heatmap = null;
+      this.heatmapMessage = null;
+      this._syncHeatmapKindButtons();
+      const note = document.getElementById('fpHeatmapNote');
+      if (note) note.textContent = 'loading…';
+      this.refreshMetrics();
+    }
     toggleSnap(on) { this.snapEnabled = !!on; }
     zoom(f) { this.scale = Math.max(2, Math.min(400, this.scale * f)); this._userZoomed = true; }
     resetView() { this._userZoomed = false; this.fitToView(); }
@@ -1305,10 +1421,10 @@
       const ctx = this.ctx;
       const W = this.canvas.clientWidth, H = this.canvas.clientHeight;
       ctx.clearRect(0, 0, W, H);
-      ctx.fillStyle = '#0b0e14';
+      ctx.fillStyle = T.bg;
       ctx.fillRect(0, 0, W, H);
 
-      if (!this.layout) { this.drawCentredText('Loading blueprint…', '#5b6270'); return; }
+      if (!this.layout) { this.drawCentredText('Loading blueprint…', T.placeholder); return; }
 
       this.drawFloor();
       if (this.showLayers.heatmap) this.drawHeatmap();
@@ -1337,7 +1453,7 @@
       const { width_m, height_m } = this.layout;
       const tl = this.toScreen(0, 0), br = this.toScreen(width_m, height_m);
       ctx.save();
-      ctx.fillStyle = '#10141c';
+      ctx.fillStyle = T.inner;
       ctx.fillRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
 
       if (this.showLayers.grid) {
@@ -1346,18 +1462,18 @@
         ctx.beginPath();
         for (let x = 0; x <= width_m + 1e-9; x += step) { const s = this.toScreen(x, 0); ctx.moveTo(s.x, tl.y); ctx.lineTo(s.x, br.y); }
         for (let y = 0; y <= height_m + 1e-9; y += step) { const s = this.toScreen(0, y); ctx.moveTo(tl.x, s.y); ctx.lineTo(br.x, s.y); }
-        ctx.strokeStyle = step < 1 ? 'rgba(120,140,170,0.06)' : 'rgba(120,140,170,0.10)';
+        ctx.strokeStyle = step < 1 ? `rgba(${T.grid},0.06)` : `rgba(${T.grid},0.10)`;
         ctx.stroke();
         if (step < 5) {
           ctx.beginPath();
           const major = step < 1 ? 1 : 5;
           for (let x = 0; x <= width_m + 1e-9; x += major) { const s = this.toScreen(x, 0); ctx.moveTo(s.x, tl.y); ctx.lineTo(s.x, br.y); }
           for (let y = 0; y <= height_m + 1e-9; y += major) { const s = this.toScreen(0, y); ctx.moveTo(tl.x, s.y); ctx.lineTo(br.x, s.y); }
-          ctx.strokeStyle = 'rgba(120,140,170,0.14)';
+          ctx.strokeStyle = `rgba(${T.grid},0.14)`;
           ctx.stroke();
         }
       }
-      ctx.strokeStyle = 'rgba(0,212,255,0.55)';
+      ctx.strokeStyle = T.origin;
       ctx.lineWidth = 2;
       ctx.strokeRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
       ctx.restore();
@@ -1369,7 +1485,8 @@
       const { density_matrix: m, grid_width: gw, grid_height: gh } = this.heatmap;
       const cw = (this.layout.width_m / gw) * this.scale, ch = (this.layout.height_m / gh) * this.scale;
       ctx.save();
-      ctx.globalCompositeOperation = 'lighter';
+      // Additive glow on the dark plan; multiply keeps it visible on the light one.
+      ctx.globalCompositeOperation = T.heatBlend;
       for (let gy = 0; gy < gh; gy++) {
         for (let gx = 0; gx < gw; gx++) {
           const v = m[gy][gx];
@@ -1400,7 +1517,7 @@
       const list = this.structures.slice().sort((a, b) => (order[a.kind] || 0) - (order[b.kind] || 0));
       list.forEach((st) => {
         const poly = st.polygon || [];
-        const color = st.color || KIND_COLORS[st.kind] || '#c9d4e0';
+        const color = ink(st.color || KIND_COLORS[st.kind]) || T.text2;
         const selected = this.isSelected('structure', st.id);
         const hovered = this.isHovered('structure', st.id);
         ctx.save();
@@ -1409,7 +1526,7 @@
           this.tracePolygon(poly, false);
           ctx.lineCap = 'butt'; ctx.lineJoin = 'miter';
           ctx.lineWidth = Math.max(2, (st.thickness_m || 0.2) * this.scale);
-          ctx.strokeStyle = selected ? '#00d4ff' : hovered ? lighten(color) : color;
+          ctx.strokeStyle = selected ? T.select : hovered ? lighten(color) : color;
           ctx.stroke();
         } else if (st.kind === 'DOOR') {
           if (poly.length < 2) { ctx.restore(); return; }
@@ -1418,10 +1535,10 @@
           this.tracePolygon(poly, false);
           ctx.lineCap = 'butt';
           ctx.lineWidth = Math.max(3, (st.thickness_m || 0.1) * this.scale + 2);
-          ctx.strokeStyle = '#10141c';
+          ctx.strokeStyle = T.inner;
           ctx.stroke();
           ctx.lineWidth = selected ? 2.5 : 1.5;
-          ctx.strokeStyle = selected ? '#00d4ff' : color;
+          ctx.strokeStyle = selected ? T.select : color;
           ctx.setLineDash([5, 3]);
           ctx.stroke();
           ctx.setLineDash([]);
@@ -1443,7 +1560,7 @@
             ctx.fillStyle = hexToRgba(color, selected ? 0.12 : hovered ? 0.09 : 0.05);
             ctx.fill();
             ctx.lineWidth = selected ? 3 : 2;
-            ctx.strokeStyle = selected ? '#00d4ff' : color;
+            ctx.strokeStyle = selected ? T.select : color;
             ctx.stroke();
           } else {
             ctx.fillStyle = hexToRgba(color, selected ? 0.32 : hovered ? 0.26 : 0.18);
@@ -1466,14 +1583,14 @@
             // The hatch replaced the current path; trace the outline again.
             this.tracePolygon(poly, true);
             ctx.lineWidth = selected ? 2.5 : 1.4;
-            ctx.strokeStyle = selected ? '#00d4ff' : color;
+            ctx.strokeStyle = selected ? T.select : color;
             ctx.stroke();
           }
         }
         if (this.showLayers.labels && st.name) {
           const c = POLYLINE_KINDS.has(st.kind) ? midpoint(poly) : polygonCentroid(poly);
           const s = this.toScreen(c.x, c.y);
-          ctx.fillStyle = st.kind === 'ROOM' ? hexToRgba(color, 0.9) : '#e6edf3';
+          ctx.fillStyle = st.kind === 'ROOM' ? hexToRgba(color, 0.9) : T.text;
           ctx.font = st.kind === 'ROOM' ? '800 12px system-ui, sans-serif' : '600 10px system-ui, sans-serif';
           ctx.textAlign = 'center';
           if (st.kind === 'ROOM') {
@@ -1498,21 +1615,22 @@
         const selected = this.isSelected('zone', z.id), hovered = this.isHovered('zone', z.id);
         ctx.save();
         this.tracePolygon(poly, true);
-        ctx.fillStyle = hexToRgba(z.color, selected ? 0.30 : hovered ? 0.22 : 0.13);
+        const zc = ink(z.color);
+        ctx.fillStyle = hexToRgba(zc, selected ? 0.30 : hovered ? 0.22 : 0.13);
         ctx.fill();
-        ctx.strokeStyle = selected ? '#fff' : z.color;
+        ctx.strokeStyle = selected ? T.marker : zc;
         ctx.lineWidth = selected ? 2.5 : 1.4;
         ctx.stroke();
         if (this.showLayers.labels) {
           const c = polygonCentroid(poly);
           const s = this.toScreen(c.x, c.y);
           const m = (this.zoneMetrics || {})[z.id];
-          ctx.fillStyle = '#e6edf3';
+          ctx.fillStyle = T.text;
           ctx.font = '600 11px system-ui, sans-serif';
           ctx.textAlign = 'center';
           ctx.fillText(z.name, s.x, s.y);
           if (m && m.observed) {
-            ctx.fillStyle = z.color;
+            ctx.fillStyle = zc;
             ctx.font = '500 10px ui-monospace, monospace';
             ctx.fillText(`${m.visits} visits · ${m.avg_dwell_seconds || 0}s`, s.x, s.y + 13);
           }
@@ -1530,8 +1648,8 @@
       shape.polygon.forEach((p, i) => {
         const s = this.toScreen(p.x, p.y);
         const active = i === this.selVertex;
-        ctx.fillStyle = active ? '#00d4ff' : '#fff';
-        ctx.strokeStyle = '#0b0e14';
+        ctx.fillStyle = active ? T.select : T.marker;
+        ctx.strokeStyle = T.outline;
         ctx.lineWidth = 1.5;
         const r = active ? 5 : 4;
         ctx.fillRect(s.x - r, s.y - r, r * 2, r * 2);
@@ -1543,7 +1661,7 @@
     drawDraft() {
       if (this.mode !== MODE.DRAW) return;
       const ctx = this.ctx;
-      const color = this.draftKind === 'ZONE' ? '#00ff9d' : (KIND_COLORS[this.draftKind] || '#00ff9d');
+      const color = ink(this.draftKind === 'ZONE' ? CATEGORY_COLORS.ENTRANCE : (KIND_COLORS[this.draftKind] || CATEGORY_COLORS.ENTRANCE));
       const preview = this.draftPreviewPoint();
       ctx.save();
       if (this.draft.length) {
@@ -1570,7 +1688,7 @@
         const s = this.toScreen(preview.x, preview.y);
         ctx.strokeStyle = color; ctx.lineWidth = 1;
         ctx.beginPath(); ctx.arc(s.x, s.y, 5, 0, Math.PI * 2); ctx.stroke();
-        ctx.fillStyle = '#c9d4e0';
+        ctx.fillStyle = T.text2;
         ctx.font = '500 10px ui-monospace, monospace';
         ctx.textAlign = 'left';
         ctx.fillText(`${preview.x.toFixed(1)}, ${preview.y.toFixed(1)} m`, s.x + 9, s.y - 8);
@@ -1585,7 +1703,7 @@
         const hovered = this.isHovered('camera', cam.camera_id);
         const selected = this.isSelected('camera', cam.camera_id);
         const online = cam.status === 'ONLINE';
-        const color = camColorFor(this.cameras, cam.camera_id);
+        const color = ink(camColorFor(this.cameras, cam.camera_id));
         const reach = this.cameraReachPx();
         const half = ((cam.fov_deg || 85) * Math.PI) / 180 / 2;
         const bearing = ((cam.azimuth_deg || 0) - 90) * Math.PI / 180;
@@ -1598,7 +1716,7 @@
         ctx.fillStyle = hexToRgba(color, selected ? 0.22 : hovered ? 0.18 : 0.10);
         ctx.fill();
         ctx.lineWidth = selected ? 1.6 : 1;
-        if (!cam.has_homography) { ctx.setLineDash([4, 4]); ctx.strokeStyle = hexToRgba('#ffa500', 0.85); }
+        if (!cam.has_homography) { ctx.setLineDash([4, 4]); ctx.strokeStyle = hexToRgba(T.warn, 0.85); }
         else ctx.strokeStyle = hexToRgba(color, 0.6);
         ctx.stroke();
         ctx.setLineDash([]);
@@ -1608,25 +1726,25 @@
           ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(h.x, h.y);
           ctx.strokeStyle = hexToRgba(color, 0.7); ctx.lineWidth = 1; ctx.stroke();
           ctx.beginPath(); ctx.arc(h.x, h.y, 6, 0, Math.PI * 2);
-          ctx.fillStyle = '#fff'; ctx.fill();
+          ctx.fillStyle = T.marker; ctx.fill();
           ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
         }
 
         ctx.beginPath();
         ctx.arc(s.x, s.y, selected ? 10 : 8, 0, Math.PI * 2);
-        ctx.fillStyle = online ? color : '#ff5b6b';
+        ctx.fillStyle = online ? color : T.danger;
         ctx.fill();
-        ctx.strokeStyle = selected ? '#fff' : '#0b0e14';
+        ctx.strokeStyle = selected ? T.marker : T.outline;
         ctx.lineWidth = 2;
         ctx.stroke();
 
         if (this.showLayers.labels) {
-          ctx.fillStyle = '#c9d4e0';
+          ctx.fillStyle = T.text2;
           ctx.font = '600 10px system-ui, sans-serif';
           ctx.textAlign = 'center';
           ctx.fillText((cam.name || cam.camera_id).slice(0, 22), s.x, s.y - 14);
-          if (!cam.has_homography) { ctx.fillStyle = '#ffa500'; ctx.fillText('uncalibrated', s.x, s.y + 21); }
-          else if (!online) { ctx.fillStyle = '#ff5b6b'; ctx.fillText(String(cam.status || 'offline').toLowerCase(), s.x, s.y + 21); }
+          if (!cam.has_homography) { ctx.fillStyle = T.warn; ctx.fillText('uncalibrated', s.x, s.y + 21); }
+          else if (!online) { ctx.fillStyle = T.danger; ctx.fillText(String(cam.status || 'offline').toLowerCase(), s.x, s.y + 21); }
         }
         ctx.restore();
       });
@@ -1639,7 +1757,7 @@
       const now = Date.now();
       ctx.save();
       for (const t of this.tracks.values()) {
-        const color = camColorFor(this.cameras, t.camera_id);
+        const color = ink(camColorFor(this.cameras, t.camera_id));
         const pts = t.points;
         if (!pts.length) continue;
         for (let i = 1; i < pts.length; i++) {
@@ -1654,9 +1772,9 @@
         const stale = now - t.lastSeen > 1500;   // still within TTL but not seen this second
         ctx.beginPath(); ctx.arc(s.x, s.y, 6, 0, Math.PI * 2);
         ctx.fillStyle = hexToRgba(color, stale ? 0.5 : 0.95); ctx.fill();
-        ctx.strokeStyle = '#0b0e14'; ctx.lineWidth = 1.5; ctx.stroke();
+        ctx.strokeStyle = T.outline; ctx.lineWidth = 1.5; ctx.stroke();
         if (this.showLayers.labels) {
-          ctx.fillStyle = '#fff';
+          ctx.fillStyle = T.marker;
           ctx.font = '700 9px ui-monospace, monospace';
           ctx.textAlign = 'center';
           ctx.fillText(shortId(t.track_id), s.x, s.y - 10);
@@ -1669,15 +1787,15 @@
       const ov = this.calOverlay;
       if (!ov) return;
       const ctx = this.ctx;
-      const color = camColorFor(this.cameras, ov.cameraId);
+      const color = ink(camColorFor(this.cameras, ov.cameraId));
       ctx.save();
       (ov.pairs || []).forEach((pair, i) => {
         if (!pair.floor) return;
         const s = this.toScreen(pair.floor.x, pair.floor.y);
         ctx.beginPath(); ctx.arc(s.x, s.y, 9, 0, Math.PI * 2);
         ctx.fillStyle = hexToRgba(color, 0.9); ctx.fill();
-        ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
-        ctx.fillStyle = '#0b0e14';
+        ctx.strokeStyle = T.marker; ctx.lineWidth = 1.5; ctx.stroke();
+        ctx.fillStyle = T.outline;
         ctx.font = '800 10px ui-monospace, monospace';
         ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
         ctx.fillText(String(i + 1), s.x, s.y);
@@ -1685,11 +1803,11 @@
         if (rp) {
           const r = this.toScreen(rp.x, rp.y);
           ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(r.x, r.y);
-          ctx.strokeStyle = '#ffa500'; ctx.lineWidth = 1; ctx.stroke();
+          ctx.strokeStyle = T.warn; ctx.lineWidth = 1; ctx.stroke();
           ctx.beginPath();
           ctx.moveTo(r.x - 6, r.y - 6); ctx.lineTo(r.x + 6, r.y + 6);
           ctx.moveTo(r.x - 6, r.y + 6); ctx.lineTo(r.x + 6, r.y - 6);
-          ctx.strokeStyle = '#ffa500'; ctx.lineWidth = 2; ctx.stroke();
+          ctx.strokeStyle = T.warn; ctx.lineWidth = 2; ctx.stroke();
         }
       });
       ctx.restore();
@@ -1701,13 +1819,13 @@
       const px = metres * this.scale;
       const x = 18, y = this.canvas.clientHeight - 64;
       ctx.save();
-      ctx.strokeStyle = '#8b949e'; ctx.lineWidth = 2;
+      ctx.strokeStyle = T.muted; ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.moveTo(x, y); ctx.lineTo(x + px, y);
       ctx.moveTo(x, y - 4); ctx.lineTo(x, y + 4);
       ctx.moveTo(x + px, y - 4); ctx.lineTo(x + px, y + 4);
       ctx.stroke();
-      ctx.fillStyle = '#8b949e';
+      ctx.fillStyle = T.muted;
       ctx.font = '500 10px ui-monospace, monospace';
       ctx.textAlign = 'left';
       ctx.fillText(`${metres} m`, x + px + 8, y + 4);
@@ -1773,13 +1891,13 @@
   }
 
   function hexToRgba(hex, alpha) {
-    const h = (hex || '#00d4ff').replace('#', '');
+    const h = (hex || T.select || '').replace('#', '');
     const n = parseInt(h.length === 3 ? h.split('').map((c) => c + c).join('') : h, 16);
     return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
   }
 
   function lighten(hex) {
-    const h = (hex || '#c9d4e0').replace('#', '');
+    const h = (hex || T.text2 || '').replace('#', '');
     const n = parseInt(h.length === 3 ? h.split('').map((c) => c + c).join('') : h, 16);
     const mix = (v) => Math.round(v + (255 - v) * 0.35);
     return `rgb(${mix((n >> 16) & 255)},${mix((n >> 8) & 255)},${mix(n & 255)})`;

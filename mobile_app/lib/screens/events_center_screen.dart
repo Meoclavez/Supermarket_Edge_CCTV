@@ -42,12 +42,12 @@ class _EventsCenterScreenState extends State<EventsCenterScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: AppTheme.darkBackground,
+      backgroundColor: context.palette.background,
       appBar: AppBar(
         title: const Text('AI INCIDENT & ALERTS CENTER', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
         actions: [
           IconButton(
-            icon: const Icon(Icons.refresh_rounded, color: AppTheme.cyberBlue),
+            icon: Icon(Icons.refresh_rounded, color: context.palette.accent),
             onPressed: _loadEvents,
           ),
         ],
@@ -57,25 +57,25 @@ class _EventsCenterScreenState extends State<EventsCenterScreen> {
           // Filter Chips
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-            color: AppTheme.cardSurface,
+            color: context.palette.card,
             child: Row(
               children: [
                 _buildFilterChip('ALL'),
                 const SizedBox(width: 8),
-                _buildFilterChip('CRITICAL', color: AppTheme.emergencyRed),
+                _buildFilterChip('HIGH', color: context.palette.alert),
                 const SizedBox(width: 8),
-                _buildFilterChip('HIGH', color: AppTheme.warningOrange),
+                _buildFilterChip('WARNING', color: context.palette.warning),
                 const SizedBox(width: 8),
-                _buildFilterChip('WARNING', color: AppTheme.cyberBlue),
+                _buildFilterChip('INFO', color: context.palette.accent),
               ],
             ),
           ),
           Expanded(
             child: _isLoading
-                ? const Center(child: CircularProgressIndicator(color: AppTheme.cyberBlue))
+                ? Center(child: CircularProgressIndicator(color: context.palette.accent))
                 : _events.isEmpty
-                    ? const Center(
-                        child: Text('No AI security incidents found for this filter.', style: TextStyle(color: Colors.white54)),
+                    ? Center(
+                        child: Text('No AI security incidents found for this filter.', style: TextStyle(color: context.palette.dim(0.54))),
                       )
                     : ListView.builder(
                         padding: const EdgeInsets.all(16),
@@ -101,13 +101,13 @@ class _EventsCenterScreenState extends State<EventsCenterScreen> {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
         decoration: BoxDecoration(
-          color: isSelected ? (color ?? AppTheme.cyberBlue) : Colors.white10,
+          color: isSelected ? (color ?? context.palette.accent) : context.palette.hairline(0.10),
           borderRadius: BorderRadius.circular(20),
         ),
         child: Text(
           label,
           style: TextStyle(
-            color: isSelected ? Colors.black : Colors.white70,
+            color: isSelected ? context.palette.onAccent : context.palette.dim(0.70),
             fontSize: 11,
             fontWeight: FontWeight.bold,
           ),
@@ -120,12 +120,12 @@ class _EventsCenterScreenState extends State<EventsCenterScreen> {
     final timeStr = DateFormat('yyyy-MM-dd  HH:mm:ss').format(event.timestamp);
 
     return Card(
-      color: AppTheme.cardSurface,
+      color: context.palette.card,
       margin: const EdgeInsets.only(bottom: 12),
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(10),
         side: BorderSide(
-          color: event.severity == 'CRITICAL' ? AppTheme.emergencyRed.withOpacity(0.5) : AppTheme.borderHighlight,
+          color: event.isHigh ? context.palette.alert.withValues(alpha: 0.5) : context.palette.border,
         ),
       ),
       child: ListTile(
@@ -133,12 +133,12 @@ class _EventsCenterScreenState extends State<EventsCenterScreen> {
         leading: Container(
           padding: const EdgeInsets.all(10),
           decoration: BoxDecoration(
-            color: event.severity == 'CRITICAL' ? AppTheme.emergencyRed.withOpacity(0.2) : AppTheme.cyberBlue.withOpacity(0.2),
+            color: event.isHigh ? context.palette.alert.withValues(alpha: 0.2) : context.palette.accent.withValues(alpha: 0.2),
             shape: BoxShape.circle,
           ),
           child: Icon(
-            event.severity == 'CRITICAL' ? Icons.warning_rounded : Icons.shield_rounded,
-            color: event.severity == 'CRITICAL' ? AppTheme.emergencyRed : AppTheme.cyberBlue,
+            event.isHigh ? Icons.warning_rounded : Icons.shield_rounded,
+            color: event.isHigh ? context.palette.alert : context.palette.accent,
           ),
         ),
         title: Text(
@@ -147,12 +147,12 @@ class _EventsCenterScreenState extends State<EventsCenterScreen> {
         ),
         subtitle: Text(
           '${event.location} (${event.cameraName})\n$timeStr • Conf: ${(event.confidence * 100).toStringAsFixed(0)}%',
-          style: const TextStyle(color: Colors.white60, fontSize: 11),
+          style: TextStyle(color: context.palette.dim(0.60), fontSize: 11),
         ),
         trailing: ElevatedButton(
           style: ElevatedButton.styleFrom(
-            backgroundColor: AppTheme.cyberBlue,
-            foregroundColor: Colors.black,
+            backgroundColor: context.palette.accent,
+            foregroundColor: context.palette.onAccent,
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           ),
           child: const Text('Play Clip', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),

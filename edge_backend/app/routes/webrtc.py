@@ -27,9 +27,19 @@ async def get_stream_token(camera_id: str):
 
 @router.get("/ice-servers")
 async def get_ice_servers(client_id: str = "mobile_client"):
-    """Returns STUN and dynamic time-limited TURN relay credentials for WebRTC peer connections."""
+    """STUN, plus time-limited TURN credentials when the optional TURN relay is enabled.
+
+    ``turn_enabled: false`` means WebRTC can only connect on the store LAN;
+    clients off-site should use the MJPEG ``/stream`` over HTTPS instead.
+    """
     ice_servers = turn_service.generate_ice_servers(client_id=client_id, ttl_seconds=86400)
-    return {"iceServers": ice_servers}
+    turn_enabled = turn_service.turn_configured()
+    return {
+        "iceServers": ice_servers,
+        "turn_enabled": turn_enabled,
+        "webrtc_scope": "internet" if turn_enabled else "lan_only",
+        "remote_fallback": "/stream",
+    }
 
 
 @router.post("/offer", response_model=WebRtcAnswer)

@@ -30,3 +30,25 @@ def test_ram_info_has_no_fallback_constants():
     if total is not None:
         assert total > 0
     assert not (total == 16.0 and avail == 12.0), "looks like the old hardcoded fallback"
+
+
+def test_hardware_profile_attribute_is_probed_lazily():
+    """``hardware_profile`` is computed on access, so it reflects the live detector."""
+    from app.services import hardware_detector
+
+    assert "hardware_profile" not in vars(hardware_detector)
+    profile = hardware_detector.hardware_profile
+    assert profile.inference_backend == person_detector.status()["backend"]
+
+
+def test_status_is_read_without_loading_a_model():
+    """Reading status on a fresh detector must not initialise it."""
+    from app.services.inference_backend import PersonDetector
+
+    d = PersonDetector()
+    s = d.status()
+    assert s["initialised"] is False and d.session is None
+    assert s["backend"] == "not_initialised" and s["available"] is False
+    for key in ("backend", "provider", "device", "model", "model_path", "input_size", "warmup_ms",
+                "avg_infer_ms", "available", "error", "keypoints_supported", "object_model"):
+        assert key in s

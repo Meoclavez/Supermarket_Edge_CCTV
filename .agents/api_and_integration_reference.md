@@ -96,7 +96,7 @@
 
 ### 1.4 Events & Device Registration
 * `POST /api/v1/events/trigger`
-  * Header: `X-Edge-API-Key: edge_ai_vision_internal_secret`
+  * Header: `X-Edge-API-Key: <INTERNAL_SERVICE_KEY from storage/secrets/device_secrets.json or .env>`
   * Ingests vision events and dispatches APNs/FCM emergency alerts.
 * `POST /api/v1/cameras/register-device`
   * **Payload**: `{"device_token": "FCM_OR_APNS_TOKEN", "platform": "android", "device_name": "Pixel 8"}`
@@ -140,7 +140,7 @@ services:
     environment:
       - PORT=8000
       - STORAGE_DIR=/app/storage
-      - COTURN_SECRET=cctv_turn_super_secret_dynamic_key_change_me_in_prod
+      - COTURN_SECRET=${COTURN_SECRET:?set COTURN_SECRET in .env}
 
   caddy:
     image: caddy:2-alpine

@@ -1,23 +1,14 @@
-import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 import '../core/theme/app_theme.dart';
+import '../services/api_service.dart';
+import '../core/server_time.dart';
 
-class CameraQuotaInfo {
-  final String name;
-  final double usedGb;
-  final double quotaGb;
-  final int segments;
-  final String oldest;
-
-  CameraQuotaInfo({
-    required this.name,
-    required this.usedGb,
-    required this.quotaGb,
-    required this.segments,
-    required this.oldest,
-  });
-}
-
+/// Recording storage and disk health from `GET /api/v1/storage/health`.
+///
+/// Every value shown comes from the edge server. Fields the server leaves
+/// null (for example SMART data on a disk that does not report it) are shown
+/// as "n/a" rather than estimated.
 class StorageHealthScreen extends StatefulWidget {
   const StorageHealthScreen({Key? key}) : super(key: key);
 
@@ -25,406 +16,192 @@ class StorageHealthScreen extends StatefulWidget {
   State<StorageHealthScreen> createState() => _StorageHealthScreenState();
 }
 
-class _StorageHealthScreenState extends State<StorageHealthScreen> with SingleTickerProviderStateMixin {
-  late AnimationController _animController;
-
-  final double _totalDiskGb = 1000.0;
-  final double _usedDiskGb = 428.4;
-  final int _driveTempCelsius = 41;
-  final int _wearLevelPercent = 98;
-  final int _reallocatedSectors = 0;
-  final int _powerOnHours = 1420;
-  final String _smartHealth = 'PASSED';
-  final String _driveModel = 'Samsung 980 NVMe 1TB (PCIe 3.0 x4)';
-
-  final List<CameraQuotaInfo> _cameraQuotas = [
-    CameraQuotaInfo(name: 'Camera 01 - Main Gate', usedGb: 142.5, quotaGb: 250.0, segments: 2420, oldest: '7 days ago'),
-    CameraQuotaInfo(name: 'Camera 02 - Backyard Patio', usedGb: 118.0, quotaGb: 250.0, segments: 1980, oldest: '7 days ago'),
-    CameraQuotaInfo(name: 'Camera 03 - Warehouse Bay', usedGb: 124.9, quotaGb: 250.0, segments: 2110, oldest: '7 days ago'),
-    CameraQuotaInfo(name: 'Camera 04 - Front Porch', usedGb: 43.0, quotaGb: 250.0, segments: 720, oldest: '3 days ago'),
-  ];
+class _StorageHealthScreenState extends State<StorageHealthScreen> {
+  Map<String, dynamic>? _data;
+  bool _loading = true;
+  String? _error;
 
   @override
   void initState() {
     super.initState();
-    _animController = AnimationController(vsync: this, duration: const Duration(milliseconds: 1200))..forward();
+    _load();
   }
 
-  @override
-  void dispose() {
-    _animController.dispose();
-    super.dispose();
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final data = await ApiService().getStorageHealth();
+      if (mounted) setState(() => _data = data);
+    } catch (e) {
+      if (mounted) setState(() => _error = 'Could not load storage health: $e');
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
   }
+
+  static double _num(dynamic v) => (v as num?)?.toDouble() ?? 0.0;
+  static String _opt(dynamic v, [String suffix = '']) => v == null ? 'n/a' : '$v$suffix';
 
   @override
   Widget build(BuildContext context) {
-    final double usedPct = (_usedDiskGb / _totalDiskGb) * 100;
+    Widget body;
+    if (_loading && _data == null) {
+      body = Center(child: CircularProgressIndicator(color: context.palette.accent));
+    } else if (_data == null) {
+      body = Center(child: Padding(padding: const EdgeInsets.all(24), child: Text(_error ?? 'No data', textAlign: TextAlign.center)));
+    } else {
+      final d = _data!;
+      final disks = List<Map<String, dynamic>>.from(d['smart_status'] ?? []);
+      final quotas = List<Map<String, dynamic>>.from(d['camera_quotas'] ?? []);
+      body = RefreshIndicator(
+        onRefresh: _load,
+        child: ListView(
+          padding: const EdgeInsets.all(16),
+          children: [
+            if (_error != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: Text(_error!, style: TextStyle(color: context.palette.warning, fontSize: 12)),
+              ),
+            _buildPoolCard(d),
+            const SizedBox(height: 16),
+            _sectionTitle('DISKS'),
+            if (disks.isEmpty) Text('The server reported no disk SMART data.', style: TextStyle(color: context.palette.dim(0.60))),
+            for (final disk in disks) _buildDiskCard(disk),
+            const SizedBox(height: 16),
+            _sectionTitle('PER-CAMERA RECORDING'),
+            if (quotas.isEmpty) Text('No recordings yet.', style: TextStyle(color: context.palette.dim(0.60))),
+            for (final q in quotas) _buildQuotaTile(q),
+          ],
+        ),
+      );
+    }
 
     return Scaffold(
-      backgroundColor: AppTheme.darkBackground,
+      backgroundColor: context.palette.background,
       appBar: AppBar(
-        title: const Text('System Telemetry & Storage SMART Health', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-        actions: [
-          IconButton(
-            tooltip: 'Refresh Diagnostics',
-            icon: const Icon(Icons.refresh_rounded, color: AppTheme.cyberBlue),
-            onPressed: () {
-              _animController.reset();
-              _animController.forward();
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('NVMe SMART metrics refreshed.')),
-              );
-            },
+        title: const Text('Storage health', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+        actions: [IconButton(icon: const Icon(Icons.refresh_rounded), onPressed: _loading ? null : _load)],
+      ),
+      body: body,
+    );
+  }
+
+  Widget _sectionTitle(String t) => Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: Text(t, style: TextStyle(color: context.palette.dim(0.70), fontWeight: FontWeight.bold, fontSize: 12, letterSpacing: 0.8)),
+      );
+
+  Widget _card(Widget child) => Container(
+        margin: const EdgeInsets.only(bottom: 10),
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: context.palette.card,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: context.palette.border),
+        ),
+        child: child,
+      );
+
+  Widget _buildPoolCard(Map<String, dynamic> d) {
+    final usedPct = _num(d['used_percent']);
+    final color = usedPct > 85 ? context.palette.alert : context.palette.accent;
+    return _card(Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _sectionTitle('RECORDING POOL'),
+        Text(d['storage_root']?.toString() ?? '', style: TextStyle(fontFamily: 'monospace', fontSize: 12, color: context.palette.dim(0.60))),
+        const SizedBox(height: 10),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(4),
+          child: LinearProgressIndicator(
+            value: (usedPct / 100).clamp(0.0, 1.0),
+            minHeight: 10,
+            backgroundColor: context.palette.hairline(0.12),
+            valueColor: AlwaysStoppedAnimation<Color>(color),
           ),
-        ],
-      ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        ),
+        const SizedBox(height: 10),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            LayoutBuilder(
-              builder: (context, constraints) {
-                if (constraints.maxWidth > 800) {
-                  return Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Expanded(flex: 4, child: _buildPrimaryStorageGaugeCard(usedPct)),
-                      const SizedBox(width: 16),
-                      Expanded(flex: 6, child: _buildDriveSmartCard()),
-                    ],
-                  );
-                } else {
-                  return Column(
-                    children: [
-                      _buildPrimaryStorageGaugeCard(usedPct),
-                      const SizedBox(height: 16),
-                      _buildDriveSmartCard(),
-                    ],
-                  );
-                }
-              },
-            ),
-            const SizedBox(height: 20),
-            _buildCameraQuotasCard(),
-            const SizedBox(height: 20),
-            _buildHardwarePipelineCard(),
+            _stat('Used', '${_num(d['used_gb']).toStringAsFixed(1)} GB (${usedPct.toStringAsFixed(1)}%)'),
+            _stat('Free', '${_num(d['free_gb']).toStringAsFixed(1)} GB'),
+            _stat('Total', '${_num(d['total_gb']).toStringAsFixed(0)} GB'),
           ],
         ),
-      ),
-    );
+        const SizedBox(height: 6),
+        Text('Archives: ${_num(d['archives_used_gb']).toStringAsFixed(1)} GB • '
+            '${d['is_external_mount'] == true ? 'external mount' : 'internal disk'}',
+            style: TextStyle(color: context.palette.dim(0.54), fontSize: 11)),
+      ],
+    ));
   }
 
-  Widget _buildPrimaryStorageGaugeCard(double usedPct) {
-    return Card(
-      color: AppTheme.cardSurface,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14), side: const BorderSide(color: AppTheme.borderHighlight)),
-      child: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          children: [
-            const Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text('PRIMARY 24/7 DVR POOL', style: TextStyle(color: Colors.white70, fontWeight: FontWeight.bold, fontSize: 12, letterSpacing: 0.8)),
-                Icon(Icons.storage_rounded, color: AppTheme.cyberBlue, size: 20),
-              ],
-            ),
-            const SizedBox(height: 16),
-            SizedBox(
-              height: 160,
-              width: 160,
-              child: AnimatedBuilder(
-                animation: _animController,
-                builder: (context, _) {
-                  return CustomPaint(
-                    painter: StorageRingGaugePainter(
-                      percent: (_usedDiskGb / _totalDiskGb) * _animController.value,
-                      color: usedPct > 85 ? AppTheme.emergencyRed : AppTheme.cyberBlue,
-                    ),
-                    child: Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Text('${usedPct.toStringAsFixed(1)}%', style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold)),
-                          const Text('USED', style: TextStyle(color: Colors.white54, fontSize: 10, letterSpacing: 1)),
-                        ],
-                      ),
-                    ),
-                  );
-                },
-              ),
-            ),
-            const SizedBox(height: 16),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceAround,
-              children: [
-                _buildStatColumn('Used Space', '${_usedDiskGb.toStringAsFixed(1)} GB', AppTheme.cyberBlue),
-                _buildStatColumn('Free Space', '${(_totalDiskGb - _usedDiskGb).toStringAsFixed(1)} GB', AppTheme.liveGreen),
-                _buildStatColumn('Capacity', '${_totalDiskGb.toStringAsFixed(0)} GB', Colors.white70),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildDriveSmartCard() {
-    return Card(
-      color: AppTheme.cardSurface,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14), side: const BorderSide(color: AppTheme.borderHighlight)),
-      child: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text('NVME SSD SMART HEALTH', style: TextStyle(color: Colors.white70, fontWeight: FontWeight.bold, fontSize: 12, letterSpacing: 0.8)),
-                    const SizedBox(height: 4),
-                    Text(_driveModel, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 13)),
-                  ],
-                ),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: AppTheme.liveGreen.withOpacity(0.15),
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(color: AppTheme.liveGreen.withOpacity(0.5)),
-                  ),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.check_circle_rounded, size: 12, color: AppTheme.liveGreen),
-                      const SizedBox(width: 4),
-                      Text(_smartHealth, style: const TextStyle(color: AppTheme.liveGreen, fontSize: 11, fontWeight: FontWeight.bold)),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 20),
-            GridView.count(
-              crossAxisCount: 2,
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              childAspectRatio: 2.8,
-              crossAxisSpacing: 12,
-              mainAxisSpacing: 12,
-              children: [
-                _buildSmartMetricTile('Drive Temperature', '$_driveTempCelsius °C', Icons.thermostat_rounded, _driveTempCelsius > 65 ? AppTheme.warningOrange : AppTheme.liveGreen),
-                _buildSmartMetricTile('Remaining Health', '$_wearLevelPercent%', Icons.health_and_safety_rounded, AppTheme.cyberBlue),
-                _buildSmartMetricTile('Power-On Hours', '$_powerOnHours hrs', Icons.timer_rounded, Colors.white70),
-                _buildSmartMetricTile('Reallocated Sectors', '$_reallocatedSectors', Icons.disc_full_rounded, _reallocatedSectors > 0 ? AppTheme.emergencyRed : AppTheme.liveGreen),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildCameraQuotasCard() {
-    return Card(
-      color: AppTheme.cardSurface,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14), side: const BorderSide(color: AppTheme.borderHighlight)),
-      child: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text('PER-CAMERA 24/7 DVR QUOTA & RETENTION ALLOCATION',
-                style: TextStyle(color: Colors.white70, fontWeight: FontWeight.bold, fontSize: 12, letterSpacing: 0.8)),
-            const SizedBox(height: 16),
-            ListView.separated(
-              itemCount: _cameraQuotas.length,
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              separatorBuilder: (_, __) => const Divider(color: AppTheme.borderHighlight, height: 20),
-              itemBuilder: (context, index) {
-                final quota = _cameraQuotas[index];
-                final double progress = quota.usedGb / quota.quotaGb;
-
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text(quota.name, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13)),
-                        Text('${quota.usedGb.toStringAsFixed(1)} GB / ${quota.quotaGb.toStringAsFixed(0)} GB (${(progress * 100).toStringAsFixed(0)}%)',
-                            style: const TextStyle(color: AppTheme.cyberBlue, fontSize: 12, fontWeight: FontWeight.w600)),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(6),
-                      child: LinearProgressIndicator(
-                        value: progress,
-                        minHeight: 8,
-                        backgroundColor: AppTheme.darkBackground,
-                        valueColor: AlwaysStoppedAnimation<Color>(progress > 0.85 ? AppTheme.emergencyRed : AppTheme.cyberBlue),
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text('1-min segments: ${quota.segments}', style: const TextStyle(color: Colors.white54, fontSize: 11)),
-                        Text('Oldest segment: ${quota.oldest}', style: const TextStyle(color: Colors.white54, fontSize: 11)),
-                      ],
-                    ),
-                  ],
-                );
-              },
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildHardwarePipelineCard() {
-    return Card(
-      color: AppTheme.cardSurface,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14), side: const BorderSide(color: AppTheme.borderHighlight)),
-      child: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text('HARDWARE ACCELERATION ENGINES (INTEL N100 + HAILO-8 M.2)',
-                style: TextStyle(color: Colors.white70, fontWeight: FontWeight.bold, fontSize: 12, letterSpacing: 0.8)),
-            const SizedBox(height: 16),
-            Row(
-              children: [
-                Expanded(
-                  child: _buildEngineStatusTile(
-                    'Intel QuickSync / VA-API',
-                    '/dev/dri/renderD128',
-                    'Zero-Copy H.264 Remux & Dec',
-                    AppTheme.liveGreen,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: _buildEngineStatusTile(
-                    'HailoRT NPU (Hailo-8)',
-                    '/dev/hailo0 (PCIe)',
-                    'YOLOv8 + 17-Keypoint Pose (8ms)',
-                    AppTheme.cyberBlue,
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildEngineStatusTile(String title, String device, String desc, Color color) {
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: AppTheme.darkBackground,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: AppTheme.borderHighlight),
-      ),
-      child: Column(
+  Widget _stat(String label, String value) => Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Container(width: 8, height: 8, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
-              const SizedBox(width: 6),
-              Text(title, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12)),
-            ],
-          ),
-          const SizedBox(height: 4),
-          Text(device, style: const TextStyle(color: Colors.white54, fontSize: 10, fontFamily: 'monospace')),
-          const SizedBox(height: 4),
-          Text(desc, style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.w500)),
+          Text(label, style: TextStyle(color: context.palette.dim(0.54), fontSize: 11)),
+          Text(value, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
         ],
-      ),
-    );
-  }
+      );
 
-  Widget _buildSmartMetricTile(String label, String value, IconData icon, Color valColor) {
-    return Container(
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: AppTheme.darkBackground,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: AppTheme.borderHighlight),
-      ),
-      child: Row(
-        children: [
-          Icon(icon, color: valColor, size: 20),
-          const SizedBox(width: 10),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Text(label, style: const TextStyle(color: Colors.white54, fontSize: 10)),
-              Text(value, style: TextStyle(color: valColor, fontWeight: FontWeight.bold, fontSize: 13)),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildStatColumn(String label, String value, Color color) {
-    return Column(
+  Widget _buildDiskCard(Map<String, dynamic> disk) {
+    final status = disk['health_status']?.toString() ?? 'UNKNOWN';
+    final ok = status.toUpperCase() == 'PASSED';
+    return _card(Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(value, style: TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 14)),
-        const SizedBox(height: 2),
-        Text(label, style: const TextStyle(color: Colors.white54, fontSize: 10)),
+        Row(
+          children: [
+            Expanded(
+              child: Text('${disk['model'] ?? 'Disk'} (${disk['device'] ?? ''})',
+                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+            ),
+            Text(status, style: TextStyle(color: ok ? context.palette.live : context.palette.alert, fontWeight: FontWeight.bold, fontSize: 11)),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 16,
+          runSpacing: 6,
+          children: [
+            _stat('Temperature', _opt(disk['temperature_celsius'], ' °C')),
+            _stat('Wear level', _opt(disk['wear_level_percent'], '%')),
+            _stat('Power-on', _opt(disk['power_on_hours'], ' h')),
+            _stat('Reallocated', _opt(disk['reallocated_sectors'])),
+          ],
+        ),
       ],
-    );
-  }
-}
-
-class StorageRingGaugePainter extends CustomPainter {
-  final double percent;
-  final Color color;
-
-  StorageRingGaugePainter({required this.percent, required this.color});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final center = Offset(size.width / 2, size.height / 2);
-    final radius = (size.width - 24) / 2;
-
-    final bgPaint = Paint()
-      ..color = Colors.white12
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 14
-      ..strokeCap = StrokeCap.round;
-    canvas.drawCircle(center, radius, bgPaint);
-
-    final sweepPaint = Paint()
-      ..color = color
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 14
-      ..strokeCap = StrokeCap.round;
-
-    final double sweepAngle = 2 * math.pi * percent;
-    canvas.drawArc(
-      Rect.fromCircle(center: center, radius: radius),
-      -math.pi / 2,
-      sweepAngle,
-      false,
-      sweepPaint,
-    );
+    ));
   }
 
-  @override
-  bool shouldRepaint(covariant StorageRingGaugePainter oldDelegate) =>
-      oldDelegate.percent != percent || oldDelegate.color != color;
+  Widget _buildQuotaTile(Map<String, dynamic> q) {
+    final used = _num(q['used_gb']);
+    final quota = _num(q['quota_gb']);
+    final progress = quota > 0 ? (used / quota).clamp(0.0, 1.0) : 0.0;
+    final oldest = parseServerTime(q['oldest_segment']);
+    return _card(Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(q['camera_name']?.toString() ?? q['camera_id']?.toString() ?? 'Camera',
+            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+        const SizedBox(height: 6),
+        LinearProgressIndicator(
+          value: progress,
+          backgroundColor: context.palette.hairline(0.12),
+          valueColor: AlwaysStoppedAnimation<Color>(progress > 0.85 ? context.palette.alert : context.palette.accent),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          '${used.toStringAsFixed(1)} / ${quota.toStringAsFixed(0)} GB • ${q['segment_count'] ?? 0} segments • '
+          'oldest ${oldest != null ? DateFormat('d MMM HH:mm').format(oldest) : 'n/a'}',
+          style: TextStyle(color: context.palette.dim(0.54), fontSize: 11),
+        ),
+      ],
+    ));
+  }
 }

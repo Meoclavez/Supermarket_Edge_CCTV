@@ -14,15 +14,9 @@ webrtc:
     - 192.168.1.100:8555
     - stun:stun.l.google.com:19302
 
-streams:
-  cam_living_room:
-    - rtsp://admin:admin123@192.168.1.50:554/stream1
-    - "ffmpeg:cam_living_room#video=h264#hardware=vaapi"
-
-  cam_front_door:
-    - rtsp://admin:admin123@192.168.1.51:554/stream1
-    - "ffmpeg:cam_front_door#video=h264#hardware=vaapi"
-
-  cam_backyard:
-    - rtsp://admin:admin123@192.168.1.52:554/stream1
-    - "ffmpeg:cam_backyard#video=h264#hardware=vaapi"
+# One entry per store camera, keyed by the camera id used in the dashboard
+# (GET /api/v1/cameras). Example:
+#   cam_aisle_3:
+#     - rtsp://<user>:<password>@<camera-ip>:554/cam/realmonitor?channel=3&subtype=0
+#     - "ffmpeg:cam_aisle_3#video=h264#hardware=vaapi"
+streams: {}

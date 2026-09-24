@@ -3,6 +3,9 @@ import 'package:flutter/services.dart';
 import '../core/theme/app_theme.dart';
 import '../services/webrtc_service.dart';
 
+/// Push-to-talk store announcement through the camera's own speaker
+/// (WebRTC audio backchannel via go2rtc). Audio only reaches the shop floor
+/// if the camera has a speaker and backchannel support.
 class TalkbackButton extends StatefulWidget {
   final WebRtcService webrtcService;
 
@@ -32,13 +35,19 @@ class _TalkbackButtonState extends State<TalkbackButton> with SingleTickerProvid
   }
 
   void _startTalking() {
+    if (!widget.webrtcService.setTalkbackActive(true)) {
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(content: Text('Microphone unavailable: allow microphone access to speak through the camera.')),
+      );
+      return;
+    }
     HapticFeedback.heavyImpact();
-    widget.webrtcService.setTalkbackActive(true);
     _waveController.repeat(reverse: true);
     setState(() => _isTalking = true);
   }
 
   void _stopTalking() {
+    if (!_isTalking) return;
     HapticFeedback.lightImpact();
     widget.webrtcService.setTalkbackActive(false);
     _waveController.stop();
@@ -61,16 +70,16 @@ class _TalkbackButtonState extends State<TalkbackButton> with SingleTickerProvid
               Container(
                 padding: const EdgeInsets.all(14),
                 decoration: BoxDecoration(
-                  color: _isTalking ? AppTheme.emergencyRed : AppTheme.cardSurface,
+                  color: _isTalking ? context.palette.alert : context.palette.card,
                   shape: BoxShape.circle,
                   border: Border.all(
-                    color: _isTalking ? AppTheme.emergencyRed : AppTheme.cyberBlue,
+                    color: _isTalking ? context.palette.alert : context.palette.accent,
                     width: _isTalking ? 2 + (_waveController.value * 4) : 1.5,
                   ),
                   boxShadow: _isTalking
                       ? [
                           BoxShadow(
-                            color: AppTheme.emergencyRed.withOpacity(0.6),
+                            color: context.palette.alert.withValues(alpha: 0.6),
                             blurRadius: 16 * _waveController.value,
                             spreadRadius: 4 * _waveController.value,
                           )
@@ -79,17 +88,17 @@ class _TalkbackButtonState extends State<TalkbackButton> with SingleTickerProvid
                 ),
                 child: Icon(
                   _isTalking ? Icons.mic : Icons.mic_none,
-                  color: _isTalking ? Colors.white : AppTheme.cyberBlue,
+                  color: _isTalking ? Colors.white : context.palette.accent,
                   size: 24,
                 ),
               ),
               const SizedBox(height: 6),
               Text(
-                _isTalking ? 'HOLD TO TALK' : '2-Way Audio',
+                _isTalking ? 'SPEAKING' : 'Store PA (hold)',
                 style: TextStyle(
                   fontSize: 11,
                   fontWeight: FontWeight.bold,
-                  color: _isTalking ? AppTheme.emergencyRed : Colors.white70,
+                  color: _isTalking ? context.palette.alert : context.palette.dim(0.70),
                 ),
               ),
             ],

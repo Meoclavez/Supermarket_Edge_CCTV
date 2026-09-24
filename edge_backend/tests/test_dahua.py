@@ -42,7 +42,7 @@ def auth_headers():
 class TestDahuaDriverAndUrls:
     def test_dahua_url_generation(self):
         driver = DahuaDriver()
-        profiles = driver.build_urls("192.168.1.108", username="admin", password="password123", channel=1)
+        profiles = driver.build_urls("192.168.1.108", username="admin", password="dummy-test-password", channel=1)
         assert len(profiles) == 2
 
         sub = next(p for p in profiles if p.quality == "sub")
@@ -52,18 +52,18 @@ class TestDahuaDriverAndUrls:
         assert "subtype=1" in sub.url
         assert "channel=1" in main.url
         assert "subtype=0" in main.url
-        assert "admin:password123@" in sub.url
+        assert "admin:dummy-test-password@" in sub.url
 
     def test_dahua_multi_channel_expansion(self):
         driver = DahuaDriver()
-        profiles = driver.build_nvr_channels("192.168.1.108", username="admin", password="password123", channels=4)
+        profiles = driver.build_nvr_channels("192.168.1.108", username="admin", password="dummy-test-password", channels=4)
         assert len(profiles) == 8  # 4 channels * 2 streams (sub + main)
         ch_nums = {p.channel for p in profiles}
         assert ch_nums == {1, 2, 3, 4}
 
     def test_alternate_stream_url_fallback(self):
-        sub_url = "rtsp://admin:pass@192.168.1.108:554/cam/realmonitor?channel=3&subtype=1"
-        main_url = "rtsp://admin:pass@192.168.1.108:554/cam/realmonitor?channel=3&subtype=0"
+        sub_url = "rtsp://admin:dummy@192.168.1.108:554/cam/realmonitor?channel=3&subtype=1"
+        main_url = "rtsp://admin:dummy@192.168.1.108:554/cam/realmonitor?channel=3&subtype=0"
 
         # Substream falls back to mainstream
         assert alternate_stream_url(sub_url) == main_url
@@ -71,9 +71,9 @@ class TestDahuaDriverAndUrls:
         assert alternate_stream_url(main_url) == sub_url
 
     def test_redact_url(self):
-        url = "rtsp://admin:SecretPassword!@192.168.1.108:554/cam/realmonitor?channel=1&subtype=1"
+        url = "rtsp://admin:fake-secret-pw!@192.168.1.108:554/cam/realmonitor?channel=1&subtype=1"
         redacted = redact_url(url)
-        assert "SecretPassword!" not in redacted
+        assert "fake-secret-pw!" not in redacted
         assert "rtsp://***@192.168.1.108:554" in redacted
 
 
@@ -90,7 +90,7 @@ class TestNVRCredentialService:
             # Save credentials
             saved = svc.save_credentials(
                 username="security_admin",
-                password="MyUltraSecurePassword123",
+                password="not-a-real-password-for-tests",
                 host="192.168.1.150",
                 port=554,
                 default_channels=16,
@@ -105,7 +105,7 @@ class TestNVRCredentialService:
             svc2 = NVRCredentialService(storage_dir=Path(tmpdir))
             u, p = svc2.get_auth_for_host("192.168.1.150")
             assert u == "security_admin"
-            assert p == "MyUltraSecurePassword123"
+            assert p == "not-a-real-password-for-tests"
 
             # Check file permissions on POSIX
             if os.name == "posix":
@@ -137,9 +137,9 @@ class TestDahuaProbeService:
             channel=1,
             active=True,
             status="ACTIVE",
-            sub_url="rtsp://admin:pass@192.168.1.108:554/cam/realmonitor?channel=1&subtype=1",
-            main_url="rtsp://admin:pass@192.168.1.108:554/cam/realmonitor?channel=1&subtype=0",
-            preferred_url="rtsp://admin:pass@192.168.1.108:554/cam/realmonitor?channel=1&subtype=1",
+            sub_url="rtsp://admin:dummy@192.168.1.108:554/cam/realmonitor?channel=1&subtype=1",
+            main_url="rtsp://admin:dummy@192.168.1.108:554/cam/realmonitor?channel=1&subtype=0",
+            preferred_url="rtsp://admin:dummy@192.168.1.108:554/cam/realmonitor?channel=1&subtype=1",
             preferred_subtype=1,
             resolution="1280x720",
             fps=25.0,
@@ -148,9 +148,9 @@ class TestDahuaProbeService:
             channel=2,
             active=False,
             status="NO_SIGNAL",
-            sub_url="rtsp://admin:pass@192.168.1.108:554/cam/realmonitor?channel=2&subtype=1",
-            main_url="rtsp://admin:pass@192.168.1.108:554/cam/realmonitor?channel=2&subtype=0",
-            preferred_url="rtsp://admin:pass@192.168.1.108:554/cam/realmonitor?channel=2&subtype=1",
+            sub_url="rtsp://admin:dummy@192.168.1.108:554/cam/realmonitor?channel=2&subtype=1",
+            main_url="rtsp://admin:dummy@192.168.1.108:554/cam/realmonitor?channel=2&subtype=0",
+            preferred_url="rtsp://admin:dummy@192.168.1.108:554/cam/realmonitor?channel=2&subtype=1",
             preferred_subtype=1,
             error="No video signal",
         )
@@ -185,7 +185,7 @@ class TestDahuaAPIRoutes:
             headers=auth_headers,
             json={
                 "username": "dahua_operator",
-                "password": "NVRMasterPassword#2026",
+                "password": "fake-nvr-password-for-tests",
                 "host": "192.168.1.200",
                 "port": 554,
                 "default_channels": 16,

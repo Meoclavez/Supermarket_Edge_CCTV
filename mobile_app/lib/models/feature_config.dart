@@ -1,43 +1,39 @@
+/// Per-camera retail analytics flags (`CameraFeatureConfig` on the edge server).
+///
+/// Only the three retail flags are editable in the app. Any other keys the
+/// server returns (stream FPS, recording options, ...) are kept verbatim and
+/// sent back unchanged, so saving a toggle never resets settings the app does
+/// not know about.
 class FeatureConfig {
-  bool motionTracking;
-  bool fallDetection;
-  bool doorMonitoring;
-  bool packageTheftTracking;
-  bool inactivityAlerts;
-  bool continuousRecording;
-  bool eventClipRecording;
+  bool theftDetection;
+  bool shelfInteraction;
+  bool peopleCounting;
+  final Map<String, dynamic> _passthrough;
 
   FeatureConfig({
-    this.motionTracking = true,
-    this.fallDetection = false,
-    this.doorMonitoring = false,
-    this.packageTheftTracking = false,
-    this.inactivityAlerts = false,
-    this.continuousRecording = true,
-    this.eventClipRecording = true,
-  });
+    this.theftDetection = true,
+    this.shelfInteraction = true,
+    this.peopleCounting = true,
+    Map<String, dynamic>? passthrough,
+  }) : _passthrough = passthrough ?? {};
+
+  static const _keys = {'theft_detection', 'shelf_interaction', 'people_counting'};
 
   factory FeatureConfig.fromJson(Map<String, dynamic> json) {
     return FeatureConfig(
-      motionTracking: json['motion_tracking'] ?? true,
-      fallDetection: json['fall_detection'] ?? false,
-      doorMonitoring: json['door_monitoring'] ?? false,
-      packageTheftTracking: json['package_theft_tracking'] ?? false,
-      inactivityAlerts: json['inactivity_alerts'] ?? false,
-      continuousRecording: json['continuous_recording'] ?? true,
-      eventClipRecording: json['event_clip_recording'] ?? true,
+      theftDetection: json['theft_detection'] ?? true,
+      shelfInteraction: json['shelf_interaction'] ?? true,
+      peopleCounting: json['people_counting'] ?? true,
+      passthrough: Map<String, dynamic>.from(json)..removeWhere((k, _) => _keys.contains(k)),
     );
   }
 
   Map<String, dynamic> toJson() {
     return {
-      'motion_tracking': motionTracking,
-      'fall_detection': fallDetection,
-      'door_monitoring': doorMonitoring,
-      'package_theft_tracking': packageTheftTracking,
-      'inactivity_alerts': inactivityAlerts,
-      'continuous_recording': continuousRecording,
-      'event_clip_recording': eventClipRecording,
+      ..._passthrough,
+      'theft_detection': theftDetection,
+      'shelf_interaction': shelfInteraction,
+      'people_counting': peopleCounting,
     };
   }
 }

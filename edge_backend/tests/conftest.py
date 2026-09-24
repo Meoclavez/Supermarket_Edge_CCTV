@@ -22,7 +22,15 @@ _TMP = Path(tempfile.mkdtemp(prefix="cctv_test_"))
 os.environ.setdefault("STORAGE_DIR", str(_TMP))
 os.environ.setdefault("DATABASE_PATH", str(_TMP / "test.db"))
 os.environ.setdefault("SQLITE_DB_PATH", str(_TMP / "test.db"))
+# Without this, init_db's startup snapshot of the test database (and its
+# prune_backups pass) ran against the real storage/backups directory.
+os.environ.setdefault("BACKUPS_DIR", str(_TMP / "backups"))
+# DEBUG is verbose logging only and must not open the API; it stays on here
+# to prove that. Most of the suite exercises endpoints without a session, so it
+# runs with the explicit AUTH_DISABLED switch; tests/test_auth_setup.py turns it
+# off to exercise real authentication.
 os.environ.setdefault("DEBUG", "true")
+os.environ.setdefault("AUTH_DISABLED", "true")
 
 
 @pytest.fixture(scope="session")

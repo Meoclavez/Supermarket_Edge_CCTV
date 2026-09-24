@@ -1,0 +1,20 @@
+# NVIDIA GPU override. Use on hosts with an NVIDIA driver and the NVIDIA
+# Container Toolkit installed:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+#
+# The image already carries CUDA/cuDNN as pip wheels (onnxruntime-gpu[cuda,cudnn]);
+# this only asks Docker to pass the host GPU and driver into the container.
+# Verify with:  docker compose exec edge_api python3 -m app.services.preflight --session-probe
+services:
+  edge_api:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, compute, utility, video]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video

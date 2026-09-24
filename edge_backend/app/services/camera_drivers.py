@@ -43,7 +43,7 @@ class DeviceProfile:
 
     id: str
     transport: str          # rtsp | usb | mjpeg
-    driver: str             # dahua | onvif | v4l2 | esp32 | generic
+    driver: str             # dahua | hikvision | onvif | v4l2 | generic
     host: Optional[str] = None
     port: Optional[int] = None
     device_path: Optional[str] = None
@@ -197,21 +197,9 @@ class V4L2Driver(CameraDriver):
         return [StreamProfile(url=host, channel=channel, quality="main", label=f"V4L2 {host}")]
 
 
-class ESP32Driver(CameraDriver):
-    """ESP32-CAM style MJPEG-over-HTTP endpoint."""
-
-    name = "esp32"
-
-    def build_urls(self, host, *, username=None, password=None, channel=1, port=81):
-        auth = _auth_prefix(username, password)
-        return [
-            StreamProfile(f"http://{auth}{host}:{port}/stream", channel, "main", "ESP32 MJPEG"),
-        ]
-
-
 DRIVERS: dict[str, CameraDriver] = {
     d.name: d
-    for d in (DahuaDriver(), HikvisionDriver(), OnvifDriver(), V4L2Driver(), ESP32Driver())
+    for d in (DahuaDriver(), HikvisionDriver(), OnvifDriver(), V4L2Driver())
 }
 
 # Substrings that identify a vendor from an ONVIF scope, HTTP banner or
@@ -224,7 +212,6 @@ _VENDOR_HINTS = (
     ("hikvision", "hikvision"),
     ("hiwatch", "hikvision"),
     ("annke", "hikvision"),
-    ("esp32", "esp32"),
 )
 
 
@@ -253,19 +240,20 @@ def build_stream_urls(
     port: Optional[int] = None,
 ) -> list[StreamProfile]:
     driver = get_driver(driver_name)
-    default_port = 81 if driver.name == "esp32" else RTSP_PORT
     return driver.build_urls(
         host,
         username=username,
         password=password,
         channel=channel,
-        port=port or default_port,
+        port=port or RTSP_PORT,
     )
 
 
 def redact_url(url: str) -> str:
     """Strip credentials from a stream URL before it reaches a log or the UI."""
-    return re.sub(r"://[^/@]+@", "://***@", url or "")
+    # Up to the LAST "@" of the authority: a password containing a raw "@"
+    # must not leave its tail visible.
+    return re.sub(r"://[^/?#\s]*@", "://***@", url or "")
 
 
 def alternate_stream_url(url: str) -> Optional[str]:

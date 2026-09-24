@@ -1,3 +1,5 @@
+import '../core/server_time.dart';
+
 class SecurityEvent {
   final String id;
   final String cameraId;
@@ -34,12 +36,13 @@ class SecurityEvent {
       eventType: json['event_type'] ?? 'MOTION_ALERT',
       severity: json['severity'] ?? 'WARNING',
       confidence: (json['confidence'] as num?)?.toDouble() ?? 0.0,
-      timestamp: json['timestamp'] != null ? DateTime.parse(json['timestamp']) : DateTime.now(),
+      timestamp: parseServerTime(json['timestamp']) ?? DateTime.now(),
       clipUrl: json['clip_url'],
       snapshotUrl: json['snapshot_url'],
       acknowledged: json['acknowledged'] ?? false,
     );
   }
 
-  bool get isCritical => severity.toUpperCase() == 'CRITICAL';
+  /// Highest severity the server emits (`EventSeverity`: HIGH, WARNING, INFO).
+  bool get isHigh => severity.toUpperCase() == 'HIGH';
 }

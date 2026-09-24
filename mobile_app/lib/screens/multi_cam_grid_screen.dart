@@ -45,26 +45,26 @@ class _MultiCamGridScreenState extends State<MultiCamGridScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: AppTheme.darkBackground,
+      backgroundColor: context.palette.background,
       appBar: AppBar(
         title: const Text('LIVE MULTI-CAM WALL (<300ms WebRTC)', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
         actions: [
           IconButton(
-            icon: const Icon(Icons.refresh_rounded, color: AppTheme.cyberBlue),
+            icon: Icon(Icons.refresh_rounded, color: context.palette.accent),
             onPressed: _loadCameras,
           ),
         ],
       ),
       body: _isLoading
-          ? const Center(child: CircularProgressIndicator(color: AppTheme.cyberBlue))
+          ? Center(child: CircularProgressIndicator(color: context.palette.accent))
           : _errorMessage != null
               ? Center(
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      const Icon(Icons.wifi_off_rounded, color: AppTheme.warningOrange, size: 48),
+                      Icon(Icons.wifi_off_rounded, color: context.palette.warning, size: 48),
                       const SizedBox(height: 12),
-                      Text(_errorMessage!, style: const TextStyle(color: Colors.white70, fontSize: 13), textAlign: TextAlign.center),
+                      Text(_errorMessage!, style: TextStyle(color: context.palette.dim(0.70), fontSize: 13), textAlign: TextAlign.center),
                       const SizedBox(height: 16),
                       ElevatedButton(onPressed: _loadCameras, child: const Text('Retry Connection')),
                     ],
@@ -114,10 +114,10 @@ class _MultiCamGridScreenState extends State<MultiCamGridScreen> {
       borderRadius: BorderRadius.circular(12),
       child: Container(
         decoration: BoxDecoration(
-          color: AppTheme.cardSurface,
+          color: context.palette.card,
           borderRadius: BorderRadius.circular(12),
           border: Border.all(
-            color: isOffline ? AppTheme.warningOrange.withOpacity(0.5) : AppTheme.borderHighlight,
+            color: isOffline ? context.palette.warning.withValues(alpha: 0.5) : context.palette.border,
           ),
         ),
         clipBehavior: Clip.antiAlias,
@@ -129,14 +129,14 @@ class _MultiCamGridScreenState extends State<MultiCamGridScreen> {
                 children: [
                   Icon(
                     isOffline ? Icons.videocam_off_outlined : Icons.videocam_outlined,
-                    color: isOffline ? AppTheme.warningOrange.withOpacity(0.6) : Colors.white24,
+                    color: isOffline ? context.palette.warning.withValues(alpha: 0.6) : context.palette.hairline(0.24),
                     size: 44,
                   ),
                   const SizedBox(height: 8),
                   if (isOffline) ...[
                     Text(
                       camera.errorMessage ?? 'Camera Connection Lost',
-                      style: const TextStyle(color: AppTheme.warningOrange, fontSize: 11, fontWeight: FontWeight.bold),
+                      style: TextStyle(color: context.palette.warning, fontSize: 11, fontWeight: FontWeight.bold),
                       textAlign: TextAlign.center,
                     ),
                     const SizedBox(height: 6),
@@ -150,21 +150,21 @@ class _MultiCamGridScreenState extends State<MultiCamGridScreen> {
                           ScaffoldMessenger.of(context).showSnackBar(
                             SnackBar(
                               content: Text(res['message'] ?? 'Scan complete'),
-                              backgroundColor: res['status'] == 'success' ? AppTheme.liveGreen : AppTheme.warningOrange,
+                              backgroundColor: res['status'] == 'success' ? context.palette.live : context.palette.warning,
                             ),
                           );
                           _loadCameras();
                         } catch (e) {
                           ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(content: Text('Recovery failed: $e'), backgroundColor: AppTheme.emergencyRed),
+                            SnackBar(content: Text('Recovery failed: $e'), backgroundColor: context.palette.alert),
                           );
                         }
                       },
                       icon: const Icon(Icons.autorenew_rounded, size: 14),
                       label: const Text('Auto-Recover IP', style: TextStyle(fontSize: 10)),
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: AppTheme.cyberBlue,
-                        foregroundColor: Colors.black,
+                        backgroundColor: context.palette.accent,
+                        foregroundColor: context.palette.onAccent,
                         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                         minimumSize: Size.zero,
                         tapTargetSize: MaterialTapTargetSize.shrinkWrap,
@@ -173,7 +173,7 @@ class _MultiCamGridScreenState extends State<MultiCamGridScreen> {
                   ] else ...[
                     Text(
                       'Tap for <300ms WebRTC Stream',
-                      style: TextStyle(color: Colors.white.withOpacity(0.4), fontSize: 11),
+                      style: TextStyle(color: context.palette.dim(0.54), fontSize: 11),
                     ),
                   ],
                 ],
@@ -242,20 +242,20 @@ class _MultiCamGridScreenState extends State<MultiCamGridScreen> {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Text(camera.location, style: const TextStyle(color: Colors.white60, fontSize: 10)),
+                  Text(camera.location, style: TextStyle(color: context.palette.dim(0.60), fontSize: 10)),
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                     decoration: BoxDecoration(
-                      color: isOffline ? AppTheme.warningOrange.withOpacity(0.15) : AppTheme.cyberBlue.withOpacity(0.15),
+                      color: isOffline ? context.palette.warning.withValues(alpha: 0.15) : context.palette.accent.withValues(alpha: 0.15),
                       borderRadius: BorderRadius.circular(4),
                       border: Border.all(
-                        color: isOffline ? AppTheme.warningOrange.withOpacity(0.4) : AppTheme.cyberBlue.withOpacity(0.4),
+                        color: isOffline ? context.palette.warning.withValues(alpha: 0.4) : context.palette.accent.withValues(alpha: 0.4),
                       ),
                     ),
                     child: Text(
-                      isOffline ? 'OFFLINE' : 'HAILO AI ACTIVE',
+                      isOffline ? 'OFFLINE' : (camera.isAiEnabled ? 'AI ON' : 'LIVE'),
                       style: TextStyle(
-                        color: isOffline ? AppTheme.warningOrange : AppTheme.cyberBlue,
+                        color: isOffline ? context.palette.warning : context.palette.accent,
                         fontSize: 9,
                         fontWeight: FontWeight.bold,
                       ),

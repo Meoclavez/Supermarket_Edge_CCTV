@@ -1,4 +1,41 @@
-enum ZoneType { intrusion, tripwire, privacyMask, door, package }
+/// Per-camera zone types supported by `POST /api/v1/cameras/{id}/zones`.
+///
+/// Shelf and department zones for heatmaps live on the store floor plan
+/// (blueprint editor), not here.
+enum ZoneType {
+  /// Entrance / exit counting line.
+  tripwire('TRIPWIRE', {'TRIPWIRE'}),
+
+  /// Staff-only or restricted area such as a stockroom or cash office.
+  restrictedArea('RESTRICTED_ZONE', {'RESTRICTED_ZONE', 'INTRUSION'}),
+
+  /// Area blurred on the edge server and ignored by analytics.
+  privacyMask('PRIVACY_MASK', {'PRIVACY_MASK', 'EXCLUSION'});
+
+  const ZoneType(this.wireValue, this.acceptedWireValues);
+
+  final String wireValue;
+  final Set<String> acceptedWireValues;
+
+  String get label {
+    switch (this) {
+      case ZoneType.tripwire:
+        return 'Entry / exit line';
+      case ZoneType.restrictedArea:
+        return 'Staff-only area';
+      case ZoneType.privacyMask:
+        return 'Privacy mask';
+    }
+  }
+
+  static ZoneType? fromWire(String? value) {
+    final v = (value ?? '').toUpperCase();
+    for (final t in ZoneType.values) {
+      if (t.acceptedWireValues.contains(v)) return t;
+    }
+    return null;
+  }
+}
 enum MaskMode { blackout, blur, mosaic, color }
 enum TripwireDirection { aToB, bToA, bidirectional }
 
@@ -44,13 +81,13 @@ class ZoneConfig {
     this.dwellTimeSeconds = 0.0,
     List<String>? allowedClasses,
   })  : polygonPoints = polygonPoints ?? [],
-        allowedClasses = allowedClasses ?? ['person', 'car', 'package'];
+        allowedClasses = allowedClasses ?? ['person'];
 
   Map<String, dynamic> toJson() => {
         'id': id,
         'camera_id': cameraId,
         'name': name,
-        'zone_type': zoneType.name,
+        'zone_type': zoneType.wireValue,
         'enabled': enabled,
         'polygon_points': polygonPoints.map((p) => p.toJson()).toList(),
         'line_start': lineStart?.toJson(),
@@ -62,13 +99,6 @@ class ZoneConfig {
       };
 
   factory ZoneConfig.fromJson(Map<String, dynamic> json) {
-    ZoneType parseZoneType(String? val) {
-      return ZoneType.values.firstWhere(
-        (e) => e.name.toLowerCase() == (val ?? '').toLowerCase(),
-        orElse: () => ZoneType.intrusion,
-      );
-    }
-
     TripwireDirection parseDirection(String? val) {
       return TripwireDirection.values.firstWhere(
         (e) => e.name.toLowerCase() == (val ?? '').toLowerCase(),
@@ -87,7 +117,7 @@ class ZoneConfig {
       id: json['id'] ?? '',
       cameraId: json['camera_id'] ?? '',
       name: json['name'] ?? '',
-      zoneType: parseZoneType(json['zone_type']),
+      zoneType: ZoneType.fromWire(json['zone_type']) ?? ZoneType.restrictedArea,
       enabled: json['enabled'] ?? true,
       polygonPoints: (json['polygon_points'] as List<dynamic>?)
               ?.map((p) => Point2D.fromJson(p as Map<String, dynamic>))
@@ -105,7 +135,7 @@ class ZoneConfig {
       allowedClasses: (json['allowed_classes'] as List<dynamic>?)
               ?.map((c) => c.toString())
               .toList() ??
-          ['person', 'car', 'package'],
+          ['person'],
     );
   }
 }

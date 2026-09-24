@@ -7,9 +7,12 @@ dashboard came from a literal in a route handler.
 
 One worker thread per enabled camera does the following loop:
 
-    capture frame -> (every Nth frame) detect people -> associate into tracks
-      -> project foot point to floor metres -> resolve which zone that is
-      -> emit zone entry/exit facts -> persist
+    capture frame -> (every Nth frame) pose-estimate people (box + 17
+      keypoints) -> ByteTrack association -> project foot point to floor
+      metres -> resolve which zone that is -> emit zone entry/exit facts
+      -> hand confirmed tracks (with skeletons) and retail objects to
+      pose_analytics -> mark zone visits that saw a shelf interaction
+      -> tripwire crossings / restricted areas (tripwire_engine) -> persist
 
 The most recent frame from each camera is also retained in memory, which is
 what ``/snapshot`` and ``/stream`` now serve. Those endpoints previously drew a
@@ -28,18 +31,89 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import numpy as np
 
 from app.config import settings
 from app.services.camera_drivers import alternate_stream_url, redact_url
-from app.services.inference_backend import person_detector
+from app.services.inference_backend import (
+    SKELETON_EDGES,
+    ObjectDetection,
+    keypoints_to_list,
+    person_detector,
+)
+from app.services.privacy_mask import (
+    apply_privacy_masks,
+    camera_masks,
+    ignore_polygons,
+    outside_ignore_regions,
+)
 from app.services.store_layout_service import point_in_polygon
-from app.services.tracking_service import CentroidTracker, Track, floor_projector
+from app.services.timeutil import utc_from_ts  # stored times are naive UTC
+from app.services.tracking_service import ASSIGNMENT_METHOD, CentroidTracker, Track, floor_projector
 
 logger = logging.getLogger(__name__)
+
+
+# ------------------------------------------------------ pose analytics hook
+# pose_analytics (theft / shelf interaction / heatmap) is optional: if the
+# module is missing or raises, the pipeline keeps counting people and logs
+# the problem once instead of once per frame.
+
+_pose_state = {"module": None, "status": "not_loaded", "error": None}
+_pose_state_lock = threading.Lock()
+_logged_once: set[str] = set()
+
+
+def _log_once(key: str, message: str) -> None:
+    if key in _logged_once:
+        return
+    _logged_once.add(key)
+    logger.warning(message)
+
+
+def _get_pose_analytics():
+    if _pose_state["status"] == "not_loaded":
+        with _pose_state_lock:
+            if _pose_state["status"] == "not_loaded":
+                try:
+                    from app.services.pose_analytics import pose_analytics
+
+                    _pose_state.update(module=pose_analytics, status="ok", error=None)
+                except Exception as e:
+                    _pose_state.update(module=None, status="unavailable", error=str(e))
+                    _log_once(
+                        "pose_import",
+                        f"pose_analytics unavailable ({e}); people are still tracked and "
+                        "counted, but shelf interactions and theft cues are not analysed.",
+                    )
+    return _pose_state["module"]
+
+
+ANALYSIS_FLAGS = ("people_counting", "shelf_interaction", "theft_detection")
+
+
+def camera_flag(camera_id: str, flag: str) -> bool:
+    """Per-camera feature toggle. A broken flag store keeps the old behaviour (on)."""
+    try:
+        from app.services.feature_manager import feature_manager
+
+        return bool(feature_manager.is_enabled(camera_id, flag))
+    except Exception as e:
+        _log_once(f"flag:{flag}", f"feature flag {flag} unreadable ({e}); treating it as enabled")
+        return True
+
+
+def _reset_pose_camera(camera_id: str) -> None:
+    pa = _get_pose_analytics()
+    if pa is None:
+        return
+    try:
+        pa.reset_camera(camera_id)
+    except Exception as e:
+        _log_once(f"pose_reset:{type(e).__name__}", f"pose_analytics.reset_camera failed: {e}")
 
 
 @dataclass
@@ -53,7 +127,7 @@ class ZoneVisitFact:
     """
 
     visit_id: str
-    phase: str                       # "open" | "close"
+    phase: str                       # "open" | "interact" | "close"
     zone_id: str
     track_id: str
     camera_id: str
@@ -82,6 +156,8 @@ class CameraRuntime:
     # Native pixel size of the frames being read; None until the first frame.
     frame_width: Optional[int] = None
     frame_height: Optional[int] = None
+    # Per-camera feature toggles as last read by the worker.
+    analysis_flags: dict = field(default_factory=dict)
     _frame: Optional[np.ndarray] = field(default=None, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     # Live tracks as plain dicts, rewritten by the worker after every analysis
@@ -95,9 +171,21 @@ class CameraRuntime:
             self._frame = frame
             self.frame_width, self.frame_height = int(w), int(h)
 
-    def get_frame(self) -> Optional[np.ndarray]:
+    def get_frame(self, masked: bool = True) -> Optional[np.ndarray]:
+        """A copy of the latest frame, with privacy masks burned in.
+
+        Every caller that shows or saves a frame gets the masked copy. Only
+        analysis code asks for ``masked=False`` (see ``privacy_mask``).
+        """
         with self._lock:
-            return None if self._frame is None else self._frame.copy()
+            frame = None if self._frame is None else self._frame.copy()
+        if frame is None or not masked:
+            return frame
+        return apply_privacy_masks(frame, self.camera_id)
+
+    def get_raw_frame(self) -> Optional[np.ndarray]:
+        """Unmasked frame, for inference only. Never serve or store this."""
+        return self.get_frame(masked=False)
 
     def set_tracks(self, tracks: list[dict], now: Optional[float] = None) -> None:
         with self._lock:
@@ -126,11 +214,69 @@ class CameraRuntime:
             "frame_width": self.frame_width,
             "frame_height": self.frame_height,
             "calibrated": self.calibrated,
+            "analysis_flags": dict(self.analysis_flags),
             "seconds_since_frame": (
                 round(time.time() - self.last_frame_at, 1) if self.last_frame_at else None
             ),
             "last_error": self.last_error,
         }
+
+
+_FFMPEG_OPTIONS: Optional[str] = None
+
+
+def ffmpeg_capture_options() -> str:
+    """OPENCV_FFMPEG_CAPTURE_OPTIONS with a socket timeout the linked FFmpeg understands.
+
+    FFmpeg >= 5 (libavformat 59) takes ``timeout`` (microseconds) for RTSP/TCP
+    I/O and dropped ``stimeout``; before 5, ``timeout`` on RTSP meant "listen
+    for an incoming connection", so older builds keep ``stimeout``.
+    ``rw_timeout`` bounds every other protocol read (HTTP/MJPEG). The same
+    string is used for every open, so concurrent workers never disagree.
+    """
+    global _FFMPEG_OPTIONS
+    if _FFMPEG_OPTIONS is None:
+        import re
+
+        import cv2
+
+        us = int(max(0.5, settings.CAMERA_READ_TIMEOUT_SEC) * 1_000_000)
+        m = re.search(r"avformat:\s+YES \((\d+)\.", cv2.getBuildInformation())
+        modern = m is None or int(m.group(1)) >= 59
+        sock = f"timeout;{us}" if modern else f"stimeout;{us}"
+        _FFMPEG_OPTIONS = f"rtsp_transport;tcp|{sock}|rw_timeout;{us}"
+    return _FFMPEG_OPTIONS
+
+
+def _resolve_host_bounded(url: str, timeout_s: float) -> None:
+    """Raise if the URL's host cannot be resolved within ``timeout_s`` (IP literals pass)."""
+    import ipaddress
+    import socket
+    from urllib.parse import urlsplit
+
+    host = urlsplit(url).hostname
+    if not host:
+        return
+    try:
+        ipaddress.ip_address(host)
+        return
+    except ValueError:
+        pass
+    result: dict = {}
+
+    def lookup():
+        try:
+            socket.getaddrinfo(host, None)
+            result["ok"] = True
+        except OSError as e:
+            result["error"] = e
+
+    t = threading.Thread(target=lookup, daemon=True, name="dns-probe")
+    t.start()
+    t.join(max(0.5, timeout_s))
+    if not result.get("ok"):
+        raise RuntimeError(f"Cannot resolve camera host {host!r}"
+                           + (f": {result['error']}" if "error" in result else " (DNS timed out)"))
 
 
 class CameraWorker(threading.Thread):
@@ -143,6 +289,10 @@ class CameraWorker(threading.Thread):
         self.tracker = CentroidTracker(runtime.camera_id)
         self._stop = threading.Event()
         self._frame_index = 0
+        self._detect_index = 0
+        # Latest retail objects; refreshed every OBJECT_DETECT_EVERY_N
+        # detection frames, so at most N-1 detection frames old.
+        self._objects: list[ObjectDetection] = []
 
     def stop(self) -> None:
         self._stop.set()
@@ -153,18 +303,26 @@ class CameraWorker(threading.Thread):
         import cv2
 
         src = source_url or self.rt.source
-        # A bare /dev/videoN path and an RTSP URL both go through VideoCapture,
-        # but network streams need a latency-bounded transport or frames pile
-        # up in the decoder until the feed is minutes behind real time.
-        if src.startswith("rtsp://"):
+        # A bare /dev/videoN path and a network URL both go through
+        # VideoCapture. Network streams get a latency-bounded transport and
+        # real open/read timeouts: without them one unreachable camera held
+        # FFmpeg for ~30 s per attempt (current FFmpeg ignores the old
+        # ``stimeout`` option), stalling that worker's reconnects.
+        if src.startswith(("rtsp://", "rtsps://", "http://", "https://")):
             import os
 
-            os.environ.setdefault(
-                "OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp|stimeout;5000000"
+            # OpenCV serialises FFmpeg opens behind one process-wide lock and
+            # FFmpeg's DNS lookup ignores its timeouts, so a camera whose
+            # hostname does not resolve would hold every other worker's open.
+            # Resolve first, bounded, outside that lock.
+            _resolve_host_bounded(src, settings.CAMERA_OPEN_TIMEOUT_SEC)
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = ffmpeg_capture_options()
+            open_ms = int(max(0.5, settings.CAMERA_OPEN_TIMEOUT_SEC) * 1000)
+            read_ms = int(max(0.5, settings.CAMERA_READ_TIMEOUT_SEC) * 1000)
+            cap = cv2.VideoCapture(
+                src, cv2.CAP_FFMPEG,
+                [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, open_ms, cv2.CAP_PROP_READ_TIMEOUT_MSEC, read_ms],
             )
-            cap = cv2.VideoCapture(src, cv2.CAP_FFMPEG)
-        elif src.startswith("http://") or src.startswith("https://"):
-            cap = cv2.VideoCapture(src, cv2.CAP_FFMPEG)
         else:
             cap = cv2.VideoCapture(src)
 
@@ -247,6 +405,8 @@ class CameraWorker(threading.Thread):
                 self.rt.set_tracks([])
                 self.rt.live_track_count = 0
                 self.rt.detections_last = 0
+                self._objects = []
+                _reset_pose_camera(self.rt.camera_id)
                 logger.warning(f"Camera {self.rt.camera_id} error: {clean_err}; retrying in {backoff:.0f}s")
             finally:
                 if cap is not None:
@@ -262,10 +422,14 @@ class CameraWorker(threading.Thread):
         self.rt.status = "DISABLED" if not self.rt.enabled else "OFFLINE"
         for t in self.tracker.flush_all():
             self.engine.close_track(t, reason="worker_stopped")
+        _reset_pose_camera(self.rt.camera_id)
 
     def _push_clip_buffer(self, frame: np.ndarray) -> None:
         try:
             from app.services.clip_recorder import clip_recorder_service
+
+            # Clips are saved footage: privacy masks apply.
+            frame = apply_privacy_masks(frame, self.rt.camera_id)
 
             fps = max(1, int(round((self.rt.fps or 5.0) / settings.ANALYTICS_DETECT_EVERY_N_FRAMES)) or 1)
             clip_recorder_service.get_or_create_buffer(self.rt.camera_id, fps=fps).push_frame(frame)
@@ -275,8 +439,42 @@ class CameraWorker(threading.Thread):
     # ----------------------------------------------------------------- analysis
 
     def _analyse(self, frame: np.ndarray, now: float) -> None:
-        detections = person_detector.detect(frame)
-        self.rt.detections_last = len(detections)
+        cam = self.rt.camera_id
+        flags = {f: camera_flag(cam, f) for f in ANALYSIS_FLAGS}
+        self.rt.analysis_flags = flags
+        if not any(flags.values()):
+            # Every analysis feature is off for this camera: spend no GPU time,
+            # show no boxes, and finish any tracks (closing open visits).
+            for t in self.tracker.flush_all():
+                self.engine.close_track(t, reason="analysis_disabled", persist=False)
+            self._objects = []
+            self.rt.set_tracks([], now)
+            self.rt.live_track_count = 0
+            self.rt.detections_last = 0
+            return
+        counting = flags["people_counting"]
+
+        # The detector sees the unmasked frame. AI_IGNORE regions then drop
+        # anything whose foot point falls inside them, before tracking.
+        masks = camera_masks(cam)
+        h, w = frame.shape[:2]
+        ignore = ignore_polygons(cam, w, h, masks)
+
+        # Ask for boxes down to the tracker's low threshold: the tracker uses
+        # the low band only to keep existing identities through occlusion.
+        detections = person_detector.detect(frame, conf_threshold=settings.TRACK_LOW_CONF_THRESHOLD)
+        detections = outside_ignore_regions(detections, ignore)
+        self.rt.detections_last = sum(
+            1 for d in detections if d.confidence >= settings.PERSON_CONF_THRESHOLD
+        )
+
+        self._detect_index += 1
+        every_n = settings.OBJECT_DETECT_EVERY_N
+        if every_n > 0 and person_detector.objects_available and self._detect_index % every_n == 0:
+            self._objects = outside_ignore_regions(
+                person_detector.detect_objects(frame), ignore,
+                foot=lambda o: ((o.bbox[0] + o.bbox[2]) / 2.0, o.bbox[3]),
+            )
 
         live = self.tracker.update(detections, now=now)
         self.rt.live_track_count = sum(1 for t in live if t.confirmed)
@@ -294,28 +492,95 @@ class CameraWorker(threading.Thread):
                 "hits": t.hits,
                 "confirmed": t.confirmed,
                 "age_seconds": round(t.age_seconds, 1),
+                # Only keypoints measured on this detection frame are shown;
+                # a coasting track keeps its box but not a stale skeleton.
+                "keypoints": keypoints_to_list(t.keypoints) if t.keypoints_fresh else None,
                 # Filled only when a homography exists; otherwise the track
                 # has no place on the blueprint and these stay None.
                 "x_m": None,
                 "y_m": None,
                 "zone_id": None,
             }
+            t.floor_xy = None
             if t.confirmed:
                 fx, fy = t.foot_point
-                floor = floor_projector.to_floor(self.rt.camera_id, fx, fy)
+                floor = floor_projector.to_floor(cam, fx, fy)
                 if floor is not None:
-                    t.floor_points.append(
-                        {"x": round(floor[0], 2), "y": round(floor[1], 2), "t": round(now, 2)}
-                    )
-                    self.engine.attribute_zone(t, floor[0], floor[1], now)
+                    t.floor_xy = (floor[0], floor[1])
                     entry["x_m"] = round(floor[0], 2)
                     entry["y_m"] = round(floor[1], 2)
-                    entry["zone_id"] = t.current_zone_id
+                    if counting:
+                        t.floor_points.append(
+                            {"x": round(floor[0], 2), "y": round(floor[1], 2), "t": round(now, 2)}
+                        )
+                        self.engine.attribute_zone(t, floor[0], floor[1], now)
+                        entry["zone_id"] = t.current_zone_id
+                if not counting and t.current_zone_id is not None:
+                    # Counting was switched off mid-visit: finish it honestly.
+                    self.engine.leave_zone(t, now)
             snapshot.append(entry)
         self.rt.set_tracks(snapshot, now)
 
+        # Evidence frames are saved by pose_analytics, so they carry the
+        # privacy masks; the analysis itself already ran on the raw frame.
+        evidence = apply_privacy_masks(frame, cam, masks)
+        confirmed = [t for t in live if t.confirmed]
+        self._observe_pose(evidence, now, confirmed)
+        self._evaluate_zone_rules(evidence, now, confirmed, counting)
+
         for finished in self.tracker.drain_finished():
-            self.engine.close_track(finished, reason="track_lost")
+            self.engine.close_track(finished, reason="track_lost", persist=counting)
+
+    def _evaluate_zone_rules(self, frame: np.ndarray, now: float, tracks: list[Track],
+                             counting: bool) -> None:
+        """Tripwire crossings and restricted areas (services/tripwire_engine.py).
+
+        Image-space rules on the confirmed tracks' foot points; runs after
+        inference returned (no inference lock held). ``frame`` is the
+        privacy-masked copy and is only used for alert snapshots. Crossings are
+        recorded only while ``people_counting`` is on.
+        """
+        try:
+            from app.services.tripwire_engine import tripwire_engine
+
+            h, w = frame.shape[:2]
+            tripwire_engine.evaluate(self.rt.camera_id, tracks, w, h, now, frame=frame,
+                                     counting=counting, camera_name=self.rt.name)
+        except Exception as e:
+            _log_once(
+                f"zone_rules:{type(e).__name__}",
+                f"tripwire/restricted-area evaluation failed ({type(e).__name__}: {e}); continuing without it",
+            )
+
+    def _observe_pose(self, frame: np.ndarray, now: float, tracks: list[Track]) -> None:
+        """Hand confirmed tracks to pose_analytics; apply the interactions it reports.
+
+        Runs after inference has returned, so the shared inference lock is
+        never held here.
+        """
+        pa = _get_pose_analytics()
+        if pa is None:
+            return
+        try:
+            result = pa.observe(self.rt.camera_id, now, frame, tracks, list(self._objects))
+        except Exception as e:
+            _log_once(
+                f"pose_observe:{type(e).__name__}",
+                f"pose_analytics.observe failed ({type(e).__name__}: {e}); continuing without it",
+            )
+            return
+        interactions = getattr(result, "interactions", None) or []
+        if not interactions:
+            return
+        by_id = {t.track_id: t for t in tracks}
+        for item in interactions:
+            try:
+                track_id, product_zone_id = item[0], item[1]
+            except Exception:
+                continue
+            track = by_id.get(track_id) or by_id.get(str(track_id))
+            if track is not None:
+                self.engine.mark_interaction(track, str(product_zone_id), now)
 
 
 class LiveAnalyticsEngine:
@@ -378,7 +643,8 @@ class LiveAnalyticsEngine:
                         zone_id=zone_id,
                         track_id=track.track_id,
                         camera_id=track.camera_id,
-                        entered_at=datetime.fromtimestamp(track.zone_entered_at),
+                        entered_at=utc_from_ts(track.zone_entered_at),
+                        interacted=track.interacted,
                     )
                 )
             return
@@ -388,6 +654,31 @@ class LiveAnalyticsEngine:
         track.current_zone_id = zone_id
         track.zone_entered_at = now if zone_id else None
         track.interacted = False
+
+    def mark_interaction(self, track: Track, product_zone_id: str, now: float) -> None:
+        """Record that this track touched a shelf during its current zone visit.
+
+        Sets ``interacted`` so the visit closes with it, and, if the visit is
+        already open in the database, publishes the flag straight away so the
+        funnel reflects it while the shopper is still there.
+        """
+        if track.current_zone_id is None:
+            return
+        already = track.interacted
+        track.interacted = True
+        if already or not track.open_visit_id or track.zone_entered_at is None:
+            return
+        self._buffer_visit(
+            ZoneVisitFact(
+                visit_id=track.open_visit_id,
+                phase="interact",
+                zone_id=track.current_zone_id,
+                track_id=track.track_id,
+                camera_id=track.camera_id,
+                entered_at=utc_from_ts(track.zone_entered_at),
+                interacted=True,
+            )
+        )
 
     def _close_open_visit(self, track: Track, now: float) -> None:
         """Finish the visit a track currently holds, if it was ever opened.
@@ -403,22 +694,38 @@ class LiveAnalyticsEngine:
                     zone_id=track.current_zone_id,
                     track_id=track.track_id,
                     camera_id=track.camera_id,
-                    entered_at=datetime.fromtimestamp(track.zone_entered_at),
-                    exited_at=datetime.fromtimestamp(now),
+                    entered_at=utc_from_ts(track.zone_entered_at),
+                    exited_at=utc_from_ts(now),
                     dwell_seconds=round(now - track.zone_entered_at, 2),
                     interacted=track.interacted,
                 )
             )
         track.open_visit_id = None
 
-    def close_track(self, track: Track, reason: str = "") -> None:
-        """Finalise a track: close its open visit and queue it for storage."""
+    def leave_zone(self, track: Track, now: float) -> None:
+        """Close the track's open visit and forget its zone (no new one opens)."""
+        self._close_open_visit(track, now)
+        track.current_zone_id = None
+        track.zone_entered_at = None
+        track.interacted = False
+
+    def close_track(self, track: Track, reason: str = "", persist: Optional[bool] = None) -> None:
+        """Finalise a track: close its open visit and queue it for storage.
+
+        An open visit is always closed so no row is left "in the zone"
+        forever. The track itself is stored only while people counting is
+        enabled for its camera (``persist`` overrides the lookup).
+        """
         if not track.confirmed:
             return
         self._close_open_visit(track, track.last_seen)
         track.current_zone_id = None
         track.zone_entered_at = None
 
+        if persist is None:
+            persist = camera_flag(track.camera_id, "people_counting")
+        if not persist:
+            return
         with self._buffer_lock:
             self._pending_tracks.append(track)
 
@@ -450,13 +757,38 @@ class LiveAnalyticsEngine:
             w.stop()
         self.runtimes.pop(camera_id, None)
 
-    def stop_all(self) -> None:
+    def stop_all(self, timeout: float = 3.0) -> list[str]:
+        """Stop every worker and wait (bounded) for them to finish.
+
+        Joining matters at shutdown: each worker closes its tracks (and so
+        its open zone visits) on the way out, and the supervisor's final
+        flush must see them. It also keeps a worker from being inside an ONNX
+        Runtime call while the interpreter tears the session down. A worker
+        blocked in a network read past ``timeout`` is left behind (they are
+        daemon threads) and named in the returned list.
+        """
+        workers = list(self.workers.values())
         for cid in list(self.workers.keys()):
             self.stop_camera(cid)
+        deadline = time.monotonic() + max(0.0, timeout)
+        stuck = []
+        for w in workers:
+            w.join(max(0.0, deadline - time.monotonic()))
+            if w.is_alive():
+                stuck.append(w.name)
+        if stuck:
+            logger.warning(f"Camera worker(s) still running after {timeout:.1f}s: {', '.join(stuck)}")
+        return stuck
 
     def get_frame(self, camera_id: str) -> Optional[np.ndarray]:
+        """Latest frame with privacy masks applied: the only one to show or save."""
         rt = self.runtimes.get(camera_id)
         return rt.get_frame() if rt else None
+
+    def get_raw_frame(self, camera_id: str) -> Optional[np.ndarray]:
+        """Unmasked latest frame, for running inference only."""
+        rt = self.runtimes.get(camera_id)
+        return rt.get_raw_frame() if rt else None
 
     def status(self) -> dict:
         runtimes = [rt.to_dict() for rt in self.runtimes.values()]
@@ -467,6 +799,8 @@ class LiveAnalyticsEngine:
             "cameras_online": online,
             "live_tracks": sum(r["live_tracks"] for r in runtimes),
             "detector": person_detector.status(),
+            "tracker": {"method": "bytetrack", "assignment": ASSIGNMENT_METHOD},
+            "pose_analytics": {"status": _pose_state["status"], "error": _pose_state["error"]},
             "zones_loaded": len(self._zones),
             "cameras": runtimes,
         }
@@ -505,6 +839,7 @@ class LiveAnalyticsEngine:
                             "y2": t["y2"],
                             "confidence": t["confidence"],
                             "confirmed": t["confirmed"],
+                            "keypoints": t.get("keypoints"),
                         }
                         for t in tracks
                     ],
@@ -531,7 +866,7 @@ class LiveAnalyticsEngine:
                 )
 
         return {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
             "running": self._started,
             "persons": persons,
             "detections": detections,
@@ -551,6 +886,8 @@ def render_overlay(frame: np.ndarray, rt: CameraRuntime) -> np.ndarray:
     exactly what the pipeline is counting. Confirmed tracks are drawn solid,
     tentative ones (below the hit floor) thin, and a corner tag states
     whether the camera is calibrated so nobody mistakes boxes for positions.
+    When the pose model supplied keypoints on the latest detection frame, the
+    visible limbs are drawn too (wrists marked larger).
     """
     import cv2
 
@@ -572,12 +909,32 @@ def render_overlay(frame: np.ndarray, rt: CameraRuntime) -> np.ndarray:
         cv2.rectangle(out, (x1, ty - th - 4), (x1 + tw + 4, ty + 2), colour, -1)
         cv2.putText(out, label, (x1 + 2, ty - 1), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (10, 10, 10), 1)
 
+        kpts = t.get("keypoints")
+        if kpts:
+            _draw_skeleton(out, kpts, colour)
+
     tag = "calibrated" if rt.calibrated else "uncalibrated"
     n_conf = sum(1 for t in tracks if t["confirmed"])
     header = f"{rt.name} | {tag} | {n_conf} tracked"
     cv2.rectangle(out, (0, 0), (10 + 8 * len(header), 22), (18, 20, 26), -1)
     cv2.putText(out, header, (6, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 224, 232), 1)
     return out
+
+
+def _draw_skeleton(out: np.ndarray, kpts, colour) -> None:
+    """Draw visible COCO limbs and joints. Invisible points are never drawn."""
+    import cv2
+
+    thr = settings.KEYPOINT_VISIBILITY_THRESHOLD
+    pts = [(int(p[0]), int(p[1]), float(p[2])) for p in kpts]
+    joint_colour = (255, 200, 60)   # BGR light blue
+    for a, b in SKELETON_EDGES:
+        if a < len(pts) and b < len(pts) and pts[a][2] >= thr and pts[b][2] >= thr:
+            cv2.line(out, pts[a][:2], pts[b][:2], colour, 2, cv2.LINE_AA)
+    for i, (x, y, v) in enumerate(pts):
+        if v >= thr:
+            # Wrists are what shelf-interaction analytics watch; mark them larger.
+            cv2.circle(out, (x, y), 5 if i in (9, 10) else 3, joint_colour, -1, cv2.LINE_AA)
 
 
 live_engine = LiveAnalyticsEngine()

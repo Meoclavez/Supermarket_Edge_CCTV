@@ -209,9 +209,19 @@ def test_shelf_stats_start_at_zero_with_null_rates(tmp_path):
         id="z1", camera_id="cam_x", name="Zone", sku_id="SKU", category="Test",
         points=[PointCoord(x=0, y=0), PointCoord(x=1, y=0), PointCoord(x=1, y=1), PointCoord(x=0, y=1)],
     ))
-    stats = svc.get_zone_stats("z1")
-    assert stats["impressions"] == stats["touches"] == stats["picks"] == 0
-    assert stats["attraction_rate"] is None
-    assert stats["friction_index"] is None
-    assert stats["conversion_rate"] is None
-    assert stats["avg_dwell_sec"] is None
+    # Stats are read from shelf_interactions rows (no in-memory counters):
+    # a zone with no recorded reach has 0 reaches and no invented rates.
+    import asyncio
+    from datetime import datetime
+    from app.database import async_session_factory, init_db
+
+    async def summary():
+        await init_db()
+        async with async_session_factory() as db:
+            return await svc.product_summary(db, datetime(2000, 1, 1), datetime(2000, 1, 2))
+
+    stats = next(p for p in asyncio.run(summary())["products"] if p["zone_id"] == "z1")
+    assert stats["reaches"] == stats["shoppers"] == 0
+    assert stats["avg_duration_sec"] is None
+    assert stats["units_per_reaching_shopper"] is None
+    assert stats["conversion_status"] == "needs POS data"

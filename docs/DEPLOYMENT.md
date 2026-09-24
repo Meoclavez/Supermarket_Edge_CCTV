@@ -200,6 +200,13 @@ you can see what the detector is doing.
 **Backups.** A snapshot is taken at every startup into `storage/backups/`,
 pruned to 7 days. Copy that directory to the NAS on a schedule.
 
+**Updating a running device.** Install the new release and restart the
+service: on start the database migrates itself (versioned migrations in
+`edge_backend/app/migrations/`, then new model columns/tables are added
+automatically), after a `storage/backups/*_pre-vNNNN.db` snapshot. It refuses
+to start on a database written by a newer release. Inspect with
+`cd edge_backend && python -m app.migrations status` (or `check` / `upgrade`).
+
 **Resetting to a fresh install.** To wipe the store and start again — for
 example after a misconfigured camera recorded false shoppers, or to hand a
 machine to a different store:
@@ -216,6 +223,121 @@ returns the layout to its default size. The operator account and `.env`
 settings are kept. Any value other than the literal `"RESET"` is refused.
 `POST /api/v1/layout/purge-seed-data` (`{"confirm":true}`) is a legacy alias
 that now performs the same full reset; it no longer keeps cameras or zones.
+
+---
+
+## 7a. Remote access: the dashboard on your own domain
+
+The dashboard can be published at `https://cctv.<your-domain>` so the owner
+can open it from anywhere. It is online **only** while remote access is
+enabled in **Settings → Remote access** and the hostname is connected;
+disable it there and the public address stops working within seconds.
+Nothing moves to the cloud: footage, detection and the database stay on this
+machine, and the tunnel carries only the pages and streams a signed-in
+operator asks for.
+
+### How it works
+
+The primary provider is a **Cloudflare Tunnel** that the app runs itself
+(`cloudflared tunnel run`, supervised and restarted with backoff by
+`app/services/remote_access_service.py`). The tunnel is an *outbound*
+connection from the store to Cloudflare, so:
+
+- no router port forwarding and no public IP are needed, and it works behind
+  carrier-grade NAT (4G/5G routers, NBN CGNAT);
+- Cloudflare issues and renews the HTTPS certificate for your domain;
+- the store's LAN address keeps working exactly as before.
+
+The tunnel token is stored encrypted under `storage/secrets/named/`, passed
+to cloudflared in an environment variable (never on its command line), never
+logged and never returned by the API — the dashboard only shows
+"configured / not configured".
+
+`cloudflared` is found on `PATH`, else in `<repo>/bin/`. `./run.sh
+--with-tunnel` downloads the official release for this OS and CPU into `bin/`
+and checks it against the SHA-256 Cloudflare publishes (this also happens
+automatically on start when remote access is enabled). No sudo is used.
+
+### Go live (step by step)
+
+1. Put the domain on Cloudflare (free plan is enough): **Add a domain**, then
+   change the nameservers at your registrar to the two Cloudflare shows. Wait
+   until the domain shows **Active**.
+2. In **Zero Trust** (one.dash.cloudflare.com) → **Networks → Tunnels →
+   Create a tunnel** → **Cloudflared**. Name it after the store.
+3. On *Install and run connector*, copy the command for any OS — **do not run
+   it**. Paste the whole command (or just the long value starting `eyJ`) into
+   **Settings → Remote access → Tunnel token** on the local dashboard.
+4. **Public hostname**: subdomain `cctv`, your domain, **Service type** `HTTP`,
+   **URL** `localhost:8000` (the port the app listens on). Save.
+5. In the dashboard enter the same hostname, tick **Enable remote access**,
+   press **Save**. The status goes *Connecting… → Connected*.
+6. Press **Verify now**. The app fetches
+   `https://<hostname>/api/v1/device/identity` and checks that the device id
+   is *this* machine's, so a hostname routed to another store's box (or a
+   stale tunnel) is caught. The badge shows *Verified* with the time.
+7. Recommended: **Zero Trust → Access → Applications → Add a self-hosted
+   application** for the hostname with an e-mail one-time-PIN policy, so
+   Cloudflare challenges visitors before the dashboard's own sign-in. If the
+   phone app must use the remote URL, add a bypass policy for `/api/*` and
+   `/stream*` (those still require the app's token).
+
+**Direct provider** (sites with a public IP and port forwarding): choose
+*Direct* in Settings; the panel shows a Caddy site block for the hostname
+(`reverse_proxy 127.0.0.1:8000`, `flush_interval -1` for the MJPEG streams).
+Run Caddy yourself, forward TCP 80/443 to this machine, then *Verify now*.
+The app does not run Caddy.
+
+### What is hardened when the dashboard is public
+
+- Requests from the internet all arrive from `cloudflared` on 127.0.0.1, so
+  the real client address comes from `CF-Connecting-IP` / `X-Forwarded-For` —
+  trusted **only** from a loopback peer. Lockouts and rate limits apply per
+  remote user; a LAN client cannot spoof those headers.
+- First-run setup (`/api/v1/setup/*`, which creates the owner account from the
+  one-time code) and `/docs` / `/openapi.json` are refused through the public
+  hostname. Create the operator account on the store network first.
+- Remote access cannot be enabled, and remote requests are refused, while
+  `AUTH_DISABLED=true`.
+- Security headers on every response: `X-Content-Type-Options: nosniff`,
+  `Content-Security-Policy: frame-ancestors 'self'` (Camera Studio's own
+  iframes keep working), `Referrer-Policy: same-origin`, and HSTS only on
+  responses served through the HTTPS hostname.
+- CORS is limited to this device's own origins (the public hostname,
+  `EDGE_BASE_URL`, explicit `ALLOWED_CORS_ORIGINS` entries; `*` is ignored).
+
+### Why there is no TURN server (coturn) by default
+
+TURN relays WebRTC media when a phone (for example on 4G) cannot reach the
+store's video gateway directly. That needs a relay with public UDP ports
+(3478 and 49152–49252) open to the internet and a shared secret — more
+exposed surface, more to configure, and more bandwidth through the store's
+uplink.
+
+It is no longer needed: remote viewing goes over HTTPS through the tunnel.
+The dashboard's live view and Camera Studio use MJPEG (`/stream`, same
+origin, token in the query string, which the tunnel passes through
+unbuffered), so they work unchanged through the public hostname. Only the
+app's port is published; go2rtc's own port (1984) never is. No public UDP
+ports and no TURN server are required.
+
+WebRTC therefore stays **LAN-only**: `GET /api/v1/webrtc/ice-servers`
+returns STUN only with `"turn_enabled": false, "webrtc_scope": "lan_only"`,
+and off-site clients use `/stream`. Coturn is kept as an **opt-in compose
+profile** for sites that specifically want WebRTC off-site:
+
+```bash
+# in edge_backend/.env
+TURN_ENABLED=true
+COTURN_SECRET=<python3 -c "import secrets; print(secrets.token_urlsafe(64))">
+COTURN_PUBLIC_IP=<the store's public IP>
+# then
+docker compose --profile turn up -d
+```
+
+`docker compose up -d` without the profile does not start coturn and does
+not need `COTURN_SECRET`; the coturn container itself refuses to start when
+the secret is empty or a placeholder.
 
 ---
 

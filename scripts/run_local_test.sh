@@ -1,83 +1,55 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Edge AI CCTV - One-Click Local PC Test Runner
+# Edge AI CCTV - local test runner
 # ==============================================================================
-# Runs the full Edge AI CCTV pipeline locally on your computer using:
-# • Your ESP32-S3 IP Camera (Wi-Fi or USB)
-# • Local USB Webcam (/dev/video0)
-# • Or Built-In Synthetic Benchmark Stream
+# 1. ./run.sh --check-only fixes and verifies the Python environment (deps,
+#    onnxruntime flavour, models, GPU provider) exactly as production startup does.
+# 2. Then, depending on the arguments:
+#      ./scripts/run_local_test.sh                 pipeline smoke test (USB webcam /dev/video0)
+#      ./scripts/run_local_test.sh rtsp://...      pipeline smoke test against that stream
+#      ./scripts/run_local_test.sh --serve         start the server + dashboard on :8000
+#      ./scripts/run_local_test.sh --pytest        run the backend test suite
 # ==============================================================================
-
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-VENV_DIR="$PROJECT_ROOT/.venv_test"
 
-echo "======================================================="
-echo "   🛡️ Edge AI CCTV Local Pipeline Benchmark & Test"
-echo "======================================================="
-
-cd "$PROJECT_ROOT"
-
-# 1. Check or Create Virtual Environment
-if [ ! -d "$VENV_DIR" ]; then
-  echo "[+] Creating local Python virtual environment in $VENV_DIR..."
-  python3 -m venv "$VENV_DIR"
+# Same venv choice as run.sh.
+if [[ -z "${EDGE_VENV:-}" ]]; then
+  if [[ -d "$PROJECT_ROOT/.venv_test" ]]; then EDGE_VENV="$PROJECT_ROOT/.venv_test"; else EDGE_VENV="$PROJECT_ROOT/.venv"; fi
+  export EDGE_VENV
 fi
+PY="$EDGE_VENV/bin/python"
 
-source "$VENV_DIR/bin/activate"
-
-# 2. Install / Verify Dependencies
-echo "[+] Checking Python test dependencies..."
-pip install --quiet --upgrade pip
-pip install --quiet \
-    opencv-python \
-    numpy \
-    pydantic \
-    pydantic-settings \
-    sqlalchemy \
-    aiosqlite \
-    fastapi \
-    uvicorn \
-    pyjwt \
-    passlib \
-    bcrypt \
-    httpx || pip install --quiet opencv-python-headless
-
-# 3. Parse Custom Stream URL or GUI Flag
-IS_GUI=false
+MODE=smoke
 STREAM_URL=""
-
 for arg in "$@"; do
-  if [ "$arg" == "--gui" ] || [ "$arg" == "-g" ]; then
-    IS_GUI=true
-  else
-    STREAM_URL="$arg"
-  fi
+  case "$arg" in
+    --serve|--gui|-g) MODE=serve ;;
+    --pytest)         MODE=pytest ;;
+    *)                STREAM_URL="$arg" ;;
+  esac
 done
 
-if [ "$IS_GUI" = true ]; then
-  echo "[+] Launching Real-Time Live AI Vision Monitor & Web HUD..."
-  echo "    🌐 Access the Live CCTV Dashboard at: http://localhost:8080"
-  if [ -n "$STREAM_URL" ]; then
-    python3 "$PROJECT_ROOT/scripts/monitor_live_ai.py" --stream "$STREAM_URL"
-  else
-    python3 "$PROJECT_ROOT/scripts/monitor_live_ai.py"
-  fi
-else
-  if [ -n "$STREAM_URL" ]; then
-    echo "[+] Testing pipeline with custom stream: $STREAM_URL"
-    python3 "$PROJECT_ROOT/scripts/test_local_system.py" --stream "$STREAM_URL" --duration 10
-  else
-    echo "[+] Testing pipeline with USB webcam / Synthetic generator..."
-    echo "    (Tip: Run './scripts/run_local_test.sh --gui' for real-time visual monitor)"
-    python3 "$PROJECT_ROOT/scripts/test_local_system.py" --duration 10
-  fi
+if [[ "$MODE" == "serve" ]]; then
+  echo "[+] Dashboard: http://localhost:${PORT:-8000}/dashboard"
+  exec "$PROJECT_ROOT/run.sh"
 fi
 
-echo "======================================================="
-echo " ✅ Test completed! Recorded clips are saved in:"
-echo "    • $PROJECT_ROOT/storage/clips/"
-echo "    • $PROJECT_ROOT/storage/dvr/"
-echo "======================================================="
+"$PROJECT_ROOT/run.sh" --check-only $([[ "$MODE" == "pytest" ]] && echo --dev)
+
+cd "$PROJECT_ROOT/edge_backend"
+if [[ "$MODE" == "pytest" ]]; then
+  exec "$PY" -m pytest tests -q
+fi
+
+SMOKE="$PROJECT_ROOT/scripts/test_local_system.py"
+if [[ ! -f "$SMOKE" ]]; then
+  echo "[!] $SMOKE not found; running the backend test suite instead."
+  exec "$PY" -m pytest tests -q
+fi
+if [[ -n "$STREAM_URL" ]]; then
+  exec "$PY" "$SMOKE" --stream "$STREAM_URL" --duration 10
+fi
+exec "$PY" "$SMOKE" --duration 10

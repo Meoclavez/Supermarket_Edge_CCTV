@@ -39,12 +39,12 @@ class _DVRPlaybackScreenState extends State<DVRPlaybackScreen> {
     final dateStr = DateFormat('yyyy-MM-dd').format(_selectedDate);
 
     return Scaffold(
-      backgroundColor: AppTheme.darkBackground,
+      backgroundColor: context.palette.background,
       appBar: AppBar(
         title: const Text('24/7 CONTINUOUS DVR PLAYBACK', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
         actions: [
           IconButton(
-            icon: const Icon(Icons.calendar_today_rounded, color: AppTheme.cyberBlue, size: 20),
+            icon: Icon(Icons.calendar_today_rounded, color: context.palette.accent, size: 20),
             onPressed: () async {
               final picked = await showDatePicker(
                 context: context,
@@ -63,12 +63,18 @@ class _DVRPlaybackScreenState extends State<DVRPlaybackScreen> {
         children: [
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            color: AppTheme.cardSurface,
+            color: context.palette.card,
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text('Date: $dateStr', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13)),
-                Text(_selectedCamera, style: const TextStyle(color: AppTheme.cyberBlue, fontSize: 13)),
+                Flexible(
+                  child: Text('Date: $dateStr',
+                      overflow: TextOverflow.ellipsis, style: TextStyle(color: context.palette.text, fontWeight: FontWeight.bold, fontSize: 13)),
+                ),
+                const SizedBox(width: 12),
+                Flexible(
+                  child: Text(_selectedCamera, overflow: TextOverflow.ellipsis, style: TextStyle(color: context.palette.accent, fontSize: 13)),
+                ),
               ],
             ),
           ),
@@ -87,7 +93,7 @@ class _DVRPlaybackScreenState extends State<DVRPlaybackScreen> {
                       style: const TextStyle(color: Colors.white70, fontSize: 14, fontWeight: FontWeight.bold),
                     ),
                     const SizedBox(height: 6),
-                    const Text('Zero-Copy 1-Min Segment HLS Stream', style: TextStyle(color: Colors.white38, fontSize: 11)),
+                    const Text('Zero-Copy 1-Min Segment HLS Stream', style: TextStyle(color: Colors.white60, fontSize: 11)),
                   ],
                 ),
               ),

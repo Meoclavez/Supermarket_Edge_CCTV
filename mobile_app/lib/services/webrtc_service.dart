@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:developer' as developer;
-import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
 import 'package:connectivity_plus/connectivity_plus.dart';
@@ -13,7 +12,6 @@ class WebRtcService {
   final RTCVideoRenderer renderer = RTCVideoRenderer();
   MediaStream? _localAudioStream;
   MediaStreamTrack? _localAudioTrack;
-  RTCRtpSender? _audioSender;
 
   bool isConnected = false;
   bool isTalkbackTransmitting = false;
@@ -22,6 +20,8 @@ class WebRtcService {
   Timer? _reconnectTimer;
   Timer? _watchdogTimer;
   int _reconnectAttempts = 0;
+  num _lastFramesDecoded = -1;
+  int _stalledChecks = 0;
   static const int _maxReconnectAttempts = 10;
   
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
@@ -123,7 +123,7 @@ class WebRtcService {
         _localAudioStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
         _localAudioTrack = _localAudioStream!.getAudioTracks().first;
         _localAudioTrack!.enabled = false;
-        _audioSender = await _peerConnection!.addTrack(_localAudioTrack!, _localAudioStream!);
+        await _peerConnection!.addTrack(_localAudioTrack!, _localAudioStream!);
       } catch (e) {
         developer.log('Microphone init notice: $e', name: 'WebRtcService');
         await _peerConnection!.addTransceiver(
@@ -161,42 +161,51 @@ class WebRtcService {
     }
   }
   
+  /// Reconnects when the decoded video frame counter stops advancing for two
+  /// consecutive checks (about 10 s), i.e. ICE is up but no video arrives.
   void _startWatchdog() {
     _watchdogTimer?.cancel();
+    _lastFramesDecoded = -1;
+    _stalledChecks = 0;
     _watchdogTimer = Timer.periodic(const Duration(seconds: 5), (timer) async {
       if (_peerConnection == null || !isConnected) return;
       try {
         final stats = await _peerConnection!.getStats();
-        bool receivingFrames = false;
-        
+        num framesDecoded = 0;
         for (var stat in stats) {
           if (stat.type == 'inbound-rtp' && stat.values['kind'] == 'video') {
-            final framesDecoded = stat.values['framesDecoded'] ?? 0;
-            if (framesDecoded > 0) {
-              receivingFrames = true;
-              break;
-            }
+            framesDecoded = (stat.values['framesDecoded'] as num?) ?? 0;
+            break;
           }
         }
-        
-        // This is a naive implementation; in a real scenario you would track framesDecoded over time
-        // to see if it's increasing. For simplicity, we just check if any were decoded.
-        // A better check:
-        // if (!receivingFrames) {
-        //   developer.log('Watchdog: No frames received in last interval, recovering', name: 'WebRtcService');
-        //   _handleConnectionFailure();
-        // }
+        if (_lastFramesDecoded >= 0 && framesDecoded <= _lastFramesDecoded) {
+          _stalledChecks++;
+        } else {
+          _stalledChecks = 0;
+        }
+        _lastFramesDecoded = framesDecoded;
+        if (_stalledChecks >= 2) {
+          developer.log('Watchdog: video frames stalled, recovering', name: 'WebRtcService');
+          _handleConnectionFailure();
+        }
       } catch (e) {
-        // Stats not available or failed
+        // Stats not available on this platform; skip the check.
       }
     });
   }
 
-  void setTalkbackActive(bool active) {
-    if (_localAudioTrack != null) {
-      _localAudioTrack!.enabled = active;
-      isTalkbackTransmitting = active;
+  /// Enables or mutes the microphone track sent to the camera speaker.
+  /// Returns false when no microphone track exists (permission denied or
+  /// capture failed), so the UI does not claim to be transmitting.
+  bool setTalkbackActive(bool active) {
+    final track = _localAudioTrack;
+    if (track == null) {
+      isTalkbackTransmitting = false;
+      return false;
     }
+    track.enabled = active;
+    isTalkbackTransmitting = active;
+    return true;
   }
 
   void _handleConnectionFailure() {

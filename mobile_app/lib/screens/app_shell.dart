@@ -8,6 +8,8 @@ import 'clip_archives_screen.dart';
 import 'storage_health_screen.dart';
 import 'settings_screen.dart';
 import '../core/error_recovery.dart';
+import '../services/server_registry.dart';
+import '../widgets/server_switcher.dart';
 
 enum NavSection {
   liveGrid,
@@ -31,7 +33,7 @@ class _AppShellState extends State<AppShell> {
   late int _currentIndex;
   bool _isSidebarCollapsed = false;
 
-  final List<NavSectionItem> _navItems = const [
+  final List<NavSectionItem> _navItems = [
     NavSectionItem(
       section: NavSection.liveGrid,
       label: 'Live Grid Wall',
@@ -51,8 +53,7 @@ class _AppShellState extends State<AppShell> {
       label: 'AI Incident Center',
       icon: Icons.notifications_active_outlined,
       selectedIcon: Icons.notifications_active_rounded,
-      badgeCount: 3,
-      badgeColor: AppTheme.emergencyRed,
+      badgeColor: (p) => p.alert,
     ),
     NavSectionItem(
       section: NavSection.zoneEditor,
@@ -118,13 +119,24 @@ class _AppShellState extends State<AppShell> {
     
     return Column(
       children: [
+        const ServerSwitcherBar(),
         ListenableBuilder(
           listenable: ConnectionMonitor(),
           builder: (context, _) {
             return OfflineIndicatorBanner(state: ConnectionMonitor().state);
           },
         ),
-        Expanded(child: ErrorBoundary(child: child)),
+        // Rebuild the section when the active store changes so it reloads
+        // its data from the newly selected server.
+        Expanded(
+          child: ListenableBuilder(
+            listenable: ServerRegistry(),
+            builder: (context, _) => KeyedSubtree(
+              key: ValueKey('${ServerRegistry().activeId}@${ServerRegistry().activeUrl}'),
+              child: ErrorBoundary(child: child),
+            ),
+          ),
+        ),
       ],
     );
   }
@@ -146,24 +158,24 @@ class _AppShellState extends State<AppShell> {
 
   Widget _buildMobileLayout() {
     return Scaffold(
-      backgroundColor: AppTheme.darkBackground,
+      backgroundColor: context.palette.background,
       body: SafeArea(child: _buildBody()),
       bottomNavigationBar: Container(
-        decoration: const BoxDecoration(
-          color: AppTheme.cardSurface,
-          border: Border(top: BorderSide(color: AppTheme.borderHighlight, width: 1)),
+        decoration: BoxDecoration(
+          color: context.palette.card,
+          border: Border(top: BorderSide(color: context.palette.border, width: 1)),
         ),
         child: NavigationBar(
           selectedIndex: _currentIndex,
           onDestinationSelected: (index) => setState(() => _currentIndex = index),
           backgroundColor: Colors.transparent,
-          indicatorColor: AppTheme.cyberBlue.withOpacity(0.25),
+          indicatorColor: context.palette.accent.withValues(alpha: 0.25),
           elevation: 0,
           labelBehavior: NavigationDestinationLabelBehavior.onlyShowSelected,
           destinations: _navItems.map((item) {
             return NavigationDestination(
-              icon: _buildBadge(item, Icon(item.icon, color: Colors.white70)),
-              selectedIcon: _buildBadge(item, Icon(item.selectedIcon, color: AppTheme.cyberBlue)),
+              icon: _buildBadge(item, Icon(item.icon, color: context.palette.dim(0.70))),
+              selectedIcon: _buildBadge(item, Icon(item.selectedIcon, color: context.palette.accent)),
               label: item.label,
             );
           }).toList(),
@@ -174,34 +186,34 @@ class _AppShellState extends State<AppShell> {
 
   Widget _buildTabletLayout() {
     return Scaffold(
-      backgroundColor: AppTheme.darkBackground,
+      backgroundColor: context.palette.background,
       body: Row(
         children: [
           NavigationRail(
             selectedIndex: _currentIndex,
             onDestinationSelected: (index) => setState(() => _currentIndex = index),
-            backgroundColor: AppTheme.cardSurface,
-            indicatorColor: AppTheme.cyberBlue.withOpacity(0.2),
-            leading: const Padding(
+            backgroundColor: context.palette.card,
+            indicatorColor: context.palette.accent.withValues(alpha: 0.2),
+            leading: Padding(
               padding: EdgeInsets.symmetric(vertical: 16),
-              child: Icon(Icons.shield_rounded, color: AppTheme.cyberBlue, size: 32),
+              child: Icon(Icons.shield_rounded, color: context.palette.accent, size: 32),
             ),
             labelType: NavigationRailLabelType.selected,
             destinations: _navItems.map((item) {
               return NavigationRailDestination(
                 icon: Tooltip(
                   message: item.label,
-                  child: _buildBadge(item, Icon(item.icon, color: Colors.white70)),
+                  child: _buildBadge(item, Icon(item.icon, color: context.palette.dim(0.70))),
                 ),
                 selectedIcon: Tooltip(
                   message: item.label,
-                  child: _buildBadge(item, Icon(item.selectedIcon, color: AppTheme.cyberBlue)),
+                  child: _buildBadge(item, Icon(item.selectedIcon, color: context.palette.accent)),
                 ),
                 label: Text(item.label, style: const TextStyle(fontSize: 11)),
               );
             }).toList(),
           ),
-          const VerticalDivider(width: 1, color: AppTheme.borderHighlight),
+          VerticalDivider(width: 1, color: context.palette.border),
           Expanded(child: _buildBody()),
         ],
       ),
@@ -212,15 +224,15 @@ class _AppShellState extends State<AppShell> {
     final double sidebarWidth = _isSidebarCollapsed ? 80 : 260;
 
     return Scaffold(
-      backgroundColor: AppTheme.darkBackground,
+      backgroundColor: context.palette.background,
       body: Row(
         children: [
           AnimatedContainer(
             duration: const Duration(milliseconds: 200),
             width: sidebarWidth,
-            decoration: const BoxDecoration(
-              color: AppTheme.cardSurface,
-              border: Border(right: BorderSide(color: AppTheme.borderHighlight, width: 1)),
+            decoration: BoxDecoration(
+              color: context.palette.card,
+              border: Border(right: BorderSide(color: context.palette.border, width: 1)),
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -232,19 +244,19 @@ class _AppShellState extends State<AppShell> {
                       Container(
                         padding: const EdgeInsets.all(8),
                         decoration: BoxDecoration(
-                          color: AppTheme.cyberBlue.withOpacity(0.15),
+                          color: context.palette.accent.withValues(alpha: 0.15),
                           borderRadius: BorderRadius.circular(8),
                         ),
-                        child: const Icon(Icons.shield_rounded, color: AppTheme.cyberBlue, size: 24),
+                        child: Icon(Icons.shield_rounded, color: context.palette.accent, size: 24),
                       ),
                       if (!_isSidebarCollapsed) ...[
                         const SizedBox(width: 12),
-                        const Expanded(
+                        Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text('EDGE AI CCTV', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 14, letterSpacing: 0.8)),
-                              Text('N100 + Hailo-8 NPU', style: TextStyle(color: AppTheme.liveGreen, fontSize: 11, fontWeight: FontWeight.w500)),
+                              Text('STORE EDGE CCTV', style: TextStyle(color: context.palette.text, fontWeight: FontWeight.bold, fontSize: 14, letterSpacing: 0.8)),
+                              Text('Loss prevention & analytics', style: TextStyle(color: context.palette.live, fontSize: 11, fontWeight: FontWeight.w500)),
                             ],
                           ),
                         ),
@@ -252,7 +264,7 @@ class _AppShellState extends State<AppShell> {
                     ],
                   ),
                 ),
-                const Divider(height: 1, color: AppTheme.borderHighlight),
+                Divider(height: 1, color: context.palette.border),
                 const SizedBox(height: 12),
                 Expanded(
                   child: ListView.builder(
@@ -269,9 +281,9 @@ class _AppShellState extends State<AppShell> {
                           child: Container(
                             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
                             decoration: BoxDecoration(
-                              color: isSelected ? AppTheme.cyberBlue.withOpacity(0.15) : Colors.transparent,
+                              color: isSelected ? context.palette.accent.withValues(alpha: 0.15) : Colors.transparent,
                               borderRadius: BorderRadius.circular(8),
-                              border: isSelected ? Border.all(color: AppTheme.cyberBlue.withOpacity(0.4)) : null,
+                              border: isSelected ? Border.all(color: context.palette.accent.withValues(alpha: 0.4)) : null,
                             ),
                             child: Row(
                               children: [
@@ -279,7 +291,7 @@ class _AppShellState extends State<AppShell> {
                                   item,
                                   Icon(
                                     isSelected ? item.selectedIcon : item.icon,
-                                    color: isSelected ? AppTheme.cyberBlue : Colors.white70,
+                                    color: isSelected ? context.palette.accent : context.palette.dim(0.70),
                                     size: 22,
                                   ),
                                 ),
@@ -289,7 +301,7 @@ class _AppShellState extends State<AppShell> {
                                     child: Text(
                                       item.label,
                                       style: TextStyle(
-                                        color: isSelected ? Colors.white : Colors.white70,
+                                        color: isSelected ? context.palette.text : context.palette.dim(0.70),
                                         fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
                                         fontSize: 13,
                                       ),
@@ -304,7 +316,7 @@ class _AppShellState extends State<AppShell> {
                     },
                   ),
                 ),
-                const Divider(height: 1, color: AppTheme.borderHighlight),
+                Divider(height: 1, color: context.palette.border),
                 InkWell(
                   onTap: () => setState(() => _isSidebarCollapsed = !_isSidebarCollapsed),
                   child: Container(
@@ -312,10 +324,10 @@ class _AppShellState extends State<AppShell> {
                     child: Row(
                       mainAxisAlignment: _isSidebarCollapsed ? MainAxisAlignment.center : MainAxisAlignment.start,
                       children: [
-                        Icon(_isSidebarCollapsed ? Icons.chevron_right_rounded : Icons.chevron_left_rounded, color: Colors.white54),
+                        Icon(_isSidebarCollapsed ? Icons.chevron_right_rounded : Icons.chevron_left_rounded, color: context.palette.dim(0.54)),
                         if (!_isSidebarCollapsed) ...[
                           const SizedBox(width: 12),
-                          const Text('Collapse Sidebar', style: TextStyle(color: Colors.white54, fontSize: 12)),
+                          Text('Collapse Sidebar', style: TextStyle(color: context.palette.dim(0.54), fontSize: 12)),
                         ],
                       ],
                     ),
@@ -334,7 +346,7 @@ class _AppShellState extends State<AppShell> {
     if (item.badgeCount == 0) return iconWidget;
     return Badge(
       label: Text('${item.badgeCount}'),
-      backgroundColor: item.badgeColor ?? AppTheme.cyberBlue,
+      backgroundColor: item.badgeColor?.call(context.palette) ?? context.palette.accent,
       child: iconWidget,
     );
   }
@@ -346,7 +358,8 @@ class NavSectionItem {
   final IconData icon;
   final IconData selectedIcon;
   final int badgeCount;
-  final Color? badgeColor;
+  /// Picks the badge colour from the active palette.
+  final Color Function(AppPalette)? badgeColor;
 
   const NavSectionItem({
     required this.section,

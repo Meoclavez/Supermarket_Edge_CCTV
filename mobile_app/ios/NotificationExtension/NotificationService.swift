@@ -17,8 +17,14 @@ class NotificationService: UNNotificationServiceExtension {
 
         // Extract media URL from APNs payload (snapshot or short video clip)
         let userInfo = request.content.userInfo
-        guard let mediaUrlString = (userInfo["snapshot_url"] as? String) ?? (userInfo["clip_url"] as? String),
-              let mediaUrl = URL(string: mediaUrlString) else {
+        // Loss-prevention pushes carry the evidence snapshot; it must be an absolute URL here.
+        guard let mediaUrlString = (userInfo["evidence_snapshot_url"] as? String)
+                ?? (userInfo["snapshot_url"] as? String)
+                ?? (userInfo["clip_url"] as? String),
+              let mediaUrl = URL(string: mediaUrlString),
+              mediaUrl.scheme != nil else {
+            // The server sends a relative, authenticated evidence URL; the
+            // app loads it in the alert screen, so show the text-only alert.
             contentHandler(bestAttemptContent)
             return
         }

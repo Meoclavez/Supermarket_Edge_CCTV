@@ -1,4 +1,4 @@
-"""SQLAlchemy database models for cameras, security events, push device tokens, DVR segments, and archives."""
+"""SQLAlchemy database models for cameras, loss-prevention alerts, push device tokens, DVR segments, and archives."""
 
 from datetime import datetime
 from typing import Optional
@@ -81,6 +81,13 @@ class CameraModel(Base):
 
 
 class SecurityEventModel(Base):
+    """Loss-prevention alert log (theft alerts, camera offline).
+
+    Each row is one alert fanned out to staff phones and the dashboard
+    websocket; ``acknowledged`` records that a staff member has seen it. The
+    evidence for a theft alert lives in ``theft_incidents``; this table is the
+    notification record. The table name is kept for existing databases.
+    """
     __tablename__ = "security_events"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -95,7 +102,8 @@ class SecurityEventModel(Base):
     snapshot_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     bounding_box: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     keypoints: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
-    kinematics: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # Older builds also had a ``kinematics`` column (fall-detection telemetry);
+    # migration m0004 drops it. Schema changes: see app/migrations/__init__.py.
     metadata_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     acknowledged: Mapped[bool] = mapped_column(Boolean, default=False)
     acknowledged_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
@@ -192,6 +200,25 @@ class ShelfInteractionModel(Base):
     action_type: Mapped[str] = mapped_column(String(32), default="GRAB")  # REACH, GRAB, INSPECT, RETURN
     duration_sec: Mapped[float] = mapped_column(Float, default=0.0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    # Written by the live pose pipeline (app/services/pose_analytics.py).
+    hand: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)            # "left" | "right"
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)       # mean wrist visibility
+    zone_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    zone_space: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)    # "image" | "floor"
+    image_x: Mapped[Optional[float]] = mapped_column(Float, nullable=True)          # wrist, 0..1 of frame width
+    image_y: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    floor_x: Mapped[Optional[float]] = mapped_column(Float, nullable=True)          # shopper position, metres
+    floor_y: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # Product attribution copied at reach time (m0010); NULL on older rows.
+    sku_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    product_category: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    shelf_level: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)      # TOP | MIDDLE | BOTTOM
+    value_tier: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)      # LOW | STANDARD | PREMIUM
+    contact_point: Mapped[Optional[str]] = mapped_column(String(12), nullable=True)   # hand_tip | wrist
+
+    __table_args__ = (Index("ix_shelf_interactions_zone_ts", "shelf_zone_id", "timestamp"),)
 
 
 class CustomerTrackModel(Base):
@@ -203,6 +230,8 @@ class CustomerTrackModel(Base):
     start_time: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
     end_time: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     trajectory_points: Mapped[list] = mapped_column(JSON, default=list)
+    # Detection frames the tracker matched (m0008); NULL on older rows.
+    hits: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     age_group: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     gender: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     sentiment: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
@@ -267,6 +296,9 @@ class TheftIncidentModel(Base):
     evidence_clip_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     bounding_box: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     wrist_trajectory: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    # Which loss-prevention rule raised this, and the evidence bullets behind it.
+    rule: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    evidence: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     guard_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     dispatch_details: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     resolution: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
@@ -382,7 +414,7 @@ class DiscoveredDeviceModel(Base):
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
     transport: Mapped[str] = mapped_column(String(16), default="rtsp")  # rtsp | usb | mjpeg
-    driver: Mapped[str] = mapped_column(String(32), default="generic")  # dahua | onvif | v4l2 | esp32
+    driver: Mapped[str] = mapped_column(String(32), default="generic")  # dahua | hikvision | onvif | v4l2
     host: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     port: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     device_path: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
@@ -395,3 +427,70 @@ class DiscoveredDeviceModel(Base):
     adopted_camera_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     first_seen: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     last_seen: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+# --- Pairing & push (migration m0007) ----------------------------------------
+
+
+class PairedDeviceModel(Base):
+    """A staff phone paired with this edge device (QR/code or password login).
+
+    Tokens issued to the phone carry ``dev`` (this device's id) and ``pd``
+    (this row's id). Revoking the row makes every token it holds unusable.
+    Only a SHA-256 of the phone's current refresh token is stored.
+    """
+    __tablename__ = "paired_devices"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    platform: Mapped[str] = mapped_column(String(16), nullable=False)  # android | ios
+    app_instance_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    user_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    paired_via: Mapped[str] = mapped_column(String(16), nullable=False)  # code | password
+    push_provider: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)  # fcm | None
+    push_token: Mapped[Optional[str]] = mapped_column(String(4096), nullable=True)
+    push_token_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    refresh_token_hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    alert_prefs: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_push_status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    last_push_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_push_error: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+
+
+class PairingSessionModel(Base):
+    """A one-time pairing code shown on the dashboard (only its HMAC is stored)."""
+    __tablename__ = "pairing_sessions"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    code_hash: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    created_by: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    paired_device_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+
+
+class TripwireEventModel(Base):
+    """One person crossing a Studio tripwire (migration m0008).
+
+    Written by services/tripwire_engine.py while the camera's
+    ``people_counting`` flag is on. ``direction`` is "in" or "out" relative to
+    the tripwire's configured in-side. ``tripwire_name`` and
+    ``counts_footfall`` are copied at crossing time so history stays correct
+    after the line is renamed, reconfigured or deleted.
+    """
+    __tablename__ = "tripwire_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tripwire_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    tripwire_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    camera_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    track_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    direction: Mapped[str] = mapped_column(String(8), nullable=False)
+    ts: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    counts_footfall: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    __table_args__ = (Index("ix_tripwire_events_tripwire_ts", "tripwire_id", "ts"),)

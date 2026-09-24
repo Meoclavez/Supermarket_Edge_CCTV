@@ -6,6 +6,9 @@ Documentation=file:///opt/edge-cctv/docs/DEPLOYMENT.md
 # avoids a burst of failed connections at every boot.
 After=network-online.target
 Wants=network-online.target
+# A camera that fails repeatedly must not take the whole service into a
+# restart loop that systemd eventually gives up on.
+StartLimitIntervalSec=0
 
 [Service]
 Type=exec
@@ -15,8 +18,18 @@ Group=edgecctv
 WorkingDirectory=/opt/edge-cctv/edge_backend
 EnvironmentFile=/opt/edge-cctv/edge_backend/.env
 
-ExecStart=/opt/edge-cctv/.venv/bin/uvicorn app.main:app \
-    --host 0.0.0.0 --port 8000 --workers 1
+# Read-only preflight (deps, onnxruntime flavour/providers, GPU-vs-provider
+# mismatch, model hashes, storage). It never installs anything: the venv is
+# read-only under ProtectSystem=strict. It fails the start only on hard errors
+# (missing packages/required model, unwritable storage); a GPU that cannot be
+# used is logged as a warning and the service runs on the CPU. Fix problems
+# as the install owner with /opt/edge-cctv/run.sh --check-only.
+ExecStartPre=/opt/edge-cctv/.venv/bin/python -m app.services.preflight
+
+# `python -m uvicorn` rather than .venv/bin/uvicorn: a venv that was copied or
+# moved keeps console scripts pointing at the old interpreter.
+ExecStart=/opt/edge-cctv/.venv/bin/python -m uvicorn app.main:app \
+    --host 0.0.0.0 --port 8000 --workers 1 --timeout-graceful-shutdown 5
 
 # Single worker is deliberate: the camera workers, their frame buffers and the
 # in-memory fact buffer live in this process. A second worker would open a
@@ -25,14 +38,12 @@ ExecStart=/opt/edge-cctv/.venv/bin/uvicorn app.main:app \
 
 Restart=always
 RestartSec=5
-# A camera that fails repeatedly must not take the whole service into a
-# restart loop that systemd eventually gives up on.
-StartLimitIntervalSec=0
 
 # Recording and model loading are memory-hungry; fail loudly rather than
-# letting the OOM killer take an unrelated process.
-MemoryHigh=3G
-MemoryMax=4G
+# letting the OOM killer take an unrelated process. The CUDA/cuDNN libraries
+# alone map well over 1 GB, and their page cache is charged to this cgroup.
+MemoryHigh=6G
+MemoryMax=8G
 
 # Hardening. The service needs its storage directory, the video devices and
 # the network, and nothing else.
@@ -41,6 +52,8 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/opt/edge-cctv/storage
+# CUDA writes its JIT/kernel cache under $HOME by default, which is read-only here.
+Environment=CUDA_CACHE_PATH=/opt/edge-cctv/storage/.nv-cache
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
@@ -51,6 +64,17 @@ LockPersonality=true
 # USB/CSI cameras and GPU render nodes for hardware decode and inference.
 DeviceAllow=char-video4linux rw
 DeviceAllow=char-drm rw
+# NVIDIA: /dev/nvidia0..N, /dev/nvidiactl and /dev/nvidia-modeset share the
+# "nvidia" major (named nvidia-frontend on older drivers); /dev/nvidia-uvm and
+# nvidia-uvm-tools are "nvidia-uvm". Groups absent on a machine are ignored.
+DeviceAllow=char-nvidia rw
+DeviceAllow=char-nvidia-frontend rw
+DeviceAllow=char-nvidia-uvm rw
+DeviceAllow=char-nvidia-caps rw
+# AMD ROCm compute queue.
+DeviceAllow=char-kfd rw
+# Hailo-8/8L NPU. On a machine without one systemd logs a notice and continues.
+DeviceAllow=/dev/hailo0 rw
 SupplementaryGroups=video render
 
 StandardOutput=journal

@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
+import '../core/theme/app_theme.dart';
 import '../models/camera_feed.dart';
 import '../models/feature_config.dart';
 import '../services/api_service.dart';
 
+/// Per-camera retail analytics toggles (`PUT /api/v1/cameras/{id}/features`).
 class CameraSettingsScreen extends StatefulWidget {
   final CameraFeed camera;
   final VoidCallback onUpdated;
@@ -16,79 +18,68 @@ class CameraSettingsScreen extends StatefulWidget {
 class _CameraSettingsScreenState extends State<CameraSettingsScreen> {
   final ApiService _apiService = ApiService();
   late FeatureConfig _config;
+  bool _saving = false;
 
   @override
   void initState() {
     super.initState();
-    _config = widget.camera.features;
+    _config = FeatureConfig.fromJson(widget.camera.features.toJson());
   }
 
-  Future<void> _saveFeature(String key, bool val) async {
+  /// Applies [change] locally, saves, and rolls back if the server rejects it.
+  Future<void> _update(void Function(FeatureConfig c) change, void Function(FeatureConfig c) undo) async {
+    setState(() {
+      change(_config);
+      _saving = true;
+    });
     try {
-      await _apiService.updateCameraFeatures(widget.camera.id, _config);
+      final saved = await _apiService.updateCameraFeatures(widget.camera.id, _config);
+      if (!mounted) return;
+      setState(() => _config = saved);
       widget.onUpdated();
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Failed to update feature")));
+      if (!mounted) return;
+      setState(() => undo(_config));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Setting not saved: $e'), backgroundColor: context.palette.alert),
+      );
+    } finally {
+      if (mounted) setState(() => _saving = false);
     }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: Text("${widget.camera.name} Features"),
-      ),
+      appBar: AppBar(title: Text('${widget.camera.name} analytics')),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          const Text("Granular AI Feature Gating", style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF38BDF8))),
+          Text('Store analytics', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: context.palette.accent)),
           const SizedBox(height: 8),
-          const Text("Turn off unneeded features to save Mini PC CPU/GPU power and memory bandwidth.", style: TextStyle(color: Colors.white70, fontSize: 13)),
+          Text(
+            'Turn off analytics a camera does not need to save edge server compute.',
+            style: TextStyle(color: context.palette.dim(0.70), fontSize: 13),
+          ),
+          if (_saving) const Padding(padding: EdgeInsets.only(top: 12), child: LinearProgressIndicator(minHeight: 2)),
           const SizedBox(height: 20),
           _buildSwitchTile(
-            "Elderly Fall Detection",
-            "17-Keypoint YOLO-Pose skeletal tracking (Heavy compute). Enable in living rooms and bedrooms.",
-            _config.fallDetection,
-            (val) {
-              setState(() => _config.fallDetection = val);
-              _saveFeature("fall_detection", val);
-            },
+            'Loss prevention',
+            'Pose-based detection of suspicious behaviour (for example concealment) for staff review.',
+            _config.theftDetection,
+            (val) => _update((c) => c.theftDetection = val, (c) => c.theftDetection = !val),
           ),
           _buildSwitchTile(
-            "Door Ajar & Entry Monitoring",
-            "Monitors door ROI for open state or nighttime breaches.",
-            _config.doorMonitoring,
-            (val) {
-              setState(() => _config.doorMonitoring = val);
-              _saveFeature("door_monitoring", val);
-            },
+            'Shelf interaction',
+            'Counts reach-to-shelf interactions per product zone for the engagement funnel.',
+            _config.shelfInteraction,
+            (val) => _update((c) => c.shelfInteraction = val, (c) => c.shelfInteraction = !val),
           ),
           _buildSwitchTile(
-            "Package & Property Theft",
-            "Stationary porch parcel tracking & removal alert.",
-            _config.packageTheftTracking,
-            (val) {
-              setState(() => _config.packageTheftTracking = val);
-              _saveFeature("package_theft_tracking", val);
-            },
-          ),
-          _buildSwitchTile(
-            "Danger Zone Inactivity",
-            "Alerts if person is stationary in high-risk zones (e.g. bathroom).",
-            _config.inactivityAlerts,
-            (val) {
-              setState(() => _config.inactivityAlerts = val);
-              _saveFeature("inactivity_alerts", val);
-            },
-          ),
-          _buildSwitchTile(
-            "Continuous 24/7 Disk Recording",
-            "Records full resolution stream directly to internal SSD.",
-            _config.continuousRecording,
-            (val) {
-              setState(() => _config.continuousRecording = val);
-              _saveFeature("continuous_recording", val);
-            },
+            'People counting',
+            'Footfall, occupancy and dwell time used for heatmaps and traffic reports.',
+            _config.peopleCounting,
+            (val) => _update((c) => c.peopleCounting = val, (c) => c.peopleCounting = !val),
           ),
         ],
       ),
@@ -100,10 +91,10 @@ class _CameraSettingsScreenState extends State<CameraSettingsScreen> {
       margin: const EdgeInsets.only(bottom: 12),
       child: SwitchListTile(
         title: Text(title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
-        subtitle: Text(subtitle, style: const TextStyle(fontSize: 12, color: Colors.white60)),
+        subtitle: Text(subtitle, style: TextStyle(fontSize: 12, color: context.palette.dim(0.60))),
         value: value,
-        activeColor: const Color(0xFF10B981),
-        onChanged: onChanged,
+        activeThumbColor: context.palette.live,
+        onChanged: _saving ? null : onChanged,
       ),
     );
   }

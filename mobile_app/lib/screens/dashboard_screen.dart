@@ -1,11 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../core/theme/app_theme.dart';
+import 'settings_screen.dart';
 import '../models/camera_feed.dart';
 import '../models/security_event.dart';
 import '../services/api_service.dart';
-import '../services/notification_service.dart';
 import 'live_view_screen.dart';
+import 'loss_prevention_screen.dart';
 import 'clip_player_screen.dart';
 
 class DashboardScreen extends StatefulWidget {
@@ -19,6 +20,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   final ApiService _apiService = ApiService();
   List<CameraFeed> _cameras = [];
   List<SecurityEvent> _recentEvents = [];
+  Map<String, dynamic>? _hardware;
   bool _isLoading = true;
   String? _errorMessage;
 
@@ -41,7 +43,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
     try {
       final cameras = await _apiService.getCameras();
       final events = await _apiService.getEvents();
+      Map<String, dynamic>? hardware;
+      try {
+        hardware = await _apiService.getHardwareProfile();
+      } catch (_) {
+        hardware = null;
+      }
       setState(() {
+        _hardware = hardware;
         _cameras = cameras;
         _recentEvents = events;
         _errorMessage = null;
@@ -55,62 +64,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
   }
 
+  /// Server addresses are managed per store (keyed by device id) in
+  /// Settings; there is no free-form URL editor here.
   void _showSettingsDialog() {
-    final controller = TextEditingController(text: _apiService.baseUrl);
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: AppTheme.cardSurface,
-        title: const Text('Edge Server Configuration', style: TextStyle(fontWeight: FontWeight.bold)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Enter Edge Mini PC LAN IP, Tailscale IP, or VPN domain:',
-              style: TextStyle(fontSize: 12, color: Colors.white70),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: controller,
-              decoration: const InputDecoration(
-                hintText: 'http://192.168.1.100:8000',
-                labelText: 'Server Base URL',
-                border: OutlineInputBorder(),
-                prefixIcon: Icon(Icons.dns),
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-          ElevatedButton(
-            onPressed: () async {
-              await _apiService.setBaseUrl(controller.text);
-              Navigator.pop(context);
-              _loadData();
-            },
-            child: const Text('Save & Reconnect'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _triggerTestEmergencyAlert() async {
-    try {
-      final event = await _apiService.triggerSimulatedEvent(
-        cameraId: _cameras.isNotEmpty ? _cameras.first.id : 'cam_living_room',
-        eventType: 'FALL_DETECTED',
-        severity: 'CRITICAL',
-      );
-      await NotificationService().triggerEmergencyTakeover(event);
-      _loadData();
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Trigger failed: $e'), backgroundColor: AppTheme.emergencyRed),
-      );
-    }
+    Navigator.of(context).push(MaterialPageRoute(builder: (_) => const SettingsScreen()));
   }
 
   @override
@@ -125,7 +82,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
               width: 10,
               height: 10,
               decoration: BoxDecoration(
-                color: isOffline ? AppTheme.emergencyRed : AppTheme.liveGreen,
+                color: isOffline ? context.palette.alert : context.palette.live,
                 shape: BoxShape.circle,
               ),
             ),
@@ -147,14 +104,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
             onPressed: _loadData,
           ),
           IconButton(
-            icon: const Icon(Icons.warning_amber_rounded, color: AppTheme.emergencyRed),
-            tooltip: 'Simulate Fall Alert (DND Bypass Test)',
-            onPressed: _triggerTestEmergencyAlert,
+            icon: Icon(Icons.policy_outlined, color: context.palette.alert),
+            tooltip: 'Loss prevention alerts',
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (context) => const LossPreventionScreen()),
+            ),
           ),
         ],
       ),
       body: _isLoading
-          ? const Center(child: CircularProgressIndicator(color: AppTheme.cyberBlue))
+          ? Center(child: CircularProgressIndicator(color: context.palette.accent))
           : isOffline && _cameras.isEmpty
               ? _buildOfflineErrorView()
               : RefreshIndicator(
@@ -168,24 +128,24 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         if (isOffline) _buildInlineOfflineWarning(),
                         _buildSystemHealthBanner(isOffline),
                         const SizedBox(height: 24),
-                        const Text(
+                        Text(
                           'LIVE CAMERA FEEDS',
                           style: TextStyle(
                             fontSize: 14,
                             fontWeight: FontWeight.bold,
-                            color: Colors.white70,
+                            color: context.palette.dim(0.70),
                             letterSpacing: 1.1,
                           ),
                         ),
                         const SizedBox(height: 12),
                         _buildCameraGrid(),
                         const SizedBox(height: 28),
-                        const Text(
+                        Text(
                           'RECENT AI SECURITY EVENTS',
                           style: TextStyle(
                             fontSize: 14,
                             fontWeight: FontWeight.bold,
-                            color: Colors.white70,
+                            color: context.palette.dim(0.70),
                             letterSpacing: 1.1,
                           ),
                         ),
@@ -205,7 +165,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const Icon(Icons.cloud_off_rounded, color: AppTheme.emergencyRed, size: 64),
+            Icon(Icons.cloud_off_rounded, color: context.palette.alert, size: 64),
             const SizedBox(height: 16),
             const Text(
               'Cannot Reach Edge AI Server',
@@ -215,10 +175,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
             Text(
               _errorMessage ?? 'Network connection failed.',
               textAlign: TextAlign.center,
-              style: const TextStyle(color: Colors.white60, fontSize: 13),
+              style: TextStyle(color: context.palette.dim(0.60), fontSize: 13),
             ),
             const SizedBox(height: 8),
-            Text('Target: ${_apiService.baseUrl}', style: const TextStyle(fontSize: 12, color: AppTheme.cyberBlue)),
+            Text('Target: ${_apiService.baseUrl}', style: TextStyle(fontSize: 12, color: context.palette.accent)),
             const SizedBox(height: 24),
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
@@ -247,15 +207,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
       margin: const EdgeInsets.only(bottom: 16),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: AppTheme.emergencyRed.withOpacity(0.15),
+        color: context.palette.alert.withValues(alpha: 0.15),
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: AppTheme.emergencyRed.withOpacity(0.5)),
+        border: Border.all(color: context.palette.alert.withValues(alpha: 0.5)),
       ),
       child: Row(
         children: [
-          const Icon(Icons.warning_amber_rounded, color: AppTheme.emergencyRed),
+          Icon(Icons.warning_amber_rounded, color: context.palette.alert),
           const SizedBox(width: 8),
-          Expanded(child: Text('Offline: $_errorMessage', style: const TextStyle(fontSize: 12, color: Colors.white))),
+          Expanded(child: Text('Offline: $_errorMessage', style: TextStyle(fontSize: 12, color: context.palette.text))),
           TextButton(onPressed: _loadData, child: const Text('Retry')),
         ],
       ),
@@ -266,34 +226,43 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       decoration: BoxDecoration(
-        color: AppTheme.cardSurface,
+        color: context.palette.card,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: isOffline ? AppTheme.emergencyRed : AppTheme.borderHighlight),
+        border: Border.all(color: isOffline ? context.palette.alert : context.palette.border),
       ),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text('Edge Hardware: Intel N100 + Hailo-8 M.2', style: TextStyle(fontWeight: FontWeight.bold)),
-              const SizedBox(height: 4),
-              Text(
-                isOffline ? 'Server Unreachable: ${_apiService.baseUrl}' : 'Inference: 7.2ms (HailoRT) • Decode: VA-API',
-                style: const TextStyle(fontSize: 12, color: Colors.white54),
-              ),
-            ],
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Edge server: ${_hardware?['device_name'] ?? _apiService.baseUrl}', style: const TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 4),
+                Text(
+                  isOffline
+                      ? 'Server Unreachable: ${_apiService.baseUrl}'
+                      : _hardware == null
+                          ? 'Hardware profile unavailable'
+                          : _hardware!['inference_available'] == true
+                              ? 'Inference: ${_hardware!['inference_backend']} (${_hardware!['inference_provider']}) • Decode: ${_hardware!['decoder_capability']}'
+                              : 'Inference unavailable: ${_hardware!['inference_error'] ?? 'no backend'}',
+                  style: TextStyle(fontSize: 12, color: context.palette.dim(0.54)),
+                ),
+              ],
+            ),
           ),
+          const SizedBox(width: 8),
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
             decoration: BoxDecoration(
-              color: isOffline ? AppTheme.emergencyRed.withOpacity(0.15) : AppTheme.liveGreen.withOpacity(0.15),
+              color: isOffline ? context.palette.alert.withValues(alpha: 0.15) : context.palette.live.withValues(alpha: 0.15),
               borderRadius: BorderRadius.circular(20),
             ),
             child: Text(
               isOffline ? 'DISCONNECTED' : '100% EDGE',
               style: TextStyle(
-                color: isOffline ? AppTheme.emergencyRed : AppTheme.liveGreen,
+                color: isOffline ? context.palette.alert : context.palette.live,
                 fontSize: 11,
                 fontWeight: FontWeight.bold,
               ),
@@ -326,9 +295,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
           },
           child: Container(
             decoration: BoxDecoration(
-              color: AppTheme.cardSurface,
+              color: context.palette.card,
               borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: AppTheme.borderHighlight),
+              border: Border.all(color: context.palette.border),
             ),
             clipBehavior: Clip.antiAlias,
             child: Stack(
@@ -360,7 +329,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     children: [
                       Text(
                         camera.name,
-                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
@@ -371,7 +340,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                             width: 6,
                             height: 6,
                             decoration: BoxDecoration(
-                              color: camera.isOnline ? AppTheme.liveGreen : AppTheme.emergencyRed,
+                              color: camera.isOnline ? AppTheme.liveGreen : AppTheme.alertRed,
                               shape: BoxShape.circle,
                             ),
                           ),
@@ -398,7 +367,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return Container(
         padding: const EdgeInsets.all(24),
         alignment: Alignment.center,
-        child: const Text('No recent anomalies detected.', style: TextStyle(color: Colors.white38)),
+        child: Text('No recent anomalies detected.', style: TextStyle(color: context.palette.dim(0.38))),
       );
     }
 
@@ -416,12 +385,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
             leading: Container(
               padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(
-                color: event.isCritical ? AppTheme.emergencyRed.withOpacity(0.2) : AppTheme.warningOrange.withOpacity(0.2),
+                color: event.isHigh ? context.palette.alert.withValues(alpha: 0.2) : context.palette.warning.withValues(alpha: 0.2),
                 shape: BoxShape.circle,
               ),
               child: Icon(
-                event.isCritical ? Icons.emergency : Icons.warning,
-                color: event.isCritical ? AppTheme.emergencyRed : AppTheme.warningOrange,
+                event.isHigh ? Icons.report_rounded : Icons.warning,
+                color: event.isHigh ? context.palette.alert : context.palette.warning,
                 size: 20,
               ),
             ),
@@ -430,11 +399,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
               style: TextStyle(
                 fontWeight: FontWeight.bold,
                 fontSize: 14,
-                color: event.isCritical ? AppTheme.emergencyRed : Colors.white,
+                color: event.isHigh ? context.palette.alert : context.palette.text,
               ),
             ),
-            subtitle: Text('${event.location} • $timeStr', style: const TextStyle(fontSize: 12, color: Colors.white60)),
-            trailing: const Icon(Icons.play_circle_fill, color: AppTheme.cyberBlue, size: 28),
+            subtitle: Text('${event.location} • $timeStr', style: TextStyle(fontSize: 12, color: context.palette.dim(0.60))),
+            trailing: Icon(Icons.play_circle_fill, color: context.palette.accent, size: 28),
             onTap: () {
               Navigator.push(
                 context,

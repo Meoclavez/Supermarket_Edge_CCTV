@@ -1,6 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 import '../core/theme/app_theme.dart';
+import '../services/api_service.dart';
+import '../core/server_time.dart';
 
+/// Exported incident clips from `GET /api/v1/dvr/archives`.
 class ClipArchivesScreen extends StatefulWidget {
   const ClipArchivesScreen({Key? key}) : super(key: key);
 
@@ -9,74 +13,83 @@ class ClipArchivesScreen extends StatefulWidget {
 }
 
 class _ClipArchivesScreenState extends State<ClipArchivesScreen> {
-  final List<Map<String, dynamic>> _archives = [
-    {
-      'id': 'arch_01',
-      'camera_name': 'Front Door Entrance',
-      'title': 'Suspicious Package Theft Incident',
-      'time_range': 'Today 14:02 - 14:07 (5 min)',
-      'size': '42.5 MB',
-      'created_at': '2 hours ago'
-    },
-    {
-      'id': 'arch_02',
-      'camera_name': 'Living Room',
-      'title': 'Kinematic Fall Event Verification',
-      'time_range': 'Yesterday 09:15 - 09:20 (5 min)',
-      'size': '38.1 MB',
-      'created_at': '1 day ago'
-    },
-  ];
+  List<Map<String, dynamic>> _archives = [];
+  bool _loading = true;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final list = await ApiService().getArchives();
+      if (mounted) setState(() => _archives = list);
+    } catch (e) {
+      if (mounted) setState(() => _error = 'Could not load archives: $e');
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  String _subtitle(Map<String, dynamic> a) {
+    final fmt = DateFormat('d MMM HH:mm');
+    final start = parseServerTime(a['start_time']);
+    final secs = (a['duration_seconds'] as num?)?.toDouble() ?? 0;
+    final mb = ((a['file_size_bytes'] as num?)?.toDouble() ?? 0) / (1024 * 1024);
+    final when = start != null ? fmt.format(start) : 'unknown time';
+    return '${a['camera_name'] ?? a['camera_id'] ?? ''} • $when (${(secs / 60).toStringAsFixed(1)} min)\n'
+        '${mb.toStringAsFixed(1)} MB • ${a['status'] ?? ''}';
+  }
 
   @override
   Widget build(BuildContext context) {
+    Widget body;
+    if (_loading) {
+      body = Center(child: CircularProgressIndicator(color: context.palette.accent));
+    } else if (_error != null) {
+      body = Center(child: Padding(padding: const EdgeInsets.all(24), child: Text(_error!, textAlign: TextAlign.center)));
+    } else if (_archives.isEmpty) {
+      body = Center(child: Text('No exported clips yet', style: TextStyle(color: context.palette.dim(0.60))));
+    } else {
+      body = RefreshIndicator(
+        onRefresh: _load,
+        child: ListView.builder(
+          padding: const EdgeInsets.all(16),
+          itemCount: _archives.length,
+          itemBuilder: (context, index) {
+            final arch = _archives[index];
+            return Card(
+              color: context.palette.card,
+              margin: const EdgeInsets.only(bottom: 12),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+                side: BorderSide(color: context.palette.border),
+              ),
+              child: ListTile(
+                leading: Icon(Icons.video_file_outlined, color: context.palette.accent, size: 36),
+                title: Text(arch['title']?.toString() ?? 'Clip', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                subtitle: Text(_subtitle(arch), style: TextStyle(color: context.palette.dim(0.60), fontSize: 11)),
+              ),
+            );
+          },
+        ),
+      );
+    }
+
     return Scaffold(
-      backgroundColor: AppTheme.darkBackground,
+      backgroundColor: context.palette.background,
       appBar: AppBar(
-        title: const Text('INCIDENT ARCHIVES & EXPORT MANAGER', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-        actions: [
-          IconButton(
-            tooltip: 'Export Custom Time Window',
-            icon: const Icon(Icons.download_for_offline_outlined, color: AppTheme.cyberBlue),
-            onPressed: () {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Custom interval export requested.')),
-              );
-            },
-          ),
-        ],
+        title: const Text('Incident clip archives', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+        actions: [IconButton(icon: const Icon(Icons.refresh), onPressed: _loading ? null : _load)],
       ),
-      body: ListView.builder(
-        padding: const EdgeInsets.all(16),
-        itemCount: _archives.length,
-        itemBuilder: (context, index) {
-          final arch = _archives[index];
-          return Card(
-            color: AppTheme.cardSurface,
-            margin: const EdgeInsets.only(bottom: 12),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(10),
-              side: const BorderSide(color: AppTheme.borderHighlight),
-            ),
-            child: ListTile(
-              leading: const Icon(Icons.video_file_outlined, color: AppTheme.cyberBlue, size: 36),
-              title: Text(arch['title'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-              subtitle: Text(
-                '${arch['camera_name']} • ${arch['time_range']}\nSize: ${arch['size']} • ${arch['created_at']}',
-                style: const TextStyle(color: Colors.white60, fontSize: 11),
-              ),
-              trailing: IconButton(
-                icon: const Icon(Icons.file_download_outlined, color: AppTheme.liveGreen),
-                onPressed: () {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('Downloading ${arch['title']} MP4...')),
-                  );
-                },
-              ),
-            ),
-          );
-        },
-      ),
+      body: body,
     );
   }
 }

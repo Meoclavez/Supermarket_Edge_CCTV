@@ -3,10 +3,14 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- Colour theme before first paint (js/theme.js adds the header control). -->
+  <script>(function(){var m=null;try{m=localStorage.getItem('edge_cctv_theme')}catch(e){}document.documentElement.setAttribute('data-theme',m==='light'||m==='system'?m:'dark')})();</script>
   <title>Edge AI CCTV - Camera Studio & Zone Editor</title>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;800&family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/css/style.css?v=2.1.5">
   <script src="/static/js/auth.js?v=2.1.5"></script>
+  <script src="/static/js/theme.js?v=2.1.5" defer></script>
 </head>
 <body>
   <div class="app-container">
@@ -51,13 +55,112 @@
             <span id="drawModeLabel" class="badge" style="align-self:center;">mode: none</span>
           </div>
           <div style="display: flex; gap: 6px; flex-wrap: wrap;">
-            <button type="button" class="btn btn-primary btn-sm" style="flex: 1;" onclick="setDrawMode('TRIPWIRE')">⚡ Tripwire (2 pts)</button>
-            <button type="button" class="btn btn-primary btn-sm" style="flex: 1;" onclick="setDrawMode('INTRUSION')">🛑 Restricted area (3+ pts)</button>
+            <button type="button" class="btn btn-sm" id="btnToolTripwire" style="flex: 1;" onclick="setDrawMode('TRIPWIRE')">🚪 Tripwire (2 pts)</button>
+            <button type="button" class="btn btn-danger btn-sm" id="btnToolRestricted" style="flex: 1.2;" onclick="setDrawMode('INTRUSION')">⛔ Restricted area (3+ pts)</button>
+          </div>
+          <div style="display: flex; gap: 6px; flex-wrap: wrap;">
             <button type="button" class="btn btn-primary btn-sm" style="flex: 1;" onclick="setDrawMode('EXCLUSION')">🌫️ Privacy mask (3+ pts)</button>
             <button type="button" class="btn btn-warning btn-sm" style="flex: 1.2;" onclick="setDrawMode('PRODUCT_SHELF')">🛒 Product shelf (4+ pts)</button>
             <button type="button" class="btn btn-success btn-sm" style="flex: 0.8;" onclick="saveDrawnZone()">💾 Save</button>
             <button type="button" class="btn btn-sm" style="flex: 0.6;" onclick="undoPoint()">Undo</button>
             <button type="button" class="btn btn-danger btn-sm" style="flex: 0.6;" onclick="clearCanvasPoints()">✕ Cancel</button>
+          </div>
+          <!-- Shown while drawing a privacy mask: what the mask does to video and analysis. -->
+          <div id="maskModeRow" style="display: none; flex-direction: column; gap: 4px;">
+            <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+              <label for="maskModeSelect" style="font-size: 11px; font-weight: 700; color: var(--accent-cyan);">Mask mode</label>
+              <select id="maskModeSelect" name="maskMode" class="form-select" style="flex: 1; min-width: 160px;" onchange="onMaskModeChange()">
+                <option value="BLUR">Blur</option>
+                <option value="MOSAIC">Mosaic (pixelate)</option>
+                <option value="BLACKOUT">Blackout</option>
+                <option value="COLOR">Solid colour</option>
+                <option value="AI_IGNORE">Ignore for analysis (video unchanged)</option>
+              </select>
+              <label for="maskColorInput" id="maskColorLabel" style="display: none; font-size: 11px;">Colour</label>
+              <input type="color" id="maskColorInput" name="maskColor" value="#000000" style="display: none;" />
+            </div>
+            <div id="maskModeHelp" class="form-status" aria-live="polite"></div>
+          </div>
+          <!-- Tripwire settings: shown while drawing or editing a tripwire. -->
+          <div id="tripwireFormRow" class="rule-form" style="display: none;">
+            <div class="rule-form-title" id="tripwireFormTitle">New tripwire</div>
+            <div class="rule-form-grid">
+              <div class="form-group">
+                <label for="twInSide">Side that is "in"</label>
+                <div class="rule-inline">
+                  <select id="twInSide" name="twInSide" class="form-select" onchange="drawOverlay()">
+                    <option value="right">Right of start → end (arrow)</option>
+                    <option value="left">Left of start → end (arrow)</option>
+                  </select>
+                  <button type="button" class="btn btn-sm" id="btnFlipInSide" onclick="flipTripwireSide()" title="Swap which side counts as in">⇅ Flip</button>
+                </div>
+              </div>
+              <div class="form-group">
+                <label for="twSeverity">Alert severity</label>
+                <select id="twSeverity" name="twSeverity" class="form-select">
+                  <option value="INFO">Info</option>
+                  <option value="WARNING" selected>Warning</option>
+                  <option value="HIGH">High</option>
+                </select>
+              </div>
+              <label class="checkbox-label" for="twCountsFootfall"><input type="checkbox" id="twCountsFootfall" name="twCountsFootfall" checked /> Counts store footfall (entrance line)</label>
+              <label class="checkbox-label" for="twEnabled"><input type="checkbox" id="twEnabled" name="twEnabled" checked /> Enabled</label>
+              <label class="checkbox-label" for="twAlertEnabled"><input type="checkbox" id="twAlertEnabled" name="twAlertEnabled" onchange="syncRuleForms()" /> Alert staff on crossing</label>
+              <div class="form-group">
+                <label for="twAlertDirection">Alert when crossing</label>
+                <select id="twAlertDirection" name="twAlertDirection" class="form-select">
+                  <option value="in">In</option>
+                  <option value="out">Out</option>
+                  <option value="both">Either way</option>
+                </select>
+              </div>
+            </div>
+            <div class="rule-form-actions">
+              <button type="button" class="btn btn-success btn-sm" id="btnSaveTripwire" onclick="saveDrawnZone()">💾 Save tripwire</button>
+              <button type="button" class="btn btn-sm" onclick="clearCanvasPoints()">Cancel</button>
+            </div>
+            <div id="tripwireFormStatus" class="form-status" aria-live="polite"></div>
+          </div>
+
+          <!-- Restricted-area settings: shown while drawing or editing an area. -->
+          <div id="restrictedFormRow" class="rule-form" style="display: none;">
+            <div class="rule-form-title" id="restrictedFormTitle">New restricted area</div>
+            <div class="form-group">
+              <label for="raScheduleMode">Schedule</label>
+              <select id="raScheduleMode" name="raScheduleMode" class="form-select" onchange="syncRuleForms()">
+                <option value="restricted_during">Restricted during these times</option>
+                <option value="allowed_during">Allowed during these times (restricted otherwise)</option>
+              </select>
+            </div>
+            <div id="raScheduleRows" class="sched-rows"></div>
+            <div class="rule-inline">
+              <button type="button" class="btn btn-sm" id="btnAddScheduleRow" onclick="addScheduleRow()">＋ Add time window</button>
+              <span id="raScheduleHelp" class="zone-sub"></span>
+            </div>
+            <div class="rule-form-grid">
+              <div class="form-group">
+                <label for="raMinDwell">Minimum dwell (seconds)</label>
+                <input type="number" id="raMinDwell" name="raMinDwell" class="form-input" min="0" max="3600" step="1" value="3" />
+              </div>
+              <div class="form-group">
+                <label for="raSeverity">Alert severity</label>
+                <select id="raSeverity" name="raSeverity" class="form-select">
+                  <option value="INFO">Info</option>
+                  <option value="WARNING">Warning</option>
+                  <option value="HIGH" selected>High</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label for="raTimezone">Time zone</label>
+                <input type="text" id="raTimezone" name="raTimezone" class="form-input" placeholder="Server local time" />
+              </div>
+              <label class="checkbox-label" for="raEnabled"><input type="checkbox" id="raEnabled" name="raEnabled" checked /> Enabled</label>
+            </div>
+            <div class="rule-form-actions">
+              <button type="button" class="btn btn-success btn-sm" id="btnSaveRestricted" onclick="saveDrawnZone()">💾 Save restricted area</button>
+              <button type="button" class="btn btn-sm" onclick="clearCanvasPoints()">Cancel</button>
+            </div>
+            <div id="restrictedFormStatus" class="form-status" aria-live="polite"></div>
           </div>
           <div id="drawStatus" class="form-status" aria-live="polite">Pick a tool, then click on the video to place points. Coordinates are stored relative to the camera frame.</div>
         </div>
@@ -86,32 +189,32 @@
         </div>
 
         <div class="glass-card">
+          <div class="card-title"><span>🚪 Tripwires</span></div>
+          <div id="tripwiresListContainer"><div class="fp-empty">Loading…</div></div>
+        </div>
+
+        <div class="glass-card">
+          <div class="card-title"><span>⛔ Restricted areas</span></div>
+          <div id="intrusionListContainer"><div class="fp-empty">Loading…</div></div>
+        </div>
+
+        <div class="glass-card">
           <div class="card-title"><span>🛒 Product shelf areas</span></div>
           <div id="productShelfListContainer"><div class="fp-empty">Loading…</div></div>
         </div>
 
         <div class="glass-card">
           <div class="card-title">
-            <span>⚡ Tripwires</span>
+            <span>🌫️ Privacy masks</span>
             <span id="clearAllBlock">
               <button type="button" class="btn btn-danger btn-sm" id="btnClearAllAsk" onclick="askClearAllZones()">Clear all</button>
               <span id="clearAllConfirm" style="display:none; align-items:center; gap:6px;">
-                <span style="font-size:11px; color: var(--accent-red);">Delete every tripwire, area and mask on every camera?</span>
+                <span style="font-size:11px; color: var(--accent-red);">Delete every privacy mask on every camera?</span>
                 <button type="button" class="btn btn-danger btn-sm" onclick="confirmClearAllZones()">Yes, clear</button>
                 <button type="button" class="btn btn-sm" onclick="cancelClearAllZones()">Keep</button>
               </span>
             </span>
           </div>
-          <div id="tripwiresListContainer"><div class="fp-empty">Loading…</div></div>
-        </div>
-
-        <div class="glass-card">
-          <div class="card-title"><span>🛑 Restricted areas</span></div>
-          <div id="intrusionListContainer"><div class="fp-empty">Loading…</div></div>
-        </div>
-
-        <div class="glass-card">
-          <div class="card-title"><span>🌫️ Privacy &amp; exclusion masks</span></div>
           <div id="exclusionListContainer"><div class="fp-empty">Loading…</div></div>
         </div>
       </div>
@@ -122,7 +225,7 @@
   <div class="modal-overlay" id="productModal">
     <div class="modal-card" style="max-width: 520px;">
       <div style="display:flex; justify-content:space-between; align-items:center;">
-        <h3 style="margin:0; font-size:15px; color:#ffaa00;">🛒 Map product shelf area</h3>
+        <h3 id="productModalTitle" style="margin:0; font-size:15px; color: var(--accent-orange);">🛒 Map product shelf area</h3>
         <button type="button" class="btn btn-sm" onclick="closeProductModal()">✕ Close</button>
       </div>
       <form onsubmit="submitProductModal(event)" style="display:flex; flex-direction:column; gap:10px; margin-top:12px;">
@@ -151,13 +254,30 @@
             <input type="number" min="1" id="modalProductFacing" name="productFacing" class="form-input" />
           </div>
         </div>
+        <div class="form-grid-2col">
+          <div class="form-group">
+            <label for="modalProductLevel">Shelf level</label>
+            <select id="modalProductLevel" name="productLevel" class="form-select">
+              <option value="">Auto (from position in the shelf unit)</option>
+              <option value="TOP">Top shelf</option>
+              <option value="MIDDLE">Middle / eye level</option>
+              <option value="BOTTOM">Bottom shelf</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="modalProductValueTier">Value tier</label>
+            <select id="modalProductValueTier" name="productValueTier" class="form-select">
+              <option value="">Auto (from price / category)</option>
+              <option value="LOW">Low</option>
+              <option value="STANDARD">Standard</option>
+              <option value="PREMIUM">Premium</option>
+            </select>
+          </div>
+        </div>
         <div class="form-group">
-          <label for="modalProductTier">Shelf tier</label>
+          <label for="modalProductTier">Placement</label>
           <select id="modalProductTier" name="productTier" class="form-select">
-            <option value="EYE_LEVEL">Eye level</option>
-            <option value="TOP">Top shelf</option>
-            <option value="REACH">Reach tier</option>
-            <option value="BOTTOM">Bottom shelf</option>
+            <option value="SHELF">Regular shelf</option>
             <option value="ENDCAP">Promo endcap</option>
           </select>
         </div>

@@ -5,15 +5,20 @@ fleet, no "current source" placeholder and no fallback list: an empty table
 means no cameras, and that is what the API reports.
 """
 
+import asyncio
 import logging
+import re
 import time
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Optional
+from urllib.parse import urlsplit
 
 import cv2
 import numpy as np
 from fastapi import APIRouter, Body, Depends, HTTPException, Response
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,11 +33,13 @@ from ..models.schemas import (
     MuteCameraRequest,
 )
 from ..services.auth_service import auth_service
+from ..services import camera_source
 from ..services.camera_discovery import camera_discovery_service
 from ..services.clip_recorder import clip_recorder_service
 from ..services.feature_manager import feature_manager
 from ..services.inference_backend import person_detector
-from ..services.live_analytics_engine import live_engine
+from ..services.live_analytics_engine import _draw_skeleton, live_engine
+from ..services.privacy_mask import apply_privacy_masks, ignore_polygons, outside_ignore_regions
 
 logger = logging.getLogger("Cameras")
 
@@ -54,14 +61,16 @@ def _model_to_feed(c: CameraModel) -> CameraFeed:
         location=c.location,
         channel_number=c.channel_number if c.channel_number is not None else 1,
         department=c.department or "GENERAL",
-        rtsp_url=c.rtsp_url,
+        # Never echo a password: stored URLs are credential-free for cameras
+        # added by URL, but adopted/NVR rows may still carry user:pw@.
+        rtsp_url=camera_source.mask_url(c.rtsp_url),
         webrtc_url=c.webrtc_url or "",
         status=c.status,
         fps=c.fps,
         resolution=c.resolution,
         is_ai_enabled=c.is_ai_enabled,
         ai_models=list(c.ai_models or []),
-        features=feature_manager.get_camera_features(c.id),
+        features=feature_manager.get_camera_features(c.id, stored=c.features),
         dvr_enabled=c.dvr_enabled,
         dvr_retention_days=c.dvr_retention_days,
         dvr_quota_gb=c.dvr_quota_gb,
@@ -88,6 +97,10 @@ def _writable_payload(cam_in: CameraFeed) -> Dict[str, object]:
         if key not in _WRITABLE_COLUMNS or value is None:
             continue
         out[key] = value.value if hasattr(value, "value") else value
+    if "features" in out:
+        # Normalise to the current flag set; keys from older builds
+        # (fall_detection, door_monitoring, ...) are dropped here.
+        out["features"] = CameraFeatureConfig.model_validate(out["features"] or {}).model_dump()
     return out
 
 
@@ -150,16 +163,129 @@ async def list_cameras(
     return CameraListResponse(cameras=feeds, total=len(feeds))
 
 
-@router.post("", response_model=CameraFeed)
-async def create_camera(cam_in: CameraFeed, db: AsyncSession = Depends(get_db)):
-    res = await db.execute(select(CameraModel).where(CameraModel.id == cam_in.id))
-    if res.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail=f"Camera ID '{cam_in.id}' already exists")
+_CAMERA_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+_DEPARTMENT_RE = re.compile(r"^[A-Z0-9 _&/-]{1,40}$")
 
-    new_cam = CameraModel(id=cam_in.id, **_writable_payload(cam_in))
+
+class CameraCreateRequest(CameraFeed):
+    """Body of ``POST /api/v1/cameras``: a CameraFeed plus how to reach it.
+
+    ``id`` and ``location`` are optional (an id is generated). ``source_type``
+    is one of rtsp, http, onvif, usb, file (inferred from the URL when
+    omitted). ``username``/``password`` are stored encrypted per camera and
+    never written into ``rtsp_url``.
+    """
+
+    id: Optional[str] = None
+    location: str = ""
+    source_type: Optional[str] = None
+    username: Optional[str] = None
+    password: Optional[str] = None
+
+
+class TestConnectionRequest(BaseModel):
+    source_type: Optional[str] = None
+    url: str
+    username: Optional[str] = None
+    password: Optional[str] = None
+    timeout_s: float = Field(camera_source.DEFAULT_TIMEOUT_S, ge=1.0, le=camera_source.MAX_TIMEOUT_S)
+
+
+async def _normalised_source(source_type, url, username, password, timeout_s=camera_source.DEFAULT_TIMEOUT_S):
+    """Validate a source and resolve ONVIF to its RTSP URI. 422 on bad input."""
+    try:
+        src = camera_source.normalize_source(source_type, url, username, password)
+        if src.source_type == "onvif":
+            info = await camera_source.resolve_source_url(src, timeout_s)
+            src = camera_source.CameraSource("rtsp", info["url"], src.username, src.password)
+        return src
+    except camera_source.SourceError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+
+
+@router.post("/test-connection")
+async def test_camera_connection(req: TestConnectionRequest):
+    """Open a stream for real, grab one frame and return its size, fps and a preview.
+
+    Nothing is stored. The response never contains credentials; ``url`` and
+    ``resolved_url`` are redacted. Validation problems are a 422; a source
+    that is valid but does not deliver video is ``success: false`` with the
+    reason, so the form can show it inline.
+    """
+    try:
+        src = camera_source.normalize_source(req.source_type, req.url, req.username, req.password)
+    except camera_source.SourceError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    return await camera_source.test_connection(src, req.timeout_s)
+
+
+@router.post("", response_model=CameraFeed)
+async def create_camera(cam_in: CameraCreateRequest, db: AsyncSession = Depends(get_db)):
+    """Add a camera. Validated server-side; credentials go to the encrypted store."""
+    cam_id = (cam_in.id or "").strip() or f"cam_{uuid.uuid4().hex[:10]}"
+    if not _CAMERA_ID_RE.match(cam_id):
+        raise HTTPException(status_code=422, detail="Camera id may only contain letters, digits, '_', '-', '.', ':'.")
+    name = (cam_in.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Enter a camera name.")
+    if len(name) > 120:
+        raise HTTPException(status_code=422, detail="Camera name is too long (max 120 characters).")
+    department = (cam_in.department or "GENERAL").strip().upper() or "GENERAL"
+    if not _DEPARTMENT_RE.match(department):
+        raise HTTPException(status_code=422, detail="Department may only contain letters, digits, spaces and _&/-.")
+    location = (cam_in.location or "").strip()
+    if len(location) > 120:
+        raise HTTPException(status_code=422, detail="Location is too long (max 120 characters).")
+
+    src = await _normalised_source(cam_in.source_type, cam_in.rtsp_url, cam_in.username, cam_in.password)
+
+    res = await db.execute(select(CameraModel).where(CameraModel.id == cam_id))
+    if res.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail=f"Camera ID '{cam_id}' already exists")
+
+    payload = _writable_payload(cam_in)
+    payload.update(name=name, department=department, location=location, rtsp_url=src.url)
+    # Nothing has been measured yet: the worker reports status, fps and
+    # resolution once it reads frames. Only an explicit client value is kept.
+    sent = cam_in.model_fields_set
+    if "status" not in sent:
+        payload["status"] = "STARTING"
+    if "fps" not in sent:
+        payload["fps"] = 0
+    if "resolution" not in sent:
+        payload["resolution"] = "unknown"
+    if "channel_number" not in sent:
+        max_ch = await db.scalar(
+            select(CameraModel.channel_number).order_by(CameraModel.channel_number.desc()).limit(1)
+        )
+        payload["channel_number"] = (max_ch or 0) + 1
+
+    if src.has_credentials:
+        try:
+            camera_source.store_credentials(cam_id, src.username, src.password)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Could not store credentials for camera %s: %s", cam_id, type(exc).__name__)
+            raise HTTPException(status_code=500, detail="Could not store the camera credentials securely.") from None
+
+    new_cam = CameraModel(id=cam_id, **payload)
     db.add(new_cam)
-    await db.commit()
+    try:
+        await db.commit()
+    except Exception:
+        if src.has_credentials:
+            camera_source.delete_credentials(cam_id)
+        raise
     await db.refresh(new_cam)
+    logger.info("Camera %s added (%s %s)", cam_id, src.source_type, camera_source.mask_url(src.url))
+
+    # Start its worker now rather than on the next reconcile tick.
+    try:
+        from ..services.pipeline_supervisor import pipeline_supervisor
+
+        if getattr(pipeline_supervisor, "_running", False):
+            await asyncio.wait_for(pipeline_supervisor.reconcile_cameras(), timeout=10)
+    except Exception as exc:  # noqa: BLE001 - the periodic reconcile picks it up
+        logger.debug("reconcile after create_camera: %s", exc)
     return _model_to_feed(new_cam)
 
 
@@ -175,6 +301,18 @@ async def update_camera(camera_id: str, cam_in: CameraFeed, db: AsyncSession = D
     res = await db.execute(select(CameraModel).where(CameraModel.id == camera_id))
     cam = res.scalar_one_or_none()
     payload = _writable_payload(cam_in)
+    if "rtsp_url" in payload:
+        url = str(payload["rtsp_url"] or "")
+        if camera_source.is_masked(url) or (cam is not None and not url):
+            # The client echoed back the redacted URL from a GET: keep the stored one.
+            payload.pop("rtsp_url")
+        elif url and "://" in url and "@" in urlsplit(url).netloc:
+            # Credentials typed inline move to the encrypted store.
+            try:
+                payload["rtsp_url"] = camera_source.detach_credentials(camera_id, url)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Could not store credentials for camera %s: %s", camera_id, type(exc).__name__)
+                raise HTTPException(status_code=500, detail="Could not store the camera credentials securely.") from None
 
     if cam is None:
         cam = CameraModel(id=camera_id, **payload)
@@ -185,6 +323,8 @@ async def update_camera(camera_id: str, cam_in: CameraFeed, db: AsyncSession = D
 
     await db.commit()
     await db.refresh(cam)
+    if "features" in payload:
+        feature_manager.set_camera_features(camera_id, CameraFeatureConfig.model_validate(payload["features"]))
     return _model_to_feed(cam)
 
 
@@ -218,6 +358,7 @@ async def delete_camera(camera_id: str, db: AsyncSession = Depends(get_db)):
     cam = await _get_camera_or_404(camera_id, db)
     await db.delete(cam)
     await db.commit()
+    camera_source.delete_credentials(camera_id)
     try:
         live_engine.stop_camera(camera_id)
     except Exception as exc:  # the supervisor reconciles anyway
@@ -230,7 +371,11 @@ async def delete_camera(camera_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.put("/{camera_id}/features", response_model=CameraFeatureConfig)
-def update_camera_features(camera_id: str, config: CameraFeatureConfig):
+async def update_camera_features(camera_id: str, config: CameraFeatureConfig, db: AsyncSession = Depends(get_db)):
+    """Set this camera's analytics toggles; stored on the camera row so they survive restarts."""
+    cam = await _get_camera_or_404(camera_id, db)
+    cam.features = config.model_dump()
+    await db.commit()
     feature_manager.set_camera_features(camera_id, config)
     return config
 
@@ -241,10 +386,13 @@ def get_camera_snapshot(camera_id: str, annotate: bool = True):
 
     When no frame is available the response is a "NO SIGNAL" slate with
     ``X-Frame-Source: no-signal`` and the reason, never a drawn stand-in.
-    With ``annotate`` the frame is overlaid with the detections the model
-    genuinely produced for it.
+    With ``annotate`` the frame is overlaid with the detections (boxes and
+    pose skeletons) the model genuinely produced for it. Privacy masks are
+    always burned in; the model itself runs on the unmasked frame, and
+    AI_IGNORE regions drop detections as in the live pipeline.
     """
-    frame = live_engine.get_frame(camera_id)
+    raw = live_engine.get_raw_frame(camera_id)
+    frame = apply_privacy_masks(raw, camera_id) if raw is not None else None
     if frame is None:
         rt = live_engine.runtimes.get(camera_id)
         if rt is None:
@@ -264,13 +412,19 @@ def get_camera_snapshot(camera_id: str, annotate: bool = True):
         )
 
     if annotate:
-        for det in person_detector.detect(frame):
+        h, w = raw.shape[:2]
+        dets = outside_ignore_regions(person_detector.detect(raw), ignore_polygons(camera_id, w, h))
+        if frame is raw:
+            frame = raw.copy()
+        for det in dets:
             x1, y1, x2, y2 = int(det.x1), int(det.y1), int(det.x2), int(det.y2)
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 157), 2)
             cv2.putText(
                 frame, f"person {det.confidence:.2f}", (x1, max(y1 - 8, 14)),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 157), 1,
             )
+            if det.keypoints is not None:
+                _draw_skeleton(frame, det.keypoints, (0, 255, 157))
 
     ok, jpeg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
     if not ok:
@@ -436,7 +590,19 @@ async def mute_camera(
     req: MuteCameraRequest = Body(default_factory=MuteCameraRequest),
     db: AsyncSession = Depends(get_db),
 ):
+    """Hold back loss-prevention phone pushes for this camera (e.g. during restocking).
+
+    Alerts are still logged and still reach the dashboard; only pushes stop.
+    ``duration_minutes: 0`` unmutes.
+    """
     cam = await _get_camera_or_404(camera_id, db)
-    cam.muted_until = datetime.utcnow() + timedelta(minutes=req.duration_minutes)
+    cam.muted_until = (
+        datetime.utcnow() + timedelta(minutes=req.duration_minutes) if req.duration_minutes > 0 else None
+    )
     await db.commit()
-    return {"status": "success", "camera_id": camera_id, "muted_minutes": req.duration_minutes}
+    return {
+        "status": "success",
+        "camera_id": camera_id,
+        "muted_minutes": req.duration_minutes,
+        "muted_until": cam.muted_until,
+    }

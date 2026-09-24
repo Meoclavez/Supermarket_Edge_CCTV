@@ -185,15 +185,20 @@ class OfflineIndicatorBanner extends StatelessWidget {
       return const SizedBox.shrink();
     }
 
+    // Fixed colours in both app themes: white on dark red (5.6:1) and near
+    // black on amber (11:1). White on plain red or amber was unreadable.
+    const dangerRed = Color(0xFFC62828);
     String message = 'Disconnected from Server';
-    Color bgColor = Colors.red;
+    Color bgColor = dangerRed;
+    Color fgColor = Colors.white;
 
     if (state == ConnectionState.RECONNECTING) {
       message = 'Reconnecting...';
       bgColor = Colors.amber;
+      fgColor = Colors.black87;
     } else if (state == ConnectionState.SERVER_UNREACHABLE) {
       message = 'Server Unreachable - Retrying';
-      bgColor = Colors.red;
+      bgColor = dangerRed;
     }
 
     return Container(
@@ -202,9 +207,9 @@ class OfflineIndicatorBanner extends StatelessWidget {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          const Icon(Icons.wifi_off, color: Colors.white, size: 16),
+          Icon(Icons.wifi_off, color: fgColor, size: 16),
           const SizedBox(width: 8),
-          Text(message, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+          Flexible(child: Text(message, style: TextStyle(color: fgColor, fontWeight: FontWeight.bold))),
         ],
       ),
     );

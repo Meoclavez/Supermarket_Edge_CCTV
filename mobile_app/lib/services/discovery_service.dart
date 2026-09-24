@@ -173,7 +173,7 @@ class EdgeDiscoveryService {
         return DiscoveredEdgeNode(
           ip: senderIp,
           port: 8000,
-          serverName: 'Intel N100 Edge Core',
+          serverName: 'Store edge server',
           version: '1.2.0',
           tlsEnabled: true,
           pingLatencyMs: latency,

@@ -1,24 +1,47 @@
+# Runtime dependencies of the edge backend. Test tools live in
+# requirements-dev.txt. Install with ./run.sh (repo root), which also resolves
+# the onnxruntime flavour for the detected accelerator; a plain
+# `pip install -r requirements.txt` works too.
 fastapi>=0.110.0
 uvicorn[standard]>=0.28.0
 pydantic>=2.6.4
 pydantic-settings>=2.2.1
 sqlalchemy[asyncio]>=2.0.28
 aiosqlite>=0.20.0
+# TLS certificate generation (scripts/generate_certs.py) and credential crypto.
 cryptography>=42.0.0
+# QR code (SVG) for pairing a phone with this device. Pure Python.
+segno>=1.6.0
+# mDNS advertisement/discovery of cameras and of this edge node.
 zeroconf>=0.132.0
+# FastAPI refuses to register any Form()/UploadFile endpoint without it.
 python-multipart>=0.0.9
 opencv-python-headless>=4.9.0.80
 numpy>=1.26.4
+# Async file IO for clip / DVR serving.
 aiofiles>=23.2.1
 pyjwt>=2.8.0
 httpx[http2]>=0.27.0
-pytest>=8.1.1
-pytest-asyncio>=0.23.6
 # bcrypt is used directly. passlib is deliberately NOT a dependency: its
 # backend probe hashes an over-length string, which bcrypt >= 4.1 rejects,
 # breaking every password hash and verify. passlib is unmaintained since 2020.
 bcrypt>=4.1.0
-# Person detection. Install onnxruntime-gpu instead on a machine with a
-# dedicated GPU; the backend probes providers at runtime and will pick up
-# TensorRT/CUDA automatically without any code change.
-onnxruntime>=1.17.0
+# CPU/RAM telemetry for /api/v1/system/stats and the hardware probe.
+psutil>=5.9
+# Hungarian assignment (scipy.optimize.linear_sum_assignment) in the tracker.
+scipy>=1.11
+
+# ONNX Runtime. `onnxruntime` and `onnxruntime-gpu` install the SAME import
+# package, so they must never both be present: whichever was installed last
+# silently wins. scripts/bootstrap.py removes the loser and reinstalls the
+# winner.
+# - x86_64 Linux/Windows: the GPU build. It also contains the CPU provider, so
+#   it runs (on CPU) on a machine without an NVIDIA GPU. The [cuda,cudnn]
+#   extras pull the nvidia-* CUDA/cuDNN pip wheels, so no system CUDA toolkit
+#   is needed, only the NVIDIA driver.
+# - everything else (aarch64 boards, macOS): the plain build, which carries
+#   the CPU provider (and CoreML on macOS).
+# Keep these markers in sync with ort_default_flavour() in scripts/bootstrap.py.
+onnxruntime-gpu[cuda,cudnn]>=1.30 ; (sys_platform == "linux" or sys_platform == "win32") and (platform_machine == "x86_64" or platform_machine == "AMD64")
+# (PEP 508 has no `not`, so the second marker is the first one negated by hand.)
+onnxruntime>=1.30 ; (sys_platform != "linux" and sys_platform != "win32") or (platform_machine != "x86_64" and platform_machine != "AMD64")

@@ -17,6 +17,7 @@ from app.config import settings
 from app.database import get_db, async_session_factory
 from app.services.auth_service import auth_service, general_rate_limiter
 from app.services.shelf_interaction_service import shelf_interaction_service, ProductShelfZone
+from app.services.timeutil import to_utc, utcnow
 from app.models.db_models import (
     PlanogramItemModel,
     POSTransactionModel,
@@ -69,8 +70,9 @@ def verify_analytics_access(
     api_key: Optional[str] = Security(api_key_header),
     bearer: Optional[HTTPAuthorizationCredentials] = Depends(security_bearer)
 ) -> bool:
-    if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("TESTING") or settings.DEBUG:
-        return True
+    # No environment-variable shortcuts (TESTING / PYTEST_CURRENT_TEST / DEBUG
+    # used to open these routes); AUTH_DISABLED is honoured inside
+    # verify_api_access and is the only bypass.
     return auth_service.verify_api_access(request, api_key, bearer)
 
 router = APIRouter(
@@ -102,6 +104,49 @@ async def get_analytics_overview(db: AsyncSession = Depends(get_db)):
     return await retail_metrics_service.overview(db, layout.id, settings.STORE_NAME)
 
 
+def _parse_window_bound(value: Optional[str], name: str) -> Optional[datetime]:
+    """ISO date/date-time -> naive UTC. A value without an offset is store-local time."""
+    from app.services.timeutil import to_utc
+
+    if value in (None, ""):
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"'{name}' must be an ISO date or date-time")
+    return to_utc(dt)
+
+
+@router.get("/footfall/tripwires")
+async def get_tripwire_footfall(
+    from_: Optional[str] = Query(None, alias="from", description="ISO start (default: today 00:00 store time)"),
+    to: Optional[str] = Query(None, description="ISO end, exclusive (default: start + 1 day)"),
+    bucket: str = Query("hour", pattern="^(hour|day|none)$"),
+    db: AsyncSession = Depends(get_db),
+):
+    """In/out crossings per Studio tripwire, with store-local hourly/daily buckets.
+
+    Tripwires with no crossing in the window report null in/out (not
+    observed). ``net_occupancy_estimate`` is entries minus exits on
+    footfall-counting lines -- an estimate, labelled as such.
+    """
+    from app.services.tripwire_engine import tripwire_footfall
+
+    start = _parse_window_bound(from_, "from")
+    end = _parse_window_bound(to, "to")
+    if start is None:
+        start = day_bounds()[0] if end is None else end - timedelta(days=1)
+    if end is None:
+        end = start + timedelta(days=1) if from_ else day_bounds()[1]
+    if end <= start:
+        raise HTTPException(status_code=422, detail="'to' must be after 'from'")
+    if end - start > timedelta(days=93):
+        raise HTTPException(status_code=422, detail="window is limited to 93 days")
+    out = await tripwire_footfall(db, start, end, bucket)
+    out["footfall_source"] = await retail_metrics_service.footfall_source(db, start, end)
+    return out
+
+
 @router.get("/floorplan")
 async def get_floorplan_data(db: AsyncSession = Depends(get_db)):
     """The blueprint plus live per-zone metrics, all in metres."""
@@ -126,18 +171,20 @@ async def get_floorplan_data(db: AsyncSession = Depends(get_db)):
 async def get_heatmaps(
     resolution_w: int = Query(50, ge=8, le=200),
     resolution_h: int = Query(30, ge=8, le=200),
+    kind: str = Query("presence", pattern="^(presence|dwell|interaction)$",
+                      description="presence = where people were, dwell = seconds spent, interaction = shelf reaches"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Occupancy density from recorded trajectories.
+    """Floor density of today's observations (presence, dwell or shelf interactions).
 
-    Returns density_matrix=null when nothing has been tracked, rather than the
+    Returns density_matrix=null when nothing has been observed, rather than the
     synthetic Gaussian blobs this endpoint used to emit.
     """
     layout = await _active_layout(db)
     start, end = day_bounds()
     return await retail_metrics_service.heatmap(
         db, layout.id, start, end, layout.width_m, layout.height_m,
-        grid_w=resolution_w, grid_h=resolution_h,
+        grid_w=resolution_w, grid_h=resolution_h, kind=kind,
     )
 
 
@@ -299,6 +346,8 @@ async def get_daily_executive_report(
             "avg_dwell": fmt(overview["avg_dwell_minutes"], " min"),
             "conversion": fmt(overview["conversion_rate_pct"], "%"),
             "daily_revenue": fmt(overview["daily_revenue"], prefix="$"),
+            # Hand reaches to mapped product shelves (shelf_interactions rows).
+            "shelf_reaches": fmt((analysis.get("product_reach") or {}).get("reaches") or None),
         },
         "coverage": overview["coverage"],
         "funnel": funnel,
@@ -306,6 +355,7 @@ async def get_daily_executive_report(
         "findings": analysis["findings"],
         "findings_count": analysis["findings_count"],
         "analysis_message": analysis["message"],
+        "shelf_reach": analysis.get("product_reach"),
     }
     if narrate:
         report["narrative"] = analysis.get("narrative")
@@ -375,16 +425,20 @@ async def ingest_pos_transactions(
         total_amt += amt
 
         # Parse timestamp if provided
+        # Stored as naive UTC like every other pipeline timestamp: an offset is
+        # converted, an offset-less value is read as store-local time. An
+        # unreadable timestamp is rejected rather than replaced with "now",
+        # which would silently move the sale to the wrong hour.
         ts_val = item.get("timestamp")
         if isinstance(ts_val, str):
             try:
-                ts = datetime.fromisoformat(ts_val.replace("Z", "+00:00")).replace(tzinfo=None)
-            except Exception:
-                ts = datetime.utcnow()
+                ts = to_utc(datetime.fromisoformat(ts_val.replace("Z", "+00:00")))
+            except ValueError:
+                raise HTTPException(status_code=422, detail=f"Invalid POS timestamp: {ts_val!r}")
         elif isinstance(ts_val, datetime):
-            ts = ts_val
+            ts = to_utc(ts_val)
         else:
-            ts = datetime.utcnow()
+            ts = utcnow()
 
         db_item = POSTransactionModel(
             id=f"pos_{uuid.uuid4().hex[:12]}",
@@ -488,7 +542,9 @@ async def get_product_shelf_zones(camera_id: Optional[str] = Query(None, descrip
     return {
         "camera_id": camera_id or "all",
         "total_zones": len(zones),
-        "zones": [z.model_dump() for z in zones]
+        # Stored fields plus effective_shelf_level / effective_value_tier and
+        # their source (operator, derived from geometry/price, or unknown).
+        "zones": [shelf_interaction_service.zone_dict(z) for z in zones]
     }
 
 
@@ -499,7 +555,7 @@ async def save_product_shelf_zone(zone: ProductShelfZone = Body(...)):
     return {
         "status": "success",
         "message": f"Product shelf zone '{saved.name}' mapped to {saved.camera_id}",
-        "zone": saved.model_dump()
+        "zone": shelf_interaction_service.zone_dict(saved)
     }
 
 
@@ -512,13 +568,68 @@ async def delete_product_shelf_zone(zone_id: str):
     return {"status": "success", "message": f"Deleted product shelf zone {zone_id}"}
 
 
+def _iso_z(dt: Optional[datetime]) -> Optional[str]:
+    return dt.isoformat() + "Z" if dt is not None else None
+
+
+def _product_window(date_str: Optional[str]):
+    """[start, end) naive UTC for a store-local YYYY-MM-DD (default today)."""
+    if not date_str:
+        return day_bounds()
+    try:
+        d = datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=422, detail="date must be YYYY-MM-DD")
+    return day_bounds(d)
+
+
+@router.get("/products/summary")
+async def get_product_reach_summary(
+    date_str: Optional[str] = Query(None, alias="date", description="Store-local day, YYYY-MM-DD (default today)"),
+    camera_id: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Per-product and per-shelf-level hand reaches for one day, read from shelf_interactions.
+
+    Conversion appears only when POS rows exist for the day; otherwise each
+    product reports ``conversion_status: "needs POS data"``.
+    """
+    start, end = _product_window(date_str)
+    return await shelf_interaction_service.product_summary(db, start, end, camera_id=camera_id)
+
+
 @router.get("/products/{zone_id}/stats")
-async def get_product_zone_stats(zone_id: str):
-    """Retrieve real-time hand reaches, dwell inspections, picks, and friction index for a product."""
-    stats = shelf_interaction_service.get_zone_stats(zone_id)
-    if not stats:
+async def get_product_zone_stats(
+    zone_id: str,
+    date_str: Optional[str] = Query(None, alias="date", description="Store-local day, YYYY-MM-DD (default today)"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Hand reaches recorded for one product zone (from the database, so restarts lose nothing)."""
+    zone = shelf_interaction_service.get_zone(zone_id)
+    if zone is None:
         raise HTTPException(status_code=404, detail="Product shelf zone not found")
-    return stats
+    start, end = _product_window(date_str)
+    summary = await shelf_interaction_service.product_summary(db, start, end, camera_id=zone.camera_id)
+    p = next((x for x in summary["products"] if x["zone_id"] == zone_id), None) or {}
+    return {
+        **p,
+        "window": summary["window"],
+        "pos_connected": summary["pos_connected"],
+        "product_name": zone.name,
+        "shelf_tier": zone.shelf_tier,
+        # Legacy keys. A hand position cannot tell a pick from a put-back, and
+        # nothing measures impressions, so those are unknown rather than 0.
+        "touches": p.get("reaches", 0),
+        "avg_dwell_sec": p.get("avg_duration_sec"),
+        "impressions": None,
+        "picks": None,
+        "put_backs": None,
+        "attraction_rate": None,
+        "friction_index": None,
+        "conversion_rate": (round(p["units_per_reaching_shopper"] * 100.0, 1)
+                            if p.get("units_per_reaching_shopper") is not None else None),
+        "ab_test_mode": zone.study_metrics.ab_test_mode,
+    }
 
 
 @router.post("/products/interactions")
@@ -540,6 +651,53 @@ async def record_hand_interaction(
         "status": "success",
         "events_count": len(events),
         "events": [e.model_dump() for e in events]
+    }
+
+
+@router.get("/products/interactions")
+async def list_shelf_interactions(
+    camera_id: Optional[str] = Query(None),
+    zone_id: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=1000),
+    db: AsyncSession = Depends(get_db),
+):
+    """Shelf interactions recorded by the live pose pipeline, newest first.
+
+    Times are ISO 8601 UTC with an explicit ``Z`` (stored as naive UTC).
+    """
+    stmt = select(ShelfInteractionModel).order_by(desc(ShelfInteractionModel.timestamp)).limit(limit)
+    if camera_id:
+        stmt = stmt.where(ShelfInteractionModel.camera_id == camera_id)
+    if zone_id:
+        stmt = stmt.where(ShelfInteractionModel.shelf_zone_id == zone_id)
+    rows = (await db.execute(stmt)).scalars().all()
+    return {
+        "total": len(rows),
+        "interactions": [
+            {
+                "id": r.id,
+                "camera_id": r.camera_id,
+                "zone_id": r.shelf_zone_id,
+                "zone_name": r.zone_name,
+                "zone_space": r.zone_space,
+                "track_id": r.person_track_id,
+                "hand": r.hand,
+                "started_at": _iso_z(r.started_at or r.timestamp),
+                "ended_at": _iso_z(r.ended_at),
+                "duration_sec": r.duration_sec,
+                "wrist_visibility": r.confidence,
+                "image_x": r.image_x,
+                "image_y": r.image_y,
+                "floor_x": r.floor_x,
+                "floor_y": r.floor_y,
+                "sku_id": r.sku_id,
+                "product_category": r.product_category,
+                "shelf_level": r.shelf_level,
+                "value_tier": r.value_tier,
+                "contact_point": r.contact_point,
+            }
+            for r in rows
+        ],
     }
 
 

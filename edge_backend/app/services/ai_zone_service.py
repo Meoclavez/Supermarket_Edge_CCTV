@@ -1,4 +1,10 @@
-"""AI Zone Service: PolygonGeometry, Virtual Tripwires, Intrusion Zones, Privacy Masks, and Persistence."""
+"""Per-camera overlay store: tripwires, restricted areas and privacy masks.
+
+All geometry is in image coordinates normalised 0..1 to the camera's own
+frame (Camera Studio / mobile zone editor). Privacy masks are applied by
+services/privacy_mask.py; tripwires and restricted areas ("intrusion_zones")
+are evaluated live by services/tripwire_engine.py.
+"""
 
 import json
 import logging
@@ -133,40 +139,10 @@ class AIZoneService:
             self._save_persistent_zones()
 
     def _init_default_zones(self):
-        self.tripwires = {
-            "tw_main_entry": {
-                "id": "tw_main_entry",
-                "name": "Main Entrance Perimeter",
-                "camera_id": "cam_living_room",
-                "x1": 0.15, "y1": 0.65, "x2": 0.85, "y2": 0.65,
-                "direction": "BIDIRECTIONAL",
-                "allowed_classes": ["person", "vehicle"],
-                "enabled": True,
-                "in_count": 0,
-                "out_count": 0
-            }
-        }
-        self.intrusion_zones = {
-            "iz_porch_restricted": {
-                "id": "iz_porch_restricted",
-                "name": "Porch / Restricted Zone",
-                "camera_id": "cam_front_door",
-                "points": [{"x": 0.20, "y": 0.50}, {"x": 0.80, "y": 0.50}, {"x": 0.85, "y": 0.90}, {"x": 0.15, "y": 0.90}],
-                "allowed_classes": ["person"],
-                "dwell_time_seconds": 0.5,
-                "enabled": True
-            }
-        }
-        self.exclusion_masks = {
-            "ex_street_mask": {
-                "id": "ex_street_mask",
-                "name": "Street & Tree Foliage Mask",
-                "camera_id": "cam_backyard",
-                "points": [{"x": 0.0, "y": 0.0}, {"x": 1.0, "y": 0.0}, {"x": 1.0, "y": 0.25}, {"x": 0.0, "y": 0.25}],
-                "mask_mode": "BLUR",
-                "enabled": True
-            }
-        }
+        # A fresh install has no overlays: the operator draws them in Studio.
+        self.tripwires = {}
+        self.intrusion_zones = {}
+        self.exclusion_masks = {}
 
     def _save_persistent_zones(self):
         try:
@@ -184,11 +160,30 @@ class AIZoneService:
         with self.lock:
             tw_id = data.get("id") or f"tw_{int(time.time()*1000)}"
             data["id"] = tw_id
-            data["in_count"] = data.get("in_count", 0)
-            data["out_count"] = data.get("out_count", 0)
+            # Counts are not stored on the line: crossings are rows in
+            # tripwire_events (services/tripwire_engine.py). Drop the legacy
+            # always-zero counters so nothing presents them as observations.
+            data.pop("in_count", None)
+            data.pop("out_count", None)
             self.tripwires[tw_id] = data
             self._save_persistent_zones()
             return data
+
+    def get_tripwire(self, tw_id: str) -> Optional[Dict[str, Any]]:
+        with self.lock:
+            tw = self.tripwires.get(tw_id)
+            return dict(tw) if tw is not None else None
+
+    def update_tripwire(self, tw_id: str, record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Replace a tripwire's stored record (already validated); None if missing."""
+        with self.lock:
+            if tw_id not in self.tripwires:
+                return None
+            record = dict(record)
+            record["id"] = tw_id
+            self.tripwires[tw_id] = record
+            self._save_persistent_zones()
+            return dict(record)
 
     def delete_tripwire(self, tw_id: str) -> bool:
         with self.lock:
@@ -206,6 +201,22 @@ class AIZoneService:
             self._save_persistent_zones()
             return data
 
+    def get_intrusion(self, iz_id: str) -> Optional[Dict[str, Any]]:
+        with self.lock:
+            iz = self.intrusion_zones.get(iz_id)
+            return dict(iz) if iz is not None else None
+
+    def update_intrusion(self, iz_id: str, record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Replace a restricted area's stored record (already validated); None if missing."""
+        with self.lock:
+            if iz_id not in self.intrusion_zones:
+                return None
+            record = dict(record)
+            record["id"] = iz_id
+            self.intrusion_zones[iz_id] = record
+            self._save_persistent_zones()
+            return dict(record)
+
     def delete_intrusion(self, iz_id: str) -> bool:
         with self.lock:
             if iz_id in self.intrusion_zones:
@@ -222,6 +233,16 @@ class AIZoneService:
             self._save_persistent_zones()
             return data
 
+    def update_exclusion(self, ex_id: str, changes: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Merge ``changes`` into an existing mask; None if it does not exist."""
+        with self.lock:
+            mask = self.exclusion_masks.get(ex_id)
+            if mask is None:
+                return None
+            mask.update(changes)
+            self._save_persistent_zones()
+            return dict(mask)
+
     def delete_exclusion(self, ex_id: str) -> bool:
         with self.lock:
             if ex_id in self.exclusion_masks:
@@ -230,12 +251,22 @@ class AIZoneService:
                 return True
             return False
 
-    def clear_all(self) -> int:
+    def clear_all(self, kinds: Optional[List[str]] = None) -> int:
+        """Delete every overlay of the given kinds (default: all three kinds).
+
+        kinds: any of "tripwires", "intrusion_zones", "exclusion_masks".
+        """
+        stores = {
+            "tripwires": self.tripwires,
+            "intrusion_zones": self.intrusion_zones,
+            "exclusion_masks": self.exclusion_masks,
+        }
         with self.lock:
-            n = len(self.tripwires) + len(self.intrusion_zones) + len(self.exclusion_masks)
-            self.tripwires.clear()
-            self.intrusion_zones.clear()
-            self.exclusion_masks.clear()
+            n = 0
+            for kind, store in stores.items():
+                if kinds is None or kind in kinds:
+                    n += len(store)
+                    store.clear()
             self._save_persistent_zones()
             return n
 

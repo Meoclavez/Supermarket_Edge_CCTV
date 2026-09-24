@@ -6,9 +6,16 @@ those identities placed on the store floor rather than in camera pixels.
 
 This module supplies both:
 
-* ``CentroidTracker`` -- IoU-based association with a short memory, which is
-  enough to hold an identity through the brief occlusions typical of aisle
-  footage without the cost of a full appearance model.
+* ``ByteTracker`` (also exported as ``CentroidTracker``) -- ByteTrack-style
+  two-stage association. Every track's box is predicted forward with a
+  constant-velocity Kalman filter; high-confidence detections are matched
+  first, then the leftover tracks get a second chance against low-confidence
+  detections, which is what holds an identity through partial occlusion by a
+  shelf end or another shopper. Low-confidence boxes can only extend a track,
+  never start one, so they cannot create false shoppers. Assignment is the
+  Hungarian algorithm when scipy is importable, greedy IoU otherwise.
+  Each track carries the latest pose keypoints, smoothed only against
+  jitter (fast limb motion passes through unsmoothed).
 * ``FloorProjector`` -- maps a detection's foot point into store metres using
   the camera's homography when one has been calibrated, and declines to guess
   when one has not.
@@ -34,6 +41,74 @@ from app.services.inference_backend import Detection
 
 logger = logging.getLogger(__name__)
 
+try:  # optional: optimal assignment when available
+    from scipy.optimize import linear_sum_assignment as _hungarian
+except Exception:  # pragma: no cover - depends on the environment
+    _hungarian = None
+
+ASSIGNMENT_METHOD = "hungarian" if _hungarian is not None else "greedy"
+
+
+# ------------------------------------------------------------ Kalman filter
+
+
+class _KalmanXYWH:
+    """Constant-velocity Kalman filter on (cx, cy, w, h), one step per update.
+
+    Noise is scaled by the box size, as in SORT/ByteTrack, so a near person
+    and a far person get proportionate uncertainty.
+    """
+
+    _W_POS = 1.0 / 20.0
+    _W_VEL = 1.0 / 160.0
+
+    def __init__(self):
+        self._F = np.eye(8)
+        self._F[:4, 4:] = np.eye(4)
+        self._H = np.eye(4, 8)
+
+    def initiate(self, z: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        mean = np.r_[z, np.zeros(4)]
+        w, h = z[2], z[3]
+        p, v = self._W_POS, self._W_VEL
+        std = [2 * p * w, 2 * p * h, 2 * p * w, 2 * p * h, 10 * v * w, 10 * v * h, 10 * v * w, 10 * v * h]
+        return mean, np.diag(np.square(std))
+
+    def predict(self, mean: np.ndarray, cov: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        w, h = max(mean[2], 1.0), max(mean[3], 1.0)
+        p, v = self._W_POS, self._W_VEL
+        q = np.diag(np.square([p * w, p * h, p * w, p * h, v * w, v * h, v * w, v * h]))
+        mean = self._F @ mean
+        cov = self._F @ cov @ self._F.T + q
+        return mean, cov
+
+    def update(self, mean: np.ndarray, cov: np.ndarray, z: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        w, h = max(mean[2], 1.0), max(mean[3], 1.0)
+        p = self._W_POS
+        r = np.diag(np.square([p * w, p * h, p * w, p * h]))
+        s = self._H @ cov @ self._H.T + r
+        k = np.linalg.solve(s, (cov @ self._H.T).T).T
+        mean = mean + k @ (z - self._H @ mean)
+        cov = cov - k @ s @ k.T
+        return mean, cov
+
+
+_KF = _KalmanXYWH()
+
+
+def _xyxy_to_xywh(b) -> np.ndarray:
+    x1, y1, x2, y2 = b
+    return np.array([(x1 + x2) / 2.0, (y1 + y2) / 2.0, max(x2 - x1, 1.0), max(y2 - y1, 1.0)], dtype=np.float64)
+
+
+def _xywh_to_xyxy(m) -> tuple[float, float, float, float]:
+    cx, cy, w, h = (float(v) for v in m[:4])
+    w, h = max(w, 1.0), max(h, 1.0)
+    return (cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0)
+
+
+# -------------------------------------------------------------------- track
+
 
 @dataclass
 class Track:
@@ -41,12 +116,19 @@ class Track:
 
     track_id: str
     camera_id: str
-    bbox: tuple[float, float, float, float]
+    bbox: tuple[float, float, float, float]      # last measured box (pixels)
     confidence: float
     first_seen: float
     last_seen: float
     hits: int = 1
     misses: int = 0
+    # Detection frames since the track was born.
+    age: int = 0
+    # Latest (17, 3) keypoints (x_px, y_px, visibility), EMA-smoothed on
+    # points visible in consecutive observations. None for a detect-only model.
+    keypoints: Optional[np.ndarray] = field(default=None, repr=False)
+    # Latest floor position in metres, set by the engine when calibrated.
+    floor_xy: Optional[tuple[float, float]] = None
     # Trajectory in floor metres, appended only while a homography exists.
     floor_points: list[dict] = field(default_factory=list)
     # Zone the track is currently inside, and when it entered.
@@ -55,6 +137,9 @@ class Track:
     # Set once this track's dwell in the current zone has been published.
     open_visit_id: Optional[str] = None
     interacted: bool = False
+    # Kalman state (cx, cy, w, h, vx, vy, vw, vh) and covariance.
+    _mean: Optional[np.ndarray] = field(default=None, repr=False)
+    _cov: Optional[np.ndarray] = field(default=None, repr=False)
 
     @property
     def confirmed(self) -> bool:
@@ -74,6 +159,22 @@ class Track:
         x1, y1, x2, y2 = self.bbox
         return ((x1 + x2) / 2.0, y2)
 
+    @property
+    def keypoints_fresh(self) -> bool:
+        """True when ``keypoints`` came from this detection frame."""
+        return self.keypoints is not None and self.misses == 0
+
+    @property
+    def predicted_bbox(self) -> tuple[float, float, float, float]:
+        return _xywh_to_xyxy(self._mean) if self._mean is not None else self.bbox
+
+    @property
+    def velocity_px(self) -> tuple[float, float]:
+        """Predicted centre motion, pixels per detection frame."""
+        if self._mean is None:
+            return (0.0, 0.0)
+        return (float(self._mean[4]), float(self._mean[5]))
+
 
 def _iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
     ax1, ay1, ax2, ay2 = a
@@ -89,69 +190,171 @@ def _iou(a: tuple[float, float, float, float], b: tuple[float, float, float, flo
     return inter / max(area_a + area_b - inter, 1e-9)
 
 
-class CentroidTracker:
-    """Greedy IoU association tracker, one instance per camera."""
+def _iou_matrix(tracks: list[Track], dets: list[Detection]) -> np.ndarray:
+    if not tracks or not dets:
+        return np.zeros((len(tracks), len(dets)))
+    a = np.array([t.predicted_bbox for t in tracks], dtype=np.float64)
+    b = np.array([(d.x1, d.y1, d.x2, d.y2) for d in dets], dtype=np.float64)
+    ix1 = np.maximum(a[:, None, 0], b[None, :, 0])
+    iy1 = np.maximum(a[:, None, 1], b[None, :, 1])
+    ix2 = np.minimum(a[:, None, 2], b[None, :, 2])
+    iy2 = np.minimum(a[:, None, 3], b[None, :, 3])
+    inter = np.clip(ix2 - ix1, 0, None) * np.clip(iy2 - iy1, 0, None)
+    area_a = np.clip(a[:, 2] - a[:, 0], 0, None) * np.clip(a[:, 3] - a[:, 1], 0, None)
+    area_b = np.clip(b[:, 2] - b[:, 0], 0, None) * np.clip(b[:, 3] - b[:, 1], 0, None)
+    return inter / np.maximum(area_a[:, None] + area_b[None, :] - inter, 1e-9)
 
-    def __init__(self, camera_id: str, iou_threshold: float = 0.3):
+
+def linear_assignment(iou: np.ndarray, min_iou: float) -> list[tuple[int, int]]:
+    """Pairs (row, col) maximising total IoU, each with IoU >= ``min_iou``."""
+    if iou.size == 0:
+        return []
+    if _hungarian is not None:
+        rows, cols = _hungarian(1.0 - iou)
+        return [(int(r), int(c)) for r, c in zip(rows, cols) if iou[r, c] >= min_iou]
+    pairs: list[tuple[int, int]] = []
+    used_r: set[int] = set()
+    used_c: set[int] = set()
+    flat = np.argsort(-iou, axis=None)
+    for idx in flat:
+        r, c = divmod(int(idx), iou.shape[1])
+        if iou[r, c] < min_iou:
+            break
+        if r in used_r or c in used_c:
+            continue
+        used_r.add(r)
+        used_c.add(c)
+        pairs.append((r, c))
+    return pairs
+
+
+# Elbows and wrists: the joints a reach is measured on.
+ARM_JOINTS = (7, 8, 9, 10)
+
+
+def smooth_keypoints(
+    prev: Optional[np.ndarray],
+    new: Optional[np.ndarray],
+    alpha: float,
+    scale: Optional[float] = None,
+    arm_alpha: Optional[float] = None,
+) -> Optional[np.ndarray]:
+    """Velocity-aware EMA on x/y of points visible in both observations.
+
+    ``alpha`` is the weight of the new observation for a point that barely
+    moved (detector jitter). A point that moved further than
+    ``TRACK_KEYPOINT_JITTER_FRAC`` of ``scale`` (the person's box height) gets
+    progressively less smoothing, and none at all beyond
+    ``TRACK_KEYPOINT_FAST_FRAC``: a plain EMA made a wrist lifted to a top
+    shelf arrive one or two detection frames late (at 5 detections/s that is
+    a quick grab missed entirely). ``arm_alpha`` overrides ``alpha`` for
+    elbows and wrists. Points not visible now take the new observation (with
+    its low visibility): a stale position is never carried forward.
+    """
+    if new is None:
+        return None
+    new = np.asarray(new, dtype=np.float32)
+    if prev is None or prev.shape != new.shape or new.shape[1] < 3:
+        return new.copy()
+    thr = settings.KEYPOINT_VISIBILITY_THRESHOLD
+    both = (new[:, 2] >= thr) & (prev[:, 2] >= thr)
+    out = new.copy()
+    if not both.any():
+        return out
+    a = np.full(new.shape[0], float(alpha), dtype=np.float32)
+    if arm_alpha is not None and new.shape[0] > max(ARM_JOINTS):
+        a[list(ARM_JOINTS)] = float(arm_alpha)
+    if scale is not None and scale > 0:
+        moved = np.hypot(new[:, 0] - prev[:, 0], new[:, 1] - prev[:, 1]) / float(scale)
+        lo = float(settings.TRACK_KEYPOINT_JITTER_FRAC)
+        hi = max(float(settings.TRACK_KEYPOINT_FAST_FRAC), lo + 1e-6)
+        a = a + (1.0 - a) * np.clip((moved - lo) / (hi - lo), 0.0, 1.0)
+    a = np.clip(a, 0.0, 1.0)[both, None]
+    out[both, :2] = a * new[both, :2] + (1.0 - a) * prev[both, :2]
+    return out
+
+
+class ByteTracker:
+    """Two-stage (ByteTrack-style) association tracker, one instance per camera."""
+
+    def __init__(self, camera_id: str, iou_threshold: Optional[float] = None):
         self.camera_id = camera_id
-        self.iou_threshold = iou_threshold
+        self.iou_threshold = settings.TRACK_IOU_THRESHOLD if iou_threshold is None else iou_threshold
+        self.low_iou_threshold = settings.TRACK_LOW_IOU_THRESHOLD
         self.tracks: dict[str, Track] = {}
         self._finished: list[Track] = []
 
+    @property
+    def high_threshold(self) -> float:
+        return settings.PERSON_CONF_THRESHOLD
+
     def update(self, detections: list[Detection], now: Optional[float] = None) -> list[Track]:
         """Associate detections to tracks. Returns the currently live tracks."""
-        now = now or time.time()
+        now = time.time() if now is None else now
 
-        if not self.tracks:
-            for d in detections:
-                self._spawn(d, now)
-            return list(self.tracks.values())
+        for t in self.tracks.values():
+            if t._mean is not None:
+                t._mean, t._cov = _KF.predict(t._mean, t._cov)
+            t.age += 1
 
-        track_ids = list(self.tracks.keys())
-        # Score every (track, detection) pair, then take matches greedily by
-        # descending IoU so the strongest overlap claims its detection first.
-        pairs: list[tuple[float, str, int]] = []
-        for tid in track_ids:
-            for di, d in enumerate(detections):
-                score = _iou(self.tracks[tid].bbox, (d.x1, d.y1, d.x2, d.y2))
-                if score >= self.iou_threshold:
-                    pairs.append((score, tid, di))
-        pairs.sort(reverse=True)
+        high = [d for d in detections if d.confidence >= self.high_threshold]
+        low = [d for d in detections if d.confidence < self.high_threshold]
 
-        claimed_tracks: set[str] = set()
-        claimed_dets: set[int] = set()
-        for score, tid, di in pairs:
-            if tid in claimed_tracks or di in claimed_dets:
-                continue
-            claimed_tracks.add(tid)
-            claimed_dets.add(di)
-            d = detections[di]
-            t = self.tracks[tid]
-            t.bbox = (d.x1, d.y1, d.x2, d.y2)
-            t.confidence = d.confidence
-            t.last_seen = now
-            t.hits += 1
-            t.misses = 0
+        # Stage 1: every live track against the confident detections.
+        pool = list(self.tracks.values())
+        matched_tracks: set[str] = set()
+        m1 = linear_assignment(_iou_matrix(pool, high), self.iou_threshold)
+        used_high = set()
+        for r, c in m1:
+            self._apply(pool[r], high[c], now)
+            matched_tracks.add(pool[r].track_id)
+            used_high.add(c)
 
-        for tid in track_ids:
-            if tid not in claimed_tracks:
-                self.tracks[tid].misses += 1
+        # Stage 2: tracks seen on the previous frame get a second chance
+        # against low-confidence boxes (occlusion), with a stricter IoU.
+        recent = [t for t in pool if t.track_id not in matched_tracks and t.misses == 0]
+        for r, c in linear_assignment(_iou_matrix(recent, low), self.low_iou_threshold):
+            self._apply(recent[r], low[c], now)
+            matched_tracks.add(recent[r].track_id)
 
-        for di, d in enumerate(detections):
-            if di not in claimed_dets:
+        for t in pool:
+            if t.track_id not in matched_tracks:
+                t.misses += 1
+
+        # Only confident, unexplained detections may start a new identity.
+        for ci, d in enumerate(high):
+            if ci not in used_high and d.confidence >= settings.TRACK_NEW_TRACK_THRESHOLD:
                 self._spawn(d, now)
 
         # Retire tracks that have gone missing for too long.
         for tid in list(self.tracks.keys()):
-            if self.tracks[tid].misses > settings.TRACK_MAX_AGE_FRAMES:
-                t = self.tracks.pop(tid)
-                if t.confirmed:
-                    self._finished.append(t)
+            t = self.tracks[tid]
+            if t.confirmed and t.misses > settings.TRACK_MAX_AGE_FRAMES:
+                self._finished.append(self.tracks.pop(tid))
+            elif not t.confirmed and t.misses > settings.TRACK_TENTATIVE_MAX_MISSES:
+                self.tracks.pop(tid)
 
         return list(self.tracks.values())
 
+    def _apply(self, t: Track, d: Detection, now: float) -> None:
+        z = _xyxy_to_xywh((d.x1, d.y1, d.x2, d.y2))
+        if t._mean is None:
+            t._mean, t._cov = _KF.initiate(z)
+        else:
+            t._mean, t._cov = _KF.update(t._mean, t._cov, z)
+        t.bbox = (d.x1, d.y1, d.x2, d.y2)
+        t.confidence = d.confidence
+        t.keypoints = smooth_keypoints(
+            t.keypoints, d.keypoints, settings.TRACK_KEYPOINT_EMA,
+            scale=max(d.y2 - d.y1, 1.0), arm_alpha=settings.TRACK_KEYPOINT_EMA_ARMS,
+        )
+        t.last_seen = now
+        t.hits += 1
+        t.misses = 0
+
     def _spawn(self, d: Detection, now: float) -> None:
         tid = f"trk_{uuid.uuid4().hex[:10]}"
+        mean, cov = _KF.initiate(_xyxy_to_xywh((d.x1, d.y1, d.x2, d.y2)))
         self.tracks[tid] = Track(
             track_id=tid,
             camera_id=self.camera_id,
@@ -159,6 +362,9 @@ class CentroidTracker:
             confidence=d.confidence,
             first_seen=now,
             last_seen=now,
+            keypoints=None if d.keypoints is None else np.asarray(d.keypoints, dtype=np.float32).copy(),
+            _mean=mean,
+            _cov=cov,
         )
 
     def drain_finished(self) -> list[Track]:
@@ -172,6 +378,10 @@ class CentroidTracker:
         self.tracks.clear()
         out.extend(self.drain_finished())
         return out
+
+
+# Name kept for existing callers.
+CentroidTracker = ByteTracker
 
 
 class FloorProjector:

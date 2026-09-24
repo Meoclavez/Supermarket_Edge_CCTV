@@ -2,7 +2,7 @@
 
 An enterprise-grade, **100% on-premises edge-processed CCTV AI monitoring and safety ecosystem**. Designed for **Intel N100 Mini PCs** paired with **Hailo-8 / 8L M.2 PCIe AI modules**, executing hardware-accelerated video decoding via **Intel QuickSync (VA-API)** and sub-10ms neural inference on the **HailoRT dataflow engine**.
 
-Connects directly to a **cross-platform Flutter client (PC Web/Desktop, Android, and iOS)** featuring **Critical Emergency Alerts (bypassing DND/Silent)**, **24/7 Segmented DVR Recording with 24-Hour Timeline Scrubbing**, **Interactive Visual Zone & Privacy Mask Editor**, **2-Way Audio Push-to-Talk**, and **Ultra-Low Latency (<300ms) WebRTC Streaming**.
+Connects directly to a **cross-platform Flutter client (PC Web/Desktop, Android, and iOS)** featuring **loss-prevention alerts for store staff**, **24/7 Segmented DVR Recording with 24-Hour Timeline Scrubbing**, **Interactive Visual Zone & Privacy Mask Editor**, **2-Way Audio Push-to-Talk**, and **Ultra-Low Latency (<300ms) WebRTC Streaming**.
 
 ---
 
@@ -10,9 +10,9 @@ Connects directly to a **cross-platform Flutter client (PC Web/Desktop, Android,
 
 * **⚡ Sub-10ms Edge AI Vision (Hailo-8 M.2)**:
   * Hardware accelerated **YOLOv8n** object detection ($<4\text{ms}$) + **YOLO-Pose** 17-keypoint pose estimation ($<8\text{ms}$).
-  * **Kinematic Fall Engine**: Multi-frame EMA velocity tracking, bounding box collapse, and horizontal torso inclination angle ($<35^\circ$).
-  * **Spatial AI Zones**: 2D vector cross-product directed virtual tripwires (`A_TO_B`, `B_TO_A`) and Ray-Casting Point-in-Polygon (PIP) intrusion detection.
-  * **Temporal State Machines**: Door Left Open ($>5\text{ min}$) and Package Theft displacement detectors.
+  * **Theft / loss prevention**: pose-keypoint behaviour cues (concealment, shelf sweeps, exit without checkout) raised as *suspicious behaviour for staff review* with snapshot and clip evidence, never as an accusation.
+  * **Market analysis**: footfall, zone dwell, conversion funnels and queue lengths aggregated from real tracked visits.
+  * **Customer heatmaps & shelf interactions**: floor-plan heatmaps from calibrated cameras and hand-to-shelf interaction events per product zone.
 * **🔒 Source-Level Hardware Privacy Masking**:
   * In-place masking (`BLACKOUT`, `BLUR`, `MOSAIC`, `COLOR`) applied directly to source frames before ring-buffering, snapshot generation, or WebRTC streaming.
 * **📼 24/7 Segmented NVR & 24-Hour Timeline**:
@@ -22,16 +22,15 @@ Connects directly to a **cross-platform Flutter client (PC Web/Desktop, Android,
 * **🌐 Zero-Trust WebRTC & NAT Traversal**:
   * **go2rtc** media gateway ($<300\text{ms}$ latency) + **Coturn** RFC 5766 dynamic HMAC-SHA1 authenticated STUN/TURN relay for symmetric 4G/5G mobile connectivity.
   * **Push-to-Talk 2-Way Audio Backchannel**: Encodes Flutter microphone audio to Opus 48kHz and routes to camera speakers.
-  * Local mDNS / Bonjour broadcaster (`_cctv-edge._tcp.local`) + automated 2048-bit SAN TLS certificates.
-* **🚨 Critical Emergency Takeover & DND Bypass**:
-  * **iOS**: Native `time-sensitive` priority + custom high-intensity siren + `AVAudioSession` loudspeaker override + Apple Critical Alerts entitlement support.
-  * **Android**: High-priority `USAGE_ALARM` notification channel with `FLAG_TURN_SCREEN_ON` waking the display and playing alarms through DND.
-  * **Lockscreen Interactive Actions**: "👁️ View Live", "🔕 Mute 5m", "📞 Call Contact" (`tel:911`).
+  * Automated 2048-bit SAN TLS certificates.
+* **🔔 Loss-prevention alerts for staff**:
+  * High-priority, time-sensitive pushes (APNs `time-sensitive`, FCM `priority: high`) with the normal alert sound; no critical-alert entitlement and no siren.
+  * Live dashboard feed over `/api/v1/events/ws`, an acknowledgeable alert log, and per-camera alert muting (e.g. during restocking).
 * **📱 Adaptive Cross-Platform Flutter Client**:
   * Responsive 3-tier layout: Mobile bottom nav ($<600\text{px}$), Tablet rail ($600-1100\text{px}$), and Desktop expanded sidebar ($>1100\text{px}$).
-  * **Visual Zone Canvas**: Click and drag polygon vertices and directed tripwire vectors directly on live camera snapshots.
+  * **Visual Zone Canvas**: Click and drag privacy-mask and product-shelf polygons directly on live camera snapshots.
   * **SMART Storage Health Dashboard**: NVMe wear levels, drive temperature, reallocated sectors, and per-camera quota progress bars.
-  * **Biometric Gate**: Hardware Face ID / Fingerprint verification for viewing sensitive feeds and dismissing alarms.
+  * **Biometric Gate**: Hardware Face ID / Fingerprint verification for viewing sensitive feeds and incident evidence.
 
 ---
 
@@ -46,11 +45,11 @@ Connects directly to a **cross-platform Flutter client (PC Web/Desktop, Android,
  │                                                                             │
  │ 1. Intel QuickSync (VA-API /dev/dri/renderD128) decodes raw RTSP feeds.     │
  │ 2. In-Place Privacy Masking (Blackout / Blur / Mosaic).                     │
- │ 3. Hailo-8 M.2 Dataflow: YOLOv8n + 17-Keypoint Pose Kinematics.             │
+ │ 3. Pose inference (Hailo / TensorRT / CUDA / CPU, probed at runtime).       │
  │ 4. Zero-Copy 24/7 DVR remuxing saves 1-min MP4 chunks + Dynamic HLS.       │
  │ 5. go2rtc (<300ms WebRTC) + Coturn RFC 5766 dynamic HMAC-SHA1 TURN.        │
- │ 6. Caddy TLS Reverse Proxy + mDNS Zeroconf Broadcaster.                     │
- │ 7. APNs Critical Alerts & FCM USAGE_ALARM Push Dispatcher.                  │
+ │ 6. Caddy TLS Reverse Proxy.                                                 │
+ │ 7. Loss-prevention alert fan-out: APNs / FCM pushes + dashboard websocket.  │
  └──────────────────────────────────────┬──────────────────────────────────────┘
                                         │ (HTTPS / WSS / WebRTC + Opus Mic)
                                         ▼
@@ -60,7 +59,7 @@ Connects directly to a **cross-platform Flutter client (PC Web/Desktop, Android,
  │  • Adaptive AppShell: Mobile bottom nav, Tablet rail, Desktop sidebar.      │
  │  • Live Multi-Cam Grid Wall: 1 to 16 adaptive camera tiles.                 │
  │  • 24/7 Continuous DVR Player: 60fps timeline with pinch zoom & snapping.   │
- │  • Visual Zone & Mask Canvas: Draw & drag polygons/tripwires on snapshots.  │
+ │  • Visual Zone & Mask Canvas: Draw & drag masks/shelf areas on snapshots.   │
  │  • System & SMART Storage Dashboard: Disk gauges, wear level, camera quota. │
  │  • AI Incident Center: Severity-filtered alerts with instant clip playback. │
  │  • Biometric Gate: FaceID / Fingerprint lock with 60s grace period.         │
@@ -93,7 +92,7 @@ Supermarket_Edge_CCTV/
 │
 ├── edge_backend/                             # Edge Mini PC Backend Services
 │   ├── app/
-│   │   ├── main.py                           # FastAPI app, SQLite lifecycle, mDNS, 24/7 DVR
+│   │   ├── main.py                           # FastAPI app, SQLite lifecycle, 24/7 DVR
 │   │   ├── config.py                         # Settings, retention policies, Coturn keys
 │   │   ├── database.py                       # SQLAlchemy async SQLite session factory
 │   │   ├── models/
@@ -102,23 +101,21 @@ Supermarket_Edge_CCTV/
 │   │   ├── routes/
 │   │   │   ├── health.py                     # Hardware & telemetry monitoring (/api/v1/health)
 │   │   │   ├── cameras.py                    # Camera CRUD, snapshots, device registration
-│   │   │   ├── events.py                     # AI event ingestion, history, clip streaming
+│   │   │   ├── events.py                     # Loss-prevention alerts: log, ack, websocket, devices
 │   │   │   ├── webrtc.py                     # WebRTC SDP signaling & dynamic ICE servers
 │   │   │   ├── dvr.py                        # 24h timeline, dynamic HLS, incident exports
-│   │   │   └── zones.py                      # Privacy masks, tripwires & alert muting
+│   │   │   └── zones.py                      # Per-camera privacy masks
 │   │   └── services/
-│   │       ├── hailo_inference_service.py    # HailoRT PCIe runner & kinematic fall engine
-│   │       ├── ai_zone_service.py            # Privacy masks, tripwires, PIP & state machines
+│   │       ├── inference_backend.py          # Pose detector with runtime accelerator probing
+│   │       ├── ai_zone_service.py            # Privacy masks & polygon geometry
 │   │       ├── dvr_recorder.py               # 24/7 continuous segmenter, HLS, stitcher & SMART
-│   │       ├── video_ingest_service.py       # Threaded QuickSync VA-API grabber with masking
 │   │       ├── clip_recorder.py              # In-memory JPEG ring-buffer MP4 generator
-│   │       ├── notification_service.py       # Dual-mode APNs & FCM push dispatcher
+│   │       ├── notification_service.py       # Loss-prevention pushes (APNs/FCM) + websocket hub
 │   │       ├── turn_service.py               # RFC 5766 dynamic ephemeral TURN credentials
-│   │       ├── mdns_service.py               # Bonjour/Zeroconf mDNS advertiser
 │   │       └── auth_service.py               # JWT session manager & path traversal sanitizer
 │   ├── tests/
 │   │   ├── test_api.py                       # REST API, auth, ICE, zones, timeline tests
-│   │   └── test_kinematics.py                # Kinematics, polygon PIP & tripwire unit tests
+│   │   └── test_features.py                  # Per-camera retail feature flags
 │   ├── coturn/coturn.conf                    # Coturn TURN/STUN relay configuration
 │   ├── Caddyfile                             # Caddy reverse proxy config (TLS termination)
 │   ├── scripts/generate_certs.py             # Automated local TLS certificate generator
@@ -160,6 +157,64 @@ Supermarket_Edge_CCTV/
 
 ## 🚀 Production Deployment Guide
 
+### 0. Running the backend (`./run.sh`)
+
+```bash
+./run.sh                    # fix the environment if needed, verify inference, start on 0.0.0.0:8000
+./run.sh --check-only       # same fixing and verification, but do not start the server
+./run.sh --port 8766 -- --reload   # arguments after -- go to uvicorn
+```
+
+`run.sh` is a thin wrapper around `edge_backend/scripts/bootstrap.py`. Each step
+checks first and only acts when something is wrong, so a second run on a healthy
+machine changes nothing:
+
+1. **venv**: `$EDGE_VENV` or `--venv`; otherwise the existing `.venv_test` if it
+   exists, else `.venv`, which is created on first run. A venv whose interpreter
+   no longer runs (for example after a system Python upgrade) is recreated.
+2. **requirements**: installed with `uv` when available, else with pip.
+3. **accelerator + onnxruntime flavour**: probes `nvidia-smi` and `/dev/nvidia*`,
+   `/dev/kfd` (ROCm), `/dev/dri` and `/dev/hailo0`. On x86_64 the flavour is
+   `onnxruntime-gpu[cuda,cudnn]`: the CUDA and cuDNN libraries come as pip
+   wheels, so only the NVIDIA driver is needed, and the same package runs on the
+   CPU when there is no GPU. `onnxruntime` and `onnxruntime-gpu` install the same
+   Python package, so if both are present the plain one is removed and
+   `onnxruntime-gpu` is reinstalled so that its files win. Use `--ort cpu` for the
+   lean CPU-only build, or `--ort openvino` on Intel.
+4. **models**: `edge_backend/models/*.onnx` are checked against
+   `models/manifest.json` (sha256). A missing or damaged model is re-exported
+   from its Ultralytics `.pt` in an isolated Python 3.12 venv under
+   `~/.cache/edge-cctv/model-export` (override with `--model-cache-dir`), so
+   ultralytics and torch never enter the app venv.
+5. **verify**: creates a real ONNX Runtime session and reports
+   `get_providers()[0]`. On an NVIDIA machine this must say
+   `CUDAExecutionProvider`.
+6. **preflight** (`python -m app.services.preflight`): read-only checks, then
+   `exec uvicorn`.
+
+The script never uses `sudo`. When the fix is at the system level (for example
+a GPU with no driver loaded) it prints the exact command for you to run.
+
+**Database updates** are automatic: every start applies pending schema migrations
+(`edge_backend/app/migrations/`, backed up first) and adds new model columns, so a
+feature update on a running device only needs a restart; see
+`python -m app.migrations status|check|upgrade`.
+
+The same checks run at every server start and are served at
+`GET /api/v1/system/preflight` (`?probe=true` also runs a real session probe).
+A summary is included in `GET /api/v1/system/hardware`.
+
+**GPU notes**
+- NVIDIA: the CUDA 13 wheels need driver >= 580. `nvidia-smi` shows the driver
+  version. TensorRT is listed by onnxruntime but its libraries are not installed,
+  so the backend falls through to CUDA.
+- Docker on NVIDIA hosts: install `nvidia-container-toolkit`, then run
+  `docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d`.
+  CPU-only, Intel and Hailo hosts use plain `docker compose up -d`.
+- systemd: `deploy/edge-cctv.service` runs the preflight as `ExecStartPre` and
+  allows the NVIDIA, ROCm and Hailo device nodes.
+- Model licence: the YOLO26 weights and exports are AGPL-3.0 (see `models/manifest.json`).
+
 ### 1. Edge Mini PC Backend Deployment (Intel N100 + Hailo M.2)
 
 #### System Prerequisites:
@@ -181,8 +236,10 @@ cd edge_backend
 # 1. Generate local 2048-bit SAN certificates
 python3 scripts/generate_certs.py
 
-# 2. Launch microservices
+# 2. Launch microservices (CPU / Intel / Hailo host)
 docker compose up -d --build
+# ...or on an NVIDIA host with nvidia-container-toolkit:
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
 ```
 
 #### Auto-Start on Boot (`systemd`):
@@ -224,7 +281,7 @@ flutter build apk --release --split-per-abi
 
 # Generated APK: build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
 ```
-* **Install**: Transfer `.apk` directly to Android devices via USB or local browser. Android automatically configures `USAGE_ALARM` channels and `FLAG_TURN_SCREEN_ON`.
+* **Install**: Transfer `.apk` directly to Android devices via USB or local browser.
 
 ---
 
@@ -243,7 +300,7 @@ flutter build apk --release --split-per-abi
    * Connect iPhone via USB $\rightarrow$ Select device in Xcode $\rightarrow$ Click **Run ▶**.
 
 > [!NOTE]
-> **iOS DND Bypass Fallback**: While awaiting Apple's Critical Alerts entitlement review, the system automatically uses **`time-sensitive`** priority + custom siren audio + `AVAudioSession` loudspeaker override, functioning immediately without review delay.
+> **iOS alert level**: loss-prevention pushes use the **`time-sensitive`** interruption level with the default sound. No critical-alert entitlement is requested.
 
 ---
 
@@ -267,25 +324,23 @@ Open `https://edge-cctv.local` or `http://192.168.1.100:8000` in any desktop bro
 ## 🧪 Local Testing & Verification
 
 ```bash
-# Run backend API and kinematics tests
+# Run backend API tests (./run.sh --check-only --dev installs pytest)
 cd edge_backend
-pytest tests/ -v
+python -m pytest tests/ -v
 
 # Test WebRTC ICE servers
 curl -s http://localhost:8000/api/v1/webrtc/ice-servers | jq .
 
-# Post a test fall event for a camera you have already added
+# Post a test loss-prevention alert for a camera you have already added
 # (there are no built-in demo cameras; use an id from GET /api/v1/cameras)
 curl -X POST http://localhost:8000/api/v1/events/trigger \
   -H "Content-Type: application/json" \
   -H "X-Edge-API-Key: $INTERNAL_SERVICE_KEY" \
   -d '{
     "camera_id": "<camera_id>",
-    "event_type": "FALL_DETECTED",
-    "severity": "CRITICAL",
-    "confidence": 0.96,
-    "bounding_box": {"x_min": 0.2, "y_min": 0.6, "x_max": 0.8, "y_max": 0.95, "confidence": 0.96, "label": "person_fallen"},
-    "kinematics": {"hip_descent_velocity": 2.3, "aspect_ratio_initial": 1.7, "aspect_ratio_final": 0.52, "transition_duration_ms": 390, "immobility_duration_sec": 5.2, "floor_proximity_score": 0.92, "torso_angle_deg": 18.5}
+    "event_type": "THEFT_SUSPECTED",
+    "severity": "HIGH",
+    "description": "Test alert: please ignore."
   }' | jq .
 ```
 

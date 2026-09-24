@@ -12,12 +12,12 @@
 The supermarket surveillance infrastructure consists of a multi-channel Dahua DVR/NVR system connected to the store local network. It is remotely accessible via Dahua's global P2P relay (`easy4ip` / DMSS cloud) and local UPnP NAT port mappings.
 
 * **Manufacturer / Firmware:** Dahua Technology (DevVersion `6.7.11`)
-* **Device Serial Number (SN):** `<NVR_SERIAL_REDACTED>`
+* **Device Serial Number (SN):** `<NVR_SERIAL>`
 * **MAC Address:** `3c:e3:6b:65:62:27` (Dahua OUI)
 * **Official Mobile App:** `DMSS` (iOS & Android) / `SmartPSS` (Desktop)
 * **Authentication:**
   * **Username:** `admin` (case-insensitive in some interfaces, standard: `admin`)
-  * **Passwords:** `<NVR_PASSWORD_REDACTED>` / `<NVR_PASSWORD_REDACTED>`
+  * **Passwords:** stored only on site and in the NVR (never in this repository); enter it in the dashboard, where it is encrypted at rest
 
 ---
 
@@ -95,9 +95,9 @@ All camera feeds follow Dahua's standard RTSP media URL syntax:
 * **Format:** `rtsp://admin:<PASSWORD>@<HOST>:554/cam/realmonitor?channel=<CHANNEL_NUM>&subtype=1`
 * **Resolution:** D1 / 720p @ 15–25 FPS (Low latency, minimal compute load on YOLO/Hailo AI models).
 * **Examples:**
-  * Camera 1 (Aisle 1): `rtsp://admin:<NVR_PASSWORD_REDACTED>@<HOST>:554/cam/realmonitor?channel=1&subtype=1`
-  * Camera 2 (Checkout): `rtsp://admin:<NVR_PASSWORD_REDACTED>@<HOST>:554/cam/realmonitor?channel=2&subtype=1`
-  * Camera 3 (Entrance): `rtsp://admin:<NVR_PASSWORD_REDACTED>@<HOST>:554/cam/realmonitor?channel=3&subtype=1`
+  * Camera 1 (Aisle 1): `rtsp://admin:<NVR_PASSWORD>@<HOST>:554/cam/realmonitor?channel=1&subtype=1`
+  * Camera 2 (Checkout): `rtsp://admin:<NVR_PASSWORD>@<HOST>:554/cam/realmonitor?channel=2&subtype=1`
+  * Camera 3 (Entrance): `rtsp://admin:<NVR_PASSWORD>@<HOST>:554/cam/realmonitor?channel=3&subtype=1`
 
 ### Main-Streams (Full HD Recording & Studio Forensics):
 * **Format:** `rtsp://admin:<PASSWORD>@<HOST>:554/cam/realmonitor?channel=<CHANNEL_NUM>&subtype=0`
@@ -127,15 +127,15 @@ webrtc:
 
 streams:
   pearcedale_cam1:
-    - "rtsp://admin:<NVR_PASSWORD_REDACTED>@127.0.0.1:8554/cam/realmonitor?channel=1&subtype=1"
+    - "rtsp://admin:<NVR_PASSWORD>@127.0.0.1:8554/cam/realmonitor?channel=1&subtype=1"
     - "ffmpeg:pearcedale_cam1#video=h264#hardware=vaapi"
 
   pearcedale_cam2:
-    - "rtsp://admin:<NVR_PASSWORD_REDACTED>@127.0.0.1:8554/cam/realmonitor?channel=2&subtype=1"
+    - "rtsp://admin:<NVR_PASSWORD>@127.0.0.1:8554/cam/realmonitor?channel=2&subtype=1"
     - "ffmpeg:pearcedale_cam2#video=h264#hardware=vaapi"
 
   pearcedale_cam3:
-    - "rtsp://admin:<NVR_PASSWORD_REDACTED>@127.0.0.1:8554/cam/realmonitor?channel=3&subtype=1"
+    - "rtsp://admin:<NVR_PASSWORD>@127.0.0.1:8554/cam/realmonitor?channel=3&subtype=1"
     - "ffmpeg:pearcedale_cam3#video=h264#hardware=vaapi"
 ```
 

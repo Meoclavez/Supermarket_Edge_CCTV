@@ -1,0 +1,15 @@
+# Keep secrets, data and dev files out of the build context.
+.env
+.env.*
+*.env
+!.env.example
+tailscale_state/
+certs/
+storage/
+recordings/
+data/
+tests/
+.pytest_cache/
+**/__pycache__/
+*.pyc
+models/*.tmp

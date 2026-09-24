@@ -54,8 +54,13 @@ class _ClipPlayerScreenState extends State<ClipPlayerScreen> {
     super.dispose();
   }
 
+  /// Video viewers stay dark in every app theme: the controls sit on and
+  /// around black video, and the overlays use constant colours.
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      Theme(data: AppTheme.viewerTheme, child: Builder(builder: _buildViewer));
+
+  Widget _buildViewer(BuildContext context) {
     final timeStr = DateFormat('yyyy-MM-dd HH:mm:ss').format(widget.event.timestamp);
 
     return Scaffold(
@@ -107,7 +112,7 @@ class _ClipPlayerScreenState extends State<ClipPlayerScreen> {
                       _controller!,
                       allowScrubbing: true,
                       colors: const VideoProgressColors(
-                        playedColor: AppTheme.emergencyRed,
+                        playedColor: AppTheme.alertRed,
                         bufferedColor: Colors.white24,
                         backgroundColor: Colors.black54,
                       ),
@@ -158,13 +163,13 @@ class _ClipPlayerScreenState extends State<ClipPlayerScreen> {
                         Container(
                           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                           decoration: BoxDecoration(
-                            color: widget.event.isCritical ? AppTheme.emergencyRed.withOpacity(0.2) : AppTheme.warningOrange.withOpacity(0.2),
+                            color: widget.event.isHigh ? AppTheme.alertRed.withOpacity(0.2) : AppTheme.warningOrange.withOpacity(0.2),
                             borderRadius: BorderRadius.circular(4),
                           ),
                           child: Text(
                             widget.event.severity,
                             style: TextStyle(
-                              color: widget.event.isCritical ? AppTheme.emergencyRed : AppTheme.warningOrange,
+                              color: widget.event.isHigh ? AppTheme.alertRed : AppTheme.warningOrange,
                               fontSize: 11,
                               fontWeight: FontWeight.bold,
                             ),
@@ -178,33 +183,6 @@ class _ClipPlayerScreenState extends State<ClipPlayerScreen> {
                     Text('Detected: $timeStr', style: const TextStyle(color: Colors.white70, fontSize: 13)),
                     const SizedBox(height: 4),
                     Text('AI Confidence: ${(widget.event.confidence * 100).toStringAsFixed(1)}%', style: const TextStyle(color: AppTheme.liveGreen, fontSize: 13)),
-                    const SizedBox(height: 12),
-                    Wrap(
-                      spacing: 8,
-                      children: [
-                        if (widget.event.eventType.contains('TRIPWIRE') || true) // Mock condition since we just want to display
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                            decoration: BoxDecoration(
-                              color: Colors.blueAccent.withOpacity(0.2),
-                              borderRadius: BorderRadius.circular(4),
-                              border: Border.all(color: Colors.blueAccent),
-                            ),
-                            child: const Text('TRIPWIRE: A -> B', style: TextStyle(color: Colors.blueAccent, fontSize: 11, fontWeight: FontWeight.bold)),
-                          ),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                          decoration: BoxDecoration(
-                            color: Colors.redAccent.withOpacity(0.2),
-                            borderRadius: BorderRadius.circular(4),
-                            border: Border.all(color: Colors.redAccent),
-                          ),
-                          child: const Text('RESTRICTED ZONE', style: TextStyle(color: Colors.redAccent, fontSize: 11, fontWeight: FontWeight.bold)),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 20),
-                    const Text('Buffer Specs: 5s Pre-Event + 10s Post-Event MP4 (+faststart) • 15s Total', style: TextStyle(color: Colors.white38, fontSize: 11)),
                   ],
                 ),
               ),

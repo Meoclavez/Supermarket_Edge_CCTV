@@ -47,6 +47,19 @@ MIN_VISITS_FOR_CONFIDENCE = 5       # below this, the sample proves nothing
 # anything is normal behaviour, not a merchandising failure.
 MERCHANDISING_CATEGORIES = ("AISLE", "DEPARTMENT", "SHELF")
 
+# Product-level (shelf reach) rules, over shelf_interactions rows.
+# A shelf is "dead" only when the same camera demonstrably recorded reaches
+# elsewhere (so the pose pipeline was working) and saw enough shoppers.
+DEAD_SHELF_MIN_CAMERA_REACHES = 10
+DEAD_SHELF_MIN_CAMERA_SHOPPERS = 10
+# Shelf-level comparison needs this many reaches in total, spread over at
+# least one configured zone per compared level.
+SHELF_LEVEL_MIN_REACHES = 20
+SHELF_LEVEL_GAP_RATIO = 0.5          # top/bottom below half the eye-level rate
+# High reach, low sale: only with POS rows for the day.
+HIGH_REACH_MIN_SHOPPERS = 10
+LOW_UNITS_PER_REACHING_SHOPPER = 0.2
+
 
 class Finding:
     """One rule hit, with the evidence that produced it."""
@@ -194,6 +207,108 @@ def _detect(zones: list[ZoneMetrics], funnel: dict) -> list[Finding]:
     order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
     findings.sort(key=lambda f: order.get(f.severity, 9))
     return findings
+
+
+def _detect_products(summary: Optional[dict]) -> tuple[list[Finding], list[str]]:
+    """Merchandising rules over per-product shelf reaches. Returns (findings, suppressed)."""
+    findings: list[Finding] = []
+    suppressed: list[str] = []
+    if not summary:
+        return findings, ["product_reach: product summary unavailable"]
+    products = [p for p in summary.get("products") or [] if p.get("configured") and p.get("enabled", True)]
+    if not products:
+        return findings, ["product_reach: no product shelf areas are mapped in Studio"]
+
+    # 1. Dead shelves: no reach at all while the camera was demonstrably working.
+    for p in products:
+        cam_reaches = int(p.get("camera_reaches") or 0)
+        cam_shoppers = p.get("camera_shoppers")
+        if (
+            p["reaches"] == 0
+            and cam_reaches >= DEAD_SHELF_MIN_CAMERA_REACHES
+            and cam_shoppers is not None and cam_shoppers >= DEAD_SHELF_MIN_CAMERA_SHOPPERS
+        ):
+            findings.append(Finding(
+                category="MERCHANDISING",
+                severity="MEDIUM",
+                zone=p["name"],
+                finding=(
+                    f"No shopper reached for {p['name']} (SKU {p['sku_id']}) today, while the same camera "
+                    f"recorded {cam_reaches} reaches at other products and {cam_shoppers} shoppers."
+                ),
+                root_cause="A shelf nobody touches is usually out of stock, hidden, mispriced or mis-faced.",
+                action_item=f"Check stock, facing and shelf-edge label for {p['name']}.",
+                evidence={"reaches": 0, "camera_reaches": cam_reaches, "camera_shoppers": cam_shoppers,
+                          "shelf_level": p.get("shelf_level")},
+            ))
+    if not any(int(p.get("camera_reaches") or 0) >= DEAD_SHELF_MIN_CAMERA_REACHES for p in products):
+        suppressed.append(
+            f"dead_shelf: needs a camera with at least {DEAD_SHELF_MIN_CAMERA_REACHES} recorded reaches today"
+        )
+
+    # 2. Top / bottom shelf vs eye level (MIDDLE), reaches per configured zone.
+    levels = {row["level"]: row for row in summary.get("shelf_levels") or []}
+    mid = levels.get("MIDDLE")
+    total = sum(p["reaches"] for p in products)
+    compared = False
+    if mid and mid.get("zones") and total >= SHELF_LEVEL_MIN_REACHES and mid.get("reaches_per_zone"):
+        for lvl, label in (("TOP", "top-shelf"), ("BOTTOM", "bottom-shelf")):
+            row = levels.get(lvl)
+            if not row or not row.get("zones") or row.get("reaches_per_zone") is None:
+                continue
+            compared = True
+            ratio = row["reaches_per_zone"] / mid["reaches_per_zone"]
+            if ratio < SHELF_LEVEL_GAP_RATIO:
+                findings.append(Finding(
+                    category="MERCHANDISING",
+                    severity="LOW",
+                    zone=f"{label.capitalize()} products",
+                    finding=(
+                        f"{label.capitalize()} products drew {row['reaches_per_zone']:.1f} reaches per product "
+                        f"today against {mid['reaches_per_zone']:.1f} at eye level ({ratio * 100:.0f}%)."
+                    ),
+                    root_cause="Shoppers reach most at eye level; products placed high or low are handled less.",
+                    action_item=(
+                        f"Keep high-margin or promoted lines at eye level; review which {label} products "
+                        "would benefit from moving."
+                    ),
+                    evidence={"level": lvl, "reaches": row["reaches"], "zones": row["zones"],
+                              "reaches_per_zone": row["reaches_per_zone"],
+                              "eye_level_reaches_per_zone": mid["reaches_per_zone"]},
+                ))
+    if not compared:
+        suppressed.append(
+            f"shelf_level_reach: needs {SHELF_LEVEL_MIN_REACHES}+ reaches and products at eye level "
+            "and at another level (set shelf levels in Studio)"
+        )
+
+    # 3. High reach, low conversion -- only when POS data exists.
+    if not summary.get("pos_connected"):
+        suppressed.append("product_conversion: needs POS data (no POS rows for this day)")
+    else:
+        seen_skus: set = set()
+        for p in products:
+            sku = p.get("sku_id")
+            ratio = p.get("units_per_reaching_shopper")
+            reachers = p.get("sku_reaching_shoppers") or 0
+            if not sku or sku in seen_skus or ratio is None or reachers < HIGH_REACH_MIN_SHOPPERS:
+                continue
+            seen_skus.add(sku)
+            if ratio < LOW_UNITS_PER_REACHING_SHOPPER:
+                findings.append(Finding(
+                    category="MERCHANDISING",
+                    severity="HIGH",
+                    zone=p["name"],
+                    finding=(
+                        f"{reachers} shoppers reached for {p['name']} (SKU {sku}) but POS recorded "
+                        f"{p['pos_units_sold']} unit(s) sold ({ratio:.2f} per reaching shopper)."
+                    ),
+                    root_cause="Handled but not bought: price resistance, unclear label, or damaged/short-dated stock.",
+                    action_item=f"Check the price label, pack condition and dates on {p['name']}.",
+                    evidence={"sku_id": sku, "reaching_shoppers": reachers,
+                              "pos_units_sold": p["pos_units_sold"], "units_per_reaching_shopper": ratio},
+                ))
+    return findings, suppressed
 
 
 class BusinessAnalysisService:
@@ -356,6 +471,18 @@ class BusinessAnalysisService:
         assessable = sum(1 for z in zones if z.visits >= MIN_VISITS_FOR_CONFIDENCE)
         findings = _detect(zones, funnel)
 
+        # Product-level shelf reach rules (from shelf_interactions rows).
+        product_summary = None
+        try:
+            from app.services.shelf_interaction_service import shelf_interaction_service
+            product_summary = await shelf_interaction_service.product_summary(db, start, end)
+        except Exception as e:  # never let product rules break the zone analysis
+            logger.warning(f"Product reach summary unavailable: {e}")
+        product_findings, product_suppressed = _detect_products(product_summary)
+        findings.extend(product_findings)
+        _order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+        findings.sort(key=lambda f: _order.get(f.severity, 9))
+
         if persist and findings:
             await self._persist(db, findings)
 
@@ -370,11 +497,21 @@ class BusinessAnalysisService:
             "suppressed_rules": (
                 [] if engagement_tracked
                 else ["merchandising_engagement: no shelf-interaction source is reporting"]
+            ) + product_suppressed,
+            "product_reach": (
+                {
+                    "reaches": product_summary["totals"]["reaches"],
+                    "products_reached": product_summary["totals"]["products_reached"],
+                    "products_configured": product_summary["totals"]["products_configured"],
+                    "shelf_levels": product_summary["shelf_levels"],
+                    "pos_connected": product_summary["pos_connected"],
+                }
+                if product_summary else None
             ),
             # Say plainly why an empty result is empty.
-            "sufficient_data": assessable > 0,
+            "sufficient_data": assessable > 0 or bool(product_findings),
             "message": (
-                None if assessable
+                None if (assessable or product_findings)
                 else (
                     f"Not enough observations yet. A zone needs at least "
                     f"{MIN_VISITS_FOR_CONFIDENCE} recorded visits before it can be assessed."

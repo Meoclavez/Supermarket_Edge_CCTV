@@ -3,6 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- Colour theme before first paint (js/theme.js adds the header control). -->
+  <script>(function(){var m=null;try{m=localStorage.getItem('edge_cctv_theme')}catch(e){}document.documentElement.setAttribute('data-theme',m==='light'||m==='system'?m:'dark')})();</script>
   <title>Edge AI CCTV - Retail Intelligence & Multi-Camera Matrix</title>
   
   <!-- Modern Fonts -->
@@ -11,9 +13,11 @@
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;800&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   
   <!-- Cyber-Glassmorphism Stylesheet -->
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/css/style.css?v=2.1.5" />
   <link rel="stylesheet" href="/static/css/floorplan.css?v=2.1.5" />
   <script src="/static/js/auth.js?v=2.1.5"></script>
+  <script src="/static/js/theme.js?v=2.1.5" defer></script>
 
   <!-- Chart.js for High-Performance Canvas Graphs -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
@@ -127,7 +131,7 @@
       <button class="tab-btn" data-tab="market_ai" onclick="switchTab('market_ai')">
         <span>🧠</span>
         <span>ML Market Intelligence & Suggestions</span>
-        <span class="tab-count" style="background: #ffaa00; color: #000; font-weight: 800;">AI</span>
+        <span class="tab-count tab-count-ai">AI</span>
       </button>
       <button class="tab-btn" data-tab="theft" onclick="switchTab('theft')">
         <span>🚨</span>
@@ -137,6 +141,10 @@
       <button class="tab-btn" data-tab="digest" onclick="switchTab('digest')">
         <span>📑</span>
         <span>Executive Daily Digest</span>
+      </button>
+      <button class="tab-btn" data-tab="settings" onclick="switchTab('settings')">
+        <span>⚙️</span>
+        <span>Settings</span>
       </button>
     </nav>
 
@@ -185,10 +193,10 @@
             <span class="fp-sep"></span>
             <div class="fp-tool-group" id="fpTools">
               <button class="btn btn-sm fp-tool active" data-tool="view" onclick="blueprintEditor.setTool('view')" title="Select, move shapes, drag vertices (V)">Select</button>
-              <button class="btn btn-sm fp-tool" data-tool="ROOM" onclick="blueprintEditor.startDraw('ROOM')" title="Draw a room outline (R)"><span class="fp-tool-swatch" style="background:#4a90d9"></span>Room</button>
-              <button class="btn btn-sm fp-tool" data-tool="WALL" onclick="blueprintEditor.startDraw('WALL')" title="Draw a wall polyline (W), hold Shift for straight segments"><span class="fp-tool-swatch" style="background:#c9d4e0"></span>Wall</button>
-              <button class="btn btn-sm fp-tool" data-tool="SHELF" onclick="blueprintEditor.startDraw('SHELF')" title="Draw a shelf, counter or obstacle (S)"><span class="fp-tool-swatch" style="background:#f472b6"></span>Shelf</button>
-              <button class="btn btn-sm fp-tool" data-tool="DOOR" onclick="blueprintEditor.startDraw('DOOR')" title="Draw a door opening (D)"><span class="fp-tool-swatch" style="background:#fbbf24"></span>Door</button>
+              <button class="btn btn-sm fp-tool" data-tool="ROOM" onclick="blueprintEditor.startDraw('ROOM')" title="Draw a room outline (R)"><span class="fp-tool-swatch fp-swatch-room"></span>Room</button>
+              <button class="btn btn-sm fp-tool" data-tool="WALL" onclick="blueprintEditor.startDraw('WALL')" title="Draw a wall polyline (W), hold Shift for straight segments"><span class="fp-tool-swatch fp-swatch-wall"></span>Wall</button>
+              <button class="btn btn-sm fp-tool" data-tool="SHELF" onclick="blueprintEditor.startDraw('SHELF')" title="Draw a shelf, counter or obstacle (S)"><span class="fp-tool-swatch fp-swatch-shelf"></span>Shelf</button>
+              <button class="btn btn-sm fp-tool" data-tool="DOOR" onclick="blueprintEditor.startDraw('DOOR')" title="Draw a door opening (D)"><span class="fp-tool-swatch fp-swatch-door"></span>Door</button>
               <button class="btn btn-sm fp-tool btn-primary" data-tool="ZONE" onclick="blueprintEditor.startDrawZone()" title="Draw an analytics zone (Z)">Zone</button>
               <button class="btn btn-sm" onclick="blueprintEditor.resizeStore()" title="Floor name and dimensions">Store size</button>
             </div>
@@ -252,17 +260,71 @@
               <span>Cameras &amp; devices</span>
               <div style="display: flex; gap: 6px;">
                 <button class="btn btn-sm btn-secondary" onclick="deviceManager.toggleDahuaPanel()" id="btnToggleDahua" title="Configure Dahua NVR and scan channels">📹 Dahua NVR</button>
+                <button class="btn btn-sm btn-secondary" onclick="deviceManager.toggleAddPanel()" id="btnToggleAddCamera" aria-expanded="false" aria-controls="addCameraPanel" title="Add a camera by RTSP / MJPEG URL, ONVIF address, USB device or video file">+ Add camera</button>
                 <button class="btn btn-sm btn-primary" onclick="deviceManager.scan()" id="btnScanDevices">Scan network</button>
               </div>
             </div>
 
+            <!-- Add a camera by address: inline form, tested before it is saved. -->
+            <div id="addCameraPanel" class="dev-add-panel" role="group" aria-labelledby="acTitle" hidden>
+              <div class="dev-add-head">
+                <div class="dev-add-title" id="acTitle">Add camera by address</div>
+                <button type="button" class="btn btn-xs" id="acClose">Close</button>
+              </div>
+              <div class="fp-field"><label for="acName">Camera name</label>
+                <input id="acName" name="acName" type="text" maxlength="120" placeholder="e.g. Aisle 3 north" autocomplete="off"></div>
+              <div class="fp-field-row">
+                <div class="fp-field"><label for="acType">Source type</label>
+                  <select id="acType" name="acType">
+                    <option value="rtsp">RTSP stream</option>
+                    <option value="http">HTTP MJPEG stream</option>
+                    <option value="onvif">ONVIF device (address)</option>
+                    <option value="usb">USB camera (index or /dev path)</option>
+                    <option value="file">Local video file (testing)</option>
+                  </select></div>
+                <div class="fp-field"><label for="acDept">Area</label>
+                  <select id="acDept" name="acDept">
+                    <option value="ENTRANCE">ENTRANCE</option>
+                    <option value="EXIT">EXIT</option>
+                    <option value="AISLE">AISLE</option>
+                    <option value="DEPARTMENT">DEPARTMENT</option>
+                    <option value="CHECKOUT">CHECKOUT</option>
+                    <option value="STOCKROOM">STOCKROOM</option>
+                    <option value="GENERAL" selected>GENERAL</option>
+                  </select></div>
+              </div>
+              <div class="fp-field"><label for="acUrl" id="acUrlLabel">Stream URL</label>
+                <input id="acUrl" name="acUrl" type="text" maxlength="480" spellcheck="false" autocomplete="off" placeholder="rtsp://192.168.1.64:554/stream1">
+                <div class="dev-hint" id="acUrlHint"></div></div>
+              <div class="fp-field-row" id="acCredRow">
+                <div class="fp-field"><label for="acUser">Username (optional)</label>
+                  <input id="acUser" name="acUser" type="text" autocomplete="off"></div>
+                <div class="fp-field"><label for="acPass">Password (optional)</label>
+                  <div class="dev-pass-wrap">
+                    <input id="acPass" name="acPass" type="password" autocomplete="new-password">
+                    <button type="button" class="btn btn-xs dev-pass-toggle" id="acPassToggle" aria-label="Show password" aria-pressed="false">Show</button>
+                  </div></div>
+              </div>
+              <div class="fp-field"><label for="acLoc">Location (optional)</label>
+                <input id="acLoc" name="acLoc" type="text" maxlength="120" placeholder="e.g. Above the front doors" autocomplete="off"></div>
+              <div class="fp-actions">
+                <button type="button" class="btn btn-sm btn-secondary" id="acTest">Test connection</button>
+                <button type="button" class="btn btn-sm btn-primary" id="acSave">Save camera</button>
+              </div>
+              <div id="acStatus" class="fp-status dev-add-status" role="status" aria-live="polite"></div>
+              <figure id="acPreview" class="dev-preview" hidden>
+                <img id="acPreviewImg" alt="Frame received from the camera during the connection test">
+                <figcaption id="acPreviewCap" class="dev-preview-cap"></figcaption>
+              </figure>
+            </div>
+
             <!-- Dahua NVR Multi-Channel Setup Panel -->
-            <div id="dahuaNvrPanel" style="display: none; padding: 12px; margin-bottom: 12px; border-radius: 10px; background: rgba(0,212,255,0.04); border: 1px solid rgba(0,212,255,0.25);">
+            <div id="dahuaNvrPanel" class="nvr-panel" style="display: none;">
               <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                <div style="font-size: 12.5px; font-weight: 800; color: #00d4ff;">📹 Dahua NVR / Multi-Channel Scanner</div>
+                <div class="nvr-panel-title">📹 Dahua NVR / Multi-Channel Scanner</div>
                 <button class="btn btn-xs" onclick="deviceManager.toggleDahuaPanel()">✕ Close</button>
               </div>
-              <div style="font-size: 11px; color: #8b949e; margin-bottom: 10px; line-height: 1.4;">
+              <div class="nvr-panel-help">
                 Connect CCTV cameras through Dahua NVR / XVR / DVR via RTSP. Credentials persist on disk.
               </div>
               <div class="fp-field-row">
@@ -281,10 +343,10 @@
                   <input id="nvrUser" type="text" value="admin" autocomplete="off">
                 </div>
                 <div class="fp-field" style="flex: 1; position: relative;">
-                  <label for="nvrPass">Password <span id="nvrPassStatus" style="font-size: 9.5px; color: #00ff9d;"></span></label>
+                  <label for="nvrPass">Password <span id="nvrPassStatus" class="nvr-pass-status"></span></label>
                   <div style="display: flex; align-items: center;">
                     <input id="nvrPass" type="password" placeholder="NVR Password" style="flex: 1; padding-right: 32px;" autocomplete="new-password">
-                    <button type="button" class="btn btn-xs" style="margin-left: -30px; background: transparent; border: none; color: #8b949e; cursor: pointer;" onclick="deviceManager.togglePassVis('nvrPass')">👁</button>
+                    <button type="button" class="btn btn-xs pass-vis-btn" onclick="deviceManager.togglePassVis('nvrPass')">👁</button>
                   </div>
                 </div>
               </div>
@@ -311,7 +373,7 @@
                 <button class="btn btn-sm btn-primary" id="btnProbeNvr" onclick="deviceManager.probeNvr()">🔍 Scan NVR Channels</button>
                 <button class="btn btn-sm" id="btnSaveNvrCreds" onclick="deviceManager.saveNvrCreds()">💾 Save Credentials</button>
               </div>
-              <div id="dahuaProbeStatus" class="fp-status" style="margin-top: 8px;"></div>
+              <div id="dahuaProbeStatus" class="fp-status" role="status" aria-live="polite" style="margin-top: 8px;"></div>
               <div id="dahuaChannelsList" style="margin-top: 10px; max-height: 220px; overflow-y: auto;"></div>
             </div>
 
@@ -350,6 +412,37 @@
         </div>
       </div>
 
+      <!-- Entrances: today's in/out per Studio tripwire (js/entrances.js). -->
+      <div class="glass-card" id="entrancesCard" style="margin-top: 14px;">
+        <div class="card-title">
+          <span>🚪 Entrances today</span>
+          <span class="badge" id="entrancesSourceBadge" title="Which signal store footfall uses today">FOOTFALL: &mdash;</span>
+        </div>
+        <div class="entrances-summary">
+          <div class="stat-box">
+            <div class="stat-label">In</div>
+            <div class="stat-val metric-unobserved" id="entrancesTotalIn">&mdash;</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-label">Out</div>
+            <div class="stat-val metric-unobserved" id="entrancesTotalOut">&mdash;</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-label">Inside now (estimate)</div>
+            <div class="stat-val metric-unobserved" id="entrancesOccupancy">&mdash;</div>
+          </div>
+        </div>
+        <div style="overflow-x: auto;">
+          <table class="friction-table entrances-table">
+            <thead>
+              <tr><th>Tripwire</th><th>Camera</th><th>In</th><th>Out</th><th>Net</th></tr>
+            </thead>
+            <tbody id="entrancesTableBody"><tr><td colspan="5"><div class="fp-empty">Loading…</div></td></tr></tbody>
+          </table>
+        </div>
+        <div class="form-status entrances-note" id="entrancesNote"></div>
+      </div>
+
       <div class="analytics-two-col" style="margin-top: 14px;">
         <div class="glass-card">
           <div class="card-title">
@@ -381,6 +474,15 @@
             <canvas id="demographicsChart"></canvas>
           </div>
         </div>
+      </div>
+
+      <!-- Product shelf reaches: js/product_reach.js -->
+      <div class="glass-card" id="productReachPanel" style="margin-top: 14px;">
+        <div class="card-title">
+          <span>🛒 Product Shelf Reaches (hand-to-shelf, today)</span>
+          <span class="badge metric-unobserved" id="productReachBadge">REACHES: &mdash;</span>
+        </div>
+        <div id="productReachBody"><div class="fp-empty">Loading…</div></div>
       </div>
     </section>
 
@@ -419,30 +521,52 @@
       <!-- Theft KPIs -->
       <div class="overview-strip" style="margin-bottom: 14px;">
         <div class="stat-box">
-          <span class="stat-label">Active Shoplifting Alerts</span>
+          <span class="stat-label">Open Incidents for Review</span>
           <span class="metric-unobserved stat-val" id="kpiTheftActiveAlerts" style="color: var(--accent-red);">&mdash;</span>
         </div>
         <div class="stat-box">
-          <span class="stat-label">Theft Incidents Today</span>
+          <span class="stat-label">Incidents Flagged Today</span>
           <span class="metric-unobserved stat-val" id="kpiTheftAttemptsToday">&mdash;</span>
         </div>
         <div class="stat-box">
-          <span class="stat-label">Prevented Loss Value</span>
+          <span class="stat-label">Item Value in Actioned Incidents</span>
           <span class="metric-unobserved stat-val" id="kpiTheftPreventedLoss" style="color: var(--accent-green);">&mdash;</span>
         </div>
         <div class="stat-box">
           <span class="stat-label">Top High-Risk Dept</span>
-          <span class="metric-unobserved stat-val" id="kpiTheftHighRiskDept" style="color: #ffaa00; font-size: 13px;">&mdash;</span>
+          <span class="metric-unobserved stat-val" id="kpiTheftHighRiskDept" style="color: var(--accent-orange); font-size: 13px;">&mdash;</span>
         </div>
       </div>
 
       <!-- Recent Incidents Stream Table / Cards -->
       <div class="glass-card">
         <div class="card-title" style="display: flex; justify-content: space-between; align-items: center;">
-          <span>📋 Edge CCTV Shoplifting Incidents & Triage Log</span>
-          <button class="btn btn-sm" onclick="fetchTheftIncidents()">🔄 Refresh Stream</button>
+          <span>📋 Loss-Prevention Review Queue</span>
+          <button class="btn btn-sm" onclick="fetchTheftIncidents()">🔄 Refresh</button>
         </div>
+        <p style="margin: 6px 0 0; font-size: 11.5px; color: var(--text-dim); line-height: 1.45;">
+          Every entry is <b>suspicious behaviour for staff review</b>, not a finding of theft. The pose pipeline flags
+          concealment, shelf sweeping, loitering at high-value products and exit without checkout; confidence is derived
+          from keypoint visibility, duration and how many signals agreed. Check the evidence image and footage before acting.
+        </p>
         <div id="theftIncidentsList" style="display: flex; flex-direction: column; gap: 10px; margin-top: 10px;"></div>
+      </div>
+
+      <!-- Full-size evidence viewer (inline overlay; no popups or dialogs) -->
+      <div id="theftEvidenceViewer" role="dialog" aria-modal="true" aria-label="Evidence image"
+           onclick="if (event.target === this) closeTheftEvidence()"
+           style="display: none; position: fixed; inset: 0; z-index: 1000; background: var(--lightbox-scrim); align-items: center; justify-content: center; padding: 16px;">
+        <div style="display: flex; flex-direction: column; gap: 8px; max-width: 96vw; max-height: 94vh;">
+          <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;">
+            <span id="theftEvidenceCaption" style="color: var(--lightbox-text); font-size: 12px;"></span>
+            <span style="display: flex; gap: 6px;">
+              <a id="theftEvidenceOpen" class="btn btn-sm" href="#" target="_blank" rel="noopener">Open in new tab</a>
+              <button id="theftEvidenceClose" type="button" class="btn btn-sm" onclick="closeTheftEvidence()">Close ✕</button>
+            </span>
+          </div>
+          <img id="theftEvidenceFull" alt="Evidence image: annotated frame and person crop"
+               style="display: block; max-width: 96vw; max-height: 86vh; object-fit: contain; background: var(--media-bg); border-radius: 6px;">
+        </div>
       </div>
     </section>
 
@@ -455,8 +579,21 @@
           <span>📑 <span id="digestStoreName">Store</span> Executive Briefing</span>
           <button class="btn btn-primary btn-sm" onclick="printDailyDigest()">🖨️ Export PDF / Print</button>
         </div>
-        <div class="digest-narrative" id="digestNarrative" style="font-size: 13px; line-height: 1.6; color: #cbd5e1; margin-top: 12px;"></div>
+        <div class="digest-narrative" id="digestNarrative" style="font-size: 13px; line-height: 1.6; color: var(--text-steps); margin-top: 12px;"></div>
       </div>
+    </section>
+
+    <!-- ==========================================
+         TAB: Settings. Each panel is owned by one script:
+         device + remote access -> remote_access.js,
+         pairing, push and paired phones -> pairing.js
+         ========================================== -->
+    <section id="tab-settings" class="tab-view">
+      <div class="glass-card" id="settings-device"></div>
+      <div class="glass-card" id="settings-remote"></div>
+      <div class="glass-card" id="settings-pairing"></div>
+      <div class="glass-card" id="settings-push"></div>
+      <div class="glass-card" id="settings-devices"></div>
     </section>
   </div>
 
@@ -517,21 +654,21 @@
         <div class="form-grid-2col">
           <div class="form-group">
             <label for="configFloorX">Floor X (m)</label>
-            <input type="number" step="0.05" min="0" class="form-input" id="configFloorX" name="floorX" required />
+            <input type="number" step="any" min="0" class="form-input" id="configFloorX" name="floorX" required />
           </div>
           <div class="form-group">
             <label for="configFloorY">Floor Y (m)</label>
-            <input type="number" step="0.05" min="0" class="form-input" id="configFloorY" name="floorY" required />
+            <input type="number" step="any" min="0" class="form-input" id="configFloorY" name="floorY" required />
           </div>
         </div>
         <div class="form-grid-2col" style="margin-top: 8px;">
           <div class="form-group">
             <label for="configFloorZ">Mounting height Z (m)</label>
-            <input type="number" step="0.1" min="0" class="form-input" id="configFloorZ" name="floorZ" />
+            <input type="number" step="any" min="0" class="form-input" id="configFloorZ" name="floorZ" />
           </div>
           <div class="form-group">
             <label for="configFovDeg">Field of view (degrees)</label>
-            <input type="number" step="1" min="1" max="180" class="form-input" id="configFovDeg" name="fovDeg" />
+            <input type="number" step="any" min="1" max="180" class="form-input" id="configFovDeg" name="fovDeg" />
           </div>
         </div>
         <div class="form-group" style="margin-top: 8px;">
@@ -545,11 +682,9 @@
         <div class="form-group" style="margin-top: 10px;">
           <label>AI features on this camera</label>
           <div class="checkbox-group-grid">
-            <label class="checkbox-label" for="featDwellTracking"><input type="checkbox" id="featDwellTracking" name="featDwellTracking" /> Dwell tracking</label>
-            <label class="checkbox-label" for="featShelfInteraction"><input type="checkbox" id="featShelfInteraction" name="featShelfInteraction" /> Shelf interaction</label>
-            <label class="checkbox-label" for="featTheftDetection"><input type="checkbox" id="featTheftDetection" name="featTheftDetection" /> Theft detection</label>
-            <label class="checkbox-label" for="featFallDetection"><input type="checkbox" id="featFallDetection" name="featFallDetection" /> Fall detection</label>
-            <label class="checkbox-label" for="featQueueMonitoring"><input type="checkbox" id="featQueueMonitoring" name="featQueueMonitoring" /> Queue monitoring</label>
+            <label class="checkbox-label" for="featPeopleCounting" title="Zone visits, dwell, queues and footfall from tracked people"><input type="checkbox" id="featPeopleCounting" name="featPeopleCounting" /> People counting &amp; dwell</label>
+            <label class="checkbox-label" for="featShelfInteraction" title="Hand-to-shelf interactions from pose keypoints"><input type="checkbox" id="featShelfInteraction" name="featShelfInteraction" /> Shelf interaction</label>
+            <label class="checkbox-label" for="featTheftDetection" title="Suspicious behaviour flagged for staff review"><input type="checkbox" id="featTheftDetection" name="featTheftDetection" /> Theft detection</label>
           </div>
         </div>
 
@@ -582,5 +717,9 @@
   <script src="/static/js/devices.js?v=2.1.5"></script>
   <script src="/static/js/calibration.js?v=2.1.5"></script>
   <script src="/static/js/analytics.js?v=2.1.5"></script>
+  <script src="/static/js/product_reach.js?v=2.1.5"></script>
+  <script src="/static/js/entrances.js?v=2.1.5"></script>
+  <script src="/static/js/remote_access.js?v=2.1.5"></script>
+  <script src="/static/js/pairing.js?v=2.1.5"></script>
 </body>
 </html>

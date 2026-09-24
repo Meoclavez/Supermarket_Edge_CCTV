@@ -10,9 +10,8 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.services.hardware_detector import HardwareDetector
 from app.services.feature_manager import FeatureManager
-from app.services.kinematic_fall_engine import KinematicFallEngine
 from app.services.ai_zone_service import PolygonGeometry, ai_zone_service
-from app.models.schemas import Point2D, CameraFeatureConfig, EventType, EventSeverity
+from app.models.schemas import Point2D, CameraFeatureConfig
 
 class TestHardwareAndFeatures(unittest.TestCase):
     def test_hardware_detector(self):
@@ -23,14 +22,15 @@ class TestHardwareAndFeatures(unittest.TestCase):
 
     def test_feature_manager(self):
         fm = FeatureManager()
-        cfg = CameraFeatureConfig(fall_detection=True, door_monitoring=False)
+        cfg = CameraFeatureConfig(theft_detection=True, shelf_interaction=False)
         fm.set_camera_features("cam_test", cfg)
-        self.assertTrue(fm.get_camera_features("cam_test").fall_detection)
-        cfg.fall_detection = False
+        self.assertTrue(fm.is_enabled("cam_test", "theft_detection"))
+        self.assertFalse(fm.is_enabled("cam_test", "shelf_interaction"))
+        cfg.theft_detection = False
         fm.set_camera_features("cam_test", cfg)
-        self.assertFalse(fm.get_camera_features("cam_test").fall_detection)
+        self.assertFalse(fm.get_camera_features("cam_test").theft_detection)
 
-class TestZonesAndKinematics(unittest.TestCase):
+class TestZones(unittest.TestCase):
     def test_polygon_geometry_and_crossing(self):
         poly = [Point2D(x=0.2, y=0.2), Point2D(x=0.8, y=0.2), Point2D(x=0.8, y=0.8), Point2D(x=0.2, y=0.8)]
         self.assertTrue(PolygonGeometry.is_point_in_polygon(0.5, 0.5, poly))
@@ -42,19 +42,6 @@ class TestZonesAndKinematics(unittest.TestCase):
         crossed, direction = PolygonGeometry.check_line_crossing(p1, p2, q1, q2)
         self.assertTrue(crossed)
         self.assertIsNotNone(direction)
-
-    def test_kinematic_fall(self):
-        engine = KinematicFallEngine()
-        standing = [(100.0, 50.0 + i*10, 0.9) for i in range(17)]
-        bbox_standing = (80.0, 40.0, 120.0, 220.0)
-        self.assertIsNone(engine.evaluate_pose("cam1", "Living Room", 1, standing, bbox_standing))
-
-        time.sleep(0.1)
-        fallen = [(100.0, 300.0, 0.9) for _ in range(17)]
-        bbox_fallen = (40.0, 280.0, 200.0, 320.0)
-        evt = engine.evaluate_pose("cam1", "Living Room", 1, fallen, bbox_fallen)
-        self.assertIsNotNone(evt)
-        self.assertEqual(evt.event_type, EventType.FALL_DETECTED)
 
 class TestScannerAndAPIs(unittest.TestCase):
     def setUp(self):
@@ -76,25 +63,57 @@ class TestScannerAndAPIs(unittest.TestCase):
             self.assertEqual(res3.status_code, 200)
             self.assertEqual(res3.text, res1.text)
 
-    def test_zones_api_persistence(self):
-        # Create tripwire
-        res = self.client.post("/api/zones/tripwire", json={
-            "name": "Front Porch Line",
-            "x1": 0.1, "y1": 0.5, "x2": 0.9, "y2": 0.5,
-            "direction": "BIDIRECTIONAL"
+    def test_privacy_mask_api_persistence(self):
+        res = self.client.post("/api/zones/exclusion", json={
+            "name": "Staff room doorway",
+            "camera_id": "cam_test",
+            "points": [{"x": 0.1, "y": 0.1}, {"x": 0.4, "y": 0.1}, {"x": 0.4, "y": 0.5}],
+            "mask_mode": "BLUR",
         })
         self.assertEqual(res.status_code, 200)
-        tw_id = res.json()["tripwire"]["id"]
+        mask_id = res.json()["exclusion_mask"]["id"]
 
-        # Fetch zones
         get_res = self.client.get("/api/zones")
         self.assertEqual(get_res.status_code, 200)
-        tripwires = get_res.json()["tripwires"]
-        self.assertTrue(any(tw["id"] == tw_id for tw in tripwires))
+        self.assertTrue(any(m["id"] == mask_id for m in get_res.json()["exclusion_masks"]))
 
-        # Delete tripwire
-        del_res = self.client.delete(f"/api/zones/tripwire/{tw_id}")
+        del_res = self.client.delete(f"/api/zones/exclusion/{mask_id}")
         self.assertEqual(del_res.status_code, 200)
+
+    def test_every_mask_mode_persists_and_can_be_changed(self):
+        from app.services.ai_zone_service import AIZoneService
+        pts = [{"x": 0.1, "y": 0.1}, {"x": 0.4, "y": 0.1}, {"x": 0.4, "y": 0.5}]
+        created = []
+        for mode in ("BLUR", "MOSAIC", "BLACKOUT", "COLOR", "AI_IGNORE"):
+            body = {"name": f"mask {mode}", "camera_id": "cam_modes", "points": pts, "mask_mode": mode}
+            if mode == "COLOR":
+                body["mask_color_bgr"] = [10, 200, 30]
+            res = self.client.post("/api/zones/exclusion", json=body)
+            self.assertEqual(res.status_code, 200, res.text)
+            self.assertEqual(res.json()["exclusion_mask"]["mask_mode"], mode)
+            created.append(res.json()["exclusion_mask"]["id"])
+
+        # Persisted to disk: a fresh service instance reads the same modes back.
+        stored = {m["id"]: m for m in AIZoneService().get_all_zones("cam_modes")["exclusion_masks"]}
+        self.assertEqual([stored[i]["mask_mode"] for i in created], ["BLUR", "MOSAIC", "BLACKOUT", "COLOR", "AI_IGNORE"])
+        self.assertEqual(stored[created[3]]["mask_color_bgr"], [10, 200, 30])
+
+        # Unknown modes are rejected, not stored as something the renderer guesses at.
+        bad = self.client.post("/api/zones/exclusion", json={"camera_id": "cam_modes", "points": pts, "mask_mode": "SEPIA"})
+        self.assertEqual(bad.status_code, 422)
+        bad_cam = self.client.post("/api/v1/cameras/cam_modes/zones", json={"zone_type": "EXCLUSION", "points": pts, "mask_mode": "SEPIA"})
+        self.assertEqual(bad_cam.status_code, 422)
+
+        # Change the mode of an existing mask in place.
+        upd = self.client.patch(f"/api/zones/exclusion/{created[0]}", json={"mask_mode": "AI_IGNORE"})
+        self.assertEqual(upd.status_code, 200, upd.text)
+        self.assertEqual(upd.json()["exclusion_mask"]["mask_mode"], "AI_IGNORE")
+        self.assertEqual(upd.json()["exclusion_mask"]["points"], pts)
+        self.assertEqual(self.client.patch("/api/zones/exclusion/nope", json={"mask_mode": "BLUR"}).status_code, 404)
+        self.assertEqual(self.client.patch(f"/api/zones/exclusion/{created[0]}", json={"mask_mode": "SEPIA"}).status_code, 422)
+
+        for i in created:
+            self.assertEqual(self.client.delete(f"/api/zones/exclusion/{i}").status_code, 200)
 
     def test_cameras_scan_endpoint(self):
         """Scan reports what discovery actually found -- possibly nothing.

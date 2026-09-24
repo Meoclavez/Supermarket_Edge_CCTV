@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models.db_models import CameraModel
 from app.services.auth_service import auth_service
+from app.services import camera_source
 from app.services.camera_drivers import redact_url
 from app.services.dahua_probe_service import dahua_probe_service
 from app.services.nvr_credential_service import nvr_credential_service
@@ -160,6 +161,7 @@ async def adopt_dahua_channels(
     from app.services.dahua_probe_service import build_dahua_url
 
     adopted: List[Dict[str, Any]] = []
+    stored_creds: List[str] = []
 
     # Calculate staggered positions on floorplan
     cols = 4
@@ -172,14 +174,17 @@ async def adopt_dahua_channels(
         ch = item.channel
         subtype = 0 if item.quality == "main" else 1
 
-        stream_url = build_dahua_url(
-            host=host,
-            port=payload.port,
-            channel=ch,
-            subtype=subtype,
-            username=username,
-            password=password,
-        )
+        # The stored URL carries no credentials; they are kept encrypted per
+        # camera and injected only when the stream is opened.
+        stream_url = build_dahua_url(host=host, port=payload.port, channel=ch, subtype=subtype)
+        try:
+            stream_url = camera_source.detach_credentials(cam_id, stream_url, username, password)
+        except Exception as exc:  # noqa: BLE001
+            for done in stored_creds:
+                camera_source.delete_credentials(done)
+            logger.error(f"Could not store credentials for camera {cam_id}: {type(exc).__name__}")
+            raise HTTPException(status_code=500, detail="Could not store the camera credentials securely.") from None
+        stored_creds.append(cam_id)
 
         col_idx = i % cols
         row_idx = i // cols
@@ -216,7 +221,12 @@ async def adopt_dahua_channels(
             "floor_y": cam.floor_y,
         })
 
-    await db.commit()
+    try:
+        await db.commit()
+    except Exception:
+        for done in stored_creds:
+            camera_source.delete_credentials(done)
+        raise
 
     # Reconcile supervisor so feeds start immediately
     try:

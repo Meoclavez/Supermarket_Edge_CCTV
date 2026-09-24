@@ -6,11 +6,10 @@ class ApiConstants {
   // Endpoints
   static const String camerasEndpoint = '/api/v1/cameras';
   static const String eventsEndpoint = '/api/v1/events';
-  static const String triggerEventEndpoint = '/api/v1/events/trigger';
+  static const String theftIncidentsEndpoint = '/api/v1/theft/incidents';
   static const String webrtcOfferEndpoint = '/api/v1/webrtc/offer';
   static const String webrtcIceEndpoint = '/api/v1/webrtc/ice-servers';
   static const String webrtcTokenEndpoint = '/api/v1/webrtc/token';
-  static const String registerDeviceEndpoint = '/api/v1/cameras/register-device';
 
   // WebRTC ICE Servers
   static const Map<String, dynamic> rtcIceServers = {

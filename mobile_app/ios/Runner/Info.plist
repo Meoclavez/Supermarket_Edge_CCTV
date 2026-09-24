@@ -39,16 +39,14 @@
 	<key>NSCameraUsageDescription</key>
 	<string>Used for bi-directional CCTV video and calibration.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Used for 2-way audio talkback through CCTV camera speakers.</string>
+	<string>Used only while you hold the Store PA button, to speak to shoppers through a camera's speaker.</string>
 	<key>NSFaceIDUsageDescription</key>
-	<string>Used to authenticate access to secure camera feeds.</string>
+	<string>Used to confirm it is you before showing camera feeds.</string>
 	
-	<!-- Background Modes for Push Notifications & VoIP/WebRTC Audio -->
+	<!-- Background mode for loss-prevention push notifications -->
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>remote-notification</string>
-		<string>audio</string>
-		<string>voip</string>
 	</array>
 
 	<key>CADisableMinimumFrameDurationOnPhone</key>

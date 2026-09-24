@@ -1,0 +1,313 @@
+{
+  "schema": 1,
+  "comment": "Model files the edge backend ships with. Verified by app/services/preflight.py at startup and restored by scripts/fetch_models.py. Re-exporting is not byte-identical (the export embeds a timestamp), so fetch_models accepts a re-export whose ONNX IO signature matches 'io' and records its hash in models/.local_exports.json.",
+  "exporter": {
+    "tool": "ultralytics",
+    "requirement": "ultralytics>=8.4,<8.5",
+    "exported_with": "ultralytics 8.4.160",
+    "python": "3.12",
+    "torch_index_url": "https://download.pytorch.org/whl/cpu",
+    "extra_packages": [
+      "onnx",
+      "onnxslim"
+    ],
+    "command": "yolo export model=<source> format=onnx imgsz=640 simplify=True"
+  },
+  "licence_note": "Ultralytics YOLO26 weights and their exports are licensed AGPL-3.0 (https://ultralytics.com/license). RTMPose (rtmpose-*.onnx) is Apache-2.0 (https://github.com/open-mmlab/mmpose).",
+  "models": [
+    {
+      "file": "yolo26s-pose.onnx",
+      "sha256": "472b4368379213c614a485c95ba04e6b4dd7b6a8e4c9861e0e90277620ec854d",
+      "size": 41845149,
+      "task": "pose",
+      "required": true,
+      "role": "Person + 17 COCO keypoints. Default person model when a GPU provider is active.",
+      "source": "yolo26s-pose.pt",
+      "export": {
+        "format": "onnx",
+        "imgsz": 640,
+        "simplify": true
+      },
+      "licence": "AGPL-3.0",
+      "io": {
+        "inputs": [
+          {
+            "name": "images",
+            "shape": [
+              1,
+              3,
+              640,
+              640
+            ],
+            "type": "tensor(float)"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "output0",
+            "shape": [
+              1,
+              56,
+              8400
+            ],
+            "type": "tensor(float)"
+          }
+        ]
+      }
+    },
+    {
+      "file": "yolo26n-pose.onnx",
+      "sha256": "732e1cb7aaef76c349e1f7b095d3451d5a15fd151c18c775b23ee1ce7bda0c38",
+      "size": 12111783,
+      "task": "pose",
+      "required": true,
+      "role": "Person + 17 COCO keypoints, small. Default person model on CPU.",
+      "source": "yolo26n-pose.pt",
+      "export": {
+        "format": "onnx",
+        "imgsz": 640,
+        "simplify": true
+      },
+      "licence": "AGPL-3.0",
+      "io": {
+        "inputs": [
+          {
+            "name": "images",
+            "shape": [
+              1,
+              3,
+              640,
+              640
+            ],
+            "type": "tensor(float)"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "output0",
+            "shape": [
+              1,
+              56,
+              8400
+            ],
+            "type": "tensor(float)"
+          }
+        ]
+      }
+    },
+    {
+      "file": "yolo26n.onnx",
+      "sha256": "a715b3e3aab1dd434ce1fd3f929fd8f01993dd21cf39fb9a22aaf168546f5c32",
+      "size": 9930308,
+      "task": "detect",
+      "required": false,
+      "role": "80-class COCO objects (bags, trolleys, phones) used as context for theft review.",
+      "source": "yolo26n.pt",
+      "export": {
+        "format": "onnx",
+        "imgsz": 640,
+        "simplify": true
+      },
+      "licence": "AGPL-3.0",
+      "io": {
+        "inputs": [
+          {
+            "name": "images",
+            "shape": [
+              1,
+              3,
+              640,
+              640
+            ],
+            "type": "tensor(float)"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "output0",
+            "shape": [
+              1,
+              84,
+              8400
+            ],
+            "type": "tensor(float)"
+          }
+        ]
+      }
+    },
+    {
+      "file": "yolo26m-pose-544x960.onnx",
+      "sha256": "6bf2fc90b989dc17ffdeb74f5da50a4ddca206f02e85ac77ae5e13a3b3bb7876",
+      "size": 86644792,
+      "task": "pose",
+      "required": false,
+      "role": "Person + 17 keypoints, medium model at a 16:9 544x960 input. Top of the GPU ladder (POSE_MODEL_LADDER_GPU): chosen when its measured latency fits the budget. Best far-shopper wrists.",
+      "source": "yolo26m-pose.pt",
+      "export": {
+        "format": "onnx",
+        "imgsz": "544,960",
+        "simplify": true
+      },
+      "licence": "AGPL-3.0",
+      "io": {
+        "inputs": [
+          {
+            "name": "images",
+            "shape": [
+              1,
+              3,
+              544,
+              960
+            ],
+            "type": "tensor(float)"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "output0",
+            "shape": [
+              1,
+              56,
+              10710
+            ],
+            "type": "tensor(float)"
+          }
+        ]
+      }
+    },
+    {
+      "file": "yolo26s-pose-544x960.onnx",
+      "sha256": "90364cb36050effc2734bb393f25bb76eb3257dfed7fc6d3f93306aa34dff62a",
+      "size": 41919069,
+      "task": "pose",
+      "required": false,
+      "role": "Person + 17 keypoints, small model at a 16:9 544x960 input (same cost class as 640x640 on 16:9 frames, 1.5x the pixels per person). Second on the GPU ladder.",
+      "source": "yolo26s-pose.pt",
+      "export": {
+        "format": "onnx",
+        "imgsz": "544,960",
+        "simplify": true
+      },
+      "licence": "AGPL-3.0",
+      "io": {
+        "inputs": [
+          {
+            "name": "images",
+            "shape": [
+              1,
+              3,
+              544,
+              960
+            ],
+            "type": "tensor(float)"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "output0",
+            "shape": [
+              1,
+              56,
+              10710
+            ],
+            "type": "tensor(float)"
+          }
+        ]
+      }
+    },
+    {
+      "file": "yolo26n-pose-544x960.onnx",
+      "sha256": "8f4065ee0d4f4b8f2ea865dd19c626280aace2209c215e0f6242ddda99a72e60",
+      "size": 12185703,
+      "task": "pose",
+      "required": false,
+      "role": "Person + 17 keypoints, nano model at a 16:9 544x960 input. CPU ladder (POSE_MODEL_LADDER_CPU): ~2x the far-shopper wrist recall of yolo26n-pose at 640 for ~25 % more CPU time.",
+      "source": "yolo26n-pose.pt",
+      "export": {
+        "format": "onnx",
+        "imgsz": "544,960",
+        "simplify": true
+      },
+      "licence": "AGPL-3.0",
+      "io": {
+        "inputs": [
+          {
+            "name": "images",
+            "shape": [
+              1,
+              3,
+              544,
+              960
+            ],
+            "type": "tensor(float)"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "output0",
+            "shape": [
+              1,
+              56,
+              10710
+            ],
+            "type": "tensor(float)"
+          }
+        ]
+      }
+    },
+    {
+      "file": "rtmpose-s-256x192.onnx",
+      "sha256": "9aeb635b83f86aea45cf45d85798f7eba1a162de8e0d721c44e54fe5eebaf47d",
+      "size": 21890172,
+      "task": "pose_topdown",
+      "required": false,
+      "role": "Optional top-down keypoint refiner (POSE_REFINER): RTMPose-s SimCC, one 256x192 crop per person; refines wrists/elbows of small or far shoppers. Auto-enabled on accelerators when it fits the latency budget.",
+      "source": "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/rtmpose-s_simcc-body7_pt-body7_420e-256x192-acd4a1ef_20230504.zip",
+      "download": {
+        "url": "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/rtmpose-s_simcc-body7_pt-body7_420e-256x192-acd4a1ef_20230504.zip",
+        "archive_sha256": "7673922e531014906ca4f0f239b7e233b740146a10b632deaa2a28d45470d802",
+        "member": "20230831/rtmpose_onnx/rtmpose-s_simcc-body7_pt-body7_420e-256x192-acd4a1ef_20230504/end2end.onnx"
+      },
+      "preprocess": {
+        "crop": "bbox x1.25 padding, 192:256 aspect, affine",
+        "input": "RGB, mean [123.675,116.28,103.53], std [58.395,57.12,57.375]",
+        "decode": "SimCC argmax / 2.0, score = min(max_x, max_y)"
+      },
+      "licence": "Apache-2.0 (OpenMMLab mmpose / RTMPose; weights trained on the body7 mix)",
+      "io": {
+        "inputs": [
+          {
+            "name": "input",
+            "shape": [
+              "batch",
+              3,
+              256,
+              192
+            ],
+            "type": "tensor(float)"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "simcc_x",
+            "shape": [
+              "batch",
+              "MatMulsimcc_x_dim_1",
+              384
+            ],
+            "type": "tensor(float)"
+          },
+          {
+            "name": "simcc_y",
+            "shape": [
+              "batch",
+              "MatMulsimcc_x_dim_1",
+              512
+            ],
+            "type": "tensor(float)"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -22,10 +22,11 @@ except ImportError:
     cv2 = None
     np = None
 
-DEFAULT_SERIAL = "<NVR_SERIAL_REDACTED>"
-DEFAULT_USER = "admin"
-DEFAULT_PWDS = ["<NVR_PASSWORD_REDACTED>", "<NVR_PASSWORD_REDACTED>"]
-DEFAULT_LOCAL_IP = "192.168.20.160"
+DEFAULT_SERIAL = os.environ.get("NVR_SERIAL", "<NVR_SERIAL>")
+# Credentials are never stored in this file. Pass --password, set NVR_PASSWORD,
+# or type it at the prompt.
+DEFAULT_USER = os.environ.get("NVR_USER", "admin")
+DEFAULT_LOCAL_IP = os.environ.get("NVR_HOST", "192.168.20.160")
 DEFAULT_RTSP_PORT = 554
 
 def check_ffplay_available():
@@ -117,10 +118,15 @@ def main():
     parser.add_argument("--channel", type=int, default=1, help="Camera Channel 1-16 (default: 1)")
     parser.add_argument("--subtype", type=int, default=1, choices=[0, 1], help="0=Main Stream (HD), 1=Sub Stream (Fast/AI)")
     parser.add_argument("--user", default=DEFAULT_USER, help="Username (default: admin)")
-    parser.add_argument("--password", default=DEFAULT_PWDS[0], help="Password (default: <NVR_PASSWORD_REDACTED>)")
+    parser.add_argument("--password", default=os.environ.get("NVR_PASSWORD"),
+                        help="Password (default: $NVR_PASSWORD, otherwise prompted)")
     parser.add_argument("--p2p", action="store_true", help="Launch via local Dahua P2P bridge tunnel")
     parser.add_argument("--ffplay", action="store_true", help="Launch via FFplay instead of OpenCV")
     args = parser.parse_args()
+
+    if not args.password:
+        import getpass
+        args.password = getpass.getpass(f"Password for {args.user}@{args.host}: ")
 
     host = args.host
     port = args.port
@@ -137,16 +143,16 @@ def main():
     print(f"  Target Host  : {host}:{port}")
     print(f"  Channel      : {args.channel} ({'Sub-stream' if args.subtype==1 else 'Main-stream'})")
     print(f"  Username     : {args.user}")
-    print(f"  RTSP URL     : {rtsp_url}")
+    print(f"  RTSP URL     : {rtsp_url.replace(':' + args.password + '@', ':***@')}")
     print("=" * 60)
 
     if args.ffplay:
         if not check_ffplay_available():
             print("[-] ffplay not found on system PATH. Falling back to OpenCV viewer.")
         else:
-            cmd = f'ffplay -rtsp_transport tcp -fflags nobuffer -flags low_delay -i "{rtsp_url}"'
-            print(f"[*] Launching FFplay:\n{cmd}")
-            os.system(cmd)
+            cmd = ["ffplay", "-rtsp_transport", "tcp", "-fflags", "nobuffer", "-flags", "low_delay", "-i", rtsp_url]
+            print("[*] Launching FFplay")
+            subprocess.call(cmd)
             return
 
     # Attempt direct stream opening
@@ -154,9 +160,9 @@ def main():
     if not success:
         print("\n[!] Could not connect to direct RTSP endpoint.")
         print("[*] Alternative viewing options:")
-        print(f" 1. Mobile App: Open DMSS -> Add SN '{DEFAULT_SERIAL}' -> Password '{args.password}'")
+        print(f" 1. Mobile App: Open DMSS -> Add SN '{DEFAULT_SERIAL}' -> device password")
         print(f" 2. Public IP : Run with --host <AUSTRALIAN_PUBLIC_IP>")
-        print(f" 3. Test other password: --password {DEFAULT_PWDS[1]}")
+        print(" 3. Check the password: --password ... or NVR_PASSWORD=...")
 
 if __name__ == "__main__":
     main()
