@@ -95,13 +95,12 @@
 
   window.addEventListener('edge:tab', (e) => { if (e.detail && e.detail.tab === 'analytics') start(); });
   window.entrancesCard = { refresh };
-  if (document.readyState !== 'loading') {
+  const boot = () => {
     const tab = el('tab-analytics');
     if (tab && tab.classList.contains('active')) start();
-  } else {
-    document.addEventListener('DOMContentLoaded', () => {
-      const tab = el('tab-analytics');
-      if (tab && tab.classList.contains('active')) start();
-    });
-  }
+  };
+  // Start only after auth.js has checked the stored token (edgeAuth.onReady).
+  if (window.edgeAuth && typeof window.edgeAuth.onReady === 'function') window.edgeAuth.onReady(boot);
+  else if (document.readyState !== 'loading') boot();
+  else document.addEventListener('DOMContentLoaded', boot);
 })();

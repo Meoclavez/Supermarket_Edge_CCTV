@@ -201,6 +201,17 @@ class HandState:
     post_reach_zone: Optional[str] = None
     post_reach_snapshot: Optional[Dict[str, Any]] = None
     trajectory: Deque[Tuple[float, float, float, float]] = field(default_factory=deque)
+    # Where the hand touched a zone on the latest frame it was seen in one
+    # (pixel point, zone id, time): the input to the cross-track dedupe.
+    hit_xy: Optional[Tuple[float, float]] = None
+    hit_wrist: Optional[Tuple[float, float]] = None
+    hit_zone: Optional[str] = None
+    hit_ts: float = -1.0
+    # Time _start_reach ran for the active reach (the frame it was reported).
+    active_reported_ts: float = -1.0
+    # The active reach duplicates another track's reach (the pose model gave
+    # one physical hand to two overlapping people): it is never persisted.
+    active_suppressed: bool = False
 
 
 @dataclass
@@ -212,6 +223,8 @@ class TrackState:
     skeletons: Deque[Tuple[float, np.ndarray]]
     bbox: Tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
     keypoints: Optional[np.ndarray] = None
+    # Time of the last fresh skeleton (``keypoints`` is from that frame).
+    keypoints_ts: float = -1.0
     reaches: Deque[Dict[str, Any]] = field(default_factory=lambda: deque(maxlen=64))
     interaction_count: int = 0
     interaction_vis_sum: float = 0.0
@@ -265,7 +278,8 @@ class PoseAnalytics:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._sync_engine = None
         self._sync_engine_url: Optional[str] = None
-        self.stats = {"frames": 0, "interactions": 0, "incidents": 0, "persisted": 0, "write_errors": 0}
+        self.stats = {"frames": 0, "interactions": 0, "incidents": 0, "persisted": 0, "write_errors": 0,
+                      "deduplicated": 0}
 
     # ----------------------------------------------------------- lifecycle
 
@@ -530,23 +544,59 @@ class PoseAnalytics:
 
             kps_raw = getattr(t, "keypoints", None)
             # A coasting track (missed this detection frame) carries its last
-            # skeleton; re-using it would invent wrist samples, so skip it.
+            # skeleton; re-using it would invent wrist samples, so its hands
+            # only age: the occlusion grace still runs on frame time.
             if kps_raw is None or getattr(t, "keypoints_fresh", True) is False:
+                self._age_unseen_hands(cam, st, ts)
                 continue
             kps = np.asarray(kps_raw, dtype=np.float32)
             if kps.shape != (17, 3):
+                self._age_unseen_hands(cam, st, ts)
                 continue
             st.keypoints = kps
+            st.keypoints_ts = ts
             st.skeletons.append((ts, kps.copy()))
             self._update_head(st, kps, ts)
             self._update_hands(cam, st, kps, bags, floor, ts, frame, result)
             self._update_presence(cam, st, ts, frame, result)
 
-        # Tracks the engine no longer reports: finalise after a grace period.
+        # One physical hand given to two overlapping people is one reach.
+        self._dedupe_reaches(cam, ts, result)
+
+        # Tracks the engine no longer reports: their open reaches close once
+        # the occlusion grace runs out; the state is finalised after the TTL.
         ttl = settings.INTERACTION_TRACK_TTL_SEC
-        for tid in [k for k, s in cam.tracks.items() if k not in seen and ts - s.last_seen > ttl]:
-            st = cam.tracks.pop(tid)
-            self._finalize_track(cam, st, st.last_seen, frame=None)
+        for tid, st in list(cam.tracks.items()):
+            if tid in seen:
+                continue
+            if ts - st.last_seen > ttl:
+                cam.tracks.pop(tid)
+                self._finalize_track(cam, st, st.last_seen, frame=None)
+            else:
+                self._age_unseen_hands(cam, st, ts)
+
+    def _age_unseen_hands(self, cam: CameraState, st: TrackState, ts: float) -> None:
+        """Advance a track's hand timers on a frame with no fresh skeleton for it.
+
+        The person stepped out of view, the tracker is coasting, or the pose
+        model lost the body. Nothing about the hand is known, so nothing
+        advances a reach; but the occlusion grace is wall/frame time, so a
+        reach whose hand has not been seen in its zone for
+        ``INTERACTION_OCCLUSION_GRACE_SEC`` ends now, dated to the last time
+        the hand was seen there (``active_last``). A hand that reappears in the
+        same zone within the grace continues the same reach in
+        ``_update_hands``.
+        """
+        grace = settings.INTERACTION_OCCLUSION_GRACE_SEC
+        for hand in st.hands.values():
+            if hand.active_zone is not None and ts - hand.active_last > grace:
+                self._leave_shelf(cam, st, hand, None, ts, None, 0.0, None)
+            if hand.closing is not None and ts - hand.closing["last"] > settings.INTERACTION_REENTRY_MERGE_SEC:
+                self._emit_reach(cam, st, hand)
+            if hand.candidate_zone is not None and ts - hand.candidate_last > grace:
+                hand.candidate_zone = None
+                hand.candidate_frames = 0
+                hand.candidate_vis = []
 
     # ------------------------------------------------------------- hands
 
@@ -712,6 +762,9 @@ class PoseAnalytics:
                     sticky = hand.active_zone or (hand.closing or {}).get("zone_id")
                     hit = self._zone_at_points(cam, self._hand_points(kps, hand, vis_thr), sticky)
             zone: Optional[ProductZoneGeom] = hit[0] if hit else None
+            if hit:
+                hand.hit_xy, hand.hit_zone, hand.hit_ts = (hit[2], hit[3]), zone.id, ts
+                hand.hit_wrist = (wx, wy)
 
             # Is the wrist at the waistband/pocket band or inside a bag the
             # person is carrying? (Only matters after a reach, but cheap.)
@@ -801,10 +854,20 @@ class PoseAnalytics:
 
     def _leave_shelf(self, cam: CameraState, st: TrackState, hand: HandState, kps: np.ndarray, ts: float,
                      frame: Optional[np.ndarray], wv: float, target: Optional[str]) -> None:
-        """The hand left its zone: end the reach and start collecting concealment evidence."""
+        """The hand left its zone: end the reach and start collecting concealment evidence.
+
+        ``kps`` is None when the reach ends on a frame without a skeleton
+        (occlusion grace expired while the person was out of view).
+        """
         left_zone = hand.active_zone
         reach_vis = hand.active_vis_sum / max(hand.active_frames, 1)
+        suppressed = hand.active_suppressed
         self._end_reach(cam, st, hand, hand.active_last)
+        if suppressed:
+            # A duplicate of another person's reach: no concealment evidence
+            # is collected for a hand that was never this person's.
+            self._clear_post_reach(hand)
+            return
         hand.post_reach = [{
             "t": ts, "in_shelf": False, "in_conceal": target is not None, "vis": wv,
             "reach_vis": reach_vis, "target": target,
@@ -838,6 +901,8 @@ class PoseAnalytics:
         hand.active_missing = 0
         hand.active_xy = hand.candidate_xy
         hand.active_floor = floor
+        hand.active_reported_ts = ts
+        hand.active_suppressed = False
         hand.candidate_zone = None
         hand.candidate_frames = 0
         hand.candidate_vis = []
@@ -882,6 +947,7 @@ class PoseAnalytics:
         hand.active_missing = 0
         hand.active_xy = c["xy"]
         hand.active_floor = c["floor"]
+        hand.active_suppressed = bool(c.get("suppressed"))
         hand.candidate_zone = None
         hand.candidate_frames = 0
         hand.candidate_vis = []
@@ -903,8 +969,10 @@ class PoseAnalytics:
             "vis_sum": hand.active_vis_sum,
             "xy": hand.active_xy,
             "floor": hand.active_floor,
+            "suppressed": hand.active_suppressed,
         }
         hand.active_zone = None
+        hand.active_suppressed = False
         hand.active_zone_geom = None
         hand.active_contact = None
         hand.active_frames = 0
@@ -916,6 +984,9 @@ class PoseAnalytics:
         c = hand.closing
         hand.closing = None
         if c is None:
+            return
+        if c.get("suppressed"):
+            self.stats["deduplicated"] = self.stats.get("deduplicated", 0) + 1
             return
         zone: Optional[ProductZoneGeom] = c["zone"]
         duration = max(c["last"] - c["started"], 0.0)
@@ -943,6 +1014,153 @@ class PoseAnalytics:
         }
         if cam.interactions_on:
             self._enqueue("interaction", rec)
+
+    # ------------------------------------------------- cross-track dedupe
+
+    def _dedupe_reaches(self, cam: CameraState, ts: float, result: ObserveResult) -> None:
+        """Keep one reach when two people's skeletons claim the same hand.
+
+        With two shoppers overlapping in the image, the pose model can give the
+        front person's hand to the person behind as well, so one physical reach
+        would be recorded twice, on two tracks, at the same spot. On every
+        frame, active reaches of *different* tracks in the same zone whose
+        contact points -- or wrists, since a borrowed wrist hangs off a
+        different elbow and so extrapolates to a different hand tip -- are
+        closer (this frame) than ``INTERACTION_DEDUPE_DIST_FRAC`` of the frame
+        diagonal are one reach:
+        the hand whose arm chain is most plausible for its own body keeps it
+        (``_arm_plausibility``), ties going to the track whose shoulder is
+        nearer the hand; the other is suppressed (never persisted, removed from
+        the theft rules' reach history). Two people reaching side by side touch
+        the zone at different points and are left alone.
+        """
+        if not cam.frame_size or len(cam.tracks) < 2:
+            return
+        frac = float(settings.INTERACTION_DEDUPE_DIST_FRAC or 0.0)
+        if frac <= 0:
+            return
+        w, h = cam.frame_size
+        max_d = frac * math.hypot(w, h)
+        live: List[Tuple[TrackState, HandState]] = [
+            (st, hand)
+            for st in cam.tracks.values() if st.keypoints_ts == ts and st.keypoints is not None
+            for hand in st.hands.values()
+            if hand.active_zone is not None and not hand.active_suppressed
+            and hand.hit_ts == ts and hand.hit_zone == hand.active_zone and hand.hit_xy is not None
+        ]
+        if len(live) < 2:
+            return
+        for i in range(len(live)):
+            st_a, hand_a = live[i]
+            for j in range(i + 1, len(live)):
+                st_b, hand_b = live[j]
+                if st_a is st_b or hand_a.active_suppressed or hand_b.active_suppressed:
+                    continue
+                if hand_a.active_zone != hand_b.active_zone:
+                    continue
+                (ax, ay), (bx, by) = hand_a.hit_xy, hand_b.hit_xy  # type: ignore[misc]
+                d = math.hypot(ax - bx, ay - by)
+                if hand_a.hit_wrist is not None and hand_b.hit_wrist is not None:
+                    (awx, awy), (bwx, bwy) = hand_a.hit_wrist, hand_b.hit_wrist
+                    d = min(d, math.hypot(awx - bwx, awy - bwy))
+                if d > max_d:
+                    continue
+                keep_a = self._prefer_first(st_a, hand_a, st_b, hand_b)
+                loser_st, loser = (st_b, hand_b) if keep_a else (st_a, hand_a)
+                self._suppress_reach(cam, loser_st, loser, ts, result)
+
+    def _prefer_first(self, st_a: TrackState, hand_a: HandState, st_b: TrackState, hand_b: HandState) -> bool:
+        """True when track A's claim on the shared hand beats track B's."""
+        pa = self._arm_plausibility(st_a, hand_a, st_b)
+        pb = self._arm_plausibility(st_b, hand_b, st_a)
+        if abs(pa - pb) > 0.1:
+            return pa > pb
+        return self._shoulder_distance(st_a, hand_a) <= self._shoulder_distance(st_b, hand_b)
+
+    @staticmethod
+    def _shoulder_distance(st: TrackState, hand: HandState) -> float:
+        """Pixels from the hand's own shoulder (else the nearer visible one) to its wrist."""
+        kps = st.keypoints
+        if kps is None:
+            return float("inf")
+        vis_thr = settings.INTERACTION_MIN_KEYPOINT_VIS
+        wx, wy = float(kps[hand.kp_index][0]), float(kps[hand.kp_index][1])
+        s_idx, _e = ARM[hand.kp_index]
+        order = [s_idx] + [i for i in (L_SHOULDER, R_SHOULDER) if i != s_idx]
+        for i in order:
+            if float(kps[i][2]) >= vis_thr:
+                return math.hypot(float(kps[i][0]) - wx, float(kps[i][1]) - wy)
+        return float("inf")
+
+    def _arm_plausibility(self, st: TrackState, hand: HandState, other: TrackState) -> float:
+        """0..1: how believable it is that this wrist belongs to this body.
+
+        A wrist the pose model lent from someone else hangs off an arm chain
+        that does not fit: the forearm is far longer (or shorter) than the
+        upper arm, the arm is too long for the body's torso, the forearm folds
+        straight back over the upper arm, or the "hand" sits inside the other
+        person's torso. Each misfit scales the score down; a missing shoulder
+        or elbow leaves the chain unverifiable, which also scores lower.
+        """
+        kps = st.keypoints
+        if kps is None:
+            return 0.0
+        vis_thr = settings.INTERACTION_MIN_KEYPOINT_VIS
+        s_idx, e_idx = ARM[hand.kp_index]
+        s, e, wr = kps[s_idx], kps[e_idx], kps[hand.kp_index]
+        score = 1.0
+        if float(s[2]) < vis_thr:
+            score *= 0.2
+        elif float(e[2]) < vis_thr:
+            score *= 0.5
+        else:
+            ux, uy = float(e[0] - s[0]), float(e[1] - s[1])
+            fx, fy = float(wr[0] - e[0]), float(wr[1] - e[1])
+            upper, fore = math.hypot(ux, uy), math.hypot(fx, fy)
+            if upper < 1.0 or fore < 1.0:
+                score *= 0.4
+            else:
+                ratio = fore / upper
+                lo = settings.INTERACTION_DEDUPE_FOREARM_RATIO_MIN
+                hi = settings.INTERACTION_DEDUPE_FOREARM_RATIO_MAX
+                if ratio < lo:
+                    score *= ratio / lo
+                elif ratio > hi:
+                    score *= hi / ratio
+                if (ux * fx + uy * fy) / (upper * fore) < -0.85:
+                    score *= 0.5            # forearm folded back onto the upper arm
+                body = self._body(kps, vis_thr)
+                if body is not None:
+                    max_arm = settings.INTERACTION_DEDUPE_MAX_ARM_TORSOS * body["torso"]
+                    if upper + fore > max_arm:
+                        score *= max_arm / (upper + fore)
+        if other.keypoints is not None:
+            ob = self._body(other.keypoints, vis_thr)
+            if ob is not None and _box_contains((ob["x_lo"], ob["sh_y"], ob["x_hi"], ob["hip_y"]),
+                                                float(wr[0]), float(wr[1])):
+                score *= 0.3
+        return score
+
+    def _suppress_reach(self, cam: CameraState, st: TrackState, hand: HandState, ts: float,
+                        result: ObserveResult) -> None:
+        """Mark ``hand``'s active reach a duplicate and undo what its start recorded."""
+        hand.active_suppressed = True
+        started, zone_id = hand.active_started, hand.active_zone
+        for r in list(st.reaches):
+            if r["hand"] == hand.name and r["zone_id"] == zone_id and r["timestamp"] == started:
+                st.reaches.remove(r)
+                st.interaction_count = max(0, st.interaction_count - 1)
+                st.interaction_vis_sum = max(0.0, st.interaction_vis_sum - float(r["vis"]))
+                break
+        if st.first_interaction_t == started:
+            st.first_interaction_t = min((r["timestamp"] for r in st.reaches), default=None)
+        if hand.active_reported_ts == ts and cam.interactions_on:
+            key = (str(st.track_id), zone_id)
+            if key in result.interactions:
+                result.interactions.remove(key)
+                self.stats["interactions"] = max(0, self.stats["interactions"] - 1)
+        logger.debug(f"pose_analytics: reach by {st.track_id} ({hand.name}) in {zone_id} "
+                     f"on {cam.camera_id} duplicates another track's; suppressed")
 
     # ------------------------------------------------------------- head
 

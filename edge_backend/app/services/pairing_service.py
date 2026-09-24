@@ -176,8 +176,10 @@ def issue_phone_tokens(paired_device_id: str, user_id: Optional[str], role: str 
         raise RuntimeError("device identity is not initialised")
     ep = current_auth_epoch(force=True)
     sub = user_id or f"paired:{paired_device_id}"
-    common = {"sub": sub, "role": role, "ep": ep, "dev": dev, "pd": paired_device_id, "iat": now}
-    access = dict(common, type="user_session", exp=now + ACCESS_TTL_S)
+    # sid: one login session (see token_revocation); /auth/logout revokes it.
+    common = {"sub": sub, "role": role, "ep": ep, "dev": dev, "pd": paired_device_id, "iat": now,
+              "sid": uuid.uuid4().hex}
+    access = dict(common, type="user_session", exp=now + ACCESS_TTL_S, jti=uuid.uuid4().hex)
     refresh = dict(common, type="refresh", exp=now + REFRESH_TTL_S, jti=uuid.uuid4().hex)
     return {
         "access_token": jwt.encode(access, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM),
@@ -188,8 +190,8 @@ def issue_phone_tokens(paired_device_id: str, user_id: Optional[str], role: str 
 
 def reissue_phone_access(payload: dict) -> str:
     now = int(time.time())
-    access = {k: payload[k] for k in ("sub", "role", "ep", "dev", "pd") if k in payload}
-    access.update(type="user_session", iat=now, exp=now + ACCESS_TTL_S)
+    access = {k: payload[k] for k in ("sub", "role", "ep", "dev", "pd", "sid") if k in payload}
+    access.update(type="user_session", iat=now, exp=now + ACCESS_TTL_S, jti=uuid.uuid4().hex)
     return jwt.encode(access, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
 
 

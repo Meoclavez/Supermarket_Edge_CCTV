@@ -323,8 +323,9 @@ def test_lockout_uses_real_remote_ip(monkeypatch):
             auth_service.verify_api_access(
                 _req("127.0.0.1", {"CF-Connecting-IP": "203.0.113.66", "Authorization": "Bearer bad"}),
                 api_key=None, bearer=None, token=None)
-    assert "203.0.113.66" in intrusion_detector.failed_attempts
-    assert "127.0.0.1" not in intrusion_detector.failed_attempts
+    # Bad tokens are charged to the address's token bucket, never to the tunnel.
+    assert intrusion_detector.key("203.0.113.66", "token") in intrusion_detector.failed_attempts
+    assert not any(k.startswith("127.0.0.1") for k in intrusion_detector.failed_attempts)
 
 
 def test_is_remote_request(monkeypatch):
@@ -408,8 +409,9 @@ def test_mjpeg_token_in_query_works_through_proxy(monkeypatch):
     bad = Request({**req.scope, "query_string": b"camera_id=c1&token=bad"})
     with pytest.raises(Exception):
         auth_service.verify_api_access(bad, api_key=None, bearer=None, token=None)
-    assert "203.0.113.9" in intrusion_detector.failed_attempts
-    assert "127.0.0.1" not in intrusion_detector.failed_attempts
+    # Bad tokens are charged to the address's token bucket, never to the tunnel.
+    assert intrusion_detector.key("203.0.113.9", "token") in intrusion_detector.failed_attempts
+    assert not any(k.startswith("127.0.0.1") for k in intrusion_detector.failed_attempts)
 
 
 def test_caddy_block_for_direct_provider(client, operator):

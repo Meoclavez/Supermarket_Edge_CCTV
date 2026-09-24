@@ -703,8 +703,11 @@
   document.addEventListener('visibilitychange', () => {
     if (settingsVisible() && !pollTimer) schedulePoll();
   });
-  document.addEventListener('DOMContentLoaded', () => { if (settingsVisible()) openSettings(); });
-  if (document.readyState !== 'loading' && settingsVisible()) openSettings();
+  const boot = () => { if (settingsVisible()) openSettings(); };
+  // Start only after auth.js has checked the stored token (edgeAuth.onReady).
+  if (window.edgeAuth && typeof window.edgeAuth.onReady === 'function') window.edgeAuth.onReady(boot);
+  else if (document.readyState !== 'loading') boot();
+  else document.addEventListener('DOMContentLoaded', boot);
 
   window.edgePairing = { reload: openSettings };
 })();

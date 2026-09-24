@@ -43,6 +43,10 @@ class LoginReq(BaseModel):
 class RefreshReq(BaseModel):
     refresh_token: str
 
+class LogoutReq(BaseModel):
+    # Optional: the refresh token of the same sign-in, revoked as well.
+    refresh_token: Optional[str] = None
+
 class ChangePasswordReq(BaseModel):
     old_password: str
     new_password: str
@@ -337,17 +341,50 @@ async def complete_setup(
     setup_service.generate_secure_secrets()
     return {"status": "success"}
 
+# While an address is locked out for wrong passwords, its password checks are
+# throttled to one per LOGIN_LOCKED_RETRY_SEC instead of refused outright, so
+# the right password still signs the operator in (lockout by bad-token polling
+# lives in a separate bucket and never reaches this) while guessing stays slow.
+LOGIN_LOCKED_RETRY_SEC = 2.0
+_last_locked_login: Dict[str, float] = {}
+
+
+def _throttle_locked_login(ip: str) -> None:
+    if not intrusion_detector.is_locked_out(ip, "login"):
+        _last_locked_login.pop(ip, None)
+        return
+    now = time.monotonic()
+    last = _last_locked_login.get(ip)
+    if last is not None and now - last < LOGIN_LOCKED_RETRY_SEC:
+        raise HTTPException(
+            status_code=429,
+            detail=("Too many failed sign-in attempts from this address. Wait a few seconds "
+                    "between attempts."),
+            headers={"Retry-After": str(max(1, int(LOGIN_LOCKED_RETRY_SEC + 0.999)))},
+        )
+    _last_locked_login[ip] = now
+    if len(_last_locked_login) > 4096:
+        _last_locked_login.clear()
+
+
 # Auth routes
 @router.post("/auth/login")
 async def login(req: LoginReq, request: Request, session: AsyncSession = Depends(get_db)):
+    """Password sign-in.
+
+    The password is checked first: a correct one always signs in and clears
+    this address's counters. A wrong one counts toward the lockout (429); while
+    locked out, attempts are throttled rather than refused (see above).
+    """
     ip = _client_ip(request)
-    _raise_if_locked_out(ip)
+    _throttle_locked_login(ip)
     tokens = await auth_service.authenticate_user(session, req.username, req.password)
     if not tokens:
         intrusion_detector.record_failure(ip)
         _raise_if_locked_out(ip)
         raise HTTPException(status_code=401, detail="Invalid username or password")
     intrusion_detector.record_success(ip, "password")
+    _last_locked_login.pop(ip, None)
     if req.phone is None:
         return tokens
     # A phone signing in with the operator's password ends up exactly where a
@@ -367,6 +404,26 @@ async def refresh(req: RefreshReq):
     # Sync DB checks for phone tokens (revocation, stored refresh hash).
     new_access = await asyncio.to_thread(auth_service.refresh_access_token, req.refresh_token)
     return {"access_token": new_access, "token_type": "bearer"}
+
+@router.post("/auth/logout")
+async def logout(request: Request, req: Optional[LogoutReq] = None):
+    """Sign out server-side: the presented session token stops working now.
+
+    The session token comes from the Authorization header (or the dashboard
+    cookie). Its whole sign-in session is revoked, which includes the refresh
+    token issued with it; a ``refresh_token`` in the body is revoked as well.
+    Idempotent: an already expired or signed-out token returns 200 with
+    ``revoked: 0``. Revocations are kept until the tokens would have expired.
+    """
+    auth_header = request.headers.get("Authorization", "")
+    access = auth_header.split(" ", 1)[1].strip() if auth_header.startswith("Bearer ") else None
+    access = access or request.cookies.get("edge_cctv_token")
+    refresh_tok = req.refresh_token if req else None
+    if not access and not refresh_tok:
+        raise HTTPException(status_code=401, detail="No session token was presented.")
+    revoked = await asyncio.to_thread(auth_service.revoke_session, access, refresh_tok)
+    return {"status": "signed_out", "revoked": revoked}
+
 
 @router.post("/auth/change-password")
 async def change_password(

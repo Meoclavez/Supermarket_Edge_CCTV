@@ -1115,7 +1115,7 @@ class PersonDetector:
 
     def _is_plausible_person(
         self, x1: float, y1: float, x2: float, y2: float, frame_area: float,
-        keypoints: Optional[np.ndarray] = None,
+        keypoints: Optional[np.ndarray] = None, max_frame_fraction: Optional[float] = None,
     ) -> bool:
         """Reject boxes whose shape cannot be a person.
 
@@ -1125,12 +1125,23 @@ class PersonDetector:
         head found a coherent body (``_has_coherent_torso``: a torso, or head +
         shoulders + an elbow): that is direct evidence of a person who is
         bending or reaching, which is exactly when a box goes square.
+
+        The size gate is ``max_frame_fraction`` (the camera's own setting) or
+        the global ``PERSON_MAX_FRAME_FRACTION``. A box above it is still a
+        person when the pose head found a coherent skeleton (both shoulders
+        plus the hips or the head, ``_has_coherent_skeleton``) and the box is
+        within ``PERSON_MAX_FRAME_FRACTION_WITH_SKELETON``: a shopper close to
+        the camera has one, a false giant box over shelving does not.
         """
         w, h = x2 - x1, y2 - y1
         if w < settings.PERSON_MIN_BOX_PIXELS or h < settings.PERSON_MIN_BOX_PIXELS:
             return False
-        if (w * h) / frame_area > settings.PERSON_MAX_FRAME_FRACTION:
-            return False
+        limit = settings.PERSON_MAX_FRAME_FRACTION if max_frame_fraction is None else float(max_frame_fraction)
+        frac = (w * h) / frame_area
+        if frac > limit:
+            relaxed = max(limit, float(settings.PERSON_MAX_FRAME_FRACTION_WITH_SKELETON))
+            if frac > relaxed or not _has_coherent_skeleton(keypoints):
+                return False
         if h / max(w, 1e-6) < settings.PERSON_MIN_ASPECT_RATIO:
             return _has_coherent_torso(keypoints)
         return True
@@ -1149,8 +1160,12 @@ class PersonDetector:
         frame: np.ndarray,
         conf_threshold: Optional[float] = None,
         iou_threshold: Optional[float] = None,
+        max_frame_fraction: Optional[float] = None,
     ) -> list[Detection]:
         """Detect people (with keypoints when the model has them) in a BGR frame.
+
+        ``max_frame_fraction`` overrides ``PERSON_MAX_FRAME_FRACTION`` for this
+        call (the camera's ``person_max_frame_fraction`` setting).
 
         Returns an empty list when no backend is available. That emptiness is
         meaningful and must be propagated, not replaced with placeholder data.
@@ -1179,7 +1194,7 @@ class PersonDetector:
                 for i in keep:
                     bx1, by1, bx2, by2 = (float(v) for v in boxes[i])
                     kp = kpts[i] if kpts is not None else None
-                    if not self._is_plausible_person(bx1, by1, bx2, by2, frame_area, kp):
+                    if not self._is_plausible_person(bx1, by1, bx2, by2, frame_area, kp, max_frame_fraction):
                         rejected += 1
                         continue
                     dets.append(Detection(bx1, by1, bx2, by2, confidence=float(scores[i]), keypoints=kp))
@@ -1340,6 +1355,26 @@ def _has_coherent_torso(kpts: Optional[np.ndarray]) -> bool:
     if hips:
         return False  # hips seen *above* the shoulders: not an upright body
     return bool(vis[7] or vis[8])
+
+
+def _has_coherent_skeleton(kpts: Optional[np.ndarray]) -> bool:
+    """Keypoint evidence that an unusually large box is a real, close person.
+
+    Both shoulders, plus either a hip below the shoulder line or a head point
+    (nose, eye or ear) above it. A person near the camera shows at least that
+    much of a body; a false detection spanning shelving or a doorway almost
+    never produces two shoulders with a head or hips in the right place.
+    """
+    if kpts is None or kpts.shape[0] < 13 or kpts.shape[1] < 3:
+        return False
+    thr = settings.KEYPOINT_VISIBILITY_THRESHOLD
+    vis = kpts[:, 2] >= thr
+    if not (vis[5] and vis[6]):
+        return False
+    shoulder_y = (kpts[5, 1] + kpts[6, 1]) / 2.0
+    if any(vis[i] and kpts[i, 1] > shoulder_y for i in (11, 12)):
+        return True
+    return any(vis[i] and kpts[i, 1] < shoulder_y for i in (0, 1, 2, 3, 4))
 
 
 person_detector = PersonDetector()

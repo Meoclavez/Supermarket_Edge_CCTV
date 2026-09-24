@@ -106,6 +106,17 @@ def camera_flag(camera_id: str, flag: str) -> bool:
         return True
 
 
+def camera_setting(camera_id: str, name: str):
+    """Per-camera detector setting (feature_manager); None = the global default."""
+    try:
+        from app.services.feature_manager import feature_manager
+
+        return feature_manager.get_setting(camera_id, name)
+    except Exception as e:
+        _log_once(f"setting:{name}", f"camera setting {name} unreadable ({e}); using the global default")
+        return None
+
+
 def _reset_pose_camera(camera_id: str) -> None:
     pa = _get_pose_analytics()
     if pa is None:
@@ -462,7 +473,13 @@ class CameraWorker(threading.Thread):
 
         # Ask for boxes down to the tracker's low threshold: the tracker uses
         # the low band only to keep existing identities through occlusion.
-        detections = person_detector.detect(frame, conf_threshold=settings.TRACK_LOW_CONF_THRESHOLD)
+        # A camera-specific size gate (close-mounted camera) is passed only
+        # when the operator set one; otherwise the detector's global default.
+        detect_kw = {"conf_threshold": settings.TRACK_LOW_CONF_THRESHOLD}
+        max_frac = camera_setting(cam, "person_max_frame_fraction")
+        if max_frac is not None:
+            detect_kw["max_frame_fraction"] = max_frac
+        detections = person_detector.detect(frame, **detect_kw)
         detections = outside_ignore_regions(detections, ignore)
         self.rt.detections_last = sum(
             1 for d in detections if d.confidence >= settings.PERSON_CONF_THRESHOLD

@@ -216,6 +216,25 @@ class RateLimiter:
         self.history[ip].append(now)
 
 class IntrusionDetector:
+    """Per-address failed-credential counter with a lockout.
+
+    Two independent buckets per address, so one kind of failure can never lock
+    out the other:
+
+    * ``"login"`` (key = the address): wrong passwords, setup codes and
+      pairing codes -- secrets a person types;
+    * ``"token"`` (key = ``"<address>#token"``): bearer tokens whose signature
+      does not verify, and wrong API keys.
+
+    Only *unverifiable* credentials count. A token with a valid signature that
+    is merely expired, from an older auth epoch, signed out, or bound to a
+    revoked phone is a stale session, not a guess: it gets a 401 and is not
+    counted. (A dashboard opened with a stale token fired ~10 polls at once
+    and locked 127.0.0.1 -- and with it the operator's own sign-in.)
+    """
+
+    SCOPES = ("login", "token")
+
     def __init__(self, max_attempts: int = 10, window_minutes: int = 5):
         self.max_attempts = max_attempts
         self.window = window_minutes * 60
@@ -235,25 +254,38 @@ class IntrusionDetector:
                 del self.failed_attempts[ip]
             self.last_cleanup = now
             
-    def record_failure(self, ip: str):
+    @staticmethod
+    def key(ip: str, scope: str = "login") -> str:
+        return ip if scope == "login" else f"{ip}#{scope}"
+
+    def record_failure(self, ip: str, scope: str = "login"):
         now = time.time()
         self.cleanup(now)
-        self.failed_attempts[ip] = [t for t in self.failed_attempts[ip] if now - t < self.window]
-        self.failed_attempts[ip].append(now)
-        logger.warning(f"[IntrusionDetector] Failed auth attempt from IP {ip}. Attempt {len(self.failed_attempts[ip])}/{self.max_attempts}")
-        
-    def check_lockout(self, ip: str):
+        k = self.key(ip, scope)
+        self.failed_attempts[k] = [t for t in self.failed_attempts[k] if now - t < self.window]
+        self.failed_attempts[k].append(now)
+        logger.warning(f"[IntrusionDetector] Failed {scope} attempt from IP {ip}. "
+                       f"Attempt {len(self.failed_attempts[k])}/{self.max_attempts}")
+
+    def recent_failures(self, ip: str, scope: str = "login") -> int:
+        now = time.time()
+        return sum(1 for t in self.failed_attempts.get(self.key(ip, scope), []) if now - t < self.window)
+
+    def is_locked_out(self, ip: str, scope: str = "login") -> bool:
+        return self.recent_failures(ip, scope) >= self.max_attempts
+
+    def check_lockout(self, ip: str, scope: str = "login"):
         now = time.time()
         self.cleanup(now)
-        valid_timestamps = [t for t in self.failed_attempts.get(ip, []) if now - t < self.window]
-        if len(valid_timestamps) >= self.max_attempts:
-            logger.error(f"[IntrusionDetector] Account lockout for IP {ip} due to {len(valid_timestamps)} failed attempts")
+        n = self.recent_failures(ip, scope)
+        if n >= self.max_attempts:
+            logger.error(f"[IntrusionDetector] {scope} lockout for IP {ip} due to {n} failed attempts")
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account locked out due to too many failed attempts")
-            
+
     def record_success(self, ip: str, token_type: str):
         logger.info(f"[Auth] Successful authentication from IP {ip}, type={token_type}")
-        if ip in self.failed_attempts:
-            del self.failed_attempts[ip]
+        for scope in self.SCOPES:
+            self.failed_attempts.pop(self.key(ip, scope), None)
 
 intrusion_detector = IntrusionDetector()
 
@@ -301,24 +333,67 @@ class AuthService:
         except jwt.PyJWTError:
             return None
 
+    def inspect_token(self, token: str) -> tuple:
+        """``(payload, signature_ok)``.
+
+        ``payload`` is the claims when the signature and time claims verify,
+        else None. ``signature_ok`` is True whenever the token was signed with
+        this device's key -- including an expired one -- and False for garbage,
+        a forged or foreign signature, or a token signed with another key.
+        Only the latter is a guess worth counting toward the lockout.
+        """
+        if not token or not isinstance(token, str):
+            return None, False
+        try:
+            return jwt.decode(token, self.secret, algorithms=[self.algorithm]), True
+        except (jwt.InvalidSignatureError, jwt.InvalidAlgorithmError, jwt.InvalidKeyError, jwt.DecodeError):
+            return None, False
+        except jwt.PyJWTError:
+            # Signature verified, a claim did not (expired, not yet valid...).
+            return None, True
+
+    @staticmethod
+    def is_revoked(token: str, payload: Optional[Dict[str, Any]]) -> bool:
+        """Signed out via /auth/logout (this token or its whole login session)."""
+        if not payload:
+            return False
+        try:
+            from app.services.token_revocation import token_revocations
+            return token_revocations.is_revoked(token, payload)
+        except Exception as exc:  # the store must never take auth down
+            logger.error(f"revocation check failed: {exc}")
+            return False
+
     def verify_session_token(self, token: str) -> Optional[Dict[str, Any]]:
-        """A signed, unexpired operator session from the current auth epoch."""
+        """A signed, unexpired, not signed-out operator session from the current auth epoch."""
         payload = self.verify_token(token) if token else None
         if not payload or payload.get("type") != "user_session":
             return None
         if not token_epoch_is_current(payload):
             return None
+        if self.is_revoked(token, payload):
+            return None
         if not phone_claims_ok(payload):
             return None
         return payload
 
-    def issue_session_tokens(self, user_id: str, role: str) -> Dict[str, str]:
+    def issue_session_tokens(self, user_id: str, role: str, sid: Optional[str] = None) -> Dict[str, str]:
+        """Access + refresh token for one login session.
+
+        Both carry the same ``sid`` (refreshed access tokens keep it) and their
+        own ``jti``, so /auth/logout can revoke one token or the whole session.
+        """
+        import uuid
+
         now = int(time.time())
         ep = current_auth_epoch(force=True)
+        sid = sid or uuid.uuid4().hex
         access_payload = {"sub": user_id, "type": "user_session", "role": role,
-                          "ep": ep, "iat": now, "exp": now + 24 * 3600}
+                          "ep": ep, "iat": now, "exp": now + 24 * 3600,
+                          "sid": sid, "jti": uuid.uuid4().hex}
         refresh_payload = {"sub": user_id, "type": "refresh", "role": role,
-                           "ep": ep, "iat": now, "exp": now + 30 * 24 * 3600}
+                           "ep": ep, "iat": now, "exp": now + 30 * 24 * 3600,
+                           "sid": sid, "jti": uuid.uuid4().hex}
         return {
             "access_token": jwt.encode(access_payload, self.secret, algorithm=self.algorithm),
             "refresh_token": jwt.encode(refresh_payload, self.secret, algorithm=self.algorithm),
@@ -331,25 +406,29 @@ class AuthService:
         token: Optional[str] = Depends(query_token_scheme),
         bearer: Optional[HTTPAuthorizationCredentials] = Depends(security_bearer)
     ) -> Dict[str, Any]:
-        """FastAPI dependency: Enforces valid token for WebRTC / live video feeds."""
+        """FastAPI dependency: Enforces valid token for WebRTC / live video feeds.
+
+        A valid token always works; only an unverifiable one counts toward
+        (and is refused by) the token lockout.
+        """
         ip = _client_ip(request)
-        intrusion_detector.check_lockout(ip)
-        
+
         raw_token = token or (bearer.credentials if bearer else None)
         if not raw_token:
             # Allow open access if development mode, but log warning
             if settings.AUTH_DISABLED:
                 return {"sub": "dev_client", "camera_id": camera_id}
-            intrusion_detector.record_failure(ip)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Missing authentication stream token"
             )
 
-        payload = self.verify_token(raw_token)
+        payload, signed = self.inspect_token(raw_token)
         if (not payload or payload.get("type") != "stream_access" or payload.get("camera_id") != camera_id
                 or not phone_claims_ok(payload)):
-            intrusion_detector.record_failure(ip)
+            if not signed:
+                intrusion_detector.record_failure(ip, "token")
+                intrusion_detector.check_lockout(ip, "token")
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Invalid or expired stream token for this camera"
@@ -365,21 +444,21 @@ class AuthService:
     ) -> Dict[str, Any]:
         """FastAPI dependency: Enforces valid token for event clips and snapshots."""
         ip = _client_ip(request)
-        intrusion_detector.check_lockout(ip)
-        
+
         raw_token = token or (bearer.credentials if bearer else None)
         if not raw_token:
             if settings.AUTH_DISABLED:
                 return {"sub": "dev_client", "type": "clip_access"}
-            intrusion_detector.record_failure(ip)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Missing clip authorization token"
             )
 
-        payload = self.verify_token(raw_token)
+        payload, signed = self.inspect_token(raw_token)
         if not payload or payload.get("type") != "clip_access" or not phone_claims_ok(payload):
-            intrusion_detector.record_failure(ip)
+            if not signed:
+                intrusion_detector.record_failure(ip, "token")
+                intrusion_detector.check_lockout(ip, "token")
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Invalid or expired clip access token"
@@ -394,19 +473,18 @@ class AuthService:
     ) -> bool:
         """FastAPI dependency: Verifies internal vision engine API key on /events/trigger."""
         ip = _client_ip(request)
-        intrusion_detector.check_lockout(ip)
-        
+
         if not api_key:
             if settings.AUTH_DISABLED:
                 return True
-            intrusion_detector.record_failure(ip)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Missing X-Edge-API-Key header"
             )
 
         if not secrets.compare_digest(api_key, settings.INTERNAL_SERVICE_KEY):
-            intrusion_detector.record_failure(ip)
+            intrusion_detector.record_failure(ip, "token")
+            intrusion_detector.check_lockout(ip, "token")
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Invalid internal service key"
@@ -453,10 +531,14 @@ class AuthService:
         if not raw_bearer:
             raw_bearer = request.cookies.get("edge_cctv_token")
 
+        bearer_signed = False
         if raw_bearer:
-            payload = self.verify_token(raw_bearer)
-            if payload and payload.get("type") == "user_session" and not token_epoch_is_current(payload):
-                payload = None  # issued before an operator reset
+            payload, bearer_signed = self.inspect_token(raw_bearer)
+            if payload and payload.get("type") == "user_session":
+                if not token_epoch_is_current(payload):
+                    payload = None  # issued before an operator reset
+                elif self.is_revoked(raw_bearer, payload):
+                    payload = None  # signed out via /auth/logout
             if payload and not phone_claims_ok(payload):
                 payload = None  # phone token for another device, or a revoked phone
             if payload and payload.get("type") in ("user_session", "stream_access", "clip_access"):
@@ -467,11 +549,14 @@ class AuthService:
         if settings.AUTH_DISABLED:
             return True
 
-        presented_credential = bool(resolved_api_key or raw_bearer)
-        if presented_credential:
-            # Something was offered and it was wrong: that is an attempt.
-            intrusion_detector.record_failure(ip)
-            intrusion_detector.check_lockout(ip)
+        # Only a credential that cannot be verified is a guess: a wrong API
+        # key, or a bearer token not signed with this device's key. A token
+        # we signed that is expired, from an old epoch, signed out or bound to
+        # a revoked phone is a stale session: 401, not counted.
+        unverifiable = bool(resolved_api_key) or bool(raw_bearer and not bearer_signed)
+        if unverifiable:
+            intrusion_detector.record_failure(ip, "token")
+            intrusion_detector.check_lockout(ip, "token")
 
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -550,6 +635,8 @@ class AuthService:
         payload = self.verify_token(refresh_token)
         if not payload or payload.get("type") != "refresh" or not token_epoch_is_current(payload):
             raise HTTPException(status_code=401, detail="Invalid refresh token")
+        if self.is_revoked(refresh_token, payload):
+            raise HTTPException(status_code=401, detail="This session was signed out")
         if "dev" in payload or "pd" in payload:
             # Paired phone: same device, not revoked, and the refresh token
             # the phone currently holds (only its hash is stored).
@@ -558,7 +645,39 @@ class AuthService:
                     or not pairing_service.refresh_token_matches(str(payload["pd"]), refresh_token)):
                 raise HTTPException(status_code=401, detail="Invalid refresh token")
             return pairing_service.reissue_phone_access(payload)
-        return self.issue_session_tokens(payload.get("sub"), payload.get("role", "owner"))["access_token"]
+        return self.issue_session_tokens(payload.get("sub"), payload.get("role", "owner"),
+                                         sid=payload.get("sid"))["access_token"]
+
+    def revoke_session(self, access_token: Optional[str], refresh_token: Optional[str] = None) -> int:
+        """Sign out: revoke the presented session token and its login session.
+
+        Revoking the session (``sid``) also kills the paired refresh token and
+        any access token refreshed from it; a refresh token presented as well
+        is revoked by its own key too. Tokens that do not verify (garbage,
+        expired) are ignored: there is nothing left to revoke. Returns the
+        number of revocation entries recorded.
+        """
+        from app.services.token_revocation import keys_for, token_key, token_revocations
+
+        now = int(time.time())
+        session_ttl = 31 * 24 * 3600
+        try:
+            from app.services import pairing_service
+            session_ttl = max(session_ttl, int(pairing_service.REFRESH_TTL_S) + int(pairing_service.ACCESS_TTL_S))
+        except Exception:
+            pass
+        entries = []
+        for raw, expected in ((access_token, "user_session"), (refresh_token, "refresh")):
+            if not raw:
+                continue
+            payload = self.verify_token(raw)
+            if not payload or payload.get("type") != expected:
+                continue
+            exp = int(payload.get("exp") or now)
+            entries.append((token_key(raw, payload), expected, exp))
+            for key in keys_for(raw, payload)[1:]:
+                entries.append((key, "session", now + session_ttl))
+        return token_revocations.revoke(entries)
 
     async def change_password(self, session, user_id, old_password, new_password):
         from app.models.db_models import AdminUserModel

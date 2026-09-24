@@ -314,6 +314,8 @@ async def update_camera(camera_id: str, cam_in: CameraFeed, db: AsyncSession = D
                 logger.error("Could not store credentials for camera %s: %s", camera_id, type(exc).__name__)
                 raise HTTPException(status_code=500, detail="Could not store the camera credentials securely.") from None
 
+    if cam is not None and "features" in payload:
+        _keep_unsent_settings(payload["features"], cam_in.features, cam.features)
     if cam is None:
         cam = CameraModel(id=camera_id, **payload)
         db.add(cam)
@@ -370,10 +372,38 @@ async def delete_camera(camera_id: str, db: AsyncSession = Depends(get_db)):
     }
 
 
+# Per-camera settings that are not on/off flags. A client that does not know
+# them (an older dashboard or the mobile app sending only the toggles) must
+# not reset them, so a key absent from the request keeps its stored value.
+_NON_FLAG_SETTINGS = ("person_max_frame_fraction",)
+
+
+def _keep_unsent_settings(target: Dict[str, object], sent: object, stored: object) -> None:
+    if isinstance(sent, CameraFeatureConfig):
+        sent_keys = sent.model_fields_set
+    elif isinstance(sent, dict):
+        sent_keys = set(sent.keys())
+    else:
+        sent_keys = set()
+    if not isinstance(stored, dict):
+        return
+    for key in _NON_FLAG_SETTINGS:
+        if key not in sent_keys and stored.get(key) is not None:
+            target[key] = stored.get(key)
+
+
 @router.put("/{camera_id}/features", response_model=CameraFeatureConfig)
 async def update_camera_features(camera_id: str, config: CameraFeatureConfig, db: AsyncSession = Depends(get_db)):
-    """Set this camera's analytics toggles; stored on the camera row so they survive restarts."""
+    """Set this camera's analytics toggles and detector settings.
+
+    Stored on the camera row so they survive restarts. Settings omitted from
+    the body (``person_max_frame_fraction``) keep their stored value; send
+    ``null`` to return to the server default.
+    """
     cam = await _get_camera_or_404(camera_id, db)
+    merged = config.model_dump()
+    _keep_unsent_settings(merged, config, cam.features)
+    config = CameraFeatureConfig.model_validate(merged)
     cam.features = config.model_dump()
     await db.commit()
     feature_manager.set_camera_features(camera_id, config)
@@ -413,7 +443,10 @@ def get_camera_snapshot(camera_id: str, annotate: bool = True):
 
     if annotate:
         h, w = raw.shape[:2]
-        dets = outside_ignore_regions(person_detector.detect(raw), ignore_polygons(camera_id, w, h))
+        max_frac = feature_manager.get_setting(camera_id, "person_max_frame_fraction")
+        dets = outside_ignore_regions(
+            person_detector.detect(raw, **({"max_frame_fraction": max_frac} if max_frac is not None else {})),
+            ignore_polygons(camera_id, w, h))
         if frame is raw:
             frame = raw.copy()
         for det in dets:

@@ -12,6 +12,13 @@
  *   - shows a sign-in form otherwise, and re-opens it on any 401.
  *
  * Loaded before every other script so no request escapes unauthenticated.
+ *
+ * A stored token is validated once, by GET /api/v1/auth/status, before any
+ * other API request may leave the page: every other /api/ fetch waits for
+ * that answer (``edgeAuth.ready``, event ``edge:auth``). A stale token used to
+ * be sprayed by ~10 dashboard pollers at once; the server counted each as a
+ * failed sign-in and locked the operator's own address out. An invalid token
+ * is now cleared (localStorage + cookie) and never sent anywhere else.
  */
 (function () {
   'use strict';
@@ -37,15 +44,56 @@
     } catch (_) {}
   }
 
+  // --- auth state ------------------------------------------------------------
+  //
+  // 'pending'  stored token not checked yet: API requests wait
+  // 'valid'    the server accepted the stored token
+  // 'invalid'  no usable token (cleared); the gate is shown
+  // 'bypass'   AUTH_DISABLED on the server and no account yet
+  // 'error'    the status check itself failed (server unreachable)
+  let authState = 'pending';
+  let resolveReady;
+  const ready = new Promise((r) => { resolveReady = r; });
+
+  // The stored token once it may be used: accepted by the server, or the
+  // check could not reach the server (requests then carry it as before).
+  function usableToken() {
+    return authState === 'valid' || authState === 'error' ? getToken() : null;
+  }
+
+  function settleAuth(state) {
+    if (authState !== 'pending') return;
+    authState = state;
+    resolveReady(state);
+    try { window.dispatchEvent(new CustomEvent('edge:auth', { detail: { state } })); } catch (_) {}
+  }
+
+  // Requests allowed out before the stored token has been checked.
+  const PRE_AUTH_PATHS = ['/api/v1/auth/status', '/api/v1/auth/refresh'];
+  function pathOf(url) {
+    try { return new URL(url, window.location.href).pathname; } catch (_) { return url; }
+  }
+
   // --- authenticated fetch -------------------------------------------------
 
   const nativeFetch = window.fetch.bind(window);
   let isGateRendering = false;
 
   window.fetch = async function (input, init) {
-    const url = typeof input === 'string' ? input : (input && input.url) || '';
-    const isApi = url.startsWith('/api/');
+    const rawUrl = typeof input === 'string' ? input : (input && input.url) || '';
+    const path = pathOf(rawUrl);
+    const sameOrigin = (() => {
+      try { return new URL(rawUrl, window.location.href).origin === window.location.origin; } catch (_) { return false; }
+    })();
+    const url = sameOrigin ? path : rawUrl;
+    const isApi = sameOrigin && url.startsWith('/api/');
     const isAuthOrSetup = url.includes('/auth/') || url.includes('/setup/');
+
+    // Nothing but the token check itself leaves before the check has answered.
+    if (isApi && authState === 'pending' && !PRE_AUTH_PATHS.includes(path)) {
+      await ready;
+    }
+
     const token = getToken();
     const gate = document.getElementById('authGate');
     const isGateActive = gate && gate.style.display !== 'none';
@@ -326,10 +374,45 @@
     host.appendChild(b);
   }
 
+  let signingOut = false;
   window.edgeAuth = {
-    signOut() { setToken(null); window.location.reload(); },
-    token: getToken,
+    // Revoke the session on the server first (POST /api/v1/auth/logout), then
+    // clear it here. A failed or slow call still signs out locally: the
+    // server-side revocation is best effort from the browser's point of view.
+    async signOut() {
+      if (signingOut) return;
+      signingOut = true;
+      const btn = document.getElementById('authSignOut');
+      if (btn) { btn.disabled = true; btn.textContent = 'Signing out…'; }
+      const t = getToken();
+      if (t) {
+        try {
+          const ctl = typeof AbortController === 'function' ? new AbortController() : null;
+          const timer = ctl ? setTimeout(() => ctl.abort(), 4000) : null;
+          await nativeFetch('/api/v1/auth/logout', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' },
+            body: '{}',
+            signal: ctl ? ctl.signal : undefined,
+          });
+          if (timer) clearTimeout(timer);
+        } catch (_) { /* offline or refused: still sign out locally */ }
+      }
+      setToken(null);
+      window.location.reload();
+    },
+    // The stored token, only once the server has accepted it.
+    token: usableToken,
+    state() { return authState; },
+    ready,
+    // Run fn once the DOM is parsed and the stored token has been checked.
+    onReady(fn) {
+      const run = () => ready.then(() => { try { fn(); } catch (e) { console.error(e); } });
+      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', run);
+      else run();
+    },
     isAuthenticated() {
+      if (authState === 'pending' || authState === 'invalid') return false;
       const gate = document.getElementById('authGate');
       if (gate && gate.style.display !== 'none') return false;
       return !!getToken();
@@ -339,7 +422,7 @@
       return !!(gate && gate.style.display !== 'none');
     },
     authUrl(url) {
-      const t = getToken();
+      const t = usableToken();
       if (!t) return url;
       const sep = url.includes('?') ? '&' : '?';
       return `${url}${sep}token=${encodeURIComponent(t)}`;
@@ -347,32 +430,58 @@
   };
 
   // --- boot ----------------------------------------------------------------
-  async function initAuth() {
-    try {
-      const currentToken = getToken();
-      if (currentToken) {
-        try { document.cookie = `${TOKEN_KEY}=${encodeURIComponent(currentToken)}; ${COOKIE_ATTRS}`; } catch (_) {}
+  async function fetchStatus(currentToken) {
+    // A few quick retries: a server that is still starting must not sign the
+    // operator out, and nothing else may be sent until this answers.
+    let lastErr = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const res = await nativeFetch('/api/v1/auth/status', {
+          headers: currentToken ? { Authorization: `Bearer ${currentToken}` } : {},
+          credentials: 'omit',   // judge the stored token alone, not a stale cookie
+        });
+        if (res.ok) return await res.json();
+        lastErr = new Error(`HTTP ${res.status}`);
+      } catch (e) {
+        lastErr = e;
       }
-      const res = await nativeFetch('/api/v1/auth/status', {
-        headers: currentToken ? { Authorization: `Bearer ${currentToken}` } : {},
-      });
-      const s = await res.json();
+      await new Promise((r) => setTimeout(r, 800 * (attempt + 1)));
+    }
+    throw lastErr || new Error('auth status unavailable');
+  }
 
-      if (s.authenticated) { mountSignOut(); return; }   // valid session, carry on
-      // A stored token the server no longer accepts (expired, or the operator
-      // accounts were reset on the server): discard it.
-      if (currentToken) setToken(null);
-      if (s.debug_bypass_active && s.admin_exists === false) {
-        // Development convenience only: the backend is not enforcing auth and
-        // no account has been created yet, so do not block the dashboard.
-        // Driven by the server's AUTH_DISABLED switch (never by DEBUG).
-        console.warn('AUTH_DISABLED is set on the server: the API is currently unauthenticated.');
-        return;
-      }
-      showGate(s.admin_exists);
+  async function initAuth() {
+    const currentToken = getToken();
+    let s;
+    try {
+      s = await fetchStatus(currentToken);
     } catch (e) {
       console.error('Could not determine auth state:', e);
+      settleAuth('error');
+      return;
     }
+    if (s.authenticated) {
+      // Valid session: refresh the cookie (MJPEG <img> and websocket use it).
+      try { document.cookie = `${TOKEN_KEY}=${encodeURIComponent(currentToken)}; ${COOKIE_ATTRS}`; } catch (_) {}
+      settleAuth('valid');
+      mountSignOut();
+      return;
+    }
+    // A stored token the server no longer accepts (expired, signed out, or the
+    // operator accounts were reset on the server): discard it everywhere.
+    setToken(null);
+    if (s.debug_bypass_active && s.admin_exists === false) {
+      // Development convenience only: the backend is not enforcing auth and
+      // no account has been created yet, so do not block the dashboard.
+      // Driven by the server's AUTH_DISABLED switch (never by DEBUG).
+      console.warn('AUTH_DISABLED is set on the server: the API is currently unauthenticated.');
+      settleAuth('bypass');
+      return;
+    }
+    // Show the gate before releasing the waiting requests, so they are
+    // answered locally (401) instead of reaching the server.
+    showGate(s.admin_exists);
+    settleAuth('invalid');
   }
 
   if (document.readyState === 'loading') {

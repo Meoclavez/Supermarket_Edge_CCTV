@@ -31,7 +31,8 @@ def test_legacy_stored_keys_are_ignored():
         "queue_monitoring": True, "sub_stream_fps": 5, "main_stream_fps": 25,
     }
     cfg = CameraFeatureConfig.model_validate(legacy)
-    assert cfg.model_dump() == {"people_counting": True, "shelf_interaction": False, "theft_detection": True}
+    assert cfg.model_dump() == {"people_counting": True, "shelf_interaction": False, "theft_detection": True,
+                                "person_max_frame_fraction": None}
 
     fm = FeatureManager()
     assert fm.get_camera_features("cam_old", stored=legacy).shelf_interaction is False

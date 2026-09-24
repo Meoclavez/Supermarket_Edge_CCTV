@@ -941,6 +941,9 @@ async function openCameraConfigModal(cameraId) {
   safeCheck('featPeopleCounting', feats.people_counting);
   safeCheck('featShelfInteraction', feats.shelf_interaction);
   safeCheck('featTheftDetection', feats.theft_detection);
+  // Stored as a fraction (0.05-1), edited as a percentage; empty = server default.
+  safeSet('configPersonMaxFrac', isNum(feats.person_max_frame_fraction)
+    ? Math.round(feats.person_max_frame_fraction * 1000) / 10 : '');
 
   const bounds = layoutSnapshot ? ` Store is ${layoutSnapshot.width_m} × ${layoutSnapshot.height_m} m.` : '';
   setCameraConfigStatus(`Editing ${cam.id}.${bounds}`, false);
@@ -983,11 +986,24 @@ async function handleCameraConfigSubmit(event) {
     return;
   }
 
-  // Only the flags the server knows; keys from older builds are not echoed back.
+  // Largest person box for this camera, typed as a percentage of the frame.
+  const maxFracRaw = (el('configPersonMaxFrac') ? el('configPersonMaxFrac').value : '').trim();
+  let personMaxFrac = null;
+  if (maxFracRaw !== '') {
+    const pct = parseFloat(maxFracRaw);
+    if (!Number.isFinite(pct) || pct < 5 || pct > 100) {
+      setCameraConfigStatus('Largest person size must be between 5 and 100 % of the frame, or empty for the server default.', true);
+      return;
+    }
+    personMaxFrac = Math.round(pct * 10) / 1000;
+  }
+
+  // Only the settings the server knows; keys from older builds are not echoed back.
   const features = {
     people_counting: el('featPeopleCounting').checked,
     shelf_interaction: el('featShelfInteraction').checked,
     theft_detection: el('featTheftDetection').checked,
+    person_max_frame_fraction: personMaxFrac,
   };
 
   // PUT replaces the whole row, so every field the API knows is sent back
@@ -1394,7 +1410,10 @@ function initAnalytics() {
   if (new URLSearchParams(window.location.search).get('__selftest') === '1') runSelfTest();
 }
 
-if (document.readyState === 'loading') {
+// Start only after auth.js has checked the stored token (edgeAuth.onReady).
+if (window.edgeAuth && typeof window.edgeAuth.onReady === 'function') {
+  window.edgeAuth.onReady(initAnalytics);
+} else if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', initAnalytics);
 } else {
   initAnalytics();

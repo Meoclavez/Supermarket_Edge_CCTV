@@ -126,6 +126,12 @@ class CameraFeatureConfig(BaseModel):
     people_counting: bool = Field(True, description="Zone visits, dwell, queues and footfall from tracked people")
     shelf_interaction: bool = Field(True, description="Hand-to-shelf interaction events from pose keypoints")
     theft_detection: bool = Field(True, description="Suspicious-behaviour incidents for staff review")
+    # Detector tuning for this camera. None = the global PERSON_MAX_FRAME_FRACTION.
+    person_max_frame_fraction: Optional[float] = Field(
+        None, ge=0.05, le=1.0,
+        description=("Largest person box accepted, as a fraction of the frame area. Raise it for a "
+                     "close-mounted camera (e.g. facing a shelf ~2 m away); empty = server default"),
+    )
 
 
 class HardwareProfile(BaseModel):

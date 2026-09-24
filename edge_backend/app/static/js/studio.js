@@ -1111,7 +1111,10 @@ function initStudio() {
   setInterval(loadZonesList, 6000);
 }
 
-if (document.readyState === 'loading') {
+// Start only after auth.js has checked the stored token (edgeAuth.onReady).
+if (window.edgeAuth && typeof window.edgeAuth.onReady === 'function') {
+  window.edgeAuth.onReady(initStudio);
+} else if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', initStudio);
 } else {
   initStudio();

@@ -116,7 +116,8 @@
 
   window.addEventListener('edge:tab', (e) => onTab(e.detail && e.detail.tab));
   window.productReach = { load, render };
-  document.addEventListener('DOMContentLoaded', () => {
-    if (tabActive() && !timer) onTab('analytics');
-  });
+  const boot = () => { if (tabActive() && !timer) onTab('analytics'); };
+  // Start only after auth.js has checked the stored token (edgeAuth.onReady).
+  if (window.edgeAuth && typeof window.edgeAuth.onReady === 'function') window.edgeAuth.onReady(boot);
+  else document.addEventListener('DOMContentLoaded', boot);
 })();

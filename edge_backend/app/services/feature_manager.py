@@ -60,6 +60,19 @@ class FeatureManager:
         with self._lock:
             self._camera_features[camera_id] = config
 
+    def _cached_or_stored(self, camera_id: str) -> CameraFeatureConfig:
+        with self._lock:
+            cfg = self._camera_features.get(camera_id)
+        if cfg is None:
+            stored = _read_stored_features(camera_id)
+            try:
+                loaded = CameraFeatureConfig.model_validate(stored) if stored else CameraFeatureConfig()
+            except Exception:
+                loaded = CameraFeatureConfig()
+            with self._lock:
+                cfg = self._camera_features.setdefault(camera_id, loaded)
+        return cfg
+
     def is_enabled(self, camera_id: str, flag: str) -> bool:
         """Cheap, thread-safe check for pipeline stages.
 
@@ -70,14 +83,13 @@ class FeatureManager:
         """
         if flag not in FEATURE_FLAGS:
             raise KeyError(f"Unknown camera feature flag: {flag}")
-        with self._lock:
-            cfg = self._camera_features.get(camera_id)
-        if cfg is None:
-            stored = _read_stored_features(camera_id)
-            loaded = CameraFeatureConfig.model_validate(stored) if stored else CameraFeatureConfig()
-            with self._lock:
-                cfg = self._camera_features.setdefault(camera_id, loaded)
-        return bool(getattr(cfg, flag))
+        return bool(getattr(self._cached_or_stored(camera_id), flag))
+
+    def get_setting(self, camera_id: str, name: str) -> Any:
+        """A non-flag per-camera setting (e.g. ``person_max_frame_fraction``); None = default."""
+        if name in FEATURE_FLAGS or name not in CameraFeatureConfig.model_fields:
+            raise KeyError(f"Unknown camera setting: {name}")
+        return getattr(self._cached_or_stored(camera_id), name)
 
     def remove_camera(self, camera_id: str) -> None:
         with self._lock:

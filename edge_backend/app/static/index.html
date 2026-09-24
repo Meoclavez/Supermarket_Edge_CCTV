@@ -16,8 +16,8 @@
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/css/style.css?v=2.1.5" />
   <link rel="stylesheet" href="/static/css/floorplan.css?v=2.1.5" />
-  <script src="/static/js/auth.js?v=2.1.5"></script>
-  <script src="/static/js/theme.js?v=2.1.5" defer></script>
+  <script src="/static/js/auth.js?v=2.1.6"></script>
+  <script src="/static/js/theme.js?v=2.1.6" defer></script>
 
   <!-- Chart.js for High-Performance Canvas Graphs -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
@@ -688,6 +688,17 @@
           </div>
         </div>
 
+        <div class="form-group" style="margin-top: 8px;">
+          <label for="configPersonMaxFrac">Largest person size (% of the frame)</label>
+          <input type="number" min="5" max="100" step="1" class="form-input" id="configPersonMaxFrac" name="personMaxFrac" placeholder="Server default" />
+          <div style="font-size: 11px; color: var(--text-dim); margin-top: 4px; line-height: 1.45;">
+            Detections bigger than this are treated as false boxes. Raise it for a camera mounted close to
+            the shoppers (for example facing a shelf about 2 m away). Leave empty to use the server default
+            (<code>PERSON_MAX_FRAME_FRACTION</code>, 35&nbsp;% unless changed). A close person whose shoulders
+            plus head or hips are visible is accepted up to 90&nbsp;% regardless.
+          </div>
+        </div>
+
         <div id="cameraConfigStatus" class="form-status" aria-live="polite"></div>
 
         <div style="display: flex; justify-content: space-between; gap: 8px; margin-top: 14px; flex-wrap: wrap;">
@@ -713,13 +724,13 @@
   <div class="toast" id="toast">Notification</div>
 
   <!-- Scripts -->
-  <script src="/static/js/floorplan.js?v=2.1.5"></script>
-  <script src="/static/js/devices.js?v=2.1.5"></script>
-  <script src="/static/js/calibration.js?v=2.1.5"></script>
-  <script src="/static/js/analytics.js?v=2.1.5"></script>
-  <script src="/static/js/product_reach.js?v=2.1.5"></script>
-  <script src="/static/js/entrances.js?v=2.1.5"></script>
-  <script src="/static/js/remote_access.js?v=2.1.5"></script>
-  <script src="/static/js/pairing.js?v=2.1.5"></script>
+  <script src="/static/js/floorplan.js?v=2.1.6"></script>
+  <script src="/static/js/devices.js?v=2.1.6"></script>
+  <script src="/static/js/calibration.js?v=2.1.6"></script>
+  <script src="/static/js/analytics.js?v=2.1.6"></script>
+  <script src="/static/js/product_reach.js?v=2.1.6"></script>
+  <script src="/static/js/entrances.js?v=2.1.6"></script>
+  <script src="/static/js/remote_access.js?v=2.1.6"></script>
+  <script src="/static/js/pairing.js?v=2.1.6"></script>
 </body>
 </html>

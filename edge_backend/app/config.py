@@ -34,7 +34,11 @@ def get_default_dir(name: str) -> Path:
     return p
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="allow")
+    # Absolute path: a relative ".env" was only found when the process started in
+    # edge_backend/, and a launch from anywhere else silently fell back to the
+    # machine-local secret store with a different JWT_SECRET, invalidating
+    # every existing session.
+    model_config = SettingsConfigDict(env_file=str(Path(__file__).resolve().parent.parent / ".env"), extra="allow")
     
     APP_NAME: str = "Universal Edge AI CCTV System"
     APP_VERSION: str = "2.1.0"
@@ -136,6 +140,11 @@ class Settings(BaseSettings):
     # real shoppers, which is indistinguishable downstream from fabricated data.
     PERSON_MIN_ASPECT_RATIO: float = float(os.getenv("PERSON_MIN_ASPECT_RATIO", "1.2"))
     PERSON_MAX_FRAME_FRACTION: float = float(os.getenv("PERSON_MAX_FRAME_FRACTION", "0.35"))
+    # A box above PERSON_MAX_FRAME_FRACTION (or the camera's own
+    # person_max_frame_fraction) is still kept when its keypoints form a
+    # coherent skeleton (shoulders + hips or head), up to this fraction.
+    PERSON_MAX_FRAME_FRACTION_WITH_SKELETON: float = float(
+        os.getenv("PERSON_MAX_FRAME_FRACTION_WITH_SKELETON", "0.9"))
     PERSON_MIN_BOX_PIXELS: int = int(os.getenv("PERSON_MIN_BOX_PIXELS", "24"))
     # Analytics runs on a decimated stream: detection every Nth frame is ample
     # for footfall and dwell, and leaves decode budget for the other channels.
@@ -293,6 +302,16 @@ class Settings(BaseSettings):
     # and not hanging down is reaching even when, foreshortened, its wrist
     # projects over the torso "rest" box.
     INTERACTION_EXTENDED_ARM_RATIO: float = float(os.getenv("INTERACTION_EXTENDED_ARM_RATIO", "0.85"))
+    # Two tracks holding a reach in the same zone with contact points closer
+    # than this fraction of the frame diagonal are one physical hand that the
+    # pose model gave to two overlapping people: only the most plausible arm
+    # keeps the reach. 0 disables the dedupe.
+    INTERACTION_DEDUPE_DIST_FRAC: float = float(os.getenv("INTERACTION_DEDUPE_DIST_FRAC", "0.03"))
+    # Plausible forearm / upper-arm length ratio in the image (foreshortening
+    # included), and maximum arm length in torso lengths, for that decision.
+    INTERACTION_DEDUPE_FOREARM_RATIO_MIN: float = float(os.getenv("INTERACTION_DEDUPE_FOREARM_RATIO_MIN", "0.45"))
+    INTERACTION_DEDUPE_FOREARM_RATIO_MAX: float = float(os.getenv("INTERACTION_DEDUPE_FOREARM_RATIO_MAX", "1.8"))
+    INTERACTION_DEDUPE_MAX_ARM_TORSOS: float = float(os.getenv("INTERACTION_DEDUPE_MAX_ARM_TORSOS", "2.2"))
 
     # Concealment: after a reach ends, the wrist must enter the lower-torso /
     # pocket region (or a detected bag) within THEFT_CONCEAL_WINDOW_SEC, stay

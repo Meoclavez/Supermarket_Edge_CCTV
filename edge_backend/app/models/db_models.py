@@ -473,6 +473,21 @@ class PairingSessionModel(Base):
     paired_device_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
 
+class RevokedTokenModel(Base):
+    """A signed-out session token or login session (migration m0011).
+
+    ``jti`` is the revocation key (``jti:<jti>``, ``h:<hash>`` or
+    ``sid:<session>``); the row is kept until ``expires_at`` (unix seconds).
+    Written and read by services/token_revocation.py.
+    """
+    __tablename__ = "revoked_tokens"
+
+    jti: Mapped[str] = mapped_column(String(64), primary_key=True)
+    token_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    expires_at: Mapped[int] = mapped_column(Integer, index=True, nullable=False)
+    revoked_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class TripwireEventModel(Base):
     """One person crossing a Studio tripwire (migration m0008).
 
