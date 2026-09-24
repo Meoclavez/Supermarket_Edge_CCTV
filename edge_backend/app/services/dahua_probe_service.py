@@ -106,73 +106,33 @@ class DahuaProbeService:
             return False
 
     @staticmethod
-    async def probe_rtsp_auth(host: str, port: int, username: str, password: str, timeout: float = 2.0) -> Tuple[bool, Optional[str]]:
-        """Verify RTSP connection and credentials with RTSP DESCRIBE / OPTIONS.
+    async def probe_rtsp_auth(host: str, port: int, username: str, password: str, timeout: float = 4.0) -> Tuple[bool, Optional[str]]:
+        """Verify the NVR accepts these credentials with one RTSP DESCRIBE.
 
-        Returns (authenticated: bool, error_message: Optional[str]).
+        Returns (authenticated, error_message). Uses the shared RTSP handshake
+        (rtsp_probe), which answers Dahua's Digest challenge on the same
+        connection. The previous inline version sent HTTP Basic, which Dahua
+        rejects with 401 whatever the password, so a correct password was
+        reported as wrong and every click cost a failed login on the NVR.
         """
-        try:
-            fut = asyncio.open_connection(host, port)
-            reader, writer = await asyncio.wait_for(fut, timeout=timeout)
-        except (OSError, asyncio.TimeoutError) as e:
-            return False, f"Could not connect to RTSP port {port}: {e}"
+        from app.services import rtsp_probe
 
-        try:
-            # 1. First send OPTIONS
-            req_opt = (
-                f"OPTIONS rtsp://{host}:{port} RTSP/1.0\r\n"
-                "CSeq: 1\r\n"
-                "User-Agent: EdgeCCTV-DahuaProbe\r\n\r\n"
-            )
-            writer.write(req_opt.encode())
-            await writer.drain()
-            data = await asyncio.wait_for(reader.read(1024), timeout=timeout)
-            text = data.decode("utf-8", "ignore")
-
-            if "RTSP/1.0" not in text:
-                return False, "Device did not respond with RTSP protocol"
-
-            # 2. Try DESCRIBE for channel 1 to verify credentials
-            auth_header = ""
-            if username and password:
-                import base64
-                basic = base64.b64encode(f"{username}:{password}".encode()).decode()
-                auth_header = f"Authorization: Basic {basic}\r\n"
-
-            req_desc = (
-                f"DESCRIBE rtsp://{host}:{port}/cam/realmonitor?channel=1&subtype=1 RTSP/1.0\r\n"
-                "CSeq: 2\r\n"
-                "Accept: application/sdp\r\n"
-                f"{auth_header}"
-                "User-Agent: EdgeCCTV-DahuaProbe\r\n\r\n"
-            )
-            writer.write(req_desc.encode())
-            await writer.drain()
-            resp = await asyncio.wait_for(reader.read(2048), timeout=timeout)
-            resp_text = resp.decode("utf-8", "ignore")
-
-            if "401 Unauthorized" in resp_text:
-                # If we sent auth and still 401, credentials are invalid
-                if auth_header:
-                    return False, "401 Unauthorized: Invalid NVR username or password"
-                # If no auth was sent, it correctly demands auth
-                return True, None
-
-            if "200 OK" in resp_text:
-                return True, None
-
-            # Some Dahua firmware returns 404 or 400 if channel 1 is empty or disabled,
-            # but that still proves RTSP connectivity and accepted auth.
-            if any(code in resp_text for code in ("404 Not Found", "400 Bad Request", "454 Session Not Found")):
-                return True, None
-
+        creds = f"{quote(username, safe='')}:{quote(password, safe='')}@" if username and password else ""
+        url = f"rtsp://{creds}{host}:{port}/cam/realmonitor?channel=1&subtype=1"
+        res = await asyncio.to_thread(rtsp_probe.probe_rtsp, url, max(1.0, float(timeout)))
+        if res.outcome == rtsp_probe.OK:
             return True, None
-        except Exception as e:
-            return False, f"RTSP probe error: {e}"
-        finally:
-            writer.close()
-            with contextlib.suppress(Exception):
-                await writer.wait_closed()
+        if res.outcome == rtsp_probe.AUTH_FAILED:
+            return False, f"NVR rejected the username/password (RTSP {res.status_code})"
+        if res.outcome == rtsp_probe.AUTH_REQUIRED:
+            return False, "NVR requires a username and password"
+        if res.outcome in (rtsp_probe.NOT_FOUND, rtsp_probe.RTSP_ERROR) and res.status_code not in (None, 401, 403):
+            # Some firmware answers 404/400/454 when channel 1 is empty or
+            # disabled; the login itself was accepted.
+            return True, None
+        if res.outcome == rtsp_probe.NOT_RTSP:
+            return False, "Device did not respond with RTSP protocol"
+        return False, f"RTSP probe failed: {res.detail}"
 
     @staticmethod
     def _test_channel_worker(
