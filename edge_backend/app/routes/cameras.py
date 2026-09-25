@@ -577,7 +577,7 @@ async def delete_camera(camera_id: str, db: AsyncSession = Depends(get_db)):
 # Per-camera settings that are not on/off flags. A client that does not know
 # them (an older dashboard or the mobile app sending only the toggles) must
 # not reset them, so a key absent from the request keeps its stored value.
-_NON_FLAG_SETTINGS = ("person_max_frame_fraction", "night_watch")
+_NON_FLAG_SETTINGS = ("person_max_frame_fraction", "night_watch", "decode_max_width")
 
 
 def _keep_unsent_settings(target: Dict[str, object], sent: object, stored: object) -> None:
@@ -781,7 +781,16 @@ async def save_camera_snapshot(camera_id: str, db: AsyncSession = Depends(get_db
 
 
 def _clip_buffer_reason(camera_id: str) -> Optional[str]:
-    """Why a clip cannot be produced right now, or None when it can."""
+    """Why a clip cannot be produced right now, or None when it can.
+
+    Where no pre-event ring is kept (CLIP_PRE_EVENT_BUFFER), the clip is its
+    post-roll, recorded from now on: that needs a camera that is streaming.
+    """
+    if not clip_recorder_service.keeps_ring(camera_id):
+        rt = live_engine.runtimes.get(camera_id)
+        if rt is None or rt.status != "ONLINE" or not rt.last_frame_at or time.time() - rt.last_frame_at > 5.0:
+            return "the camera is not delivering video"
+        return None
     buf = clip_recorder_service.buffers.get(camera_id)
     if buf is None:
         return "no frame ring buffer exists for this camera (nothing feeds clip_recorder for it)"

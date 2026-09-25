@@ -33,6 +33,7 @@ from app.config import settings
 from app.database import async_session_factory
 from app.models.db_models import CameraModel, CustomerTrackModel, ZoneVisitModel
 from app.services.camera_drivers import redact_url
+from app.services.frame_geometry import calibration_frame_size
 from app.services.live_analytics_engine import live_engine
 from app.services.store_layout_service import store_layout_service
 from app.services.timeutil import utc_from_ts
@@ -183,7 +184,8 @@ class PipelineSupervisor:
             wanted: dict[str, CameraModel] = {}
             off: dict[str, CameraModel] = {}
             for cam in cameras:
-                floor_projector.set_homography(cam.id, cam.homography_matrix)
+                floor_projector.set_homography(cam.id, cam.homography_matrix,
+                                               calibration_frame_size(cam.calibration_points))
                 if not cam.is_ai_enabled:
                     off[cam.id] = cam
                 elif cam.rtsp_url:

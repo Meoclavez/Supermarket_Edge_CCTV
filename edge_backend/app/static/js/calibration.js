@@ -105,6 +105,7 @@
         if (cp && Array.isArray(cp.image_points) && Array.isArray(cp.floor_points) && cp.image_points.length === cp.floor_points.length) {
           this.pairs = cp.image_points.map((ip, i) => ({ image: { x: ip.x, y: ip.y }, floor: { x: cp.floor_points[i].x, y: cp.floor_points[i].y } }));
           if (cp.frame_width && cp.frame_height) { this.frameW = cp.frame_width; this.frameH = cp.frame_height; }
+          this.adoptFrameSize(document.getElementById('fpCalImg'));
           this._lastResult = { kind: 'info', text: `Loaded ${this.pairs.length} saved point pairs${cp.saved_at ? ` from ${esc(String(cp.saved_at).slice(0, 16).replace('T', ' '))}` : ''}.` };
         }
       } catch (_) { /* best effort */ }
@@ -321,6 +322,27 @@
       return palette[(idx >= 0 ? idx : 0) % palette.length];
     },
 
+    /**
+     * Take the size of the frames the camera delivers now (the stream's
+     * natural size) as the pixel space of the points. Points loaded from a
+     * calibration saved at another size (a stream that is now scaled down on
+     * the GPU, or was changed) are rescaled with it, so they stay on the same
+     * spot of the picture. True when the size changed.
+     */
+    adoptFrameSize(img) {
+      if (!img || !img.naturalWidth || !img.naturalHeight) return false;
+      const natW = img.naturalWidth, natH = img.naturalHeight;
+      if (this.frameW === natW && this.frameH === natH) return false;
+      if (this.frameW && this.frameH) {
+        const sx = natW / this.frameW, sy = natH / this.frameH;
+        const scale = (p) => ({ x: Math.round(p.x * sx * 10) / 10, y: Math.round(p.y * sy * 10) / 10 });
+        this.pairs = this.pairs.map((p) => ({ image: scale(p.image), floor: p.floor }));
+        if (this.pending) this.pending = scale(this.pending);
+      }
+      this.frameW = natW; this.frameH = natH;
+      return true;
+    },
+
     /** Size the overlay canvas to the displayed image and redraw the markers. */
     fitOverlay() {
       const img = document.getElementById('fpCalImg');
@@ -329,11 +351,7 @@
       if (!img || !canvas) return;
       const box = img.getBoundingClientRect();
       const w = box.width, h = box.height;
-      if (img.naturalWidth && img.naturalHeight && (this.frameW !== img.naturalWidth || this.frameH !== img.naturalHeight)) {
-        // The stream tells us the native size; it wins over an older stored value.
-        this.frameW = img.naturalWidth; this.frameH = img.naturalHeight;
-        if (sizeEl) sizeEl.textContent = `${this.frameW}×${this.frameH} px`;
-      }
+      if (this.adoptFrameSize(img) && sizeEl) sizeEl.textContent = `${this.frameW}×${this.frameH} px`;
       if (w < 2 || h < 2) return;
       const dpr = window.devicePixelRatio || 1;
       canvas.style.width = `${w}px`; canvas.style.height = `${h}px`;
@@ -445,7 +463,7 @@
       try {
         const res = await fetch(`${API}/cameras/${encodeURIComponent(this.cameraId)}/calibration/test`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ image_points: this.pairs.map((p) => p.image) }),
+          body: JSON.stringify({ image_points: this.pairs.map((p) => p.image), frame_width: this.frameW, frame_height: this.frameH }),
         });
         if (res.status === 404) {
           this._lastResult = { kind: 'info', text: 'Calibration saved. This server has no …/calibration/test endpoint, so the reprojection check is not available.' };

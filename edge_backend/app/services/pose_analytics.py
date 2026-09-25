@@ -686,7 +686,7 @@ class PoseAnalytics:
         label, x, y = points[-1]
         try:
             from app.services.tracking_service import floor_projector
-            p = floor_projector.to_floor(cam.camera_id, float(x), float(y))
+            p = floor_projector.to_floor(cam.camera_id, float(x), float(y), frame_size=cam.frame_size)
         except Exception:
             p = None
         if p is None:

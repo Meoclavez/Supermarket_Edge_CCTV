@@ -199,6 +199,14 @@ class CameraFeatureConfig(BaseModel):
         description=("Largest person box accepted, as a fraction of the frame area. Raise it for a "
                      "close-mounted camera (e.g. facing a shelf ~2 m away); empty = server default"),
     )
+    # GPU downscale limit for this camera's frames; None = DECODE_MAX_WIDTH (auto).
+    decode_max_width: Optional[int] = Field(
+        None, ge=0, le=8192,
+        description=("Widest frame this camera is analysed and shown at, scaled down on the GPU "
+                     "(0 = the stream's native size, e.g. for full-resolution evidence stills); "
+                     "empty = server default (DECODE_MAX_WIDTH: 1920 with a wide-input pose model, else native). "
+                     "A running camera reopens its stream within seconds of a change"),
+    )
     # Night watch schedule and options; None = never configured (off).
     night_watch: Optional[NightWatchConfig] = None
 

@@ -152,6 +152,11 @@ class Settings(BaseSettings):
     )
     MIGRAPHX_FP16: bool = os.getenv("MIGRAPHX_FP16", "0").lower() in ("1", "true", "yes")
     MIGRAPHX_COMPILE_MODE: str = os.getenv("MIGRAPHX_COMPILE_MODE", "background")
+    # Let the thread that waits for the GPU sleep instead of spinning on a CPU
+    # core for the whole inference (HIP blocking sync): session.run cost 5.8
+    # ms of CPU per 5.9 ms run spinning, 2.8 ms blocking, same speed (RX 9060
+    # XT, yolo26n-pose) - about 25 % of a core at 90 analysed frames/s.
+    MIGRAPHX_BLOCKING_SYNC: bool = os.getenv("MIGRAPHX_BLOCKING_SYNC", "1").lower() in ("1", "true", "yes")
     # ONNX Runtime threads for sessions on the CPU provider, shared by the pose
     # and object models (0 = half the CPUs this process may run on), so CPU
     # inference cannot starve camera decoding and recording. Idle worker
@@ -335,6 +340,14 @@ class Settings(BaseSettings):
     PRE_EVENT_BUFFER_SECONDS: int = 5
     POST_EVENT_RECORD_SECONDS: int = 10
     RECORDING_FPS: int = 25
+    # Pre-event clip ring (services/clip_recorder.py): ~5 JPEG-encoded frames a
+    # second per camera, so a clip can start PRE_EVENT_BUFFER_SECONDS before
+    # the event. "auto": kept only for cameras that can raise a clip on their
+    # own (night watch armed with NIGHT_WATCH_CLIP on); an operator's clip
+    # export or an /events/trigger clip then records its post-roll only.
+    # "on": every streaming camera (the old behaviour; the encoding was ~27 %
+    # of the camera threads' CPU on the store box). "off": never, post-roll only.
+    CLIP_PRE_EVENT_BUFFER: str = os.getenv("CLIP_PRE_EVENT_BUFFER", "auto")
     
     # Push notifications: Firebase Cloud Messaging HTTP v1 only (APNs via FCM).
     # The service-account JSON is uploaded in Settings and stored encrypted as
@@ -533,17 +546,32 @@ class Settings(BaseSettings):
     # RTSP cameras deliver at most this many frames a second (0 = all). On the
     # GPU the rest are dropped before they cost any CPU; in software they are
     # still decoded but not converted to BGR (grab without retrieve: 17-33 %
-    # less CPU than reading every frame, measured 704x576..3072x2048). Analysis runs
-    # on at most every ANALYTICS_DETECT_EVERY_N_FRAMES-th delivered frame, so
-    # this / N is each camera's detection ceiling (10 / 5 = 2 fps, the
-    # ANALYTICS_TARGET_DETECT_FPS default). The enlarged live view and clips
-    # show at most this rate too.
-    DECODE_MAX_FPS: float = float(os.getenv("DECODE_MAX_FPS", "10"))
-    # GPU-decoded frames wider than this are scaled down on the GPU, keeping
-    # the aspect ratio (0 = native size). Camera calibrations (homography) are
-    # in pixels of the frames the camera delivers: recalibrate a camera after
-    # changing its delivered size.
-    DECODE_MAX_WIDTH: int = int(os.getenv("DECODE_MAX_WIDTH", "0"))
+    # less CPU than reading every frame, measured 704x576..3072x2048). A
+    # camera's detection ceiling stays native fps / ANALYTICS_DETECT_EVERY_N_FRAMES
+    # (25 / 5 = 5 fps) as long as this is at least that; the enlarged live
+    # view and clips show at most this rate.
+    # Default 5: every consumer but the enlarged live view is satisfied by it
+    # (analysis ~2-3 fps per camera and never capped by it, see
+    # CameraWorker._clip_every; clip ring 5 fps; the dashboard's "Normal"
+    # live view asks for 5 fps), and it halves the per-frame capture cost:
+    # 8 test cameras 67 -> 58 % of a core (720p camera 8 -> 6 %, 2560x1440 at
+    # native 15 -> 10 %). 10 gives Studio and the "High" live view smoother
+    # motion for about 1 % of a core per camera.
+    DECODE_MAX_FPS: float = float(os.getenv("DECODE_MAX_FPS", "5"))
+    # GPU-decoded frames wider than this are scaled down on the GPU, before
+    # they are downloaded, keeping the aspect ratio (0 = native size); a
+    # camera's own ``decode_max_width`` setting overrides it. "auto" = 1920
+    # while the pose model takes a wide input (the 544x960 ladder exports:
+    # it sees at most 960 px anyway; same people found at 1920 as at native
+    # on 2560x1440 and 3072x2048 test streams), and native size while a
+    # 640x640 model runs (the store box's fallback rung): that model lost
+    # 10-50 % of far people (< 150 px tall) on any GPU-scaled stream in the
+    # same test. A running camera follows a model change within seconds.
+    # At 1920 a 2560x1440 camera costs 24.5 -> 8 % of a core and a 3072x2048
+    # one 39 -> 10 % (ffmpeg + reader, store box, 10 fps). Calibrations and
+    # masks keep working (pixel geometry is scaled, services/frame_geometry.py).
+    # Trade-off: evidence stills and clips of such a camera are 1920 wide.
+    DECODE_MAX_WIDTH: str = os.getenv("DECODE_MAX_WIDTH", "auto")
     # With DECODE_BACKEND=auto, only streams of at least this many pixels
     # (width x height) are decoded on the GPU, smaller ones in software.
     # 0 = every RTSP camera on the GPU (the default). Measured on the store
@@ -557,6 +585,11 @@ class Settings(BaseSettings):
     # (STORAGE_DIR/decode_stream_sizes.json); one of unknown size is opened
     # as a 352x288 stream would be and moves once, after its first frame.
     DECODE_GPU_MIN_PIXELS: int = int(os.getenv("DECODE_GPU_MIN_PIXELS", "0"))
+    # OpenCV's own thread pool (resize, colour conversion, blur). Every camera
+    # already has its own worker thread, so the pool only added spinning
+    # threads: 8 test cameras cost 188 % of a core with OpenCV's default (one
+    # thread per CPU) and 97 % with 1. 0 = OpenCV's default.
+    OPENCV_THREADS: int = int(os.getenv("OPENCV_THREADS", "1"))
 
     # ---------------- Footfall track quality (services/retail_metrics_service.py) ----------------
     # Occlusion and detector flicker split one person into many ~1 s tracks.

@@ -6,16 +6,22 @@ camera (390 % for 33 cameras on the store box). The pip OpenCV wheel has no
 VA-API/NVDEC support, so this module runs one system ``ffmpeg`` per camera
 instead, and does all the heavy work before a frame reaches this process:
 
-    RTSP (TCP) -> GPU decode -> drop frames above DECODE_MAX_FPS -> GPU colour
-    conversion (and optional downscale) -> download -> bgr24 on a pipe
+    RTSP (TCP) -> GPU decode -> drop frames above DECODE_MAX_FPS -> GPU
+    downscale to DECODE_MAX_WIDTH -> download NV12 -> pipe -> BGR on first use
 
 Measured on an RX 9060 XT (VA-API, Mesa 26): frames must be thinned on the
 GPU, before ``hwdownload``. The GPU's own YUV->RGB conversion (``scale_vaapi
 format=bgr0``) came out washed out / off-matrix there (PSNR 21-23 dB against
-software decoding), so the probe rejects it and the frame is converted on the
-CPU after download, via yuv420p, which hits swscale's fast unscaled path:
-~3.9 % of a core per 720p camera at 10 fps, against ~12 % for today's
-software decoding at 25 fps.
+software decoding), so the probe rejects it. Scaling on the GPU is accurate
+(42-44 dB against a software bicubic downscale of 1440p / 6 MP to 1920 wide),
+so big streams are shrunk there before anything is downloaded. The frame
+then crosses the pipe as NV12 (half the bytes of BGR) and is converted to BGR
+in this process only when something uses it (``Frame``): analysis takes ~1
+in 4 delivered frames, the live view the newest. OpenCV's NV12 conversion
+matches ffmpeg's BT.601 limited-range one within rounding (46 dB); a stream
+that is full range or another matrix is normalised to that by ffmpeg first
+(``colour_needs_normalise``). Per camera at 10 fps (ffmpeg + reader thread,
+% of one core): 1440p 24.5 -> 8.2 (+ ~1 per converted frame/s), 6 MP 39 -> 9.7.
 
 Which backend is used is probed at runtime, never assumed from this box:
 NVIDIA NVDEC (``-hwaccel cuda``) -> VA-API on each render node (AMD/Intel) ->
@@ -83,16 +89,56 @@ class CameraUnreachableError(RuntimeError):
 # Filter chains per backend, most efficient first; the probe keeps the first
 # one whose frames match software decoding. "gpu_rgb" converts to BGR on the
 # GPU (scale_cuda cannot convert YUV to RGB at all in FFmpeg 9; scale_vaapi's
-# result is off on Mesa radeonsi, see above). "cpu_rgb" downloads NV12 and
-# converts NV12 -> yuv420p -> bgr24 in ffmpeg: both steps are swscale fast
-# paths, measured 40 % cheaper than NV12 -> bgr24 directly (0.75 vs 1.27 s CPU
-# for 300 frames of 720p).
+# result is off on Mesa radeonsi, see above). "cpu_nv12" downloads NV12 and
+# hands it over as is; this process converts it to BGR (OpenCV, BT.601
+# limited range) only for the frames it uses. "cpu_rgb" converts every frame
+# NV12 -> yuv420p -> bgr24 in ffmpeg (the previous default; kept as the
+# fallback). ``{norm}``: see _NORMALISE.
+NV12_CHAIN = "cpu_nv12"
 _CHAINS = {
     VAAPI: (("gpu_rgb", "scale_vaapi={opts}format=bgr0,hwdownload,format=bgr0,format=bgr24"),
+            (NV12_CHAIN, "scale_vaapi={opts}format=nv12,hwdownload,format=nv12{norm}"),
             ("cpu_rgb", "scale_vaapi={opts}format=nv12,hwdownload,format=nv12,format=yuv420p,format=bgr24")),
     CUDA: (("gpu_rgb", "scale_cuda={opts}format=bgr0,hwdownload,format=bgr0,format=bgr24"),
+           (NV12_CHAIN, "scale_cuda={opts}format=nv12,hwdownload,format=nv12{norm}"),
            ("cpu_rgb", "scale_cuda={opts}format=nv12,hwdownload,format=nv12,format=yuv420p,format=bgr24")),
 }
+# OpenCV converts NV12 as BT.601 limited range, which is what ffmpeg assumes
+# for a stream that does not say otherwise. A stream flagged full range
+# (yuvj420p / "pc") or with another matrix (bt709, ...) is converted to that
+# by ffmpeg on the CPU first (~1 % of a core per 1080p camera at 10 fps), so
+# the colours equal the ffmpeg bgr24 path's (measured 43-48 dB). Only such
+# streams pay for it: the capture reports the need and the camera reopens once.
+_NORMALISE = ",scale=out_color_matrix=bt601:out_range=tv,format=nv12"
+_BT601_MATRICES = ("", "unknown", "bt470bg", "smpte170m", "bt601", "fcc")
+_COLOUR_RE = re.compile(r"Video: \w+[^,]*, (\w+)(?:\(([^)]*)\))?")
+
+
+def colour_needs_normalise(stream_line: str) -> Optional[bool]:
+    """Whether a decoded stream (ffmpeg's input "Stream #0:0: Video: ..." line)
+    must be normalised to BT.601 limited range for OpenCV's NV12 conversion.
+
+    None when the line does not say (treated as not needed: ffmpeg itself
+    assumes BT.601 limited range then).
+    """
+    m = _COLOUR_RE.search(stream_line or "")
+    if not m:
+        return None
+    pix_fmt, props = m.group(1), (m.group(2) or "")
+    if pix_fmt.startswith("yuvj"):
+        return True
+    tokens = [t.strip() for t in props.split(",") if t.strip()]
+    if "pc" in tokens:
+        return True
+    for t in tokens:
+        if t in ("tv", "progressive", "top first", "bottom first", "top coded first (swapped)",
+                 "bottom coded first (swapped)"):
+            continue
+        # "bt709" (all three) or "bt709/unknown/unknown": the first is the matrix.
+        matrix = t.split("/")[0]
+        if matrix and matrix not in _BT601_MATRICES:
+            return True
+    return False
 # glibc gives each of ffmpeg's ~30 threads its own malloc arena; two arenas
 # halved an ffmpeg's private memory (76 -> 38 MB for 720p) at no CPU cost.
 _FFMPEG_ENV = {"MALLOC_ARENA_MAX": "2"}
@@ -146,15 +192,39 @@ def _max_fps_select(max_fps: float) -> Optional[str]:
             f"+gt(floor(t*{r})\\,floor(prev_selected_t*{r}))'")
 
 
-def filter_chain(backend: str, chain: str, max_fps: float, max_width: int) -> str:
+# DECODE_MAX_WIDTH=auto: this width while the pose model's input is at least
+# AUTO_MIN_MODEL_WIDTH wide, native size otherwise (see config.py).
+AUTO_MAX_WIDTH = 1920
+AUTO_MIN_MODEL_WIDTH = 960
+
+
+def max_width_setting() -> Optional[int]:
+    """DECODE_MAX_WIDTH as a number (0 = native), or None for "auto" / unreadable."""
+    raw = str(settings.DECODE_MAX_WIDTH or "").strip().lower()
+    if raw in ("", "auto"):
+        return None
+    try:
+        return max(0, int(float(raw)))
+    except ValueError:
+        logger.warning(f"DECODE_MAX_WIDTH={settings.DECODE_MAX_WIDTH!r} is not a number or auto; using auto")
+        return None
+
+
+def auto_max_width(model_input_width: Optional[int]) -> int:
+    """The "auto" limit for a pose model of this input width (0 = native)."""
+    return AUTO_MAX_WIDTH if model_input_width and model_input_width >= AUTO_MIN_MODEL_WIDTH else 0
+
+
+def filter_chain(backend: str, chain: str, max_fps: float, max_width: int, normalise: bool = False) -> str:
     template = dict(_CHAINS[backend])[chain]
     opts = f"w=min(iw\\,{int(max_width)}):h=-2:" if max_width and max_width > 0 else ""
-    parts = [p for p in (_max_fps_select(max_fps), template.format(opts=opts)) if p]
+    parts = [p for p in (_max_fps_select(max_fps),
+                         template.format(opts=opts, norm=_NORMALISE if normalise else "")) if p]
     return ",".join(parts)
 
 
 def ffmpeg_argv(ffmpeg: str, backend: str, device: Optional[str], chain: str, list_fd: int,
-                max_fps: float, max_width: int) -> list[str]:
+                max_fps: float, max_width: int, normalise: bool = False) -> list[str]:
     """The ffmpeg command for one camera. It holds no URL and no credentials."""
     argv = [ffmpeg, "-hide_banner", "-nostdin", "-nostats", "-loglevel", "info", "-filter_threads", "1"]
     if backend == VAAPI:
@@ -167,7 +237,7 @@ def ffmpeg_argv(ffmpeg: str, backend: str, device: Optional[str], chain: str, li
     argv += ["-threads", "1", "-protocol_whitelist", _PROTOCOLS,
              "-f", "concat", "-safe", "0", "-i", f"pipe:{list_fd}",
              "-map", "0:v:0", "-an", "-sn", "-dn",
-             "-vf", filter_chain(backend, chain, max_fps, max_width),
+             "-vf", filter_chain(backend, chain, max_fps, max_width, normalise),
              # No CFR padding: frames leave exactly as the filter selected them.
              "-fps_mode", "passthrough", "-f", "rawvideo", "pipe:1"]
     return argv
@@ -231,6 +301,83 @@ def classify_stderr(lines: list[str], input_opened: bool) -> str:
     return NO_FRAMES if input_opened else EXITED
 
 
+# ------------------------------------------------------------------- frame
+
+class Frame:
+    """One delivered picture: BGR, or NV12 that becomes BGR on first use.
+
+    A GPU capture delivers NV12. Most delivered frames are never looked at
+    (the worker keeps the newest for the live view and analyses about one in
+    four), so each is converted only when something asks for BGR, once:
+    ``bgr()`` caches the result for the worker (analysis, clip ring, night
+    watch); ``bgr_copy()`` gives a caller its own array (snapshots, the live
+    stream) and so costs no extra copy when nothing converted it yet.
+    Neither buffer is ever modified after the frame is made.
+    """
+
+    __slots__ = ("_nv12", "_bgr", "width", "height")
+
+    def __init__(self, bgr: Optional[np.ndarray] = None, nv12: Optional[np.ndarray] = None,
+                 width: Optional[int] = None, height: Optional[int] = None):
+        if bgr is None and nv12 is None:
+            raise ValueError("a frame needs pixels")
+        self._bgr, self._nv12 = bgr, nv12
+        if bgr is not None:
+            self.height, self.width = int(bgr.shape[0]), int(bgr.shape[1])
+        else:
+            self.width = int(width or nv12.shape[1])
+            self.height = int(height or nv12.shape[0] * 2 // 3)
+
+    @classmethod
+    def of(cls, frame) -> "Frame":
+        """``frame`` itself if it already is a Frame, else a BGR array wrapped."""
+        return frame if isinstance(frame, Frame) else cls(bgr=frame)
+
+    @property
+    def shape(self) -> tuple[int, int, int]:
+        return self.height, self.width, 3
+
+    @property
+    def converted(self) -> bool:
+        return self._bgr is not None
+
+    def _convert(self) -> np.ndarray:
+        import cv2
+
+        return cv2.cvtColor(self._nv12, cv2.COLOR_YUV2BGR_NV12)
+
+    def bgr(self) -> np.ndarray:
+        """The BGR picture, shared (cached): read it, never modify it."""
+        out = self._bgr
+        if out is None:
+            out = self._bgr = self._convert()
+        return out
+
+    def bgr_copy(self) -> np.ndarray:
+        """A BGR array the caller owns."""
+        out = self._bgr
+        if out is not None:
+            return out.copy()
+        return self._convert()
+
+    def gray(self) -> np.ndarray:
+        """Luma (read-only view for NV12)."""
+        if self._nv12 is not None:
+            return self._nv12[: self.height]
+        import cv2
+
+        return cv2.cvtColor(self._bgr, cv2.COLOR_BGR2GRAY)
+
+
+def read_frame(cap):
+    """``cap.read()`` as (ok, Frame) for any capture (GPU NV12 or OpenCV BGR)."""
+    reader = getattr(cap, "read_frame", None)
+    if reader is not None:
+        return reader()
+    ok, frame = cap.read()
+    return ok, (Frame(bgr=frame) if ok and frame is not None else None)
+
+
 # ----------------------------------------------------------------- capture
 
 _live_captures: "weakref.WeakSet[FfmpegHwCapture]" = weakref.WeakSet()
@@ -258,7 +405,8 @@ class FfmpegHwCapture:
 
     A drop-in for how the live worker uses ``cv2.VideoCapture``: ``read()`` ->
     ``(ok, frame)`` with a contiguous BGR uint8 frame, ``isOpened()``,
-    ``release()``, ``get()``/``set()``. The constructor blocks until the first
+    ``release()``, ``get()``/``set()``; ``read_frame()`` -> ``(ok, Frame)``
+    without converting (the NV12 chain). The constructor blocks until the first
     frame arrives or the open fails (bounded by the camera timeouts); on
     failure ``isOpened()`` is False and ``failure`` / ``error_summary`` say why.
 
@@ -273,10 +421,17 @@ class FfmpegHwCapture:
 
     def __init__(self, url: str, backend: str, device: Optional[str], chain: str, *,
                  max_fps: float, max_width: int, open_timeout: float, read_timeout: float,
-                 ffmpeg: Optional[str] = None, cancel: Optional[threading.Event] = None):
+                 ffmpeg: Optional[str] = None, cancel: Optional[threading.Event] = None,
+                 normalise: bool = False):
         self.decoder = backend
         self.device = device
         self.chain = chain
+        self.nv12 = chain == NV12_CHAIN
+        self.max_width = int(max_width or 0)
+        # NV12 chain: the stream's colour flags (full range / non-BT.601)
+        # need ffmpeg's normalisation, which this capture was opened without.
+        self.normalise = bool(normalise) and self.nv12
+        self.colour_nonstandard: Optional[bool] = None
         self.read_timeout = max(0.5, float(read_timeout))
         self.failure: Optional[str] = None
         self.width = self.height = None
@@ -315,7 +470,7 @@ class FfmpegHwCapture:
             os.write(w, _concat_list(url, timeout_us))
             os.close(w)
             w = -1
-            argv = ffmpeg_argv(ffmpeg, backend, device, chain, r, max_fps, max_width)
+            argv = ffmpeg_argv(ffmpeg, backend, device, chain, r, max_fps, max_width, normalise=self.normalise)
             self._proc = subprocess.Popen(
                 argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 bufsize=0, pass_fds=(r,), start_new_session=True,  # own process group: killpg
@@ -386,6 +541,12 @@ class FfmpegHwCapture:
             self.source_codec = m.group(1)
             self.source_size = (int(m.group(2)), int(m.group(3)))
             self.source_fps = float(fps.group(1)) if fps else None
+            self.colour_nonstandard = bool(colour_needs_normalise(line))
+
+    @property
+    def needs_colour_reopen(self) -> bool:
+        """NV12 chain opened without normalisation on a stream that needs it."""
+        return self.nv12 and not self.normalise and bool(self.colour_nonstandard)
 
     def _read_frames(self) -> None:
         out = self._proc.stdout
@@ -397,9 +558,10 @@ class FfmpegHwCapture:
                 w, h = self.width, self.height
             if w is None:
                 return
-            size = w * h * 3
+            shape = (h * 3 // 2, w) if self.nv12 else (h, w, 3)
+            size = shape[0] * shape[1] * (1 if self.nv12 else 3)
             while True:
-                frame = np.empty((h, w, 3), np.uint8)
+                frame = np.empty(shape, np.uint8)
                 view = memoryview(frame).cast("B")
                 got = 0
                 while got < size:
@@ -456,6 +618,19 @@ class FfmpegHwCapture:
         return self.failure is None and not self.released and self._seq > 0
 
     def read(self):
+        ok, frame = self.read_frame()
+        return ok, (frame.bgr() if ok else None)
+
+    def read_frame(self):
+        """(ok, Frame): the newest frame, not converted to BGR yet."""
+        ok, raw = self._read_raw()
+        if not ok:
+            return False, None
+        if self.nv12:
+            return True, Frame(nv12=raw, width=self.width, height=self.height)
+        return True, Frame(bgr=raw)
+
+    def _read_raw(self):
         deadline = time.monotonic() + self.read_timeout
         with self._cond:
             while self._seq == self._returned:
@@ -588,7 +763,7 @@ class DecodeProbe:
         return {"backend": self.backend, "label": self.label, "device": self.device, "chain": self.chain,
                 "requested": self.requested, "reason": self.reason, "codecs": dict(self.codecs),
                 "attempts": list(self.attempts), "ffmpeg": self.ffmpeg, "elapsed_s": self.elapsed_s,
-                "max_fps": float(settings.DECODE_MAX_FPS), "max_width": int(settings.DECODE_MAX_WIDTH)}
+                "max_fps": float(settings.DECODE_MAX_FPS), "max_width": str(settings.DECODE_MAX_WIDTH)}
 
 
 _probe: Optional[DecodeProbe] = None
@@ -623,7 +798,10 @@ def _decode_sample(ffmpeg: str, sample: Path, backend: str, device: Optional[str
                     "-protocol_whitelist", _PROTOCOLS, "-f", "concat", "-safe", "0", "-i", f"pipe:{r}",
                     "-map", "0:v:0", "-an", "-vf", vf, "-fps_mode", "passthrough", "-f", "rawvideo", "pipe:1"]
         else:
-            argv = ffmpeg_argv(ffmpeg, backend, device, chain, r, max_fps, max_width)
+            # The NV12 chain is tested with its colour normalisation: the
+            # bundled clips are flagged BT.709, like some cameras.
+            argv = ffmpeg_argv(ffmpeg, backend, device, chain, r, max_fps, max_width,
+                               normalise=chain == NV12_CHAIN)
         res = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=20,
                              pass_fds=(r,), start_new_session=True)
     except subprocess.TimeoutExpired:
@@ -639,6 +817,15 @@ def _decode_sample(ffmpeg: str, sample: Path, backend: str, device: Optional[str
     if res.returncode != 0 or size is None:
         return None, summarise_errors(err.splitlines()) or f"ffmpeg exited with {res.returncode}"
     fw, fh = size
+    if chain == NV12_CHAIN:
+        import cv2
+
+        per = fw * fh * 3 // 2
+        n = len(res.stdout) // per
+        if n == 0:
+            return None, "no frames decoded"
+        raw = np.frombuffer(res.stdout[: n * per], np.uint8).reshape(n, fh * 3 // 2, fw)
+        return np.stack([cv2.cvtColor(f, cv2.COLOR_YUV2BGR_NV12) for f in raw]), ""
     n = len(res.stdout) // (fw * fh * 3)
     if n == 0:
         return None, "no frames decoded"
@@ -683,7 +870,7 @@ def _run_probe() -> DecodeProbe:
     if not ffmpeg:
         probe.reason = "no ffmpeg binary on PATH, so GPU decoding cannot be used"
         return probe
-    max_fps, max_width = float(settings.DECODE_MAX_FPS), int(settings.DECODE_MAX_WIDTH)
+    max_fps, max_width = float(settings.DECODE_MAX_FPS), max_width_setting() or AUTO_MAX_WIDTH
     h264, hevc = _SAMPLES / "probe_h264.mp4", _SAMPLES / "probe_hevc.mp4"
     ref, err = _decode_sample(ffmpeg, h264, SOFTWARE, None, None, max_fps, max_width)
     if ref is None:
@@ -712,9 +899,11 @@ def _run_probe() -> DecodeProbe:
                 probe.codecs["hevc"] = hevc_frames is not None and hevc_frames.shape[0] == ref.shape[0]
                 probe.reason = (f"{BACKEND_LABELS[backend]} on {device} decoded the H.264 test clip "
                                 f"correctly (PSNR {attempt['psnr_db']} dB vs software)")
-                if chain == "cpu_rgb":
+                if chain != "gpu_rgb":
                     gpu = next((a for a in probe.attempts if a["device"] == device and a["chain"] == "gpu_rgb"), {})
-                    probe.reason += ("; YUV->BGR conversion runs on the CPU after download (on the GPU: "
+                    where = ("in this process, only for frames that are used" if chain == NV12_CHAIN
+                             else "in ffmpeg after download")
+                    probe.reason += (f"; YUV->BGR conversion runs on the CPU {where} (on the GPU: "
                                      f"{gpu.get('error', 'not usable')})")
                 return probe
     if candidates:
@@ -751,12 +940,16 @@ def reset_probe() -> None:
         _probe = None
 
 
-def open_hw_capture(url: str, probe: DecodeProbe, cancel: Optional[threading.Event] = None) -> FfmpegHwCapture:
+def open_hw_capture(url: str, probe: DecodeProbe, cancel: Optional[threading.Event] = None,
+                    max_width: Optional[int] = None, normalise: bool = False) -> FfmpegHwCapture:
+    """``max_width``: the width limit (0 = native); None = DECODE_MAX_WIDTH ("auto": native)."""
+    if max_width is None:
+        max_width = max_width_setting() or 0
     return FfmpegHwCapture(
         url, probe.backend, probe.device, probe.chain or "gpu_rgb",
-        max_fps=float(settings.DECODE_MAX_FPS), max_width=int(settings.DECODE_MAX_WIDTH),
+        max_fps=float(settings.DECODE_MAX_FPS), max_width=int(max_width),
         open_timeout=float(settings.CAMERA_OPEN_TIMEOUT_SEC), read_timeout=float(settings.CAMERA_READ_TIMEOUT_SEC),
-        ffmpeg=probe.ffmpeg, cancel=cancel,
+        ffmpeg=probe.ffmpeg, cancel=cancel, normalise=normalise,
     )
 
 
@@ -962,12 +1155,24 @@ class StreamSizes:
             return None
         return (w, h) if w > 0 and h > 0 else None
 
-    def put(self, camera_id: str, source: str, width: int, height: int) -> None:
+    def needs_normalise(self, camera_id: str, source: str) -> bool:
+        """The stream was last seen needing colour normalisation (a third entry of 1)."""
+        with self._lock:
+            entry = self._load().get(camera_id, {}).get(self.stream_key(source))
+        return isinstance(entry, list) and len(entry) > 2 and entry[2] == 1
+
+    def put(self, camera_id: str, source: str, width: int, height: int,
+            normalise: Optional[bool] = None) -> None:
+        """Remember the stream's native size (and, when known, its colour-normalisation need)."""
         key, size = self.stream_key(source), [int(width), int(height)]
         with self._lock:
             data = self._load()
             streams = data.setdefault(camera_id, {})
-            if streams.get(key) == size:
+            old = streams.get(key)
+            keep = normalise is None and isinstance(old, list) and len(old) > 2 and old[2] == 1
+            if normalise or keep:
+                size.append(1)
+            if old == size:
                 return
             streams.pop(key, None)
             streams[key] = size

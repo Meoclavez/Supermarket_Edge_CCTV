@@ -349,6 +349,18 @@ def test_calibration_round_trip(client, auth_headers):
         assert abs(pts[0]["x"] - 5.0) < 1e-6 and abs(pts[0]["y"] - 5.0) < 1e-6
         assert abs(pts[1]["x"] - 10.0) < 1e-6 and abs(pts[1]["y"]) < 1e-6
 
+        # The same spots clicked on a frame of another size (a stream now
+        # delivered at 1280x960) land on the same floor points.
+        res = client.post(
+            f"/api/v1/layout/cameras/{cam_id}/calibration/test",
+            json={"image_points": [{"x": 100, "y": 100}, {"x": 200, "y": 0}],
+                  "frame_width": 1280, "frame_height": 960},
+            headers=auth_headers,
+        )
+        pts = res.json()["floor_points"]
+        assert abs(pts[0]["x"] - 5.0) < 1e-6 and abs(pts[0]["y"] - 5.0) < 1e-6
+        assert abs(pts[1]["x"] - 10.0) < 1e-6 and abs(pts[1]["y"]) < 1e-6
+
         # Clearing removes the matrix and the points.
         res = client.delete(f"/api/v1/layout/cameras/{cam_id}/calibrate", headers=auth_headers)
         assert res.status_code == 200

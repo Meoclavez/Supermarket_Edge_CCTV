@@ -399,14 +399,30 @@ class FloorProjector:
     view and their positions on the blueprint. Without it, a camera's pixels
     have no defined relationship to the store, so this returns None rather
     than fabricating a location.
+
+    The matrix is in pixels of the frame it was authored on
+    (``calibration_points.frame_width/height``). Points are given in pixels
+    of the frame the camera delivers now (``frame_geometry.frame_sizes``, or
+    an explicit ``frame_size``) and are scaled to the authored size first, so
+    a calibration stays valid when the delivered size changes (a GPU
+    downscale, a different stream). Without a known authored or delivered
+    size nothing is scaled, as before.
     """
 
     def __init__(self):
         self._matrices: dict[str, np.ndarray] = {}
+        self._authored: dict[str, tuple[int, int]] = {}
 
-    def set_homography(self, camera_id: str, matrix: Optional[list]) -> None:
+    def set_homography(self, camera_id: str, matrix: Optional[list],
+                       frame_size: Optional[tuple] = None) -> None:
+        """Install (or with no matrix, remove) a camera's homography.
+
+        ``frame_size`` is the (width, height) the image points were authored
+        at; None keeps a size recorded earlier for the same camera.
+        """
         if not matrix:
             self._matrices.pop(camera_id, None)
+            self._authored.pop(camera_id, None)
             return
         try:
             m = np.asarray(matrix, dtype=np.float64).reshape(3, 3)
@@ -418,14 +434,37 @@ class FloorProjector:
         except Exception as e:
             logger.warning(f"Camera {camera_id} homography rejected: {e}")
             self._matrices.pop(camera_id, None)
+            return
+        if frame_size is not None:
+            self.set_authored_size(camera_id, *frame_size)
+
+    def set_authored_size(self, camera_id: str, width, height) -> None:
+        try:
+            w, h = int(width or 0), int(height or 0)
+        except (TypeError, ValueError):
+            w = h = 0
+        if w > 0 and h > 0:
+            self._authored[camera_id] = (w, h)
+        else:
+            self._authored.pop(camera_id, None)
+
+    def authored_size(self, camera_id: str) -> Optional[tuple[int, int]]:
+        return self._authored.get(camera_id)
 
     def has_homography(self, camera_id: str) -> bool:
         return camera_id in self._matrices
 
-    def to_floor(self, camera_id: str, x: float, y: float) -> Optional[tuple[float, float]]:
+    def to_floor(self, camera_id: str, x: float, y: float,
+                 frame_size: Optional[tuple] = None) -> Optional[tuple[float, float]]:
+        """Floor metres of pixel (x, y) of the delivered frame (or of ``frame_size``)."""
         m = self._matrices.get(camera_id)
         if m is None:
             return None
+        authored = self._authored.get(camera_id)
+        if authored is not None:
+            from app.services.frame_geometry import frame_sizes, scale_point
+
+            x, y = scale_point(x, y, frame_size or frame_sizes.delivered(camera_id), authored)
         vec = m @ np.array([x, y, 1.0], dtype=np.float64)
         w = vec[2]
         if abs(w) < 1e-9:

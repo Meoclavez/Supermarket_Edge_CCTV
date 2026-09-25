@@ -500,8 +500,18 @@ class NightWatch:
 
     def step(self, camera_id: str, name: str, frame: np.ndarray, now: Optional[float] = None,
              masks: Optional[list[dict]] = None) -> str:
-        """Called by the camera worker for every decoded frame: NORMAL, HOLD or CONFIRM."""
+        """Called by the camera worker for every decoded frame: NORMAL, HOLD or CONFIRM.
+
+        ``frame`` may be a ``capture_backends.Frame``: it is converted to BGR
+        only when this call uses it (a motion sample or a lighting check).
+        """
         now = self._clock() if now is None else now
+        lazy = frame if hasattr(frame, "bgr") else None
+        raw = frame
+
+        def bgr() -> np.ndarray:
+            return lazy.bgr() if lazy is not None else raw
+
         cfg = self.config(camera_id)
         with self._lock:
             w = self._watch(camera_id, name)
@@ -509,7 +519,7 @@ class NightWatch:
         if cfg is not None and cfg.enabled and cfg.when_dark and not w.armed and now - w.last_dark_check >= DARK_CHECK_SEC:
             # Nothing else may be measuring this camera's lighting (analysis off).
             w.last_dark_check = now
-            self._observe_lighting(camera_id, frame[::4, ::4])
+            self._observe_lighting(camera_id, bgr()[::4, ::4])
         reason = self.armed_reason(cfg, camera_id, now)
         with self._lock:
             if reason is None:
@@ -520,14 +530,19 @@ class NightWatch:
                 self._arm(w, reason, now)
             w.armed_by = reason
             w.detector.set_sensitivity(cfg.sensitivity)
-            due = now - w.last_sample_at >= 1.0 / max(0.2, float(settings.NIGHT_WATCH_MOTION_FPS))
+            interval = 1.0 / max(0.2, float(settings.NIGHT_WATCH_MOTION_FPS))
+            due = now - w.last_sample_at >= interval
             if due:
-                w.last_sample_at = now
+                # Scheduled, not "since the last sample": frames arrive every
+                # 1/DECODE_MAX_FPS s, and restarting the interval at each
+                # sample gave 2.5 samples/s at 5 fps (3.3 at 10) for 4 asked.
+                w.last_sample_at = max(w.last_sample_at + interval, now - interval)
         if due:
             if masks is None:
                 from app.services.privacy_mask import camera_masks
 
                 masks = camera_masks(camera_id)
+            frame = bgr()
             res = w.detector.update(frame, masks)
             self._observe_lighting(camera_id, w.detector.last_small)
             with self._lock:
@@ -537,6 +552,12 @@ class NightWatch:
         with self._lock:
             self._advance(w, cfg, now)
             return CONFIRM if w.state == "motion" and now < w.confirm_until else HOLD
+
+    def is_armed(self, camera_id: str) -> bool:
+        """Night watch is armed on this camera right now (its worker's last frame said so)."""
+        with self._lock:
+            w = self._w.get(camera_id)
+            return bool(w is not None and w.armed)
 
     def confirm(self, camera_id: str, frame: np.ndarray, detections: list, now: Optional[float] = None) -> None:
         """Person detections (AI_IGNORE already applied) on a frame admitted for confirmation."""

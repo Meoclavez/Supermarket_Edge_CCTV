@@ -41,6 +41,7 @@ from app.services.auth_service import auth_service
 from app.services.camera_discovery import camera_discovery_service
 from app.services import camera_source
 from app.services.camera_drivers import build_stream_urls, redact_url
+from app.services.frame_geometry import calibration_frame_size
 from app.services.live_analytics_engine import live_engine
 from app.services.pipeline_supervisor import pipeline_supervisor
 from app.services.store_layout_service import (
@@ -126,7 +127,12 @@ class CalibrationRequest(BaseModel):
 
 
 class CalibrationTestRequest(BaseModel):
+    """Image points to project. ``frame_width``/``frame_height``: the frame
+    size they were clicked in; default: what the camera delivers now."""
+
     image_points: list[Point]
+    frame_width: Optional[int] = Field(None, gt=0, le=16384)
+    frame_height: Optional[int] = Field(None, gt=0, le=16384)
 
 
 class ResetRequest(BaseModel):
@@ -417,7 +423,9 @@ async def calibrate_camera(
         "saved_at": datetime.utcnow().isoformat() + "Z",
     }
     await db.commit()
-    floor_projector.set_homography(camera_id, H)
+    # Points are in pixels of this size; later frames of another size are
+    # scaled to it before projecting (FloorProjector.to_floor).
+    floor_projector.set_homography(camera_id, H, (frame_w, frame_h) if frame_w and frame_h else None)
     return {
         "camera_id": camera_id,
         "homography_matrix": H,
@@ -450,7 +458,7 @@ def _ensure_projector_loaded(cam: CameraModel) -> None:
     project as "uncalibrated" despite a valid stored matrix.
     """
     if cam.homography_matrix and not floor_projector.has_homography(cam.id):
-        floor_projector.set_homography(cam.id, cam.homography_matrix)
+        floor_projector.set_homography(cam.id, cam.homography_matrix, calibration_frame_size(cam.calibration_points))
 
 
 @router.get("/cameras/{camera_id}/calibration")
@@ -494,9 +502,10 @@ async def test_calibration(
         raise HTTPException(status_code=404, detail="camera not found")
     _ensure_projector_loaded(cam)
     calibrated = floor_projector.has_homography(camera_id)
+    size = (req.frame_width, req.frame_height) if req.frame_width and req.frame_height else None
     out: list[Optional[dict]] = []
     for p in req.image_points:
-        floor = floor_projector.to_floor(camera_id, p.x, p.y) if calibrated else None
+        floor = floor_projector.to_floor(camera_id, p.x, p.y, frame_size=size) if calibrated else None
         out.append(None if floor is None else {"x": round(floor[0], 3), "y": round(floor[1], 3)})
     return {"camera_id": camera_id, "calibrated": calibrated, "floor_points": out}
 

@@ -52,10 +52,16 @@ class StreamRingBuffer:
             self.latest_frame = frame
             self.latest_frame_time = ts
 
-    def get_pre_event_frames(self) -> List[np.ndarray]:
-        """Safely decompress and retrieve buffered pre-event frames."""
+    def get_pre_event_frames(self, max_age: Optional[float] = None) -> List[np.ndarray]:
+        """Safely decompress and retrieve buffered pre-event frames.
+
+        Only frames from the last ``max_age`` seconds (default: the ring's
+        length plus one): a ring that was fed on demand earlier must not put
+        old footage in front of a new clip.
+        """
+        limit = time.time() - (self.max_seconds + 1.0 if max_age is None else float(max_age))
         with self._lock:
-            raw_items = list(self.buffer)
+            raw_items = [item for item in self.buffer if item[0] >= limit]
 
         frames = []
         for _, enc in raw_items:
@@ -70,9 +76,65 @@ class StreamRingBuffer:
 
 
 class ClipRecorderService:
+    """Per-camera pre-event rings, fed by the camera workers while ``wants()``.
+
+    Keeping a ring means JPEG-encoding ~5 frames a second per camera, so it
+    is kept only where a clip can be needed (CLIP_PRE_EVENT_BUFFER): always
+    ("on"), never ("off"), or ("auto") for a camera whose armed night watch
+    saves clips (NIGHT_WATCH_CLIP). A clip being recorded asks for frames for
+    its post-roll (``request``) in every mode, so an on-demand clip still
+    gets real footage from the moment it was asked for.
+    """
+
+    # How long a "does this camera need a ring" answer is reused (seconds).
+    WANT_CACHE_SEC = 2.0
+
     def __init__(self):
         self.buffers: Dict[str, StreamRingBuffer] = {}
         self._service_lock = threading.Lock()
+        self._demand: Dict[str, float] = {}             # camera -> monotonic deadline
+        self._auto_cache: Dict[str, Tuple[float, bool]] = {}
+
+    @staticmethod
+    def mode() -> str:
+        m = str(getattr(settings, "CLIP_PRE_EVENT_BUFFER", "auto") or "auto").strip().lower()
+        if m in ("on", "always", "1", "true", "yes"):
+            return "on"
+        if m in ("off", "never", "0", "false", "no"):
+            return "off"
+        return "auto"
+
+    def request(self, camera_id: str, seconds: float) -> None:
+        """Feed this camera's ring for the next ``seconds`` (a clip being recorded)."""
+        until = time.monotonic() + max(0.0, float(seconds))
+        with self._service_lock:
+            self._demand[camera_id] = max(self._demand.get(camera_id, 0.0), until)
+
+    def keeps_ring(self, camera_id: str) -> bool:
+        """Whether this camera's ring is fed continuously (a pre-event part exists)."""
+        mode = self.mode()
+        if mode != "auto":
+            return mode == "on"
+        now = time.monotonic()
+        cached = self._auto_cache.get(camera_id)
+        if cached is not None and now - cached[0] < self.WANT_CACHE_SEC:
+            return cached[1]
+        want = False
+        if settings.NIGHT_WATCH_CLIP:
+            try:
+                from app.services.night_watch import night_watch
+
+                want = night_watch.is_armed(camera_id)
+            except Exception:  # noqa: BLE001 - unknown: keep the ring rather than lose a clip
+                want = True
+        self._auto_cache[camera_id] = (now, want)
+        return want
+
+    def wants(self, camera_id: str) -> bool:
+        """Should the camera worker push frames into this camera's ring now?"""
+        if self._demand and self._demand.get(camera_id, 0.0) > time.monotonic():
+            return True
+        return self.keeps_ring(camera_id)
 
     def get_or_create_buffer(self, camera_id: str, fps: int = 15) -> StreamRingBuffer:
         with self._service_lock:
@@ -85,12 +147,23 @@ class ClipRecorderService:
             return self.buffers[camera_id]
 
     def save_snapshot(self, camera_id: str, event_id: str) -> Optional[str]:
-        """Save high-resolution snapshot for rich push notification."""
-        buf = self.buffers.get(camera_id)
-        if not buf:
-            return None
+        """Save high-resolution snapshot for rich push notification.
 
-        frame = buf.get_latest_frame_copy()
+        From the clip ring when it is being fed, else (no ring kept for this
+        camera, CLIP_PRE_EVENT_BUFFER) the live pipeline's latest frame, which
+        carries the privacy masks like the ring's frames do.
+        """
+        buf = self.buffers.get(camera_id)
+        frame = None
+        if buf is not None and time.time() - buf.latest_frame_time <= 5.0:
+            frame = buf.get_latest_frame_copy()
+        if frame is None:
+            try:
+                from app.services.live_analytics_engine import live_engine
+
+                frame = live_engine.get_frame(camera_id)
+            except Exception:  # noqa: BLE001 - no pipeline: no snapshot
+                frame = None
         if frame is None:
             return None
 
@@ -116,6 +189,9 @@ class ClipRecorderService:
             ServiceHealthTracker.report_status("clip_recorder", "degraded", "Disk usage critical")
             return ""
 
+        # The worker feeds the ring while the post-roll is recorded, whatever
+        # CLIP_PRE_EVENT_BUFFER says (pre-event frames exist only where it is kept).
+        self.request(camera_id, post_roll_seconds + 2.0)
         buf = self.get_or_create_buffer(camera_id, fps=fps)
         pre_frames = buf.get_pre_event_frames()
         post_frames = []
@@ -124,7 +200,8 @@ class ClipRecorderService:
 
         start_time = time.time()
         while time.time() - start_time < post_roll_seconds:
-            latest = buf.get_latest_frame_copy()
+            # Not a frame left over from an earlier, on-demand feed.
+            latest = buf.get_latest_frame_copy() if buf.latest_frame_time >= start_time - 1.0 else None
             if latest is not None:
                 post_frames.append(latest)
             await asyncio.sleep(1.0 / fps)

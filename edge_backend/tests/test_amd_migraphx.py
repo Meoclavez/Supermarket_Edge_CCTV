@@ -321,7 +321,7 @@ def amd_box(monkeypatch, tmp_path):
     info = {"ok": True, "reason": None, "devices": 1, "gfx": "gfx1200", "cache_dir": str(cache),
             "cache_warning": None}
 
-    def fake_prepare(ort, cache_base=None, fp16=False):
+    def fake_prepare(ort, cache_base=None, fp16=False, blocking_sync=False):
         monkeypatch.setattr(amd, "_devices", [_Device()])
         monkeypatch.setattr(amd, "_prepared", dict(info))
         return dict(info)
@@ -503,3 +503,35 @@ def test_compile_in_child_runs_the_prewarm_script_and_parses_its_verdict(monkeyp
     _FakePopen.rc = 2
     ok, why = d._compile_in_child()
     assert not ok and "ended on cpu" in why and "HIP failure" in why
+
+
+def test_hip_blocking_sync_sets_the_device_flag(monkeypatch):
+    """The HIP runtime is asked to block, not spin, while waiting for the GPU."""
+    import ctypes
+
+    calls = []
+
+    class FakeHip:
+        def hipSetDeviceFlags(self, flags):  # noqa: N802 - HIP's name
+            calls.append(flags.value)
+            return 0
+
+    class FakeRocm:
+        @staticmethod
+        def find_libraries(name):
+            assert name == "amdhip64"
+            return ["/x/libamdhip64.so.7"]
+
+    monkeypatch.setattr(ctypes, "CDLL", lambda path, mode=0: FakeHip())
+    info = {}
+    amd._hip_blocking_sync(FakeRocm, info)
+    assert calls == [amd.HIP_DEVICE_SCHEDULE_BLOCKING_SYNC] and info["blocking_sync"] is True
+
+    class Broken:
+        @staticmethod
+        def find_libraries(name):
+            return []
+
+    info = {}
+    amd._hip_blocking_sync(Broken, info)      # no library: default kept, never raises
+    assert info["blocking_sync"] is False

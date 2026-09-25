@@ -394,11 +394,13 @@ def _set_cache_env(base: Path, key: str) -> tuple[Optional[Path], Optional[str]]
     return cache_dir, None
 
 
-def prepare(ort, cache_base: Optional[Path | str] = None, fp16: bool = False) -> dict[str, Any]:
+def prepare(ort, cache_base: Optional[Path | str] = None, fp16: bool = False,
+            blocking_sync: bool = False) -> dict[str, Any]:
     """Load ROCm + the plugin and register it with ``ort``. Once per process.
 
     Returns ``{"ok": bool, "reason": str|None, "devices": int, "gfx": ...,
     "cache_dir": ...}``. Never raises: every failure is a reason string.
+    ``blocking_sync``: see ``_hip_blocking_sync``.
     """
     global _prepared, _devices
     with _lock:
@@ -408,7 +410,7 @@ def prepare(ort, cache_base: Optional[Path | str] = None, fp16: bool = False) ->
                                 "cache_dir": None, "cache_warning": None}
         started = time.perf_counter()
         try:
-            _prepare(ort, info, Path(cache_base) if cache_base else default_cache_base(), fp16)
+            _prepare(ort, info, Path(cache_base) if cache_base else default_cache_base(), fp16, blocking_sync)
         except Exception as exc:  # noqa: BLE001 - a broken ROCm install must not take the service down
             info["reason"] = f"{type(exc).__name__}: {exc}"
         info["prepare_ms"] = round((time.perf_counter() - started) * 1000.0, 1)
@@ -421,7 +423,34 @@ def prepare(ort, cache_base: Optional[Path | str] = None, fp16: bool = False) ->
         return dict(info)
 
 
-def _prepare(ort, info: dict, cache_base: Path, fp16: bool) -> None:
+# hipDeviceScheduleBlockingSync (hip_runtime_api.h).
+HIP_DEVICE_SCHEDULE_BLOCKING_SYNC = 0x4
+
+
+def _hip_blocking_sync(rocm_sdk, info: dict) -> None:
+    """Make HIP block (sleep on an interrupt) instead of spinning while the
+    CPU waits for the GPU.
+
+    By default a thread in ``session.run`` spins on a core for the whole
+    inference: measured on the RX 9060 XT (yolo26n-pose, 640x640), 5.8 ms of
+    CPU for 5.9 ms of wall time per run. Blocking: 2.8 ms of CPU, wall 6.0 ms.
+    Must be set before this process creates its HIP context, i.e. before the
+    plugin is registered; a failure leaves the default (spinning) and is only
+    reported in ``info["blocking_sync"]``.
+    """
+    try:
+        libs = rocm_sdk.find_libraries("amdhip64")
+        hip = ctypes.CDLL(str(libs[0]), mode=ctypes.RTLD_GLOBAL)
+        rc = int(hip.hipSetDeviceFlags(ctypes.c_uint(HIP_DEVICE_SCHEDULE_BLOCKING_SYNC)))
+        info["blocking_sync"] = rc == 0
+        if rc:
+            logger.info(f"HIP blocking sync not set (hipSetDeviceFlags returned {rc}); GPU waits spin")
+    except Exception as exc:  # noqa: BLE001 - an optimisation only
+        info["blocking_sync"] = False
+        logger.info(f"HIP blocking sync not set ({type(exc).__name__}: {exc}); GPU waits spin")
+
+
+def _prepare(ort, info: dict, cache_base: Path, fp16: bool, blocking_sync: bool = False) -> None:
     if not sys.platform.startswith("linux"):
         info["reason"] = "MIGraphX plugin EP is Linux-only"
         return
@@ -461,6 +490,8 @@ def _prepare(ort, info: dict, cache_base: Path, fp16: bool) -> None:
     import rocm_sdk  # noqa: PLC0415
 
     rocm_sdk.initialize_process(preload_shortnames=list(PRELOAD_SHORTNAMES))
+    if blocking_sync:
+        _hip_blocking_sync(rocm_sdk, info)
     c_lib = next((p for p in sorted(ldir.glob("libmigraphx_c.so.*"))
                   if re.fullmatch(r"libmigraphx_c\.so\.\d+", p.name)), None)
     if c_lib is None:

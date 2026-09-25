@@ -41,7 +41,8 @@ from app.config import settings
 from app.services import capture_backends
 from app.services.camera_drivers import alternate_stream_url, redact_url
 # Defined with the capture backends (which raise them too); imported here by name.
-from app.services.capture_backends import CameraAuthError, CameraUnreachableError
+from app.services.capture_backends import CameraAuthError, CameraUnreachableError, Frame
+from app.services.frame_geometry import frame_sizes
 from app.services.inference_backend import (
     SKELETON_EDGES,
     ObjectDetection,
@@ -54,6 +55,7 @@ from app.services import night_watch as nw
 from app.services.privacy_mask import (
     apply_privacy_masks,
     camera_masks,
+    deferred_privacy_masks,
     ignore_polygons,
     outside_ignore_regions,
 )
@@ -204,30 +206,38 @@ class CameraRuntime:
     decoder_note: Optional[str] = None
     # Per-camera feature toggles as last read by the worker.
     analysis_flags: dict = field(default_factory=dict)
-    _frame: Optional[np.ndarray] = field(default=None, repr=False)
+    # The newest delivered frame (capture_backends.Frame: NV12 from the GPU,
+    # converted to BGR only when something reads it).
+    _frame: Optional[Frame] = field(default=None, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     # Live tracks as plain dicts, rewritten by the worker after every analysis
     # pass and read by the API / stream overlay. Never mutated in place.
     _tracks: list[dict] = field(default_factory=list, repr=False)
     _tracks_at: float = 0.0
 
-    def put_frame(self, frame: np.ndarray) -> None:
-        h, w = frame.shape[:2]
+    def put_frame(self, frame) -> None:
+        """Keep ``frame`` (a Frame, or a BGR array) as the newest one."""
+        frame = Frame.of(frame)
         with self._lock:
             self._frame = frame
-            self.frame_width, self.frame_height = int(w), int(h)
+            self.frame_width, self.frame_height = frame.width, frame.height
 
     def get_frame(self, masked: bool = True) -> Optional[np.ndarray]:
-        """A copy of the latest frame, with privacy masks burned in.
+        """A BGR copy of the latest frame, with privacy masks burned in.
 
         Every caller that shows or saves a frame gets the masked copy. Only
         analysis code asks for ``masked=False`` (see ``privacy_mask``).
         """
         with self._lock:
-            frame = None if self._frame is None else self._frame.copy()
-        if frame is None or not masked:
+            frame = self._frame
+        if frame is None:
+            return None
+        # Converted from NV12 here if the worker never needed this frame
+        # itself; either way an array the caller owns.
+        frame = frame.bgr_copy()
+        if not masked:
             return frame
-        return apply_privacy_masks(frame, self.camera_id)
+        return apply_privacy_masks(frame, self.camera_id, inplace=True)
 
     def get_raw_frame(self) -> Optional[np.ndarray]:
         """Unmasked frame, for inference only. Never serve or store this."""
@@ -354,6 +364,37 @@ def ffmpeg_capture_options() -> str:
     return _FFMPEG_OPTIONS
 
 
+_opencv_threads: Optional[int] = None
+
+
+def configure_opencv_threads() -> Optional[int]:
+    """Size OpenCV's own thread pool (``OPENCV_THREADS``), once per process.
+
+    OpenCV parallelises resize / colour conversion / blur over a pool of one
+    thread per CPU by default, and its workers spin while waiting for work.
+    With one camera worker thread per camera the calls already run in
+    parallel, so the pool only added wake-ups and spinning: measured on the
+    store box, 8 test cameras cost 188 % of a core with the default pool and
+    97 % with 1 thread (same frames, same analysed rate). The pool threads
+    also inherit the name of the camera thread that first used OpenCV, which
+    is why the live service showed "cam-cam_b4fbe4d" at 35 %: 16 pool threads,
+    not that camera. 0 = OpenCV's default.
+    """
+    global _opencv_threads
+    if _opencv_threads is None:
+        n = max(0, int(settings.OPENCV_THREADS))
+        try:
+            import cv2
+
+            if n > 0:
+                cv2.setNumThreads(n)
+            _opencv_threads = int(cv2.getNumThreads())
+        except Exception as e:  # noqa: BLE001 - OpenCV missing: nothing to size
+            logger.debug(f"OpenCV thread pool not configured: {e}")
+            _opencv_threads = 0
+    return _opencv_threads
+
+
 # Decode threads by stream size (pixels), smallest first; above the last: 4.
 _DECODE_THREAD_STEPS = ((1280 * 720, 1), (1920 * 1080, 2))
 # Used for a first open, before the stream's size is known.
@@ -447,6 +488,8 @@ class CameraWorker(threading.Thread):
         self._decoder_switched = False
         # Every how many delivered frames one goes to the clip ring (_clip_every).
         self._clip_n = max(1, int(settings.ANALYTICS_DETECT_EVERY_N_FRAMES))
+        # Every how many delivered frames one may be analysed (_clip_every).
+        self._detect_n = self._clip_n
         # Latest retail objects; refreshed every OBJECT_DETECT_EVERY_N
         # detection frames, so at most N-1 detection frames old.
         self._objects: list[ObjectDetection] = []
@@ -553,7 +596,9 @@ class CameraWorker(threading.Thread):
         """
         # FFmpeg's DNS lookup ignores its timeouts; resolve first, bounded.
         _resolve_host_bounded(src, settings.CAMERA_OPEN_TIMEOUT_SEC)
-        cap = capture_backends.open_hw_capture(src, probe, cancel=self._stop)
+        cap = capture_backends.open_hw_capture(
+            src, probe, cancel=self._stop, max_width=self._max_width(),
+            normalise=capture_backends.stream_sizes.needs_normalise(self.rt.camera_id, src))
         if cap.isOpened():
             self._hw_no_frames = 0
             return cap
@@ -572,6 +617,35 @@ class CameraWorker(threading.Thread):
                            "until the camera is restarted")
             return None
         return cap
+
+    def _max_width(self) -> int:
+        """Width limit for this camera's GPU-decoded frames (0 = native size).
+
+        The camera's ``decode_max_width``, else DECODE_MAX_WIDTH; "auto"
+        follows the pose model: 1920 for a wide-input (544x960) model, native
+        for a 640x640 one, which finds fewer far people on scaled frames.
+        """
+        value = camera_setting(self.rt.camera_id, "decode_max_width")
+        if value is not None:
+            return max(0, int(value))
+        fixed = capture_backends.max_width_setting()
+        if fixed is not None:
+            return fixed
+        spec = getattr(person_detector, "spec", None)
+        width = spec.input_size[0] if spec is not None and getattr(spec, "input_size", None) else None
+        return capture_backends.auto_max_width(width)
+
+    def _width_changed(self, cap) -> bool:
+        """A GPU capture whose delivered width no longer matches ``_max_width()``
+        (the pose model changed class, or the setting was edited)."""
+        if not isinstance(cap, capture_backends.FfmpegHwCapture) or not cap.source_size:
+            return False
+        native = int(cap.source_size[0])
+
+        def width(limit: int) -> int:
+            return min(native, limit) if limit and limit > 0 else native
+
+        return width(self._max_width()) != width(getattr(cap, "max_width", 0))
 
     def _open_software(self, src: str):
         import cv2
@@ -639,6 +713,7 @@ class CameraWorker(threading.Thread):
         while not self._stop.is_set():
             cap = None
             auth_paused = False
+            reopen = False
             wait = backoff
             try:
                 try:
@@ -706,7 +781,9 @@ class CameraWorker(threading.Thread):
                 self._clip_n = self._clip_every(cap)
 
                 while not self._stop.is_set():
-                    ok, frame = cap.read()
+                    # A Frame: a GPU capture's stays NV12 until something
+                    # needs BGR (analysis, the clip ring, a snapshot).
+                    ok, frame = capture_backends.read_frame(cap)
                     if not ok or frame is None:
                         if self._stop.is_set():
                             break   # stop() ended the capture
@@ -714,8 +791,13 @@ class CameraWorker(threading.Thread):
                         raise RuntimeError("Stream ended or frame read failed" + (f" ({why})" if why else ""))
                     if not sized:
                         sized = True
-                        cap = self._after_first_frame(cap, active_source, frame)
-                        self._cap = cap
+                        reopened = self._after_first_frame(cap, active_source, frame)
+                        if reopened is not cap:
+                            # Moved to the other decoder, or reopened with
+                            # colour normalisation: this frame is the old one's.
+                            cap = self._cap = reopened
+                            self._clip_n = self._clip_every(cap)
+                            continue
                         self._clip_n = self._clip_every(cap)
 
                     self.rt.frames_read += 1
@@ -723,10 +805,10 @@ class CameraWorker(threading.Thread):
                     self.rt.put_frame(frame)
                     frames_in_window += 1
                     self._frame_index += 1
-                    # Feed the pre-event ring buffer so incident clips and
-                    # the clip export action are cut from real footage.
-                    if self._frame_index % self._clip_n == 0:
-                        self._push_clip_buffer(frame)
+                    # Feed the pre-event ring buffer, when a clip can need it
+                    # (clip_recorder.wants), so clips are cut from real footage.
+                    if self._frame_index % self._clip_n == 0 and self._clip_wanted():
+                        self._push_clip_buffer(frame.bgr())
 
                     now = time.time()
                     if now - last_tick >= 2.0:
@@ -735,6 +817,12 @@ class CameraWorker(threading.Thread):
                         frames_in_window = 0
                         last_tick = now
                         self._clip_n = self._clip_every(cap)
+                        if self._width_changed(cap):
+                            logger.info(f"Camera {self.rt.camera_id}: frame width limit is now "
+                                        f"{self._max_width() or 'native'} (pose model or setting changed); "
+                                        "reopening the stream")
+                            reopen = True
+                            break
 
                     # Night watch: while armed, a cheap motion check replaces
                     # the pose model (the scheduler holds this camera); motion
@@ -748,12 +836,12 @@ class CameraWorker(threading.Thread):
                     # clip stride already accounts for frames the GPU decoder
                     # dropped). Frames it skips are still shown.
                     if inference_scheduler.admit(self.rt.camera_id, fps=self.rt.fps,
-                                                 frame_index=self._frame_index, every_n=self._clip_n):
+                                                 frame_index=self._frame_index, every_n=self._detect_n):
                         try:
                             if mode == nw.CONFIRM:
-                                self._night_confirm(frame, now)
+                                self._night_confirm(frame.bgr(), now)
                             else:
-                                self._analyse(frame, now)
+                                self._analyse(frame.bgr(), now)
                         finally:
                             inference_scheduler.done(self.rt.camera_id)
 
@@ -799,6 +887,15 @@ class CameraWorker(threading.Thread):
                     except Exception:
                         pass
 
+            if reopen and not self._stop.is_set():
+                # A planned reopen at a new frame width: no retry wait. Track
+                # boxes and pose state are in the old frame's pixels.
+                for t in self.tracker.flush_all():
+                    self.engine.close_track(t, reason="frame_size_changed")
+                self.rt.set_tracks([])
+                self.rt.live_track_count = 0
+                _reset_pose_camera(self.rt.camera_id)
+                continue
             if self._sleep(wait):
                 break
             if not auth_paused:
@@ -816,21 +913,40 @@ class CameraWorker(threading.Thread):
         if current is None or not current.enabled:
             _drop_clip_buffer(self.rt.camera_id)
 
-    def _after_first_frame(self, cap, source: str, frame: np.ndarray):
+    def _after_first_frame(self, cap, source: str, frame):
         """Remember the stream's size; move the camera to the cheaper decoder once.
 
         A camera whose size was not known (first start, new stream) opened on
         the decoder chosen for an unknown size. If its measured size says the
         other decoder is cheaper, it is reopened there, once per worker life
         and logged (the login already succeeded, so this costs no failed
-        attempt). Otherwise a software capture gets its decode threads fitted.
+        attempt). A GPU capture whose stream turned out to need colour
+        normalisation (full range / non-BT.601, ``capture_backends``) is
+        reopened with it, once; the need is remembered with the stream size,
+        so later opens have it from the start. Otherwise a software capture
+        gets its decode threads fitted.
         """
         hw = isinstance(cap, capture_backends.FfmpegHwCapture)
         h, w = frame.shape[:2]
         if hw and cap.source_size:
             w, h = cap.source_size            # native, before any DECODE_MAX_WIDTH scaling
         _source_sizes[source] = (int(w), int(h))
-        capture_backends.stream_sizes.put(self.rt.camera_id, source, int(w), int(h))
+        normalise = cap.colour_nonstandard if hw and cap.nv12 else None
+        capture_backends.stream_sizes.put(self.rt.camera_id, source, int(w), int(h), normalise=normalise)
+        # Pixel geometry authored at another size is scaled to this one.
+        frame_sizes.set(self.rt.camera_id, (frame.shape[1], frame.shape[0]), (int(w), int(h)))
+        if hw and cap.needs_colour_reopen and not self._stop.is_set():
+            logger.info(f"Camera {self.rt.camera_id}: stream is not BT.601 limited range; reopening with "
+                        "colour normalisation")
+            try:
+                cap.release()
+            except Exception:
+                pass
+            cap = self._open(source)
+            if not cap or not cap.isOpened():
+                raise RuntimeError(f"Cannot reopen {redact_url(source)} with colour normalisation")
+            self._report_decoder(cap, source)
+            return cap
 
         choice = self._choice
         want_gpu = capture_backends.size_prefers_gpu(w, h)
@@ -857,7 +973,7 @@ class CameraWorker(threading.Thread):
             return cap   # a GPU capture has no decode threads to fit
         return self._fit_decode_threads(cap, source, frame)
 
-    def _fit_decode_threads(self, cap, source: str, frame: np.ndarray):
+    def _fit_decode_threads(self, cap, source: str, frame):
         """Remember the stream's size; reopen once if it needs more decode threads.
 
         The first open of a source cannot know its resolution, so it uses
@@ -888,13 +1004,30 @@ class CameraWorker(threading.Thread):
         ANALYTICS_DETECT_EVERY_N_FRAMES (25 / 5 = 5 fps) when the GPU path
         delivers fewer frames (DECODE_MAX_FPS): every 2nd of 10 fps, not every
         5th. Software capture delivers the native rate: every Nth, as before.
+
+        Also sets ``_detect_n``, the stride the scheduler may analyse at: the
+        same ratio rounded down, so thinning never lowers a camera's analysis
+        ceiling below native / N (a 15 fps camera at 5 delivered fps: every
+        frame, 5 fps, rather than every 2nd, 2.5 fps).
         """
         n = max(1, int(settings.ANALYTICS_DETECT_EVERY_N_FRAMES))
         native = getattr(cap, "source_fps", None)
         delivered = self.rt.fps or getattr(cap, "output_fps", None)
         if not native or not delivered:
+            self._detect_n = n
             return n
-        return max(1, min(n, int(round(n * float(delivered) / float(native)))))
+        ratio = n * float(delivered) / float(native)
+        self._detect_n = max(1, min(n, int(ratio + 1e-6)))
+        return max(1, min(n, int(round(ratio))))
+
+    def _clip_wanted(self) -> bool:
+        """Whether the pre-event clip ring is fed for this camera (clip_recorder.wants)."""
+        try:
+            from app.services.clip_recorder import clip_recorder_service
+
+            return clip_recorder_service.wants(self.rt.camera_id)
+        except Exception:  # noqa: BLE001 - a broken recorder must not stop the capture
+            return False
 
     def _push_clip_buffer(self, frame: np.ndarray) -> None:
         try:
@@ -913,7 +1046,7 @@ class CameraWorker(threading.Thread):
 
     # ----------------------------------------------------------------- analysis
 
-    def _night_watch_step(self, frame: np.ndarray, now: float) -> str:
+    def _night_watch_step(self, frame, now: float) -> str:
         """NORMAL, HOLD or CONFIRM for this frame (services/night_watch.py).
 
         On arming, the camera's tracks are finished as when every analysis
@@ -1033,7 +1166,7 @@ class CameraWorker(threading.Thread):
             t.floor_xy = None
             if t.confirmed:
                 fx, fy = t.foot_point
-                floor = floor_projector.to_floor(cam, fx, fy)
+                floor = floor_projector.to_floor(cam, fx, fy, frame_size=(w, h))
                 if floor is not None:
                     t.floor_xy = (floor[0], floor[1])
                     entry["x_m"] = round(floor[0], 2)
@@ -1052,9 +1185,11 @@ class CameraWorker(threading.Thread):
             snapshot.append(entry)
         self.rt.set_tracks(snapshot, now)
 
-        # Evidence frames are saved by pose_analytics, so they carry the
-        # privacy masks; the analysis itself already ran on the raw frame.
-        evidence = apply_privacy_masks(frame, cam, masks)
+        # Evidence frames are saved by pose_analytics / tripwire_engine, so
+        # they carry the privacy masks; the analysis itself already ran on the
+        # raw frame. The masks are burned in only if evidence is actually
+        # taken (a copy of this frame), not on every analysed frame.
+        evidence = deferred_privacy_masks(frame, cam, masks)
         confirmed = [t for t in live if t.confirmed]
         self._observe_pose(evidence, now, confirmed)
         self._evaluate_zone_rules(evidence, now, confirmed, counting)
@@ -1281,6 +1416,7 @@ class LiveAnalyticsEngine:
         memory for a camera nobody is watching.
         """
         self.stop_camera(camera_id)
+        configure_opencv_threads()
         rt = CameraRuntime(camera_id=camera_id, name=name, source=source if enabled else "", enabled=enabled)
         self.runtimes[camera_id] = rt
         if not enabled:

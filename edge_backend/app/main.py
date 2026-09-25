@@ -353,6 +353,9 @@ async def mjpeg_stream(request: Request, camera_id: str | None = None, fps: int 
 
     async def iter_frames():
         delay = 1.0 / max(1, min(fps or 25, 30))
+        # The camera delivers at most DECODE_MAX_FPS new frames; a client
+        # asking for more gets the same JPEG again instead of a re-encode.
+        last_key, last_payload = None, None
         try:
             # Ends when the server is asked to stop; an endless response would
             # otherwise hold uvicorn's graceful shutdown open indefinitely.
@@ -363,8 +366,18 @@ async def mjpeg_stream(request: Request, camera_id: str | None = None, fps: int 
                     online = [c for c, rt in live_engine.runtimes.items() if rt.status == "ONLINE"]
                     cam = online[0] if online else None
 
-                frame = live_engine.get_frame(cam) if cam else None
-                if frame is None:
+                rt_now = live_engine.runtimes.get(cam) if cam else None
+                key = None
+                if rt_now is not None and rt_now.frames_read:
+                    key = (cam, rt_now.frames_read, rt_now._tracks_at if overlay else None)
+                if key is not None and key == last_key and last_payload:
+                    frame, payload = None, last_payload
+                else:
+                    frame = live_engine.get_frame(cam) if cam else None
+                    payload = None
+                if payload is not None:
+                    await asyncio.sleep(delay)
+                elif frame is None:
                     rt = live_engine.runtimes.get(cam) if cam else None
                     if rt is not None and not rt.enabled:
                         reason = "camera is turned off"
@@ -381,6 +394,7 @@ async def mjpeg_stream(request: Request, camera_id: str | None = None, fps: int 
                             # never touches the frame the worker is analysing.
                             frame = render_overlay(frame, rt, scale=scale)
                     payload = _encode_jpeg(frame)
+                    last_key, last_payload = key, payload
                     # Dashboard tiles ask for a low frame rate: a wall of 32 feeds
                     # re-encoding at full rate would spend the whole CPU budget on
                     # JPEG for thumbnails nobody is inspecting frame by frame.

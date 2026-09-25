@@ -199,7 +199,7 @@ def test_real_ffmpeg_software_decode_through_the_reader(monkeypatch):
     """The real ffmpeg, its real stream dump lines and the bundled clip (software decode, no GPU)."""
     real = cb.ffmpeg_argv
 
-    def software(ffmpeg, backend, device, chain, list_fd, max_fps, max_width):
+    def software(ffmpeg, backend, device, chain, list_fd, max_fps, max_width, normalise=False):
         argv = real(ffmpeg, backend, device, chain, list_fd, max_fps, max_width)
         hw = argv.index("-hwaccel")
         del argv[hw:hw + 6]
@@ -258,16 +258,17 @@ def test_probe_prefers_nvdec_then_vaapi_then_software(monkeypatch):
     p, calls = _probe_with(monkeypatch, "auto", {(cb.CUDA, "0", "cpu_rgb"): "ok",
                                                   (cb.VAAPI, "/dev/dri/renderD128", "gpu_rgb"): "ok"})
     assert (p.backend, p.device, p.chain) == (cb.CUDA, "0", "cpu_rgb")
-    assert [c for c in calls if c[0] != cb.SOFTWARE][:2] == [(cb.CUDA, "0", "gpu_rgb"), (cb.CUDA, "0", "cpu_rgb")]
-    assert "conversion runs on the CPU after download (on the GPU: Device creation failed)" in p.reason
+    assert [c for c in calls if c[0] != cb.SOFTWARE][:3] == [(cb.CUDA, "0", "gpu_rgb"), (cb.CUDA, "0", "cpu_nv12"),
+                                                             (cb.CUDA, "0", "cpu_rgb")]
+    assert "conversion runs on the CPU in ffmpeg after download (on the GPU: Device creation failed)" in p.reason
 
     p, _ = _probe_with(monkeypatch, "auto", {(cb.VAAPI, "/dev/dri/renderD129", "gpu_rgb"): "ok"},
                        nvidia=False, nodes=("/dev/dri/renderD128", "/dev/dri/renderD129"))
     assert (p.backend, p.device, p.chain) == (cb.VAAPI, "/dev/dri/renderD129", "gpu_rgb")
-    assert [a["device"] for a in p.attempts] == ["/dev/dri/renderD128"] * 2 + ["/dev/dri/renderD129"]
+    assert [a["device"] for a in p.attempts] == ["/dev/dri/renderD128"] * 3 + ["/dev/dri/renderD129"]
 
     p, _ = _probe_with(monkeypatch, "auto", {}, nvidia=False)
-    assert p.backend == cb.SOFTWARE and "no GPU decoder passed" in p.reason and len(p.attempts) == 2
+    assert p.backend == cb.SOFTWARE and "no GPU decoder passed" in p.reason and len(p.attempts) == 3
 
 
 def test_probe_rejects_a_decoder_that_returns_the_wrong_picture(monkeypatch):
@@ -324,7 +325,7 @@ def vaapi_worker(monkeypatch):
 def test_gpu_failure_on_one_stream_falls_back_to_software_for_that_camera(vaapi_worker, monkeypatch):
     w, soft = vaapi_worker
     hw = []
-    monkeypatch.setattr(cb, "open_hw_capture", lambda src, probe, cancel=None: hw.append(src) or _FailedHw(cb.DECODE))
+    monkeypatch.setattr(cb, "open_hw_capture", lambda src, probe, cancel=None, **k: hw.append(src) or _FailedHw(cb.DECODE))
     assert isinstance(w._open(), _SoftCap) and soft == [URL] and len(hw) == 1
     assert "decoding failed for this stream (boom)" in w._hw_disabled
     assert "decoding failed" in w._software_reason(URL)
@@ -474,6 +475,7 @@ class _FakeHw(cb.FfmpegHwCapture):
     def __init__(self, source_size=(2560, 1440)):  # noqa: D107 - skip the real open
         self.decoder, self.source_size, self.source_fps, self.max_fps = cb.VAAPI, source_size, 25.0, 10.0
         self.released, self.failure, self.pid = False, None, None
+        self.nv12, self.normalise, self.colour_nonstandard = True, False, False
 
     def isOpened(self):
         return not self.released
@@ -490,7 +492,7 @@ def auto_worker(monkeypatch, tmp_path):
     monkeypatch.setattr(lae, "_resolve_host_bounded", lambda *a: None)
     monkeypatch.setattr(lae, "_source_sizes", {})
     opened = []
-    monkeypatch.setattr(cb, "open_hw_capture", lambda src, probe, cancel=None: opened.append("gpu") or _FakeHw())
+    monkeypatch.setattr(cb, "open_hw_capture", lambda src, probe, cancel=None, **k: opened.append("gpu") or _FakeHw())
 
     def make(cam="cam_auto"):
         w = lae.CameraWorker(lae.CameraRuntime(camera_id=cam, name="c", source=URL), lae.LiveAnalyticsEngine())
