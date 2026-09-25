@@ -101,6 +101,7 @@ button.fp-badge { line-height: inherit; text-align: left; }
 .fp-badge-cal { color: var(--accent-green); }
 .fp-badge-uncal { color: var(--amber); }
 .fp-badge-off { color: var(--rose); }
+.fp-badge-disabled { color: var(--text-faint); }
 .fp-badge-note { color: var(--amber); font-style: italic; background: rgba(var(--amber-rgb), 0.08); border-color: rgba(var(--amber-rgb), 0.3); cursor: default; }
 
 .fp-live { font-size: 10.5px; font-family: ui-monospace, monospace; color: var(--text-dim); background: rgba(var(--panel2-rgb), 0.8); padding: 3px 8px; border-radius: 6px; align-self: flex-start; }

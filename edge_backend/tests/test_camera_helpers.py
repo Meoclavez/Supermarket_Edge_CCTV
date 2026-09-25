@@ -37,7 +37,8 @@ def camera_row(client):
             if existing is None:
                 session.add(CameraModel(
                     id=CAM_ID, name="Helper Test Cam", location="Test",
-                    rtsp_url="", is_ai_enabled=False,
+                    # Switched on but without a source, so no worker starts.
+                    rtsp_url="", is_ai_enabled=True,
                 ))
                 await session.commit()
 

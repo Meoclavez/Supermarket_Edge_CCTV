@@ -550,7 +550,8 @@ class StoreLayoutService:
                     "department": cam.department,
                     "role": getattr(cam, "role", None),
                     "channel_number": cam.channel_number,
-                    "status": rt.status if rt is not None else "OFFLINE",
+                    # A camera turned off is DISABLED (shown as OFF), never offline.
+                    "status": "DISABLED" if not cam.is_ai_enabled else (rt.status if rt is not None else "OFFLINE"),
                     "fps_actual": round(rt.fps, 1) if rt is not None else None,
                     "last_error": rt.last_error if rt is not None else None,
                     "floor_x": cam.floor_x,

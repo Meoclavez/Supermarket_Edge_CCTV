@@ -357,7 +357,10 @@ async def mjpeg_stream(request: Request, camera_id: str | None = None, fps: int 
                 frame = live_engine.get_frame(cam) if cam else None
                 if frame is None:
                     rt = live_engine.runtimes.get(cam) if cam else None
-                    reason = (rt.last_error or rt.status) if rt else "no camera configured"
+                    if rt is not None and not rt.enabled:
+                        reason = "camera is turned off"
+                    else:
+                        reason = (rt.last_error or rt.status) if rt else "no camera configured"
                     payload = _placeholder_frame(str(reason))
                     await asyncio.sleep(0.5)
                 else:

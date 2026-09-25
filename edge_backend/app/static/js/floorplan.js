@@ -1379,8 +1379,10 @@
           html = '<span class="fp-badge fp-badge-note">live map endpoint not available on this server</span>';
         } else {
           const parts = this.detections.map((d) => {
-            const cls = d.status !== 'ONLINE' ? 'fp-badge-off' : d.calibrated ? 'fp-badge-cal' : 'fp-badge-uncal';
-            const state = d.status !== 'ONLINE' ? String(d.status || 'offline').toLowerCase() : d.calibrated ? 'calibrated' : 'uncalibrated';
+            // A camera turned off says "off" in a neutral colour, not a fault.
+            const off = d.status === 'DISABLED';
+            const cls = off ? 'fp-badge-disabled' : d.status !== 'ONLINE' ? 'fp-badge-off' : d.calibrated ? 'fp-badge-cal' : 'fp-badge-uncal';
+            const state = off ? 'off' : d.status !== 'ONLINE' ? String(d.status || 'offline').toLowerCase() : d.calibrated ? 'calibrated' : 'uncalibrated';
             return `<button type="button" class="fp-badge" data-cam="${escapeHtml(d.camera_id)}" title="Select this camera on the map">
               <span class="fp-badge-swatch" style="background:${camColorFor(this.cameras, d.camera_id)}"></span>
               ${escapeHtml(d.camera_name || d.camera_id)} · <b>${d.live_tracks}</b> live · <span class="${cls}">${state}</span></button>`;

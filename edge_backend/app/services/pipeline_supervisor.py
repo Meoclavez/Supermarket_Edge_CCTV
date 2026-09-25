@@ -13,6 +13,11 @@ The supervisor closes that gap. It owns two periodic jobs:
 * **reconcile** -- keeps the running worker set equal to the enabled cameras in
   the database, and republishes the blueprint whenever it changes, so adding a
   camera or redrawing a zone takes effect without a restart.
+
+A camera's on/off switch is ``cameras.is_ai_enabled`` (PUT
+/api/v1/cameras/{id}/enabled). An enabled camera with a source gets a worker;
+a camera turned off gets a DISABLED runtime with no worker, so it is reported
+as off rather than offline and costs no connection, decode or inference.
 """
 
 from __future__ import annotations
@@ -65,6 +70,19 @@ class PipelineSupervisor:
         self._tasks: list[asyncio.Task] = []
         self._running = False
         self._layout_stamp: str = ""
+        self._reconcile_lock: tuple[object, asyncio.Lock] | None = None
+
+    def _lock(self) -> asyncio.Lock:
+        """One reconcile at a time on the running loop.
+
+        The periodic reconcile and one triggered by an on/off switch would
+        otherwise interleave at the database read, and the one that read
+        first could restart a worker for a camera that was just turned off.
+        """
+        loop = asyncio.get_running_loop()
+        if self._reconcile_lock is None or self._reconcile_lock[0] is not loop:
+            self._reconcile_lock = (loop, asyncio.Lock())
+        return self._reconcile_lock[1]
 
     async def start(self) -> None:
         if self._running:
@@ -155,29 +173,42 @@ class PipelineSupervisor:
 
     async def reconcile_cameras(self) -> None:
         """Make the worker set match the enabled cameras in the database."""
-        async with async_session_factory() as db:
-            res = await db.execute(select(CameraModel))
-            cameras = list(res.scalars().all())
+        async with self._lock():
+            async with async_session_factory() as db:
+                res = await db.execute(select(CameraModel))
+                cameras = list(res.scalars().all())
 
-        wanted: dict[str, CameraModel] = {}
-        for cam in cameras:
-            floor_projector.set_homography(cam.id, cam.homography_matrix)
-            if cam.is_ai_enabled and cam.rtsp_url:
-                wanted[cam.id] = cam
+            wanted: dict[str, CameraModel] = {}
+            off: dict[str, CameraModel] = {}
+            for cam in cameras:
+                floor_projector.set_homography(cam.id, cam.homography_matrix)
+                if not cam.is_ai_enabled:
+                    off[cam.id] = cam
+                elif cam.rtsp_url:
+                    wanted[cam.id] = cam
 
-        running = set(live_engine.runtimes.keys())
+            running = set(live_engine.runtimes.keys())
 
-        for cam_id in running - set(wanted.keys()):
-            logger.info(f"Stopping worker for removed/disabled camera {cam_id}")
-            live_engine.stop_camera(cam_id)
+            for cam_id in running - set(wanted.keys()) - set(off.keys()):
+                logger.info(f"Stopping worker for camera {cam_id} (removed, or no source)")
+                live_engine.stop_camera(cam_id)
 
-        for cam_id, cam in wanted.items():
-            rt = live_engine.runtimes.get(cam_id)
-            source = _camera_source(cam)
-            if rt is not None and rt.source == source:
-                continue
-            logger.info(f"Starting worker for {cam_id} -> {redact_url(source)}")
-            live_engine.start_camera(cam_id, cam.name, source, enabled=True)
+            for cam_id, cam in off.items():
+                rt = live_engine.runtimes.get(cam_id)
+                if rt is not None and not rt.enabled:
+                    rt.name = cam.name
+                    continue
+                if rt is not None:
+                    logger.info(f"Camera {cam_id} turned off: stopping its worker")
+                live_engine.start_camera(cam_id, cam.name, "", enabled=False)
+
+            for cam_id, cam in wanted.items():
+                rt = live_engine.runtimes.get(cam_id)
+                source = _camera_source(cam)
+                if rt is not None and rt.enabled and rt.source == source:
+                    continue
+                logger.info(f"Starting worker for {cam_id} -> {redact_url(source)}")
+                live_engine.start_camera(cam_id, cam.name, source, enabled=True)
 
     async def flush_once(self) -> int:
         """Write buffered facts to the database. Returns rows written."""

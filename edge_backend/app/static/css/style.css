@@ -1634,6 +1634,7 @@ html, body {
 .dev-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
 .dot-on { background: var(--accent-green); box-shadow: 0 0 6px rgba(var(--green-rgb), 0.7); }
 .dot-off { background: var(--rose); }
+.dot-disabled { background: var(--text-faint); }
 .dev-main { flex: 1; min-width: 0; }
 .dev-name { font-size: 12px; font-weight: 700; color: var(--text-soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dev-sub { font-size: 10px; color: var(--text-faint); font-family: ui-monospace, monospace; }
@@ -1775,6 +1776,49 @@ html, body {
 .camera-card-focus .camera-video-container[data-focus-for] { cursor: zoom-out; max-height: 72vh; }
 
 .camera-footer { display: flex; gap: 6px; padding: 9px 12px; }
+
+/* Four tiles at a time (js/analytics.js, cameraGrid): two by two, one column on
+   phones. Wide screens cap the width so both rows fit the window. */
+.camera-grid.camera-grid-quad { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (min-width: 768px) {
+  .camera-grid.camera-grid-quad { max-width: max(960px, calc((100vh - 480px) * 1.7778 + 14px)); margin-inline: auto; width: 100%; }
+}
+@media (max-width: 767px) {
+  .camera-grid.camera-grid-quad { grid-template-columns: minmax(0, 1fr); }
+}
+.camera-card-tools { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.cam-pin-btn { font-family: var(--font-sans); font-size: 10.5px; font-weight: 700; padding: 3px 9px; min-height: 26px;
+  border-radius: 6px; cursor: pointer; color: var(--text-dim); background: rgba(var(--tint-rgb), 0.04);
+  border: 1px solid rgba(var(--slate-rgb), 0.3); }
+.cam-pin-btn:hover { color: var(--text-strong); border-color: var(--accent-cyan); }
+.cam-pin-btn[aria-pressed="true"] { color: var(--amber); border-color: rgba(var(--amber-rgb), 0.6); background: rgba(var(--amber-rgb), 0.12); }
+.cam-pin-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.camera-card-pinned { border-color: rgba(var(--amber-rgb), 0.55); }
+/* Turned off: neutral, never the red of a fault. */
+.cam-hud-off { color: #aab4c0; border-color: rgba(170,180,192,0.35); }
+
+.grid-rotation-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 10px 0;
+  padding: 8px 12px; border-radius: var(--radius-md); background: var(--card-bg); border: 1px solid var(--card-border); }
+.grid-rotation-bar[hidden], .camera-power-bar[hidden] { display: none; }
+.grid-rotation-bar .btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+.grid-rotation-status { font-size: 12px; color: var(--text-soft); font-variant-numeric: tabular-nums; flex: 1 1 220px; min-width: 0; }
+.grid-rotation-delay { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); }
+.grid-delay-input { width: 68px; min-height: 32px; padding: 4px 8px; border-radius: var(--radius-sm); font: inherit;
+  color: var(--text-strong); background: var(--input-bg); border: 1px solid var(--control-border, rgba(var(--tint-rgb), 0.16)); }
+.grid-delay-input:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.grid-rotation-note { font-size: 11px; color: var(--amber); }
+.grid-rotation-note:empty { display: none; }
+
+.camera-power-bar { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; padding: 10px 12px;
+  border-radius: var(--radius-md); background: var(--card-bg); border: 1px solid var(--card-border); }
+.camera-off-list { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; max-height: 132px; overflow-y: auto; }
+.camera-power-label { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-dim); margin-right: 4px; }
+.camera-off-chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 4px 3px 6px; border-radius: 8px; max-width: 100%;
+  background: rgba(var(--tint-rgb), 0.03); border: 1px solid rgba(var(--slate-rgb), 0.22); }
+.camera-off-badge { padding: 1px 7px; font-size: 9.5px; color: var(--text-dim); border-color: rgba(var(--slate-rgb), 0.4); }
+.camera-off-name { font-size: 12px; color: var(--text-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.camera-power-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.camera-power-confirm { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; color: var(--text-soft); }
 
 .action-card-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .action-meta { font-size: 10px; color: var(--text-faint); font-family: ui-monospace, monospace; }

@@ -60,6 +60,9 @@
       await this.refresh();
       // Keep camera status fresh so an operator sees a feed drop out.
       setInterval(() => this.refreshCameras(), 6000);
+      window.addEventListener('edge:cameras-changed', (e) => {
+        if (!(e.detail && e.detail.from === 'devices')) this.refreshCameras();
+      });
     },
 
     async refresh() {
@@ -143,15 +146,20 @@
       host.innerHTML = this.cameras.map((c) => {
         const online = c.status === 'ONLINE';
         const authFailed = c.status === 'AUTH_FAILED';
+        // Turned off by the operator: OFF in a neutral colour, never a fault.
+        const off = c.status === 'DISABLED';
         const frame = c.frame_width && c.frame_height ? `${c.frame_width}×${c.frame_height}` : 'no frame yet';
         const id = esc(c.camera_id);
-        const label = authFailed ? 'WRONG PASSWORD' : c.status;
+        const label = authFailed ? 'WRONG PASSWORD' : off ? 'OFF' : c.status;
         const problem = authFailed
           ? '<div class="dev-hint">The camera rejected the username/password. Fix them in the camera\'s Settings (or on the camera), then Reconnect. Automatic retries are paused so the camera does not lock the account.</div>'
-          : (!online && c.last_error ? `<div class="dev-hint">${esc(String(c.last_error).slice(0, 160))}</div>` : '');
+          : (!online && !off && c.last_error ? `<div class="dev-hint">${esc(String(c.last_error).slice(0, 160))}</div>` : '');
+        const power = off
+          ? `<button class="btn btn-xs btn-primary" onclick="deviceManager.setEnabled('${id}', true)" title="Start this camera again">Turn on</button>`
+          : `<button class="btn btn-xs" onclick="deviceManager.setEnabled('${id}', false)" title="Stop this camera: no video, no analysis and no network traffic until it is turned on again">Turn off</button>`;
         return `
         <div class="dev-row dev-row-cam ${c.camera_id === selected ? 'is-selected' : ''}" data-cam-row="${id}">
-          <span class="dev-dot ${online ? 'dot-on' : 'dot-off'}"></span>
+          <span class="dev-dot ${online ? 'dot-on' : off ? 'dot-disabled' : 'dot-off'}"></span>
           <div class="dev-main">
             <div class="dev-name">${esc(c.name)}</div>
             <div class="dev-sub">${esc(label)} · ${(+c.floor_x || 0).toFixed(1)}, ${(+c.floor_y || 0).toFixed(1)} m · ${Math.round(c.azimuth_deg || 0)}°</div>
@@ -160,11 +168,13 @@
               <span class="dev-tag ${c.frame_width ? '' : 'warn'}">${frame}</span>
               <span class="dev-tag ${c.has_homography ? 'ok' : 'warn'}">${c.has_homography ? 'calibrated' : 'uncalibrated'}</span>
               ${authFailed ? '<span class="dev-tag err">wrong password</span>' : ''}
+              ${off ? '<span class="dev-tag">turned off</span>' : ''}
             </div>
             ${problem}
           </div>
           <div class="dev-actions">
-            ${online ? '' : `<button class="btn btn-xs" onclick="deviceManager.reconnect('${id}')" title="Try to connect to this camera now">Reconnect</button>`}
+            ${power}
+            ${online || off ? '' : `<button class="btn btn-xs" onclick="deviceManager.reconnect('${id}')" title="Try to connect to this camera now">Reconnect</button>`}
             <button class="btn btn-xs" onclick="deviceManager.config('${id}')" title="Position, bearing, field of view">Config</button>
             <button class="btn btn-xs" data-role-action="open-checklist" data-camera="${id}" title="What is left to set up for this camera's purpose">Checklist</button>
             <button class="btn btn-xs ${c.has_homography ? '' : 'btn-primary'}" onclick="deviceManager.calibrate('${id}')" title="Map this camera's image onto the plan">Calibrate</button>
@@ -183,6 +193,22 @@
         setTimeout(() => this.refreshCameras(), 4000);
       } catch (e) {
         status(`Reconnect failed: ${e.message}`, 'error');
+      }
+    },
+
+    /** Turn a camera on or off (PUT /api/v1/cameras/{id}/enabled); the Cameras view follows. */
+    async setEnabled(cameraId, enabled) {
+      try {
+        const res = await fetch(`/api/v1/cameras/${encodeURIComponent(cameraId)}/enabled`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled }),
+        });
+        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
+        const cam = this.cameras.find((c) => c.camera_id === cameraId);
+        status(`${cam ? cam.name : cameraId} turned ${enabled ? 'on' : 'off'}.`, 'ok');
+        await this.refreshCameras();
+        window.dispatchEvent(new CustomEvent('edge:cameras-changed', { detail: { from: 'devices' } }));
+      } catch (e) {
+        status(`Could not turn the camera ${enabled ? 'on' : 'off'}: ${e.message}`, 'error');
       }
     },
 

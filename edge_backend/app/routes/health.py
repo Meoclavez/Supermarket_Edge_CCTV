@@ -73,14 +73,23 @@ def _hailo_service(detector: dict) -> dict:
 
 
 def _camera_services(cameras: list, pipeline: dict) -> dict:
-    """One ``rtsp_cam_<id>`` entry per configured camera, from its live worker."""
+    """One ``rtsp_cam_<id>`` entry per configured camera, from its live worker.
+
+    ``cameras`` holds ``(id, name)`` or ``(id, name, enabled)``. A camera the
+    operator turned off is DISABLED (not a failure) whether or not the
+    pipeline has picked the switch up yet.
+    """
     T = ServiceHealthTracker
     runtimes = {str(r.get("camera_id")): r for r in (pipeline.get("cameras") or [])}
     now = time.time()
     out = {}
-    for cam_id, cam_name in cameras:
+    for cam in cameras:
+        cam_id, cam_name = cam[0], cam[1]
+        enabled = bool(cam[2]) if len(cam) > 2 else True
         rt = runtimes.get(str(cam_id))
-        if rt is None:
+        if not enabled or (rt is not None and rt.get("enabled") is False):
+            entry = T.entry(T.DISABLED, "turned off on the dashboard", None, None)
+        elif rt is None:
             entry = T.entry(T.NOT_CHECKED, "no live worker for this camera (analytics pipeline not running)",
                             consecutive_failures=None)
         else:
@@ -90,7 +99,7 @@ def _camera_services(cameras: list, pipeline: dict) -> dict:
             if status == "ONLINE":
                 entry = T.entry(T.HEALTHY, None, last_frame, 0)
             elif status == "DISABLED":
-                entry = T.entry(T.DISABLED, None, last_frame, None)
+                entry = T.entry(T.DISABLED, "turned off on the dashboard", None, None)
             elif status == "OFFLINE":
                 entry = T.entry(T.FAILED, rt.get("last_error") or "no video from the camera", last_frame, None)
             elif status == "AUTH_FAILED":  # camera rejected the login; retries paused
@@ -139,7 +148,8 @@ async def health_check():
     cameras: list = []
     try:
         async with async_session_factory() as session:
-            cameras = [tuple(r) for r in (await session.execute(select(CameraModel.id, CameraModel.name))).all()]
+            cameras = [tuple(r) for r in (await session.execute(
+                select(CameraModel.id, CameraModel.name, CameraModel.is_ai_enabled))).all()]
             cam_count = len(cameras)
             alert_count = await session.scalar(
                 select(func.count(SecurityEventModel.id)).where(
@@ -200,6 +210,8 @@ async def health_check():
         "services": services,
         "telemetry": {
             "total_cameras": cam_count,
+            # Turned off by the operator: neither working nor failed.
+            "cameras_off": sum(1 for c in cameras if not c[2]) if cam_count is not None else None,
             "cameras_online": pipeline.get("cameras_online"),
             "pipeline_running": pipeline.get("running"),
             "total_alerts": alert_count,

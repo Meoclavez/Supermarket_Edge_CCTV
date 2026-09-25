@@ -56,6 +56,15 @@
     return off.map((c) => `${c.name || c.camera_id}: ${c.last_error || problemKind(c)}`).join('\n');
   }
 
+  /** Cameras that are on but not sending pictures (turned-off ones are not faults). */
+  function notWorking(pipe) {
+    return (pipe.cameras || []).filter((c) => c.status !== 'ONLINE' && c.status !== 'DISABLED' && c.enabled !== false);
+  }
+
+  /**
+   * "12 / 30" working out of the cameras that are on; cameras the operator
+   * turned off are counted separately ("3 turned off"), never as failures.
+   */
   function renderCameras(pipe) {
     const note = el('kpiCamerasNote');
     if (!pipe) { setMetric('kpiCameras', null); if (note) note.textContent = 'Camera status unavailable.'; return; }
@@ -65,16 +74,29 @@
       if (note) note.innerHTML = 'No cameras yet. <button type="button" class="link-btn" onclick="openDeviceManager()">Add a camera</button>';
       return;
     }
-    setMetric('kpiCameras', `${on ?? DASH} / ${tot}`);
-    const off = (pipe.cameras || []).filter((c) => c.status !== 'ONLINE');
+    const turnedOff = isNum(pipe.cameras_off) ? pipe.cameras_off : 0;
+    const enabled = isNum(pipe.cameras_enabled) ? pipe.cameras_enabled : tot - turnedOff;
+    const offNote = turnedOff ? ` (${turnedOff} turned off)` : '';
     const box = el('kpiCamerasBox');
+    if (!enabled) {
+      setMetric('kpiCameras', 'All off');
+      if (box) box.classList.remove('stat-box-alert');
+      if (note) {
+        note.innerHTML = `All ${tot} camera${tot === 1 ? ' is' : 's are'} turned off.
+          <button type="button" class="link-btn" onclick="switchTab('cameras')">Turn on →</button>`;
+        note.title = '';
+      }
+      return;
+    }
+    setMetric('kpiCameras', `${on ?? DASH} / ${enabled}`);
+    const off = notWorking(pipe);
     if (box) box.classList.toggle('stat-box-alert', off.length > 0);
     if (!note) return;
     if (!off.length) {
-      note.textContent = 'All cameras sending pictures';
+      note.textContent = `All cameras that are on are sending pictures${offNote}`;
       note.title = '';
     } else {
-      note.innerHTML = `${off.length} not working: ${escapeHtml(problemSummary(off))}
+      note.innerHTML = `${off.length} not working: ${escapeHtml(problemSummary(off))}${escapeHtml(offNote)}
         <button type="button" class="link-btn" onclick="switchTab('cameras')">Fix →</button>`;
       note.title = problemDetail(off);
     }
@@ -139,9 +161,10 @@
     } else if (overview && !c.cameras_total) {
       html = 'No cameras yet. Add one to start counting shoppers.' +
         ' <button type="button" class="btn btn-sm btn-primary" onclick="openDeviceManager()">Add cameras</button>';
-    } else if (pipe && pipe.cameras_total && pipe.cameras_online === 0) {
-      const off = pipe.cameras || [];
-      html = `None of your ${pipe.cameras_total} camera(s) is sending pictures${off.length ? ': ' + escapeHtml(problemSummary(off)) : ''}.` +
+    } else if (pipe && pipe.cameras_total && pipe.cameras_online === 0 && notWorking(pipe).length) {
+      // Only cameras that are on: a camera turned off is not "not sending".
+      const off = notWorking(pipe);
+      html = `None of your ${off.length} camera(s) that are on is sending pictures: ${escapeHtml(problemSummary(off))}.` +
         ' <button type="button" class="btn btn-sm" onclick="switchTab(\'cameras\')">Check cameras</button>';
     } else if (overview && c.cameras_total && !c.cameras_calibrated) {
       html = 'People are counted, but no camera is placed on the store map yet, so the map and heatmap stay empty.' +

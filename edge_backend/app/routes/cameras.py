@@ -140,7 +140,8 @@ async def list_cameras(
 
     The stored ``status`` column is only the last persisted value; whether a
     camera is delivering frames right now is known by its worker, so the live
-    value overrides it. A camera without a worker is reported OFFLINE.
+    value overrides it. A camera without a worker is reported OFFLINE, and a
+    camera turned off (``is_ai_enabled`` false) DISABLED.
     """
     stmt = select(CameraModel).order_by(CameraModel.channel_number.asc())
     if department:
@@ -152,7 +153,12 @@ async def list_cameras(
     for c in cams:
         feed = _model_to_feed(c)
         rt = live_engine.runtimes.get(c.id)
-        if rt is not None:
+        if not c.is_ai_enabled:
+            # Turned off by the operator: OFF, never "offline", even before
+            # the pipeline has picked the switch up.
+            feed.status = "DISABLED"
+            feed.fps = 0
+        elif rt is not None:
             feed.status = rt.status
             feed.fps = int(round(rt.fps)) if rt.fps else 0
         else:
@@ -327,6 +333,79 @@ async def create_camera(cam_in: CameraCreateRequest, db: AsyncSession = Depends(
     return _model_to_feed(new_cam)
 
 
+# ---------------- On / off ----------------
+#
+# The switch is the existing ``is_ai_enabled`` column, which the pipeline
+# supervisor has always used to decide whether a camera gets a worker. Off
+# means no worker, no connection, no decode, no inference and no clip buffer;
+# nothing is recorded, and the camera reports DISABLED ("OFF" on the
+# dashboard), never offline. The bulk route is declared before
+# PUT /{camera_id} so "enabled" is never taken for a camera id.
+
+class CameraEnabledRequest(BaseModel):
+    enabled: bool
+
+
+class CamerasEnabledRequest(BaseModel):
+    camera_ids: list[str] = Field(..., min_length=1, max_length=500)
+    enabled: bool
+
+
+async def _reconcile_now(camera_id: str = "") -> None:
+    """Apply stored camera changes to the workers now, not on the next tick."""
+    try:
+        from ..services.pipeline_supervisor import pipeline_supervisor
+
+        if getattr(pipeline_supervisor, "_running", False):
+            await asyncio.wait_for(pipeline_supervisor.reconcile_cameras(), timeout=10)
+    except Exception as exc:  # noqa: BLE001 - the periodic reconcile picks it up
+        logger.debug("reconcile for %s: %s", camera_id or "cameras", exc)
+
+
+def _switch_state(cam: CameraModel) -> dict:
+    rt = live_engine.runtimes.get(cam.id)
+    if not cam.is_ai_enabled:
+        status = "DISABLED"
+    else:
+        status = rt.status if rt is not None and rt.enabled else "OFFLINE"
+    return {"camera_id": cam.id, "name": cam.name, "enabled": bool(cam.is_ai_enabled), "status": status}
+
+
+async def _set_enabled(camera_ids: list[str], enabled: bool, db: AsyncSession) -> list[dict]:
+    """Store the switch for every camera (all or none), then apply it."""
+    ids = list(dict.fromkeys(str(i) for i in camera_ids))
+    res = await db.execute(select(CameraModel).where(CameraModel.id.in_(ids)))
+    found = {c.id: c for c in res.scalars().all()}
+    missing = [i for i in ids if i not in found]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"Unknown camera(s): {', '.join(missing[:20])}")
+    changed = [found[i] for i in ids if bool(found[i].is_ai_enabled) != enabled]
+    for cam in changed:
+        cam.is_ai_enabled = enabled
+    if changed:
+        await db.commit()
+        logger.info("Turned %s %d camera(s): %s", "on" if enabled else "off", len(changed),
+                    ", ".join(c.id for c in changed[:20]))
+        await _reconcile_now()
+    return [_switch_state(found[i]) for i in ids]
+
+
+@router.put("/enabled")
+async def set_cameras_enabled(body: CamerasEnabledRequest, db: AsyncSession = Depends(get_db)):
+    """Turn many cameras on or off at once (e.g. every camera that is offline).
+
+    Unknown ids fail the whole request with 404 and change nothing.
+    """
+    cams = await _set_enabled(body.camera_ids, body.enabled, db)
+    return {"enabled": body.enabled, "updated": len(cams), "cameras": cams}
+
+
+@router.put("/{camera_id}/enabled")
+async def set_camera_enabled(camera_id: str, body: CameraEnabledRequest, db: AsyncSession = Depends(get_db)):
+    """Turn one camera on (its worker starts now) or off (its worker stops now)."""
+    return (await _set_enabled([camera_id], body.enabled, db))[0]
+
+
 @router.get("/{camera_id}", response_model=CameraFeed)
 async def get_camera(camera_id: str, db: AsyncSession = Depends(get_db)):
     cam = await _get_camera_or_404(camera_id, db)
@@ -358,6 +437,11 @@ async def update_camera(camera_id: str, cam_in: CameraFeed, db: AsyncSession = D
         source_changed = True
     if cam is not None and "features" in payload:
         _keep_unsent_settings(payload["features"], cam_in.features, cam.features)
+    if cam is not None:
+        # On/off is changed only through PUT /{id}/enabled: the field defaults
+        # to true, and the Settings dialog echoes the value it loaded, so a
+        # save would otherwise silently turn a switched-off camera back on.
+        payload.pop("is_ai_enabled", None)
     # Setting a role here stores it without touching the toggles; use
     # PUT /{id}/role with apply_defaults to apply the preset.
     if "role" in payload:
@@ -385,13 +469,7 @@ async def update_camera(camera_id: str, cam_in: CameraFeed, db: AsyncSession = D
 
 async def _restart_worker(camera_id: str) -> dict:
     """Apply a changed source now and wake the worker from any retry pause."""
-    try:
-        from ..services.pipeline_supervisor import pipeline_supervisor
-
-        if getattr(pipeline_supervisor, "_running", False):
-            await asyncio.wait_for(pipeline_supervisor.reconcile_cameras(), timeout=10)
-    except Exception as exc:  # noqa: BLE001 - the periodic reconcile picks it up
-        logger.debug("reconcile for %s: %s", camera_id, exc)
+    await _reconcile_now(camera_id)
     woke = live_engine.reconnect_camera(camera_id)
     rt = live_engine.runtimes.get(camera_id)
     return {"reconnecting": woke, "status": rt.status if rt is not None else "OFFLINE",
@@ -541,6 +619,8 @@ def get_camera_snapshot(camera_id: str, annotate: bool = True, overlay: bool = F
         rt = live_engine.runtimes.get(camera_id)
         if rt is None:
             reason = "Camera is not running. Add it from the device scan."
+        elif not rt.enabled:
+            reason = "Camera is turned off. Turn it on from the Cameras view."
         else:
             reason = rt.last_error or f"Camera status: {rt.status}"
 
@@ -596,12 +676,13 @@ async def get_camera_live_status(camera_id: str, db: AsyncSession = Depends(get_
     """
     cam = await _get_camera_or_404(camera_id, db)
     rt = live_engine.runtimes.get(camera_id)
-    if rt is None:
+    if rt is None or not rt.enabled:
+        off = not cam.is_ai_enabled or rt is not None
         return {
             "camera_id": cam.id,
             "name": cam.name,
             "running": False,
-            "status": "OFFLINE",
+            "status": "DISABLED" if off else "OFFLINE",
             "enabled": bool(cam.is_ai_enabled),
             "frames_read": 0,
             "detections_last_frame": None,
@@ -609,7 +690,7 @@ async def get_camera_live_status(camera_id: str, db: AsyncSession = Depends(get_
             "fps": None,
             "has_frame": False,
             "seconds_since_frame": None,
-            "last_error": "No pipeline worker is running for this camera.",
+            "last_error": None if off else "No pipeline worker is running for this camera.",
             "calibrated": bool(cam.homography_matrix),
             "frame_width": None,
             "frame_height": None,

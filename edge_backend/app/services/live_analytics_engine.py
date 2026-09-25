@@ -262,6 +262,17 @@ class CameraRuntime:
         }
 
 
+def _drop_clip_buffer(camera_id: str) -> None:
+    """Free a camera's pre-event frame buffer (it holds seconds of video in RAM)."""
+    try:
+        from app.services.clip_recorder import clip_recorder_service
+
+        with clip_recorder_service._service_lock:
+            clip_recorder_service.buffers.pop(camera_id, None)
+    except Exception:  # noqa: BLE001 - nothing to free
+        pass
+
+
 # Reconnect policy. A camera that is unreachable is retried with exponential
 # backoff up to CAMERA_RETRY_MAX_SEC. A camera that REJECTS the login is not:
 # Dahua and most NVR/IP camera firmware lock the account after ~5 failed
@@ -629,6 +640,10 @@ class CameraWorker(threading.Thread):
         for t in self.tracker.flush_all():
             self.engine.close_track(t, reason="worker_stopped")
         _reset_pose_camera(self.rt.camera_id)
+        # Turned off (or removed) while a last frame was being buffered.
+        current = self.engine.runtimes.get(self.rt.camera_id)
+        if current is None or not current.enabled:
+            _drop_clip_buffer(self.rt.camera_id)
 
     def _fit_decode_threads(self, cap, source: str, frame: np.ndarray):
         """Remember the stream's size; reopen once if it needs more decode threads.
@@ -981,11 +996,19 @@ class LiveAnalyticsEngine:
     # ----------------------------------------------------------------- workers
 
     def start_camera(self, camera_id: str, name: str, source: str, enabled: bool = True) -> None:
+        """Run a worker for the camera, or, with ``enabled=False``, record it as off.
+
+        A camera the operator turned off keeps a DISABLED runtime and nothing
+        else: no worker thread, no connection, no decode, no inference and
+        no clip buffer. Its source is not kept either, so no login sits in
+        memory for a camera nobody is watching.
+        """
         self.stop_camera(camera_id)
-        rt = CameraRuntime(camera_id=camera_id, name=name, source=source, enabled=enabled)
+        rt = CameraRuntime(camera_id=camera_id, name=name, source=source if enabled else "", enabled=enabled)
         self.runtimes[camera_id] = rt
         if not enabled:
             rt.status = "DISABLED"
+            _drop_clip_buffer(camera_id)
             return
         worker = CameraWorker(rt, self)
         self.workers[camera_id] = worker
@@ -1040,9 +1063,15 @@ class LiveAnalyticsEngine:
     def status(self) -> dict:
         runtimes = [rt.to_dict() for rt in self.runtimes.values()]
         online = sum(1 for r in runtimes if r["status"] == "ONLINE")
+        off = sum(1 for r in runtimes if not r["enabled"])
         return {
             "running": self._started,
+            # Every configured camera, including those turned off; "working"
+            # is out of cameras_enabled, so a switched-off camera never counts
+            # as a failure.
             "cameras_total": len(runtimes),
+            "cameras_enabled": len(runtimes) - off,
+            "cameras_off": off,
             "cameras_online": online,
             "live_tracks": sum(r["live_tracks"] for r in runtimes),
             "detector": person_detector.status(),

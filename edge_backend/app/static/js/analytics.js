@@ -328,10 +328,17 @@ async function fetchSystemTelemetry() {
     }
     set('telemetryLatencyVal', isNum(d.avg_latency_ms) && d.avg_latency_ms > 0
       ? `${d.avg_latency_ms.toFixed(0)} ms per picture` : (d.available ? 'no pictures analysed yet' : DASH));
+    // "Working" is out of the cameras that are on; turned-off ones are counted apart.
     const on = pipe.cameras_online, tot = pipe.cameras_total;
-    set('brandSubtitle', isNum(tot)
-      ? (tot === 0 ? 'No cameras yet' : `${on ?? DASH} of ${tot} camera${tot === 1 ? '' : 's'} working${d.available ? '' : ' · detection unavailable'}`)
-      : DASH);
+    const enabled = isNum(pipe.cameras_enabled) ? pipe.cameras_enabled : tot;
+    const off = isNum(pipe.cameras_off) ? pipe.cameras_off : 0;
+    let subtitle = DASH;
+    if (isNum(tot)) {
+      if (tot === 0) subtitle = 'No cameras yet';
+      else if (enabled === 0) subtitle = `All ${tot} camera${tot === 1 ? ' is' : 's are'} turned off`;
+      else subtitle = `${on ?? DASH} of ${enabled} camera${enabled === 1 ? '' : 's'} working${off ? ` · ${off} turned off` : ''}${d.available ? '' : ' · detection unavailable'}`;
+    }
+    set('brandSubtitle', subtitle);
     updateMatrixHud(pipe);
   }
 }
@@ -460,17 +467,20 @@ async function loadCamerasMatrix() {
   if (badge) badge.textContent = allCamerasList.length;
 
   buildAreaChips();
+  pruneGridPins();
 
-  // Re-render only when the set of cameras changed; a re-render tears down
-  // every open MJPEG connection.
+  // Rebuild every tile only when a camera's card text changed. Anything else
+  // (a camera turned off or on, a new status) moves tiles in place, so the
+  // tiles that stay keep their picture and nothing is fetched twice.
   const signature = allCamerasList.map((c) => `${c.id}|${c.name}|${c.department}|${c.location}|${c.role || ''}`).join(';');
   if (signature !== lastCameraSignature) {
     lastCameraSignature = signature;
     renderCameraGrid();
   } else {
-    attachCameraStreams();
+    applyGridSlots();
   }
 }
+window.addEventListener('edge:cameras-changed', (e) => { if (!(e.detail && e.detail.from === 'matrix')) loadCamerasMatrix(); });
 
 /** Filter key of a camera: its purpose (role), or 'NONE' when it has none. */
 function cameraPurposeKey(cam) { return cam.role || 'NONE'; }
@@ -508,16 +518,16 @@ function filterCameras(category) {
   document.querySelectorAll('.channel-pill').forEach((pill) => {
     pill.classList.toggle('active', pill.getAttribute('data-filter') === category);
   });
-  renderCameraGrid();
+  cameraGrid.offset = 0;
+  cameraGrid.nextAt = 0;
+  applyGridSlots();
 }
 
 function filterCamerasBySearch(query) {
-  const q = (query || '').toLowerCase();
-  document.querySelectorAll('.camera-card').forEach((card) => {
-    const title = (card.getAttribute('data-cam-name') || '').toLowerCase();
-    const loc = (card.getAttribute('data-cam-loc') || '').toLowerCase();
-    card.style.display = (title.includes(q) || loc.includes(q)) ? '' : 'none';
-  });
+  cameraGrid.search = String(query || '');
+  cameraGrid.offset = 0;
+  cameraGrid.nextAt = 0;
+  applyGridSlots();
 }
 
 const FPS_LABEL = { 1: 'Low', 5: 'Normal', 15: 'High' };
@@ -541,75 +551,475 @@ function streamUrl(cameraId) {
   return window.edgeAuth && window.edgeAuth.authUrl ? window.edgeAuth.authUrl(base) : base;
 }
 
-function renderCameraGrid() {
-  const grid = el('cameraMatrixGrid');
-  if (!grid) return;
-  const keepFocus = tileFeed.focusId;
-  tileFeedReset();
-  grid.innerHTML = '';
+/*
+ * Four tiles, rotating through the cameras.
+ *
+ * Even as single pictures, 33 tiles on screen meant 33 cameras decoded for
+ * the browser. The view shows CAMERA_SLOTS tiles; every few seconds the
+ * slots that are not pinned move on to the next cameras in order, wrapping
+ * round, so every camera gets the same time on screen. Only the cameras on
+ * screen are fetched (tileFeed), so at most TILE_MAX_IN_FLIGHT picture
+ * requests plus one enlarged live stream use the browser's six connections.
+ *
+ * Pins are per slot: a pinned camera stays in its slot and the rotating
+ * list is every other camera that is on (and matches the area filter and
+ * search). Cameras turned off are never in it and never requested. The
+ * delay, pause and pins are this viewer's preferences (localStorage, when
+ * the browser allows it).
+ */
+const CAMERA_SLOTS = 4;
+const ROTATE_MIN_S = 3;
+const ROTATE_MAX_S = 600;
+const ROTATE_DEFAULT_S = 10;
+const GRID_PREFS_KEY = 'edge.cameraGrid.v1';
+const cameraGrid = {
+  delay: ROTATE_DEFAULT_S,                      // seconds on one page
+  paused: false,
+  pins: new Array(CAMERA_SLOTS).fill(null),     // slot -> pinned camera id
+  offset: 0,          // rotating-list index shown in the first free slot
+  nextAt: 0,          // when the next page is due; 0 while not counting down
+  search: '',
+  layout: null,       // last gridLayout()
+  confirmOffline: false,
+  powerHtml: null,
+};
 
+/** Turned off by the operator: no worker, no picture requests, shown as OFF. */
+function cameraIsOff(cam) { return !!cam && (cam.status === 'DISABLED' || cam.is_ai_enabled === false); }
+
+function clampRotateDelay(v) { return Math.min(ROTATE_MAX_S, Math.max(ROTATE_MIN_S, Math.round(v))); }
+
+function loadGridPrefs() {
+  let saved = null;
+  try { saved = JSON.parse(window.localStorage.getItem(GRID_PREFS_KEY) || 'null'); } catch (_) { saved = null; }
+  if (!saved || typeof saved !== 'object') return;
+  if (Number.isFinite(Number(saved.delay))) cameraGrid.delay = clampRotateDelay(Number(saved.delay));
+  cameraGrid.paused = saved.paused === true;
+  if (Array.isArray(saved.pins)) {
+    const seen = new Set();
+    cameraGrid.pins = Array.from({ length: CAMERA_SLOTS }, (_, i) => {
+      const id = saved.pins[i];
+      if (typeof id !== 'string' || !id || seen.has(id)) return null;
+      seen.add(id);
+      return id;
+    });
+  }
+}
+
+function saveGridPrefs() {
+  try {
+    window.localStorage.setItem(GRID_PREFS_KEY, JSON.stringify(
+      { delay: cameraGrid.delay, paused: cameraGrid.paused, pins: cameraGrid.pins }));
+  } catch (_) { /* storage blocked: the settings last for this visit only */ }
+}
+
+/** Forget pins of cameras that were removed or turned off. */
+function pruneGridPins() {
+  const on = new Set(allCamerasList.filter((c) => !cameraIsOff(c)).map((c) => c.id));
+  let changed = false;
+  cameraGrid.pins = cameraGrid.pins.map((id) => {
+    if (id && !on.has(id)) { changed = true; return null; }
+    return id;
+  });
+  if (changed) saveGridPrefs();
+}
+
+/** Cameras that may be shown: on, in the selected area, matching the search. */
+function gridPool() {
+  const q = cameraGrid.search.trim().toLowerCase();
+  return allCamerasList.filter((c) => !cameraIsOff(c)
+    && (activeCameraFilter === 'ALL' || cameraPurposeKey(c) === activeCameraFilter)
+    && (!q || `${c.name || ''} ${c.location || ''}`.toLowerCase().includes(q)));
+}
+
+/**
+ * Which camera each slot shows. A pin counts only while its camera is in the
+ * pool (a pin outside the area filter is kept, and that slot rotates).
+ */
+function gridLayout() {
+  const pool = gridPool();
+  const ids = pool.map((c) => c.id);
+  const pins = cameraGrid.pins.map((id) => (id && ids.includes(id) ? id : null));
+  const pinned = new Set(pins.filter(Boolean));
+  const rotating = ids.filter((id) => !pinned.has(id));
+  const freeSlots = pins.map((id, i) => (id ? -1 : i)).filter((i) => i >= 0);
+  const n = rotating.length;
+  cameraGrid.offset = n ? ((cameraGrid.offset % n) + n) % n : 0;
+  const slots = pins.slice();
+  const shown = [];
+  freeSlots.forEach((slot, k) => {
+    if (k >= n) return;
+    const idx = (cameraGrid.offset + k) % n;
+    slots[slot] = rotating[idx];
+    shown.push(idx);
+  });
+  return { pool, pins, rotating, slots, shown, free: freeSlots.length, canRotate: freeSlots.length > 0 && n > freeSlots.length };
+}
+
+function cameraById(id) { return allCamerasList.find((c) => c.id === id) || null; }
+
+function buildCameraCard(cam, slot) {
+  const card = document.createElement('div');
+  card.className = 'camera-card';
+  card.setAttribute('data-cam-name', cam.name || '');
+  card.setAttribute('data-cam-loc', cam.location || '');
+  card.setAttribute('data-camera-card', cam.id);
+  card.setAttribute('data-slot', String(slot));
+  const id = escapeHtml(cam.id);
+  const online = cam.status === 'ONLINE';
+  card.innerHTML = `
+    <div class="camera-card-header">
+      <div class="camera-card-titles">
+        <div class="camera-title">${escapeHtml(cam.name)}</div>
+        <div class="cam-meta-text">${[cam.department && cam.department !== 'GENERAL' ? cam.department : '', cam.location || ''].filter(Boolean).map(escapeHtml).join(' · ')}</div>
+      </div>
+      <div class="camera-card-tools">
+        <button type="button" class="cam-pin-btn" data-pin-for="${id}" aria-pressed="false" onclick="toggleCameraPin(${slot}, '${id}')"></button>
+        <span class="badge ${online ? 'badge-green' : 'badge-danger'}" data-status-for="${id}"${cam.status === 'AUTH_FAILED' ? ` title="${escapeHtml(AUTH_FAILED_TIP)}"` : ''}>● ${escapeHtml(cameraStatusLabel(cam.status || 'UNKNOWN'))}</span>
+      </div>
+    </div>
+
+    <div class="camera-video-container" data-focus-for="${id}" role="button" tabindex="0" aria-pressed="false"
+      title="Click to enlarge and watch this camera live" onclick="focusCameraTile('${id}')"
+      onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); focusCameraTile('${id}'); }">
+      <img class="camera-img" data-camera-id="${id}" alt="${escapeHtml(cam.name)} live picture" />
+      <div class="camera-overlay-top">
+        <span class="cam-hud-badge ${online ? 'cam-hud-stale' : 'cam-hud-offline'}" data-live-for="${id}">${online ? '● waiting for picture' : '● ' + escapeHtml(cameraStatusLabel(cam.status))}</span>
+        <span class="cam-hud-badge" data-res-for="${id}" title="Picture size">${DASH}</span>
+      </div>
+      <div class="camera-overlay-bottom">
+        <span class="cam-hud-badge" data-hud-for="${id}" title="People the camera sees right now, and whether it is placed on the store map">${DASH}</span>
+        <span class="cam-hud-badge" data-age-for="${id}" title="Age of the newest picture"></span>
+      </div>
+    </div>
+
+    <!-- V2 MOUNT POINT: camera role badge / setup checklist for this camera. -->
+    <div class="cam-role-slot" data-role-slot="${id}"></div>
+
+    <div class="camera-footer">
+      <button type="button" class="btn btn-sm" onclick="openCameraConfigModal('${id}')">⚙️ Settings</button>
+      <button type="button" class="btn btn-sm" data-reconnect-for="${id}" onclick="reconnectCamera('${id}')" title="Try to connect to this camera now" ${online ? 'hidden' : ''}>Reconnect</button>
+      <button type="button" class="btn btn-sm" data-power-for="${id}" onclick="setCameraEnabled('${id}', false)"
+        title="Turn this camera off: no video, no analysis and no network traffic until it is turned on again">Turn off</button>
+      <a href="/dashboard/studio?camera_id=${encodeURIComponent(cam.id)}" class="btn btn-primary btn-sm" title="Draw counting lines, shelf areas, staff-only areas and privacy masks on this camera">Camera setup</a>
+    </div>`;
+  return card;
+}
+
+function setCardPinned(card, pinned) {
+  const btn = card.querySelector('.cam-pin-btn');
+  const name = card.getAttribute('data-cam-name') || 'this camera';
+  card.classList.toggle('camera-card-pinned', pinned);
+  if (!btn) return;
+  btn.setAttribute('aria-pressed', pinned ? 'true' : 'false');
+  btn.textContent = pinned ? 'Pinned' : 'Pin';
+  btn.setAttribute('aria-label', pinned ? `Unpin ${name}: its tile rotates again` : `Pin ${name} to this tile`);
+  btn.title = pinned ? 'Pinned: stays here while the other tiles rotate. Click to unpin.'
+    : 'Keep this camera in this tile while the other tiles rotate';
+}
+
+/** What the grid says instead of tiles, or null when it has tiles. */
+function gridEmptyMessage(L) {
   if (!allCamerasList.length) {
-    grid.innerHTML = `
+    return { key: 'none', html: `
       <div class="matrix-empty">
         <div class="matrix-empty-title">No cameras yet</div>
         <div class="matrix-empty-text">Add a camera by its address, scan the network and USB ports, or add a Dahua
           recorder's channels. Each camera then appears here with its live picture.</div>
         <button type="button" class="btn btn-primary" onclick="openDeviceManager()">Add cameras</button>
-      </div>`;
-    return;
+      </div>` };
+  }
+  if (L.pool.length) return null;
+  const off = allCamerasList.filter(cameraIsOff).length;
+  if (off === allCamerasList.length) {
+    return { key: 'all-off', html: `
+      <div class="matrix-empty">
+        <div class="matrix-empty-title">Every camera is turned off</div>
+        <div class="matrix-empty-text">${off} camera${off === 1 ? ' is' : 's are'} turned off, so nothing is shown, analysed or
+          fetched. Turn cameras on in the list below.</div>
+      </div>` };
+  }
+  const q = cameraGrid.search.trim();
+  const what = q ? `matching "${q}"` : `in "${cameraPurposeLabel(activeCameraFilter)}"`;
+  return { key: `filter:${activeCameraFilter}:${q}`, html: emptyState(`No cameras that are on ${what}.`, 'Show all', "filterCameras('ALL'); clearCameraSearch()") };
+}
+
+function clearCameraSearch() {
+  const input = el('cameraSearchInput');
+  if (input) input.value = '';
+  filterCamerasBySearch('');
+}
+
+/**
+ * Put the right camera in each slot. A slot whose camera is unchanged is
+ * left alone (its picture and request stay); a slot whose camera changed
+ * gets a new tile, and the old camera's request is aborted.
+ */
+function applyGridSlots() {
+  const host = el('cameraMatrixGrid');
+  if (!host) return;
+  const L = gridLayout();
+  cameraGrid.layout = L;
+  const message = gridEmptyMessage(L);
+
+  if (message) {
+    host.querySelectorAll('[data-slot]').forEach((card) => tileFeedUnregister(card.getAttribute('data-camera-card')));
+    if (host.getAttribute('data-empty') !== message.key) {
+      host.innerHTML = message.html;
+      host.setAttribute('data-empty', message.key);
+    }
+  } else {
+    if (host.hasAttribute('data-empty')) {
+      host.innerHTML = '';
+      host.removeAttribute('data-empty');
+    }
+    const cards = L.slots.map((_, slot) => host.querySelector(`[data-slot="${slot}"]`));
+    const stale = cards.map((card, slot) => !!card && card.getAttribute('data-camera-card') !== L.slots[slot]);
+    // Drop every outgoing camera first, so one that only moved slot is registered again below.
+    cards.forEach((card, slot) => { if (stale[slot]) tileFeedUnregister(card.getAttribute('data-camera-card')); });
+    L.slots.forEach((id, slot) => {
+      let card = cards[slot];
+      if (card && !stale[slot]) { setCardPinned(card, L.pins[slot] === id); return; }
+      if (card) card.remove();
+      const cam = id ? cameraById(id) : null;
+      if (!cam) return;
+      card = buildCameraCard(cam, slot);
+      const after = [...host.querySelectorAll('[data-slot]')].find((n) => Number(n.getAttribute('data-slot')) > slot);
+      host.insertBefore(card, after || null);
+      setCardPinned(card, L.pins[slot] === id);
+      tileFeedRegister(id, card.querySelector('img.camera-img'));
+    });
   }
 
-  const filtered = allCamerasList.filter((cam) => activeCameraFilter === 'ALL' || cameraPurposeKey(cam) === activeCameraFilter);
-  if (!filtered.length) {
-    grid.innerHTML = emptyState(`No cameras in "${cameraPurposeLabel(activeCameraFilter)}".`, 'Show all', "filterCameras('ALL')");
-    return;
-  }
-
-  filtered.forEach((cam) => {
-    const card = document.createElement('div');
-    card.className = 'camera-card';
-    card.setAttribute('data-cam-name', cam.name || '');
-    card.setAttribute('data-cam-loc', cam.location || '');
-    card.setAttribute('data-camera-card', cam.id);
-    const online = cam.status === 'ONLINE';
-    card.innerHTML = `
-      <div class="camera-card-header">
-        <div class="camera-card-titles">
-          <div class="camera-title">${escapeHtml(cam.name)}</div>
-          <div class="cam-meta-text">${[cam.department && cam.department !== 'GENERAL' ? cam.department : '', cam.location || ''].filter(Boolean).map(escapeHtml).join(' · ')}</div>
-        </div>
-        <span class="badge ${online ? 'badge-green' : 'badge-danger'}" data-status-for="${escapeHtml(cam.id)}"${cam.status === 'AUTH_FAILED' ? ` title="${escapeHtml(AUTH_FAILED_TIP)}"` : ''}>● ${escapeHtml(cameraStatusLabel(cam.status || 'UNKNOWN'))}</span>
-      </div>
-
-      <div class="camera-video-container" data-focus-for="${escapeHtml(cam.id)}" role="button" tabindex="0" aria-pressed="false"
-        title="Click to enlarge and watch this camera live" onclick="focusCameraTile('${escapeHtml(cam.id)}')"
-        onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); focusCameraTile('${escapeHtml(cam.id)}'); }">
-        <img class="camera-img" data-camera-id="${escapeHtml(cam.id)}" alt="${escapeHtml(cam.name)} live picture" />
-        <div class="camera-overlay-top">
-          <span class="cam-hud-badge ${online ? 'cam-hud-stale' : 'cam-hud-offline'}" data-live-for="${escapeHtml(cam.id)}">${online ? '● waiting for picture' : '● ' + escapeHtml(cameraStatusLabel(cam.status))}</span>
-          <span class="cam-hud-badge" data-res-for="${escapeHtml(cam.id)}" title="Picture size">${DASH}</span>
-        </div>
-        <div class="camera-overlay-bottom">
-          <span class="cam-hud-badge" data-hud-for="${escapeHtml(cam.id)}" title="People the camera sees right now, and whether it is placed on the store map">${DASH}</span>
-          <span class="cam-hud-badge" data-age-for="${escapeHtml(cam.id)}" title="Age of the newest picture"></span>
-        </div>
-      </div>
-
-      <!-- V2 MOUNT POINT: camera role badge / setup checklist for this camera. -->
-      <div class="cam-role-slot" data-role-slot="${escapeHtml(cam.id)}"></div>
-
-      <div class="camera-footer">
-        <button type="button" class="btn btn-sm" onclick="openCameraConfigModal('${escapeHtml(cam.id)}')">⚙️ Settings</button>
-        <button type="button" class="btn btn-sm" data-reconnect-for="${escapeHtml(cam.id)}" onclick="reconnectCamera('${escapeHtml(cam.id)}')" title="Try to connect to this camera now" ${online ? 'hidden' : ''}>Reconnect</button>
-        <a href="/dashboard/studio?camera_id=${encodeURIComponent(cam.id)}" class="btn btn-primary btn-sm" title="Draw counting lines, shelf areas, staff-only areas and privacy masks on this camera">Camera setup</a>
-      </div>`;
-    grid.appendChild(card);
-    tileFeedRegister(cam.id, card.querySelector('img.camera-img'));
-  });
-
-  if (keepFocus && tileFeed.tiles.has(keepFocus)) tileFeed.focusId = keepFocus;
+  renderGridControls(L);
+  renderCameraPower();
   if (pipelineSnapshot) updateMatrixHud(pipelineSnapshot);
   attachCameraStreams();
+}
+
+/** Full rebuild of the tiles, after camera names or areas changed. */
+function renderCameraGrid() {
+  const host = el('cameraMatrixGrid');
+  if (!host) return;
+  const keepFocus = tileFeed.focusId;
+  tileFeedReset();
+  host.innerHTML = '';
+  host.removeAttribute('data-empty');
+  applyGridSlots();
+  if (keepFocus && tileFeed.tiles.has(keepFocus)) {
+    setTileFocus(keepFocus);
+    attachCameraStreams();
+  }
+}
+
+// ---- rotation controls
+
+/** "5–8" or "29–30, 1–2": the rotating positions on screen, 1-based. */
+function shownRangeLabel(L) {
+  const runs = [];
+  L.shown.forEach((idx) => {
+    const last = runs[runs.length - 1];
+    if (last && idx === last[1] + 1) last[1] = idx; else runs.push([idx, idx]);
+  });
+  return runs.map(([a, b]) => (a === b ? `${a + 1}` : `${a + 1}–${b + 1}`)).join(', ');
+}
+
+function renderGridControls(L) {
+  const bar = el('gridRotationBar');
+  if (!bar) return;
+  // Four cameras or fewer fit on one page: nothing to rotate, no controls.
+  const show = L.pool.length > CAMERA_SLOTS;
+  bar.hidden = !show;
+  if (!show) return;
+  const blocked = !L.canRotate;
+  ['gridPrevBtn', 'gridNextBtn', 'gridPauseBtn'].forEach((id) => { const b = el(id); if (b) b.disabled = blocked; });
+  const pause = el('gridPauseBtn');
+  if (pause) {
+    pause.textContent = cameraGrid.paused ? 'Resume' : 'Pause';
+    pause.setAttribute('aria-pressed', cameraGrid.paused ? 'true' : 'false');
+    pause.title = cameraGrid.paused ? 'Resume rotating the cameras' : 'Stop rotating; Previous and Next still work';
+  }
+  const input = el('gridDelayInput');
+  if (input && document.activeElement !== input && input.value !== String(cameraGrid.delay)) input.value = String(cameraGrid.delay);
+  renderGridStatus();
+}
+
+function renderGridStatus() {
+  const node = el('gridRotationStatus');
+  const L = cameraGrid.layout;
+  if (!node || !L) return;
+  const pinned = CAMERA_SLOTS - L.free;
+  let text = '';
+  if (L.pool.length > CAMERA_SLOTS) {
+    if (!L.free) {
+      text = `All ${CAMERA_SLOTS} tiles are pinned, so nothing rotates. Unpin one to see the other ${L.rotating.length} camera${L.rotating.length === 1 ? '' : 's'}.`;
+    } else {
+      text = `Cameras ${shownRangeLabel(L)} of ${L.rotating.length}${pinned ? ` · ${pinned} pinned` : ''}`;
+      if (cameraGrid.paused) text += ' · paused';
+      else if (tileFeed.focusId) text += ' · paused while a camera is enlarged';
+      else if (cameraGrid.nextAt) text += ` · next in ${Math.max(0, Math.ceil((cameraGrid.nextAt - Date.now()) / 1000))} s`;
+    }
+  }
+  if (node.textContent !== text) node.textContent = text;
+}
+
+/** Previous (-1) or next (+1) page; works while paused. */
+function stepCameraGrid(dir) {
+  const L = cameraGrid.layout || gridLayout();
+  if (!L.canRotate) return;
+  const n = L.rotating.length;
+  cameraGrid.offset = (((cameraGrid.offset + dir * L.free) % n) + n) % n;
+  cameraGrid.nextAt = 0;             // the next page gets the full delay
+  applyGridSlots();
+}
+
+function toggleCameraRotation() {
+  cameraGrid.paused = !cameraGrid.paused;
+  cameraGrid.nextAt = 0;
+  saveGridPrefs();
+  if (cameraGrid.layout) renderGridControls(cameraGrid.layout);
+}
+
+function setCameraRotationDelay(value) {
+  const input = el('gridDelayInput');
+  const note = el('gridDelayNote');
+  const v = Number(value);
+  if (String(value).trim() === '' || !Number.isFinite(v)) {
+    if (input) input.value = String(cameraGrid.delay);
+    if (note) note.textContent = `Enter ${ROTATE_MIN_S} to ${ROTATE_MAX_S} seconds.`;
+    return;
+  }
+  const d = clampRotateDelay(v);
+  cameraGrid.delay = d;
+  if (input) input.value = String(d);
+  if (note) note.textContent = d !== v ? `Kept within ${ROTATE_MIN_S} to ${ROTATE_MAX_S} seconds.` : '';
+  saveGridPrefs();
+  if (cameraGrid.nextAt) cameraGrid.nextAt = Date.now() + d * 1000;     // applies to the page on screen now
+  renderGridStatus();
+}
+
+/** Pin the camera in this slot, or unpin it. Other tiles keep their cameras. */
+function toggleCameraPin(slot, id) {
+  if (cameraGrid.pins[slot] === id) {
+    cameraGrid.pins[slot] = null;
+    const back = gridLayout().rotating.indexOf(id);
+    if (back >= 0 && back < cameraGrid.offset) cameraGrid.offset += 1;
+  } else {
+    const idx = (cameraGrid.layout || gridLayout()).rotating.indexOf(id);
+    cameraGrid.pins = cameraGrid.pins.map((p) => (p === id ? null : p));
+    cameraGrid.pins[slot] = id;
+    // It leaves the rotating list; later cameras move up one place.
+    if (idx >= 0 && idx < cameraGrid.offset) cameraGrid.offset -= 1;
+  }
+  saveGridPrefs();
+  applyGridSlots();
+}
+
+/** Twice a second: advance the rotation when its time is up. */
+function gridTick() {
+  const L = cameraGrid.layout;
+  const running = !!L && L.canRotate && !cameraGrid.paused && !tileFeed.focusId && tileFeedActive();
+  if (!running) {
+    cameraGrid.nextAt = 0;           // enlarged, paused or not watched: start over afterwards
+  } else if (!cameraGrid.nextAt) {
+    cameraGrid.nextAt = Date.now() + cameraGrid.delay * 1000;
+  } else if (Date.now() >= cameraGrid.nextAt) {
+    stepCameraGrid(1);
+    cameraGrid.nextAt = Date.now() + cameraGrid.delay * 1000;
+  }
+  renderGridStatus();
+}
+
+// ---- turning cameras off and on
+
+function cameraName(id) { const c = cameraById(id); return (c && c.name) || id; }
+
+/** PUT the switch for one or many cameras; the tiles follow at once. */
+async function setCamerasEnabled(ids, enabled) {
+  ids = [...new Set(ids)];
+  if (!ids.length) return false;
+  const one = ids.length === 1;
+  const what = one ? cameraName(ids[0]) : `${ids.length} cameras`;
+  try {
+    const res = await fetch(one ? `/api/v1/cameras/${encodeURIComponent(ids[0])}/enabled` : '/api/v1/cameras/enabled', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(one ? { enabled } : { camera_ids: ids, enabled }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    (one ? [data] : data.cameras || []).forEach((s) => {
+      const cam = cameraById(s.camera_id);
+      if (cam) { cam.is_ai_enabled = !!s.enabled; cam.status = s.status; }
+      const pipe = ((pipelineSnapshot && pipelineSnapshot.cameras) || []).find((c) => c.camera_id === s.camera_id);
+      if (pipe) { pipe.status = s.status; pipe.enabled = !!s.enabled; }
+    });
+    cameraGrid.confirmOffline = false;
+    pruneGridPins();
+    applyGridSlots();
+    showToast(`${what} turned ${enabled ? 'on' : 'off'}`, 'ok');
+    window.dispatchEvent(new CustomEvent('edge:cameras-changed', { detail: { from: 'matrix' } }));
+    return true;
+  } catch (e) {
+    showToast(`Could not turn ${what} ${enabled ? 'on' : 'off'}: ${e.message}`, 'error');
+    return false;
+  }
+}
+
+function setCameraEnabled(id, enabled) { return setCamerasEnabled([id], enabled); }
+
+/** On cameras that are not delivering video (unreachable or wrong password). */
+function offlineCameras() {
+  return allCamerasList.filter((c) => !cameraIsOff(c) && (c.status === 'OFFLINE' || c.status === 'AUTH_FAILED'));
+}
+
+function turnAllCamerasOn() { return setCamerasEnabled(allCamerasList.filter(cameraIsOff).map((c) => c.id), true); }
+function askTurnOffOffline() { cameraGrid.confirmOffline = true; renderCameraPower(); const b = el('powerOfflineYes'); if (b) b.focus(); }
+function cancelTurnOffOffline() { cameraGrid.confirmOffline = false; renderCameraPower(); const b = el('powerOfflineAsk'); if (b) b.focus(); }
+function confirmTurnOffOffline() { return setCamerasEnabled(offlineCameras().map((c) => c.id), false); }
+
+/**
+ * Under the tiles: every camera that is off, each with its own "Turn on",
+ * and the bulk actions (all on; everything offline off, confirmed inline).
+ */
+function renderCameraPower() {
+  const host = el('cameraPowerBar');
+  if (!host) return;
+  const off = allCamerasList.filter(cameraIsOff);
+  const offline = offlineCameras();
+  if (!offline.length) cameraGrid.confirmOffline = false;
+  let html = '';
+  if (off.length) {
+    html += `<div class="camera-off-list" role="list" aria-label="Cameras turned off">
+      <span class="camera-power-label">Turned off (${off.length})</span>
+      ${off.map((c) => `<span class="camera-off-chip" role="listitem">
+        <span class="badge badge-neutral camera-off-badge">OFF</span>
+        <span class="camera-off-name" title="${escapeHtml(c.location || c.name)}">${escapeHtml(c.name)}</span>
+        <button type="button" class="btn btn-xs btn-primary" onclick="setCameraEnabled('${escapeHtml(c.id)}', true)" aria-label="Turn on ${escapeHtml(c.name)}">Turn on</button>
+      </span>`).join('')}
+    </div>`;
+  }
+  const actions = [];
+  if (off.length > 1) {
+    actions.push(`<button type="button" class="btn btn-sm" onclick="turnAllCamerasOn()">Turn all ${off.length} on</button>`);
+  }
+  if (offline.length) {
+    const names = escapeHtml(offline.map((c) => c.name).join(', '));
+    actions.push(cameraGrid.confirmOffline
+      ? `<span class="camera-power-confirm" role="group" aria-label="Confirm turning off offline cameras">
+          Turn off ${offline.length} camera${offline.length === 1 ? '' : 's'} not sending pictures? They stop costing anything until turned on.
+          <button type="button" class="btn btn-sm btn-danger" id="powerOfflineYes" onclick="confirmTurnOffOffline()" title="${names}">Turn off</button>
+          <button type="button" class="btn btn-sm" onclick="cancelTurnOffOffline()">Cancel</button></span>`
+      : `<button type="button" class="btn btn-sm" id="powerOfflineAsk" onclick="askTurnOffOffline()" title="${names}">Turn off ${offline.length} offline camera${offline.length === 1 ? '' : 's'}</button>`);
+  }
+  if (actions.length) html += `<div class="camera-power-actions">${actions.join('')}</div>`;
+  if (html === cameraGrid.powerHtml) return;
+  cameraGrid.powerHtml = html;
+  host.innerHTML = html;
+  host.hidden = !html;
 }
 
 /**
@@ -648,13 +1058,15 @@ function updateMatrixHud(pipe) {
     const status = document.querySelector(`[data-status-for="${CSS.escape(id)}"]`);
     if (status) {
       const online = c.status === 'ONLINE';
+      const off = c.status === 'DISABLED';
       status.textContent = `● ${cameraStatusLabel(c.status)}`;
-      status.title = c.status === 'AUTH_FAILED' ? AUTH_FAILED_TIP : (online ? '' : (c.last_error || ''));
+      status.title = c.status === 'AUTH_FAILED' ? AUTH_FAILED_TIP : (online || off ? '' : (c.last_error || ''));
       status.classList.toggle('badge-green', online);
-      status.classList.toggle('badge-danger', !online);
+      status.classList.toggle('badge-danger', !online && !off);
+      status.classList.toggle('badge-neutral', off);
     }
     const retry = document.querySelector(`[data-reconnect-for="${CSS.escape(id)}"]`);
-    if (retry) retry.hidden = c.status === 'ONLINE';
+    if (retry) retry.hidden = c.status === 'ONLINE' || c.status === 'DISABLED';
     setResolutionBadge(id, c);
   });
 }
@@ -723,6 +1135,22 @@ function tileFeedRegister(id, img) {
     id, img, visible: !obs, ctl: null, url: null, lastTry: 0, lastFrameAt: 0, source: null, error: null, streamHash: null,
   });
   if (obs) obs.observe(img);
+}
+
+/** Drop one tile (its camera rotated out or was turned off): abort, free, forget. */
+function tileFeedUnregister(id) {
+  const t = tileFeed.tiles.get(id);
+  if (!t) return;
+  if (tileFeed.focusId === id) {
+    closeFocusStream();
+    tileFeed.focusId = null;
+  }
+  clearTimeout(t.img._retryTimer);
+  if (t.ctl) t.ctl.abort();
+  if (t.url) URL.revokeObjectURL(t.url);
+  t.url = null;
+  if (tileFeed.observer) tileFeed.observer.unobserve(t.img);
+  tileFeed.tiles.delete(id);
 }
 
 /** Drop every tile: abort its request, free its picture. Before a re-render. */
@@ -805,7 +1233,9 @@ function renderTileLive(id) {
   let text;
   let kind;
   let tip = '';
-  if (status !== 'ONLINE') {
+  if (status === 'DISABLED') {
+    text = '● OFF'; kind = 'off'; tip = 'Turned off: nothing is fetched or analysed';
+  } else if (status !== 'ONLINE') {
     text = `● ${cameraStatusLabel(status)}`; kind = 'offline';
   } else if (t && t.source === 'no-signal') {
     text = '● NO PICTURE'; kind = 'offline'; tip = 'The server has no picture from this camera right now';
@@ -824,6 +1254,7 @@ function renderTileLive(id) {
   badge.classList.toggle('cam-hud-live', kind === 'live');
   badge.classList.toggle('cam-hud-offline', kind === 'offline');
   badge.classList.toggle('cam-hud-stale', kind === 'stale');
+  badge.classList.toggle('cam-hud-off', kind === 'off');
 }
 
 // ---- the one enlarged, live-streaming tile
@@ -942,8 +1373,9 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && tileFeed.focusId && currentView === 'cameras') { setTileFocus(null); pumpTiles(); }
 });
 
-/** Twice a second: keep tiles due for a picture moving and their LIVE badges honest. */
+/** Twice a second: rotate the grid when due, keep tiles due for a picture moving and their LIVE badges honest. */
 function tileTick() {
+  gridTick();
   if (!tileFeedActive()) return;
   sampleFocusStream();
   pumpTiles();
@@ -1279,6 +1711,7 @@ function normaliseDepartment(v) {
 function cameraStatusLabel(status) {
   if (status === 'ONLINE') return 'WORKING';
   if (status === 'AUTH_FAILED') return 'WRONG PASSWORD';
+  if (status === 'DISABLED') return 'OFF';
   return status || 'OFFLINE';
 }
 
@@ -1577,7 +2010,8 @@ async function runSelfTest() {
   if (cams === 0) {
     check('empty state rendered', !!document.querySelector('.matrix-empty'));
   } else {
-    check('one tile per camera', tiles.length === cams, `${tiles.length}/${cams}`);
+    const shown = Math.min(CAMERA_SLOTS, gridPool().length);
+    check(`${shown} tile(s): at most ${CAMERA_SLOTS}, cameras that are on only`, tiles.length === shown, `${tiles.length}/${shown}`);
     tiles.forEach((img) => {
       const r = img.getBoundingClientRect();
       const id = img.getAttribute('data-camera-id');
@@ -1646,6 +2080,17 @@ window.filterCameras = filterCameras;
 window.filterCamerasBySearch = filterCamerasBySearch;
 window.setDecimationFPS = setDecimationFPS;
 window.focusCameraTile = focusCameraTile;
+window.toggleCameraPin = toggleCameraPin;
+window.stepCameraGrid = stepCameraGrid;
+window.toggleCameraRotation = toggleCameraRotation;
+window.setCameraRotationDelay = setCameraRotationDelay;
+window.setCameraEnabled = setCameraEnabled;
+window.setCamerasEnabled = setCamerasEnabled;
+window.turnAllCamerasOn = turnAllCamerasOn;
+window.askTurnOffOffline = askTurnOffOffline;
+window.cancelTurnOffOffline = cancelTurnOffOffline;
+window.confirmTurnOffOffline = confirmTurnOffOffline;
+window.clearCameraSearch = clearCameraSearch;
 window.openCameraConfigModal = openCameraConfigModal;
 window.reconnectCamera = reconnectCamera;
 window.closeCameraConfigModal = closeCameraConfigModal;
@@ -1657,6 +2102,7 @@ window.initOrUpdateCharts = initOrUpdateCharts;
 window.renderHourlyVisitors = renderHourlyVisitors;
 
 function initAnalytics() {
+  loadGridPrefs();
   initHashRouting();
   fetchSystemTelemetry();
   refreshBrand();

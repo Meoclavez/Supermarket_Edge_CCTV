@@ -192,7 +192,24 @@
         </div>
       </div>
 
-      <div class="camera-grid" id="cameraMatrixGrid"></div>
+      <!-- Four tiles at a time; the other cameras rotate through them (js/analytics.js,
+           cameraGrid). Shown only when more than four cameras are on. -->
+      <div class="grid-rotation-bar" id="gridRotationBar" role="group" aria-label="Camera rotation" hidden>
+        <button type="button" class="btn btn-sm" id="gridPrevBtn" onclick="stepCameraGrid(-1)" aria-label="Show the previous cameras">&lsaquo; Previous</button>
+        <button type="button" class="btn btn-sm" id="gridPauseBtn" onclick="toggleCameraRotation()" aria-pressed="false">Pause</button>
+        <button type="button" class="btn btn-sm" id="gridNextBtn" onclick="stepCameraGrid(1)" aria-label="Show the next cameras">Next &rsaquo;</button>
+        <span class="grid-rotation-status" id="gridRotationStatus"></span>
+        <label class="grid-rotation-delay" for="gridDelayInput">Change every
+          <input type="number" id="gridDelayInput" name="gridDelay" class="grid-delay-input" min="3" max="600" step="1" value="10"
+            inputmode="numeric" onchange="setCameraRotationDelay(this.value)"
+            onkeydown="if (event.key === 'Enter') { event.preventDefault(); setCameraRotationDelay(this.value); }"> s</label>
+        <span class="grid-rotation-note" id="gridDelayNote" role="status"></span>
+      </div>
+
+      <div class="camera-grid camera-grid-quad" id="cameraMatrixGrid"></div>
+
+      <!-- Cameras turned off (each with "Turn on") and bulk on/off actions. -->
+      <div class="camera-power-bar" id="cameraPowerBar" hidden></div>
     </section>
 
     <!-- ==========================================
