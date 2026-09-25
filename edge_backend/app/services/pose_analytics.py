@@ -1543,6 +1543,10 @@ class PoseAnalytics:
                                   f"{datetime.fromtimestamp(p['ts']).strftime('%Y-%m-%d %H:%M:%S')}")
             path = self.evidence_dir() / f"{p['id']}.jpg"
             ok = cv2.imwrite(str(path), img, [int(cv2.IMWRITE_JPEG_QUALITY), int(settings.THEFT_EVIDENCE_JPEG_QUALITY)])
+            if ok:
+                from app.services.evidence_storage import note_evidence_written
+
+                note_evidence_written(path)  # the evidence limit (oldest first) runs if now exceeded
             return str(path) if ok else None
         except Exception as e:
             logger.error(f"Could not write evidence image for {p.get('id')}: {e}")

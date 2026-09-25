@@ -43,8 +43,9 @@ class CameraModel(Base):
     is_ai_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     ai_models: Mapped[list] = mapped_column(JSON, default=list)
 
-    # 24/7 DVR Configuration
-    dvr_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Legacy DVR columns. This device never records continuously (the store
+    # NAS does), so dvr_enabled is always off; m0015 turned existing rows off.
+    dvr_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     dvr_retention_days: Mapped[int] = mapped_column(Integer, default=7)
     dvr_quota_gb: Mapped[float] = mapped_column(Float, default=100.0)
 
@@ -112,6 +113,9 @@ class SecurityEventModel(Base):
     metadata_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     acknowledged: Mapped[bool] = mapped_column(Boolean, default=False)
     acknowledged_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # Set when the evidence storage limit deleted this alert's still/clip
+    # (services/evidence_storage.py); snapshot_url/clip_url are then NULL.
+    evidence_expired_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     camera: Mapped["CameraModel"] = relationship("CameraModel", back_populates="events")
 
@@ -336,6 +340,9 @@ class TheftIncidentModel(Base):
     resolved_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     dispatched_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     dispatched_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # Set when the evidence storage limit deleted this incident's evidence
+    # file (services/evidence_storage.py); snapshot_path keeps the old name.
+    evidence_expired_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

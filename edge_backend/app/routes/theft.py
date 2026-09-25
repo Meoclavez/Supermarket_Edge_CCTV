@@ -140,6 +140,10 @@ async def get_theft_incident_evidence(incident_id: str, db: AsyncSession = Depen
         raise HTTPException(status_code=404, detail=f"Theft incident '{incident_id}' not found")
     if not inc.snapshot_path:
         raise HTTPException(status_code=404, detail="No evidence image was recorded for this incident")
+    if inc.evidence_expired_at is not None:
+        raise HTTPException(status_code=410, detail=(
+            f"Evidence expired: the image was deleted by the evidence storage limit on "
+            f"{inc.evidence_expired_at:%Y-%m-%d %H:%M} UTC"))
     path = Path(inc.snapshot_path).resolve()
     # Serve only files inside the evidence directory, whatever the row says.
     root = pose_analytics.evidence_dir().resolve()

@@ -438,8 +438,10 @@ def test_an_offline_camera_is_never_reported_armed(watch):
     assert st["state"] == "unavailable" and st["armed"] is False and st["note"]
 
 
-def test_evidence_is_capped_oldest_first(watch, monkeypatch):
+def test_evidence_is_capped_oldest_first(watch, monkeypatch, tmp_path):
     nw, _, _, _ = watch
+    # The evidence limit only ever deletes inside STORAGE_DIR (evidence_storage.py).
+    monkeypatch.setattr(settings, "STORAGE_DIR", tmp_path)
     d = NightWatch.evidence_dir()
     for i in range(5):
         p = d / f"nw_{i:012x}.jpg"

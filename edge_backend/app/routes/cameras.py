@@ -99,6 +99,10 @@ def _writable_payload(cam_in: CameraFeed) -> Dict[str, object]:
         if key not in _WRITABLE_COLUMNS or value is None:
             continue
         out[key] = value.value if hasattr(value, "value") else value
+    if "dvr_enabled" in out:
+        # No continuous recording on this device (the store NAS records);
+        # the legacy flag is stored off whatever a client sends.
+        out["dvr_enabled"] = False
     if "features" in out:
         # Normalise to the current flag set; keys from older builds
         # (fall_detection, door_monitoring, ...) are dropped here.
@@ -758,6 +762,9 @@ async def save_camera_snapshot(camera_id: str, db: AsyncSession = Depends(get_db
     ok = cv2.imwrite(str(path), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
     if not ok or not path.exists():
         raise HTTPException(status_code=500, detail="failed to write snapshot")
+    from ..services.evidence_storage import note_evidence_written
+
+    note_evidence_written(path)
 
     h, w = frame.shape[:2]
     return {

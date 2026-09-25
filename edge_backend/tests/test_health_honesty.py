@@ -71,6 +71,10 @@ def fresh(monkeypatch, tmp_path):
 
     monkeypatch.setattr(fcm_provider, "configured", lambda: False)
     monkeypatch.setattr(health_route, "_pipeline_status", lambda: _pipeline())
+    # Nothing has measured the evidence directories on a fresh install either.
+    from app.services import evidence_storage as evidence_mod
+
+    monkeypatch.setattr(evidence_mod, "evidence_storage", evidence_mod.EvidenceStorage())
     yield TestClient(app)
     ServiceHealthTracker().reset()
     _run(_remove_camera())
@@ -90,6 +94,8 @@ def test_fresh_install_reports_no_fabricated_healthy(fresh):
     assert services["hailo"]["status"] == "NOT_PRESENT"
     assert services["notification"]["status"] == "NOT_CONFIGURED"
     assert services["go2rtc"]["status"] == "NOT_CHECKED"
+    assert services["evidence_storage"]["status"] == "NOT_CHECKED"
+    assert data["storage"]["evidence"]["status"] == "not_run_yet"
     for name in ("hailo", "notification", "go2rtc"):
         assert services[name]["last_success_time"] is None, name
         # Same keys as before, so existing clients keep parsing it.

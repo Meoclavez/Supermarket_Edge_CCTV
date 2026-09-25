@@ -294,7 +294,7 @@ async def add_cameras(
             resolution="unknown",
             is_ai_enabled=True,
             ai_models=[],
-            dvr_enabled=True,
+            dvr_enabled=False,  # no continuous recording on this device
             dvr_retention_days=7,
             dvr_quota_gb=100.0,
         )

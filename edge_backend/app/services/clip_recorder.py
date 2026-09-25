@@ -1,7 +1,9 @@
-"""Memory-optimized, thread-safe ring-buffer video recorder and storage retention cleaner.
+"""Memory-optimized, thread-safe ring-buffer for short alert clips.
 
 Stores JPEG-compressed frames in memory (reducing RAM usage by 98%) and exports
-optimized MP4 clips with +faststart flags. Includes automatic disk retention cleaner.
+optimized MP4 clips with +faststart flags. There is no continuous recording:
+a clip is only written for an alert or an operator request, and the saved
+stills/clips are aged out by services/evidence_storage.py (oldest first).
 """
 
 import os
@@ -19,6 +21,7 @@ import numpy as np
 
 from app.config import settings
 from app.services.auth_service import auth_service
+from app.services.evidence_storage import note_evidence_written
 from app.services.resilience import ServiceHealthTracker
 
 logger = logging.getLogger("ClipRecorder")
@@ -66,38 +69,6 @@ class StreamRingBuffer:
             return self.latest_frame.copy() if self.latest_frame is not None else None
 
 
-class StorageCleaner:
-    """Manages disk retention policy to prevent Mini PC SSD exhaustion."""
-
-    @staticmethod
-    def cleanup_old_media(storage_dir: Path, max_age_days: int = 7, max_disk_percent: float = 85.0):
-        """Purge media files older than max_age_days or when disk space exceeds threshold."""
-        try:
-            total, used, free = shutil.disk_usage(str(storage_dir))
-            used_pct = (used / total) * 100
-            now = time.time()
-            max_age_sec = max_age_days * 86400
-
-            files = list(storage_dir.glob("*/*.*"))
-            # Sort oldest first (FIFO)
-            files.sort(key=lambda f: f.stat().st_mtime)
-
-            for f in files:
-                if f.suffix.lower() not in [".mp4", ".jpg", ".jpeg"]:
-                    continue
-                file_age = now - f.stat().st_mtime
-                if file_age > max_age_sec or used_pct > max_disk_percent:
-                    try:
-                        f.unlink()
-                        logger.info(f"Purged expired media file: {f.name}")
-                        total, used, free = shutil.disk_usage(str(storage_dir))
-                        used_pct = (used / total) * 100
-                    except Exception as e:
-                        logger.warning(f"Failed to delete {f.name}: {e}")
-        except Exception as err:
-            logger.error(f"Storage cleaner error: {err}")
-
-
 class ClipRecorderService:
     def __init__(self):
         self.buffers: Dict[str, StreamRingBuffer] = {}
@@ -125,7 +96,8 @@ class ClipRecorderService:
 
         filename = f"{event_id}.jpg"
         filepath = settings.SNAPSHOTS_DIR / filename
-        cv2.imwrite(str(filepath), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+        if cv2.imwrite(str(filepath), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 90]):
+            note_evidence_written(filepath)
 
         token = auth_service.generate_clip_token(event_id)
         return f"{settings.EDGE_BASE_URL}/api/v1/events/snapshots/{filename}?token={token}"
@@ -169,6 +141,7 @@ class ClipRecorderService:
             clip_duration_ms = int((len(all_frames) / fps) * 1000)
             logger.info(f"Clip recorded: {output_filename} | clip_duration_ms={clip_duration_ms} | file_size_bytes={file_size_bytes}")
             ServiceHealthTracker.report_status("clip_recorder", "healthy", "Clip recorded successfully")
+            note_evidence_written(output_path)
 
         token = auth_service.generate_clip_token(event_id)
         clip_url = f"{settings.EDGE_BASE_URL}/api/v1/events/clips/{output_filename}?token={token}"

@@ -613,6 +613,15 @@ def check_storage() -> tuple[list, list, list]:
         if not ok:
             errors.append(_issue("storage", f"database {db} is not writable", f"sudo chown $(id -un) {db}"))
     root = str(getattr(settings, "STORAGE_DIR", ""))
+    try:
+        from app.services.evidence_storage import network_mount_problem  # noqa: PLC0415
+
+        problem = network_mount_problem(Path(root)) if root else None
+    except Exception:  # noqa: BLE001 - a broken check must not stop preflight
+        problem = None
+    if problem:
+        warnings.append(_issue("storage", f"STORAGE_DIR {problem}; the evidence storage limit will not run",
+                               "set STORAGE_DIR in .env to a directory on this device's own disk"))
     if root.startswith("/tmp/") and "cctv_test_" not in root:
         warnings.append(_issue("storage", f"storage fell back to {root}; recordings and the database "
                                           "will be lost on reboot", f"make {REPO_DIR / 'storage'} writable"))

@@ -127,6 +127,34 @@ def _notification_service() -> dict:
     return T().get("notification") or T.unchecked_status("configured; no push has been sent yet")
 
 
+def _evidence_storage() -> tuple[dict, dict]:
+    """(storage.evidence block, services entry) from the evidence limit's last pass."""
+    T = ServiceHealthTracker
+    try:
+        from app.services.evidence_storage import evidence_storage
+
+        st = evidence_storage.status()
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}, T.entry(T.FAILED, str(exc), consecutive_failures=None)
+    block = {k: st.get(k) for k in (
+        "status", "error", "storage_dir", "used_bytes", "files", "oldest", "cap_bytes", "cap_source",
+        "effective_cap_bytes", "limited_by", "retention_days", "last_run_at", "last_cleanup_at",
+        "last_deleted", "deleted_files_total", "deleted_bytes_total", "note")}
+    block["by_kind"] = {k: {f: v.get(f) for f in ("bytes", "files", "oldest", "managed", "note")}
+                        for k, v in (st.get("by_kind") or {}).items()}
+    block["not_managed"] = {k: {f: v.get(f) for f in ("bytes", "files", "oldest")}
+                            for k, v in (st.get("not_managed") or {}).items()}
+    if st.get("status") == "refused":
+        entry = T.entry(T.FAILED, st.get("error"), consecutive_failures=None)
+    elif st.get("status") == "not_run_yet":
+        entry = T.unchecked_status("the evidence storage limit has not run yet (first pass ~30 s after start)")
+    elif st.get("status") == "over_limit":
+        entry = T.entry(T.DEGRADED, "evidence is above its limit and could not be trimmed", None, None)
+    else:
+        entry = T().get("evidence_storage") or T.entry(T.HEALTHY)
+    return block, entry
+
+
 def _overall(services: dict) -> str:
     """healthy/degraded/unhealthy from observed entries only."""
     db = services.get("database") or {}
@@ -181,6 +209,7 @@ async def health_check():
     services["hailo"] = _hailo_service(detector)
     services["notification"] = _notification_service()
     services.update(_camera_services(cameras, pipeline))
+    evidence, services["evidence_storage"] = _evidence_storage()
 
     overall = _overall(services)
     body = {
@@ -202,6 +231,7 @@ async def health_check():
             "used_percent": used_pct,
             "free_gb": round(free / (1024**3), 2),
             "retention_days": settings.STORAGE_RETENTION_DAYS,
+            "evidence": evidence,
         },
         "logs": {
             "path": str(log_path),

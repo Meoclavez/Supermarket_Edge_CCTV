@@ -133,6 +133,8 @@ async def night_watch_events(limit: int = Query(30, ge=1, le=200), camera_id: Op
             "confidence": e.confidence if meta.get("confidence_measured") else None,
             "at": time_info(ts),
             "snapshot_url": e.snapshot_url, "clip_url": e.clip_url,
+            # Deleted by the evidence storage limit (services/evidence_storage.py).
+            "evidence_expired": e.evidence_expired_at is not None,
             "acknowledged": bool(e.acknowledged),
         })
     return {"events": events, "total": len(events), "store_timezone": zone_info()}

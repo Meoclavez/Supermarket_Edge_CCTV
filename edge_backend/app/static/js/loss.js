@@ -360,7 +360,9 @@
     const thumb = thumbUrl
       ? `<a class="loss-thumb-link" href="${esc(authUrl(thumbUrl))}" target="_blank" rel="noopener" data-evidence-url="${esc(thumbUrl)}" title="Open the evidence image">
            <img src="${esc(authUrl(thumbUrl))}" alt="Evidence image for this incident" loading="lazy" class="evidence-thumb"></a>`
-      : '<div class="evidence-thumb-empty">No evidence image recorded</div>';
+      : (inc.evidence_expired_at
+        ? '<div class="evidence-thumb-empty" title="Deleted by the evidence storage limit (oldest first)">Evidence expired</div>'
+        : '<div class="evidence-thumb-empty">No evidence image recorded</div>');
     return `
       <div class="incident-head">
         <div class="loss-head-main">

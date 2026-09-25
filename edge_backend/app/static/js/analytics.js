@@ -376,11 +376,52 @@ async function loadSystemHealth() {
         set('telemetryRamVal', (isNum(stats.ram_used_gb) && isNum(stats.ram_total_gb))
           ? `${stats.ram_used_gb.toFixed(1)} of ${stats.ram_total_gb.toFixed(0)} GB` : DASH);
         set('telemetryUptimeVal', isNum(stats.uptime_seconds) ? formatDuration(stats.uptime_seconds) : DASH);
+        renderEvidenceStorage(stats.evidence_storage);
       }),
     ]);
   } finally {
     systemHealthLoading = false;
   }
+}
+
+/** Bytes -> "340 MB" / "1.2 GB". */
+function formatBytes(b) {
+  if (!isNum(b)) return DASH;
+  if (b < 1024 * 1024 * 1024) return `${Math.round(b / (1024 * 1024))} MB`;
+  const gb = b / (1024 * 1024 * 1024);
+  return `${gb >= 10 ? gb.toFixed(0) : gb.toFixed(1)} GB`;
+}
+
+/** Settings > System health: evidence on this device against its limit (services/evidence_storage.py). */
+function renderEvidenceStorage(ev) {
+  const node = el('telemetryEvidenceVal');
+  if (!node) return;
+  node.classList.remove('health-bad');
+  if (!ev) { node.textContent = DASH; node.title = ''; return; }
+  if (ev.status === 'refused') {
+    node.textContent = 'Limit not enforced';
+    node.classList.add('health-bad');
+    node.title = ev.error || '';
+    return;
+  }
+  if (ev.status === 'not_run_yet' || !isNum(ev.used_bytes)) {
+    node.textContent = 'Not checked yet';
+    node.title = 'The first check runs about 30 seconds after the server starts.';
+    return;
+  }
+  const limit = isNum(ev.effective_cap_bytes) ? ev.effective_cap_bytes : ev.cap_bytes;
+  node.textContent = `${formatBytes(ev.used_bytes)} of ${formatBytes(limit)} · ${Number(ev.files).toLocaleString()} file${ev.files === 1 ? '' : 's'}`;
+  if (ev.status === 'over_limit') node.classList.add('health-bad');
+  const parts = [
+    ev.oldest ? `Oldest kept: ${formatTimestamp(ev.oldest)}.` : 'No evidence files kept.',
+    `Limit: ${ev.cap_source || DASH}${ev.limited_by && ev.limited_by !== 'cap' ? ` (now lower: ${ev.limited_by})` : ''}.`,
+    ev.retention_days > 0 ? `Files older than ${ev.retention_days} days are deleted.` : 'No age limit.',
+    ev.last_cleanup_at
+      ? `Last cleanup ${formatAgo(ev.last_cleanup_at)}; ${Number(ev.deleted_files_total || 0).toLocaleString()} deleted since the server started.`
+      : 'Nothing deleted since the server started.',
+  ];
+  if (ev.note) parts.push(ev.note);
+  node.title = parts.join(' ');
 }
 
 /** Store name in the header, from the overview (STORE_NAME on the server). */

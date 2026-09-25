@@ -788,6 +788,10 @@ class TripwireEngine:
                     cv2.rectangle(img, (x1, y1), (x2, y2), (0, 165, 255), 2)
             path = self.evidence_dir() / f"{alert.alert_id}.jpg"
             ok = cv2.imwrite(str(path), img, [int(cv2.IMWRITE_JPEG_QUALITY), int(settings.THEFT_EVIDENCE_JPEG_QUALITY)])
+            if ok:
+                from app.services.evidence_storage import note_evidence_written
+
+                note_evidence_written(path)
             return str(path) if ok else None
         except Exception as e:
             logger.error(f"Could not write zone alert snapshot {alert.alert_id}: {e}")

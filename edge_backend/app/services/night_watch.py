@@ -721,6 +721,10 @@ class NightWatch:
                 cv2.rectangle(img, (x1, y1), (x2, y2), (0, 165, 255), 2)
         path = self.evidence_dir() / f"{p.alert_id}.jpg"
         ok = cv2.imwrite(str(path), img, [int(cv2.IMWRITE_JPEG_QUALITY), int(settings.THEFT_EVIDENCE_JPEG_QUALITY)])
+        if ok:
+            from app.services.evidence_storage import note_evidence_written
+
+            note_evidence_written(path)
         return bool(ok)
 
     def _write_clip(self, p: _Pending) -> bool:
@@ -745,33 +749,25 @@ class NightWatch:
             return False
         path = self.evidence_dir() / f"{p.alert_id}.mp4"
         clip_recorder_service._mux_frames_to_mp4(frames, path, fps)
-        return path.is_file()
+        if path.is_file():
+            from app.services.evidence_storage import note_evidence_written
+
+            note_evidence_written(path)
+            return True
+        return False
 
     def enforce_cap(self) -> int:
-        """Delete the oldest evidence until the directory is within NIGHT_WATCH_EVIDENCE_MAX_MB."""
-        cap = float(settings.NIGHT_WATCH_EVIDENCE_MAX_MB) * 1024 * 1024
-        files = []
-        for f in self.evidence_dir().glob("nw_*.*"):
-            try:
-                st = f.stat()
-            except OSError:
-                continue
-            files.append((st.st_mtime, st.st_size, f))
-        total = sum(s for _, s, _ in files)
-        removed = 0
-        for _, size, f in sorted(files, key=lambda x: x[0]):
-            if total <= cap:
-                break
-            try:
-                f.unlink()
-                total -= size
-                removed += 1
-            except OSError as e:
-                logger.warning(f"could not delete old night-watch evidence {f.name}: {e}")
+        """Delete the oldest night-watch evidence until it is within NIGHT_WATCH_EVIDENCE_MAX_MB.
+
+        The sub-cap is enforced by the evidence storage manager, which also
+        marks the alerts whose files went as "evidence expired" and refuses to
+        touch a directory outside STORAGE_DIR or on a network share.
+        """
+        from app.services.evidence_storage import evidence_storage
+
+        removed = evidence_storage.enforce_kind_cap("night_watch")
         if removed:
             self.stats["evidence_pruned"] += removed
-            logger.info(f"Night watch evidence over {settings.NIGHT_WATCH_EVIDENCE_MAX_MB:g} MB: "
-                        f"deleted {removed} oldest file(s)")
         return removed
 
     def _dispatcher(self) -> AsyncDispatch:

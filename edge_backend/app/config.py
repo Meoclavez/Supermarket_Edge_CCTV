@@ -264,8 +264,17 @@ class Settings(BaseSettings):
     SHM_DIR: Path = Path(os.getenv("SHM_DIR", "/dev/shm" if os.path.exists("/dev/shm") else "/tmp"))
     
     # Storage Retention & Purging Policies
+    # This device keeps loss-prevention evidence only (stills, optional short
+    # clips); it never records continuously (the store NAS does). Evidence is
+    # aged out by services/evidence_storage.py, oldest first across all kinds:
+    # older than STORAGE_RETENTION_DAYS (0 = no age limit), above
+    # EVIDENCE_MAX_GB in total (0 = automatic: 10% of the disk, 1-50 GB), or
+    # when the disk passes STORAGE_MAX_DISK_PERCENT.
     STORAGE_RETENTION_DAYS: int = int(os.getenv("STORAGE_RETENTION_DAYS", "7"))
     STORAGE_MAX_DISK_PERCENT: float = float(os.getenv("STORAGE_MAX_DISK_PERCENT", "85.0"))
+    EVIDENCE_MAX_GB: float = float(os.getenv("EVIDENCE_MAX_GB", "0"))
+    # Seconds between background passes (each write also triggers one when over the limit).
+    EVIDENCE_CLEANUP_INTERVAL_SEC: float = float(os.getenv("EVIDENCE_CLEANUP_INTERVAL_SEC", "900"))
     DVR_DEFAULT_RETENTION_DAYS: int = 7
     DVR_DEFAULT_QUOTA_GB: float = 100.0
     
@@ -488,7 +497,8 @@ class Settings(BaseSettings):
     # Save a short clip (pre-event buffer + NIGHT_WATCH_CLIP_POST_SEC) with a person alert.
     NIGHT_WATCH_CLIP: bool = os.getenv("NIGHT_WATCH_CLIP", "false").lower() in ("1", "true", "yes", "on")
     NIGHT_WATCH_CLIP_POST_SEC: float = float(os.getenv("NIGHT_WATCH_CLIP_POST_SEC", "5"))
-    # Evidence stills/clips; empty = <STORAGE_DIR>/night_watch. Oldest deleted first above the cap.
+    # Evidence stills/clips; empty = <STORAGE_DIR>/night_watch. Oldest deleted first above the
+    # cap, a sub-cap inside the total evidence limit (EVIDENCE_MAX_GB, services/evidence_storage.py).
     NIGHT_WATCH_EVIDENCE_DIR: str = os.getenv("NIGHT_WATCH_EVIDENCE_DIR", "")
     NIGHT_WATCH_EVIDENCE_MAX_MB: float = float(os.getenv("NIGHT_WATCH_EVIDENCE_MAX_MB", "1024"))
 

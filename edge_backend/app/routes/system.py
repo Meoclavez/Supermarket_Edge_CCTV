@@ -109,6 +109,20 @@ def get_preflight(probe: bool = False):
     return result
 
 
+def _evidence_summary() -> Optional[dict]:
+    """The evidence limit's last pass (no scan here); None if the module is unavailable."""
+    try:
+        from app.services.evidence_storage import evidence_storage
+
+        st = evidence_storage.status()
+    except Exception:  # noqa: BLE001
+        return None
+    return {k: st.get(k) for k in (
+        "status", "error", "used_bytes", "files", "oldest", "cap_bytes", "cap_source",
+        "effective_cap_bytes", "limited_by", "retention_days", "last_run_at", "last_cleanup_at",
+        "last_deleted", "deleted_files_total", "note")}
+
+
 @router.get("/stats", response_model=SystemStats)
 def get_system_stats():
     total_ram, avail_ram = get_ram_info()
@@ -134,4 +148,5 @@ def get_system_stats():
         inference_provider=profile.inference_provider,
         shm_buffer_used_mb=None,
         uptime_seconds=round(time.time() - START_TIME, 1),
+        evidence_storage=_evidence_summary(),
     )

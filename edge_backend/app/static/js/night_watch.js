@@ -327,7 +327,9 @@
       const badge = person ? '<span class="badge badge-danger">Person</span>' : '<span class="badge badge-neutral">Motion</span>';
       const thumb = e.snapshot_url
         ? `<a class="nw-thumb-link" href="${esc(authUrl(e.snapshot_url))}" target="_blank" rel="noopener" title="Open the evidence image"><img class="nw-thumb" src="${esc(authUrl(e.snapshot_url))}" alt="Evidence image" loading="lazy"></a>`
-        : '<span class="nw-thumb nw-thumb-empty">No image</span>';
+        : (e.evidence_expired
+          ? '<span class="nw-thumb nw-thumb-empty" title="Deleted by the evidence storage limit (oldest first)">Expired</span>'
+          : '<span class="nw-thumb nw-thumb-empty">No image</span>');
       const clip = e.clip_url ? ` <a class="btn btn-sm" href="${esc(authUrl(e.clip_url))}" target="_blank" rel="noopener">Clip</a>` : '';
       return `<li class="nw-event ${person ? 'nw-event-person' : ''}">
           ${thumb}

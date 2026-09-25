@@ -175,6 +175,15 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         startup_log.exception(f"Analysis scheduler failed to start: {exc}")
 
+    # 4d. Evidence storage limit: stills/clips on this device's disk, oldest
+    # deleted first above EVIDENCE_MAX_GB / STORAGE_RETENTION_DAYS. Refuses
+    # (and says so in health) if STORAGE_DIR is on a network share.
+    from .services.evidence_storage import evidence_storage
+    try:
+        await evidence_storage.start()
+    except Exception as exc:
+        startup_log.exception(f"Evidence storage limit failed to start: {exc}")
+
     # 5. Remote access (online dashboard): runs cloudflared only when enabled,
     # a hostname and a token are configured, and authentication is on.
     from .services.remote_access_service import remote_access_service
@@ -197,6 +206,7 @@ async def lifespan(app: FastAPI):
         await asyncio.to_thread(pose_analytics.stop)
         await remote_access_service.stop()
         await recommendations_service.stop()
+        await evidence_storage.stop()
 
 
 app = FastAPI(

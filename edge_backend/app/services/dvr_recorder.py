@@ -1,7 +1,12 @@
-"""Continuous 24/7 Segmented DVR Recording Engine, HLS Generator & Storage Manager.
+"""Timeline, HLS and archive export over previously recorded DVR segments.
 
-High-performance, zero-copy RTSP stream segmentation, SQLite metadata indexing,
-lossless incident archive stitching, SMART monitoring, and per-camera FIFO retention.
+This device does NOT record continuous video: the store's NAS does that. The
+continuous FFmpeg segmenter that used to live here (never started by the
+application) has been removed, and :meth:`DVRRecorderService.start_camera_dvr`
+refuses. What remains reads segments that may already exist under
+``STORAGE_DIR/dvr`` from older builds; those files are reported by
+services/evidence_storage.py and never deleted automatically -- the owner
+decides what happens to them.
 """
 
 import os
@@ -12,7 +17,6 @@ import shutil
 import asyncio
 import logging
 import subprocess
-import threading
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
@@ -23,99 +27,13 @@ from app.config import settings
 from app.database import async_session_factory
 from app.models.db_models import DVRSegmentModel, IncidentArchiveModel, CameraModel
 from app.services.auth_service import auth_service
-from app.services.resilience import ServiceHealthTracker
+from app.services.evidence_storage import evidence_storage
 
 logger = logging.getLogger("DVRRecorder")
 
 
-class DVRCameraWorker:
-    """Manages an individual camera's continuous zero-copy FFmpeg recording subprocess."""
-
-    def __init__(self, camera_id: str, rtsp_url: str, base_dvr_dir: Path):
-        self.camera_id = camera_id
-        self.rtsp_url = rtsp_url
-        self.base_dvr_dir = base_dvr_dir
-        self.is_running = False
-        self.process: Optional[subprocess.Popen] = None
-        self.thread: Optional[threading.Thread] = None
-
-    def start(self):
-        self.is_running = True
-        self.thread = threading.Thread(target=self._supervise_loop, daemon=True)
-        self.thread.start()
-        logger.info(f"Started continuous DVR worker for {self.camera_id}")
-
-    def stop(self):
-        self.is_running = False
-        if self.process and self.process.poll() is None:
-            try:
-                self.process.terminate()
-                self.process.wait(timeout=3.0)
-            except Exception:
-                if self.process:
-                    self.process.kill()
-        if self.thread and self.thread.is_alive():
-            self.thread.join(timeout=2.0)
-        logger.info(f"Stopped continuous DVR worker for {self.camera_id}")
-
-    def _supervise_loop(self):
-        backoff = 1.0
-        while self.is_running:
-            total, used, free = shutil.disk_usage(str(self.base_dvr_dir))
-            if (used / total) > 0.90:
-                logger.critical(f"Disk usage > 90%, skipping DVR recording for {self.camera_id}")
-                ServiceHealthTracker.report_status("dvr_recorder", "degraded", "Disk usage critical")
-                time.sleep(30.0)
-                continue
-
-            camera_dir = self.base_dvr_dir / self.camera_id
-            camera_dir.mkdir(parents=True, exist_ok=True)
-            segment_pattern = str(camera_dir / "%Y%m%d_%H%M%S.mp4")
-
-            cmd = [
-                "ffmpeg",
-                "-hide_banner",
-                "-loglevel", "error",
-                "-rtsp_transport", "tcp",
-                "-stimeout", "5000000",
-                "-i", self.rtsp_url,
-                "-c:v", "copy",
-                "-c:a", "aac",
-                "-f", "segment",
-                "-segment_time", "60",
-                "-segment_atclocktime", "1",
-                "-reset_timestamps", "1",
-                "-strftime", "1",
-                "-segment_format", "mp4",
-                "-movflags", "+faststart+frag_keyframe+empty_moov",
-                segment_pattern
-            ]
-
-            try:
-                self.process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    text=True
-                )
-                _, stderr = self.process.communicate()
-
-                if self.is_running:
-                    logger.warning(f"DVR FFmpeg exited for {self.camera_id}: {stderr.strip() if stderr else 'EOF'}")
-                    ServiceHealthTracker.report_status("dvr_recorder", "degraded", f"FFmpeg crashed for {self.camera_id}")
-            except Exception as e:
-                logger.error(f"DVR process error for {self.camera_id}: {e}")
-                ServiceHealthTracker.report_status("dvr_recorder", "degraded", f"FFmpeg error for {self.camera_id}: {e}")
-
-            if self.is_running:
-                logger.info(f"Auto-restarting DVR segmenter for {self.camera_id} in 5s...")
-                time.sleep(5.0)
-            else:
-                break
-
-
 class DVRRecorderService:
-    """Orchestrates 24/7 continuous segmented recording, indexing, HLS, and quotas."""
+    """Timeline, HLS playback and archive export over existing DVR segments. Never records."""
 
     def __init__(self):
         self.dvr_dir: Path = settings.STORAGE_DIR / "dvr"
@@ -123,28 +41,11 @@ class DVRRecorderService:
         self.dvr_dir.mkdir(parents=True, exist_ok=True)
         self.archives_dir.mkdir(parents=True, exist_ok=True)
 
-        self.workers: Dict[str, DVRCameraWorker] = {}
-        self._service_lock = threading.Lock()
-
-    def start_camera_dvr(self, camera_id: str, rtsp_url: str):
-        with self._service_lock:
-            if camera_id in self.workers:
-                self.workers[camera_id].stop()
-            worker = DVRCameraWorker(camera_id, rtsp_url, self.dvr_dir)
-            self.workers[camera_id] = worker
-            worker.start()
-
-    def stop_camera_dvr(self, camera_id: str):
-        with self._service_lock:
-            worker = self.workers.pop(camera_id, None)
-            if worker:
-                worker.stop()
-
-    def stop_all(self):
-        with self._service_lock:
-            for worker in self.workers.values():
-                worker.stop()
-            self.workers.clear()
+    def start_camera_dvr(self, camera_id: str, rtsp_url: str) -> bool:
+        """Refused: continuous recording is the store NAS's job, never this device's."""
+        logger.error(f"Continuous recording requested for {camera_id} and refused: this device stores "
+                     "alert evidence only (stills/short clips); the store NAS records continuously")
+        return False
 
     # ---------------- 1. File Scanner & SQLite Indexer ----------------
 
@@ -512,21 +413,14 @@ class DVRRecorderService:
             "used_percent": round((used / total) * 100, 1),
             "smart_status": smart_infos,
             "camera_quotas": camera_quotas,
-            "archives_used_gb": round(archives_used_bytes / (1024**3), 2)
+            "archives_used_gb": round(archives_used_bytes / (1024**3), 2),
+            "evidence": evidence_storage.status(),
         }
 
     def _query_smart_telemetry(self) -> List[Dict]:
-        return [{
-            "device": "/dev/nvme0n1",
-            "model": "Intel NVMe PCIe SSD",
-            "serial_number": "N/A",
-            "temperature_celsius": 42,
-            "health_status": "PASSED",
-            "reallocated_sectors": 0,
-            "wear_level_percent": 98,
-            "power_on_hours": 1420,
-            "is_ssd": True
-        }]
+        # SMART is not read on this device. This used to return a constant
+        # "PASSED, 42 C, 98% life" record for a disk nobody had queried.
+        return []
 
 
 dvr_recorder_service = DVRRecorderService()

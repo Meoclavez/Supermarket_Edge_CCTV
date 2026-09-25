@@ -256,6 +256,8 @@ class SystemStats(BaseModel):
     inference_provider: Optional[str] = None
     shm_buffer_used_mb: Optional[float] = None
     uptime_seconds: float
+    # Evidence stills/clips on this device and their limit (services/evidence_storage.py).
+    evidence_storage: Optional[Dict[str, Any]] = None
 
 
 # ---------------- Loss-prevention alerts ----------------
@@ -286,6 +288,8 @@ class SecurityEvent(SecurityEventBase):
     snapshot_url: Optional[str] = None
     acknowledged: bool = False
     acknowledged_at: Optional[datetime] = None
+    # Set when the evidence storage limit deleted this alert's still/clip.
+    evidence_expired_at: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -314,7 +318,7 @@ class CameraFeed(BaseModel):
     is_ai_enabled: bool = True
     ai_models: List[str] = Field(default_factory=list)
     features: Any = Field(default_factory=CameraFeatureConfig)
-    dvr_enabled: bool = True
+    dvr_enabled: bool = False  # legacy: this device never records continuously
     dvr_retention_days: int = 7
     dvr_quota_gb: float = 100.0
     # Blueprint placement. All three are REAL-WORLD METRES (origin top-left,
@@ -357,7 +361,7 @@ class CameraCreate(BaseModel):
     fov_deg: Optional[float] = None
     homography_matrix: Optional[List[Any]] = None
     features: Optional[Dict[str, Any]] = None
-    dvr_enabled: bool = True
+    dvr_enabled: bool = False  # legacy: this device never records continuously
     dvr_retention_days: int = 7
     dvr_quota_gb: float = 100.0
 
@@ -518,6 +522,8 @@ class StorageHealthResponse(BaseModel):
     smart_status: List[DiskSMARTInfo]
     camera_quotas: List[CameraStorageQuota]
     archives_used_gb: float
+    # Evidence stills/clips and their limit (services/evidence_storage.py).
+    evidence: Optional[Dict[str, Any]] = None
 
 
 # ---------------- Device & Mute Schemas ----------------
@@ -811,6 +817,8 @@ class TheftIncidentBase(BaseModel):
     evidence_clip_url: Optional[str] = None
     snapshot_path: Optional[str] = None
     clip_path: Optional[str] = None
+    # Set when the evidence storage limit deleted the evidence file.
+    evidence_expired_at: Optional[datetime] = None
     evidence_summary: str = ""
     officer_notes: Optional[str] = None
     bounding_box: Optional[Dict[str, Any]] = None

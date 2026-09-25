@@ -69,6 +69,7 @@ def _row_to_event(e: SecurityEventModel) -> SecurityEvent:
         metadata=meta or None,
         acknowledged=e.acknowledged,
         acknowledged_at=e.acknowledged_at,
+        evidence_expired_at=e.evidence_expired_at,
     )
 
 
