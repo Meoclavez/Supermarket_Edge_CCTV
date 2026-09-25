@@ -37,7 +37,7 @@ from ..services.camera_discovery import camera_discovery_service
 from ..services.clip_recorder import clip_recorder_service
 from ..services.feature_manager import feature_manager
 from ..services.inference_backend import person_detector
-from ..services.live_analytics_engine import _draw_skeleton, live_engine, render_overlay
+from ..services.live_analytics_engine import _draw_skeleton, fit_width, live_engine, render_overlay
 from ..services.no_signal_slate import render_no_signal
 from ..services.privacy_mask import apply_privacy_masks, ignore_polygons, outside_ignore_regions
 
@@ -106,6 +106,29 @@ def _writable_payload(cam_in: CameraFeed) -> Dict[str, object]:
     return out
 
 
+def _live_feed(c: CameraModel) -> CameraFeed:
+    """The camera as stored, with status and fps from the running pipeline.
+
+    The stored ``status`` column is only the last persisted value (a new
+    camera's "STARTING"); whether it delivers frames right now is known by its
+    worker. Used by both the list and the single-camera GET, so they agree.
+    """
+    feed = _model_to_feed(c)
+    rt = live_engine.runtimes.get(c.id)
+    if not c.is_ai_enabled:
+        # Turned off by the operator: OFF, never "offline", even before
+        # the pipeline has picked the switch up.
+        feed.status = "DISABLED"
+        feed.fps = 0
+    elif rt is not None:
+        feed.status = rt.status
+        feed.fps = int(round(rt.fps)) if rt.fps else 0
+    else:
+        feed.status = "OFFLINE"
+        feed.fps = 0
+    return feed
+
+
 async def _get_camera_or_404(camera_id: str, db: AsyncSession) -> CameraModel:
     res = await db.execute(select(CameraModel).where(CameraModel.id == camera_id))
     cam = res.scalar_one_or_none()
@@ -151,19 +174,7 @@ async def list_cameras(
 
     feeds = []
     for c in cams:
-        feed = _model_to_feed(c)
-        rt = live_engine.runtimes.get(c.id)
-        if not c.is_ai_enabled:
-            # Turned off by the operator: OFF, never "offline", even before
-            # the pipeline has picked the switch up.
-            feed.status = "DISABLED"
-            feed.fps = 0
-        elif rt is not None:
-            feed.status = rt.status
-            feed.fps = int(round(rt.fps)) if rt.fps else 0
-        else:
-            feed.status = "OFFLINE"
-            feed.fps = 0
+        feed = _live_feed(c)
         if status and feed.status != status:
             continue
         feeds.append(feed)
@@ -409,7 +420,7 @@ async def set_camera_enabled(camera_id: str, body: CameraEnabledRequest, db: Asy
 @router.get("/{camera_id}", response_model=CameraFeed)
 async def get_camera(camera_id: str, db: AsyncSession = Depends(get_db)):
     cam = await _get_camera_or_404(camera_id, db)
-    return _model_to_feed(cam)
+    return _live_feed(cam)
 
 
 @router.put("/{camera_id}", response_model=CameraFeed)
@@ -597,8 +608,13 @@ async def update_camera_features(camera_id: str, config: CameraFeatureConfig, db
     return config
 
 
+# JPEG quality of live pictures (tiles, the live view): past ~80 the file
+# grows fast for detail nobody sees at tile size.
+SNAPSHOT_JPEG_QUALITY = 80
+
+
 @router.get("/{camera_id}/snapshot")
-def get_camera_snapshot(camera_id: str, annotate: bool = True, overlay: bool = False):
+def get_camera_snapshot(camera_id: str, annotate: bool = True, overlay: bool = False, max_width: int = 0):
     """Return the most recent real frame captured from this camera.
 
     When no frame is available the response is a "NO SIGNAL" slate with
@@ -612,6 +628,12 @@ def get_camera_snapshot(camera_id: str, annotate: bool = True, overlay: bool = F
     boxes from the worker's own snapshot, exactly like ``/stream?overlay=1``.
     No inference runs, so the dashboard's camera tiles can refresh from this
     cheaply instead of each holding an MJPEG connection open.
+
+    ``max_width`` (> 0) scales the picture down to at most that many pixels
+    wide, aspect kept, never up: a tile asks for about its on-screen size
+    (a 3072x2048 frame is ~850 KB at native size, too slow for a tile over a
+    remote link). Without it the picture is native, for evidence and
+    downloads. The size actually served is in ``X-Frame-Size``.
     """
     raw = live_engine.get_raw_frame(camera_id)
     frame = apply_privacy_masks(raw, camera_id) if raw is not None else None
@@ -649,19 +671,23 @@ def get_camera_snapshot(camera_id: str, annotate: bool = True, overlay: bool = F
             )
             if det.keypoints is not None:
                 _draw_skeleton(frame, det.keypoints, (0, 255, 157))
-    elif overlay:
-        rt = live_engine.runtimes.get(camera_id)
+        frame, _ = fit_width(frame, max_width)
+    else:
+        # Scale first, then draw: boxes and labels keep a legible size.
+        frame, scale = fit_width(frame, max_width)
+        rt = live_engine.runtimes.get(camera_id) if overlay else None
         if rt is not None:
-            # ``frame`` is this request's own copy (get_raw_frame copies).
-            frame = render_overlay(frame, rt)
+            # ``frame`` is this request's own copy (get_raw_frame / resize copy).
+            frame = render_overlay(frame, rt, scale=scale)
 
-    ok, jpeg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+    ok, jpeg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), SNAPSHOT_JPEG_QUALITY])
     if not ok:
         raise HTTPException(status_code=500, detail="failed to encode frame")
+    h, w = frame.shape[:2]
     return Response(
         content=jpeg.tobytes(),
         media_type="image/jpeg",
-        headers={"X-Frame-Source": "live", "Cache-Control": "no-store"},
+        headers={"X-Frame-Source": "live", "X-Frame-Size": f"{w}x{h}", "Cache-Control": "no-store"},
     )
 
 

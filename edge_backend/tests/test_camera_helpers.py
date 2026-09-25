@@ -159,6 +159,87 @@ def test_snapshot_overlay_draws_tracker_boxes_without_inference(client, camera_r
         live_engine.runtimes.pop(camera_row, None)
 
 
+def _noisy_frame(w, h):
+    """Camera-like detail (gradients + sensor noise), so JPEG sizes are realistic."""
+    rng = np.random.default_rng(7)
+    yy, xx = np.mgrid[0:h, 0:w]
+    base = np.stack([(xx * 255 // max(1, w - 1)), (yy * 255 // max(1, h - 1)), ((xx + yy) % 256)], axis=-1)
+    return np.clip(base + rng.normal(0, 12, (h, w, 3)), 0, 255).astype(np.uint8)
+
+
+def test_snapshot_max_width_scales_down_keeps_aspect_and_shrinks_the_jpeg(client, camera_row, monkeypatch):
+    """Tiles ask for about their on-screen width; evidence/downloads stay native."""
+    import cv2
+
+    monkeypatch.setattr(cameras_module.person_detector, "detect", lambda *_a, **_kw: [])
+    rt = CameraRuntime(camera_id=camera_row, name="Helper Test Cam", source="")
+    rt.put_frame(_noisy_frame(3072, 2048))
+    live_engine.runtimes[camera_row] = rt
+    try:
+        base = f"/api/v1/cameras/{camera_row}/snapshot?annotate=false&overlay=1"
+        native = client.get(base)
+        small = client.get(f"{base}&max_width=640")
+        wider = client.get(f"{base}&max_width=9999")            # never enlarged
+        tiny = client.get(f"{base}&max_width=1")                # clamped to a sane minimum
+        dec = lambda r: cv2.imdecode(np.frombuffer(r.content, np.uint8), cv2.IMREAD_COLOR)  # noqa: E731
+        assert dec(native).shape[:2] == (2048, 3072) and native.headers["X-Frame-Size"] == "3072x2048"
+        assert dec(small).shape[:2] == (427, 640) and small.headers["X-Frame-Size"] == "640x427"
+        assert dec(wider).shape[:2] == (2048, 3072)
+        assert dec(tiny).shape[1] == 64
+        assert len(small.content) * 10 < len(native.content)
+        # annotate=true (detections drawn on the native frame) is scaled too.
+        ann = client.get(f"/api/v1/cameras/{camera_row}/snapshot?max_width=480")
+        assert dec(ann).shape[:2] == (320, 480)
+    finally:
+        live_engine.runtimes.pop(camera_row, None)
+
+
+def test_snapshot_overlay_boxes_are_scaled_onto_the_small_picture(client, camera_row, monkeypatch):
+    import cv2
+
+    rt = CameraRuntime(camera_id=camera_row, name="Helper Test Cam", source="")
+    rt.put_frame(np.zeros((1440, 2560, 3), dtype=np.uint8))
+    rt.set_tracks([{"track_id": "trk_0001", "x1": 1000, "y1": 400, "x2": 1400, "y2": 1200, "confidence": 0.9,
+                    "confirmed": True, "x_m": None, "y_m": None}])
+    live_engine.runtimes[camera_row] = rt
+    try:
+        res = client.get(f"/api/v1/cameras/{camera_row}/snapshot?annotate=false&overlay=1&max_width=640")
+        img = cv2.imdecode(np.frombuffer(res.content, np.uint8), cv2.IMREAD_COLOR)
+        assert img.shape[:2] == (360, 640)
+        # Box left edge at x = 1000 * 0.25 = 250, drawn 2 px wide at the small size.
+        assert img[200, 249:252, 1].max() > 150
+        assert img[200, 240:246].max() < 40
+    finally:
+        live_engine.runtimes.pop(camera_row, None)
+
+
+def test_single_camera_get_reports_the_live_status_like_the_list(client, camera_row):
+    """GET /cameras/{id} used to return the stored "STARTING" while the list said ONLINE."""
+    rt = CameraRuntime(camera_id=camera_row, name="Helper Test Cam", source="")
+    rt.status, rt.fps = "ONLINE", 9.6
+    live_engine.runtimes[camera_row] = rt
+    try:
+        one = client.get(f"/api/v1/cameras/{camera_row}").json()
+        listed = next(c for c in client.get("/api/v1/cameras").json()["cameras"] if c["id"] == camera_row)
+        assert one["status"] == listed["status"] == "ONLINE"
+        assert one["fps"] == listed["fps"] == 10
+        live_engine.runtimes.pop(camera_row)
+        assert client.get(f"/api/v1/cameras/{camera_row}").json()["status"] == "OFFLINE"
+    finally:
+        live_engine.runtimes.pop(camera_row, None)
+
+
+def test_single_camera_get_reports_disabled_when_turned_off(client, camera_row):
+    async def _off():
+        async with async_session_factory() as session:
+            cam = await session.get(CameraModel, camera_row)
+            cam.is_ai_enabled = False
+            await session.commit()
+
+    asyncio.run(_off())
+    assert client.get(f"/api/v1/cameras/{camera_row}").json()["status"] == "DISABLED"
+
+
 # ---------------- clip action ----------------
 
 def test_clip_action_501_without_real_buffer(client, camera_row):

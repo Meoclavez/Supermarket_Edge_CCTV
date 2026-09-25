@@ -55,7 +55,18 @@ def test_valid_token_releases_the_held_requests_with_the_token():
     assert paths[0] == "/api/v1/auth/status" and len(paths) == 1 + len(r["statuses"])
     assert all(n["auth"] == "Bearer stored.jwt.token" for n in r["network"][1:])
     assert r["state"] == "valid" and r["statuses"] == [200] * len(r["statuses"])
-    assert r["is_authenticated"] is True and "token=stored.jwt.token" in r["auth_url"]
+    assert r["is_authenticated"] is True
+    # The session cookie carries the token, and the server accepts it for
+    # <img>/<a> URLs: the token stays out of the URL (history, proxy logs).
+    assert r["cookie_jar"].get("edge_cctv_token") == "stored.jwt.token"
+    assert r["auth_url"] == "/stream?camera_id=c1"
+
+
+@needs_node
+def test_token_goes_in_the_url_only_when_the_browser_keeps_no_cookie():
+    r = _run("valid_nocookie")
+    assert r["state"] == "valid" and r["cookie_jar"] == {}
+    assert r["auth_url"] == "/stream?camera_id=c1&token=stored.jwt.token"
 
 
 @needs_node
@@ -85,3 +96,28 @@ def test_auth_js_is_loaded_before_every_module_and_cache_busted_together():
         scripts = re.findall(r'<script src="/static/js/([a-z_]+)\.js\?v=([0-9.]+)"', html)
         assert scripts and scripts[0][0] == "auth", page
         assert len({v for _n, v in scripts}) == 1, f"{page}: mixed script versions {scripts}"
+
+
+@needs_node
+def test_tiles_ask_for_a_picture_width_matching_their_rendered_size():
+    """analytics.js previewWidth(): rendered width (letterbox-aware) x devicePixelRatio, bucketed."""
+    src = (STATIC / "js" / "analytics.js").read_text(encoding="utf-8")
+    start = src.index("const PREVIEW_WIDTHS")
+    end = src.index("\n}\n", src.index("function previewWidth")) + 3
+    script = src[start:end] + r"""
+const img = (w, h, nw, nh) => ({ getBoundingClientRect: () => ({ width: w, height: h }), naturalWidth: nw || 0, naturalHeight: nh || 0 });
+const out = [];
+for (const [dpr, args] of [[1, [400, 225]], [2, [400, 225]], [1, [1200, 675]], [2, [1200, 675]],
+                           [1, [400, 225, 3072, 2048]], [1, [0, 0]], [1.5, [300, 169, 704, 576]]]) {
+  globalThis.window = { devicePixelRatio: dpr };
+  out.push(previewWidth(img(...args)));
+}
+process.stdout.write(JSON.stringify(out));
+"""
+    res = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert res.returncode == 0, res.stderr
+    # 400 css px -> 480; x2 -> 960; 1200 -> 1280; x2 -> 1920 (cap); a 3:2 camera
+    # letterboxed in 400x225 shows 338 px wide -> 480; unknown size -> 640;
+    # 704x576 in a 300x169 box at 1.5x shows 207 px -> 310 -> 320.
+    assert json.loads(res.stdout) == [480, 960, 1280, 1920, 480, 640, 320]
+    assert "max_width=${previewWidth(t.img)}" in src and "streamUrl(id, previewWidth(img))" in src

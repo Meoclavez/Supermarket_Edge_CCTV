@@ -232,3 +232,24 @@ def test_m0011_creates_revoked_tokens_on_a_copy_of_an_m0010_database(tmp_path):
     # The original is untouched.
     with sqlite3.connect(base) as conn:
         assert conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 10
+
+
+# --------------------------------------------------------------- cookie vs query token
+
+def test_picture_urls_authenticate_with_the_session_cookie_so_no_token_is_needed_in_the_url(client):
+    """The dashboard's <img> URLs (snapshots, /stream) rely on the session
+    cookie, so auth.js leaves the token out of them; the ?token= fallback
+    stays for clients without the cookie (the mobile app)."""
+    tok = _admin(client)["access_token"]
+    url = "/api/v1/cameras/no_such_cam/snapshot?annotate=false&max_width=320"
+    client.cookies.clear()
+    assert client.get(url).status_code == 401
+    client.cookies.set("edge_cctv_token", tok)
+    try:
+        res = client.get(url)
+        assert res.status_code == 200, res.text          # a no-signal slate, but authorised
+        assert res.headers["X-Frame-Source"] == "no-signal"
+    finally:
+        client.cookies.clear()
+    assert client.get(f"{url}&token={tok}").status_code == 200
+    assert not intrusion_detector.failed_attempts

@@ -1,25 +1,46 @@
-"""Hardening for when the dashboard is reachable from the internet.
+"""Hardening for when the dashboard is reachable from outside the store.
 
-With remote access on, every request from the internet reaches uvicorn from
-``cloudflared`` (or the operator's Caddy) on the loopback interface. That has
-three consequences handled here:
+Two routes reach the dashboard from outside, both through a proxy on this
+machine that connects to uvicorn over loopback:
 
-* **Client IP.** ``request.client.host`` is 127.0.0.1 for every remote user,
-  so lockouts and rate limits would either lock out everyone at once or never
-  distinguish attackers. :func:`client_ip` trusts ``CF-Connecting-IP`` /
-  ``X-Forwarded-For`` **only** when the TCP peer is loopback (the proxy on
-  this machine). A LAN client that sends those headers is ignored, so nobody
-  on the store network can spoof an address to dodge the lockout.
-* **Remote requests.** :func:`is_remote_request` is true when the request
-  names the configured public hostname or arrived through a local proxy that
-  added Cloudflare headers. First-run setup (which creates the owner account
-  from a one-time code) and the API docs refuse such requests, and nothing is
-  served remotely while ``AUTH_DISABLED`` is on.
-* **Headers.** ``X-Content-Type-Options``, ``frame-ancestors 'self'`` (Camera
-  Studio embeds same-origin iframes, so ``'self'`` and not ``'none'``),
-  ``Referrer-Policy: same-origin`` (stream URLs carry ``?token=``), and HSTS
-  only on responses that went out through the remote HTTPS hostname, never on
-  the plain-HTTP LAN address.
+``tailscale serve`` (private: the owner's and staff's tailnet)
+    ``https://<machine>.<tailnet>.ts.net`` with a real certificate. Tailscale
+    keeps the ``Host`` header (the ``.ts.net`` name), replaces
+    ``X-Forwarded-For`` with the caller's tailnet address, sets
+    ``X-Forwarded-Proto: https`` and ``X-Forwarded-Host``, and adds
+    ``Tailscale-User-Login``/``-Name``/``-Profile-Pic`` for a user's device
+    (not for tagged devices). Client-supplied copies of all of these are
+    removed first. A Funnel request (public internet) additionally carries
+    ``Tailscale-Funnel-Request: ?1``.
+``cloudflared`` (public: the owner's domain)
+    ``Host`` is the public hostname; Cloudflare adds ``CF-Connecting-IP``,
+    ``CF-Ray``, ``CF-Visitor`` and appends to ``X-Forwarded-For``.
+
+**Which proxy headers are believed.** Only those arriving from a loopback
+peer. uvicorn's own ProxyHeadersMiddleware (on by default, trusting
+127.0.0.1/::1) usually has already replaced ``scope["client"]`` and
+``scope["scheme"]`` from ``X-Forwarded-For``/``-Proto`` before the app runs;
+this module gives the same answers whether or not that happened, so it is
+correct under the systemd unit, ``run.sh`` and the tests alike. A client on
+the LAN or tailnet that connects directly and sends these headers is ignored,
+so nobody can spoof an address to dodge the lockout (:func:`client_ip`).
+
+**Remote (public) vs. private.** :func:`is_remote_request` is true for
+requests that name the configured public hostname, carry Cloudflare headers,
+or come through Tailscale Funnel. Tailnet requests through ``tailscale serve``
+are private, like the store LAN: only devices the owner admitted to the
+tailnet can make them. For remote requests, first-run setup (which creates
+the owner account from a one-time code) and the API docs are refused, and
+nothing is served while ``AUTH_DISABLED`` is on. Being classified remote only
+ever adds restrictions, so a direct client forging Cloudflare or Funnel
+headers gains nothing.
+
+**Headers.** A Content-Security-Policy that allows scripts only from this
+origin plus the pages' own inline blocks by hash (see :func:`content_security_policy`),
+``frame-ancestors 'self'``, ``nosniff``, ``Referrer-Policy: same-origin``
+(stream URLs may carry ``?token=``), and HSTS only on a response to a request
+that actually arrived over HTTPS (Cloudflare or ``tailscale serve``), never on
+the plain-HTTP LAN or tailnet address.
 
 CORS is limited to this device's own origins: the public ``https://<hostname>``,
 ``EDGE_BASE_URL`` and any explicit (non-``*``) entries in
@@ -32,6 +53,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import logging
+import re
 from typing import Iterable, Optional
 from urllib.parse import urlsplit
 
@@ -82,23 +104,21 @@ def _peer(request_or_scope) -> Optional[str]:
     return client.host if hasattr(client, "host") else client[0]
 
 
-def client_ip(request: Request) -> str:
-    """The real client address, for lockouts, rate limits and audit logs."""
-    peer = _peer(request)
-    if _is_loopback(peer):
-        headers = request.headers
-        cf = _valid_ip(_header(headers, "cf-connecting-ip"))
-        if cf:
-            return cf
-        xff = _header(headers, "x-forwarded-for")
-        if xff:
-            # One trusted hop (the proxy on this machine): it appended the
-            # address it saw, so the right-most valid entry is the client.
-            for part in reversed(xff.split(",")):
-                ip = _valid_ip(part)
-                if ip:
-                    return ip
-    return peer or "unknown"
+TAILNET_SUFFIX = ".ts.net"
+TAILSCALE_IDENTITY_HEADERS = ("tailscale-user-login", "tailscale-user-name", "tailscale-headers-info")
+
+# proxy_kind() results
+TAILSCALE, TAILSCALE_FUNNEL, CLOUDFLARE, LOCAL_PROXY = "tailscale", "tailscale_funnel", "cloudflare", "proxy"
+
+
+def _right_most_ip(xff: str) -> Optional[str]:
+    # One trusted hop (the proxy on this machine) appended or set the address
+    # it saw, so the right-most valid entry is the client.
+    for part in reversed((xff or "").split(",")):
+        ip = _valid_ip(part)
+        if ip:
+            return ip
+    return None
 
 
 def _host_only(host_header: str) -> str:
@@ -106,6 +126,48 @@ def _host_only(host_header: str) -> str:
     if host.startswith("["):
         return host.split("]", 1)[0] + "]"
     return host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+
+
+def is_tailnet_host(host_header: str) -> bool:
+    """``<machine>.<tailnet>.ts.net``: the only names ``tailscale serve`` answers for with HTTPS."""
+    return _host_only(host_header).rstrip(".").endswith(TAILNET_SUFFIX)
+
+
+def proxy_kind(request) -> Optional[str]:
+    """Which proxy on this machine delivered the request (None: not via a loopback proxy).
+
+    ``tailscale`` is checked first: tailscaled passes other client headers
+    through unchanged, so a tailnet user could add ``CF-Connecting-IP``; for a
+    ``.ts.net`` host those are ignored.
+    """
+    if not _is_loopback(_peer(request)):
+        return None
+    h = request.headers
+    if h.get("tailscale-funnel-request"):
+        return TAILSCALE_FUNNEL
+    if is_tailnet_host(h.get("host", "")) or any(h.get(n) for n in TAILSCALE_IDENTITY_HEADERS):
+        return TAILSCALE
+    if h.get("cf-connecting-ip") or h.get("cf-ray"):
+        return CLOUDFLARE
+    if h.get("x-forwarded-for") or h.get("x-forwarded-proto"):
+        return LOCAL_PROXY
+    return None
+
+
+def client_ip(request: Request) -> str:
+    """The real client address, for lockouts, rate limits and audit logs."""
+    peer = _peer(request)
+    kind = proxy_kind(request)
+    if kind is not None:
+        headers = request.headers
+        if kind == CLOUDFLARE:
+            cf = _valid_ip(_header(headers, "cf-connecting-ip"))
+            if cf:
+                return cf
+        ip = _right_most_ip(_header(headers, "x-forwarded-for"))
+        if ip:
+            return ip
+    return peer or "unknown"
 
 
 def _remote_hostname() -> str:
@@ -118,24 +180,40 @@ def _remote_hostname() -> str:
 
 
 def is_remote_request(request: Request) -> bool:
-    """True when this request came in from the internet through the public hostname."""
+    """True when this request came in from the public internet.
+
+    That is: it names the configured public hostname, or carries Cloudflare
+    or Tailscale Funnel headers (from any peer: uvicorn may already have
+    replaced the loopback peer with the visitor's address, and a direct client
+    forging them only subjects itself to the stricter rules). Tailnet requests
+    through ``tailscale serve`` are private and return False.
+    """
+    h = request.headers
     hostname = _remote_hostname()
-    if hostname and _host_only(request.headers.get("host", "")) == hostname:
+    if hostname and _host_only(h.get("host", "")) == hostname:
         return True
-    if _is_loopback(_peer(request)):
-        h = request.headers
-        if h.get("cf-connecting-ip") or h.get("cf-ray"):
-            return True
-    return False
+    if h.get("tailscale-funnel-request"):
+        return True
+    if is_tailnet_host(h.get("host", "")):
+        return False
+    return bool(h.get("cf-connecting-ip") or h.get("cf-ray"))
 
 
 def came_via_https_proxy(request: Request) -> bool:
-    """Only a loopback proxy's X-Forwarded-Proto is believed."""
+    """True when the browser's connection was HTTPS.
+
+    A direct connection (or one whose scheme uvicorn already took from a
+    trusted proxy's X-Forwarded-Proto) is judged by its scheme; forwarding
+    headers are believed only from a loopback peer.
+    """
+    if request.url.scheme in ("https", "wss"):
+        return True
     if not _is_loopback(_peer(request)):
-        return request.url.scheme == "https"
+        return False
     proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
-    visitor = request.headers.get("cf-visitor") or ""
-    return proto == "https" or '"https"' in visitor or request.url.scheme == "https"
+    if proto == "https":
+        return True
+    return proxy_kind(request) == CLOUDFLARE and '"https"' in (request.headers.get("cf-visitor") or "")
 
 
 # --------------------------------------------------------------------------- #
@@ -203,14 +281,71 @@ class PublicExposureMiddleware:
     def _security_headers(request: Request, remote: bool) -> list[tuple[bytes, bytes]]:
         headers = [
             (b"x-content-type-options", b"nosniff"),
-            (b"content-security-policy", b"frame-ancestors 'self'"),
+            (b"content-security-policy", content_security_policy(request).encode("latin-1")),
             (b"x-frame-options", b"SAMEORIGIN"),
             (b"referrer-policy", b"same-origin"),
             (b"permissions-policy", b"camera=(), microphone=(), geolocation=()"),
         ]
-        if remote and came_via_https_proxy(request):
+        # Only when this request really came over HTTPS (Cloudflare or
+        # tailscale serve): HSTS on the plain-HTTP LAN/tailnet address would
+        # be ignored at best and, for a hostname, lock browsers out of it.
+        if came_via_https_proxy(request):
             headers.append((b"strict-transport-security", HSTS_VALUE.encode()))
         return headers
+
+
+# Google Fonts is the only third-party origin the pages use (stylesheet +
+# font files). Everything else, Chart.js included, is served from here.
+FONT_STYLESHEETS = "https://fonts.googleapis.com"
+FONT_FILES = "https://fonts.gstatic.com"
+_SAFE_HOST_RE = re.compile(r"^(?:[a-z0-9.-]+|\[[0-9a-f:.]+\])(?::\d{1,5})?$")
+
+
+def _inline_script_hashes() -> tuple[str, ...]:
+    try:
+        from app.services.web_delivery import inline_script_hashes
+
+        return inline_script_hashes()
+    except Exception as exc:  # a missing page must not take every response down
+        logger.warning(f"Could not hash the pages' inline scripts: {exc}")
+        return ()
+
+
+def content_security_policy(request) -> str:
+    """The Content-Security-Policy for this device's pages and API.
+
+    Script *elements* are limited to this origin plus the pages' own inline
+    blocks by SHA-256 (``script-src-elem``): no CDN, no injected ``<script>``,
+    no ``eval``. Inline event-handler *attributes* (``onclick="..."``) are
+    still allowed by ``script-src-attr 'unsafe-inline'`` because the pages
+    and several modules still use them; ``script-src`` keeps ``'unsafe-inline'``
+    only as the fallback for browsers without CSP level 3 (in CSP3 browsers the
+    ``-elem``/``-attr`` directives take precedence). Images may be ``data:``
+    (QR codes) and ``blob:`` (clips and snapshots saved from the page);
+    ``connect-src`` names the WebSocket scheme for this host explicitly for
+    browsers whose ``'self'`` does not cover ``ws:``/``wss:``.
+    """
+    host = (request.headers.get("host") or "").strip().lower()
+    ws = f" ws://{host} wss://{host}" if host and _SAFE_HOST_RE.match(host) else ""
+    hashes = " ".join(_inline_script_hashes())
+    return "; ".join((
+        "default-src 'self'",
+        "script-src 'self' 'unsafe-inline'",
+        f"script-src-elem 'self' {hashes}".rstrip(),
+        "script-src-attr 'unsafe-inline'",
+        f"style-src 'self' 'unsafe-inline' {FONT_STYLESHEETS}",
+        f"font-src 'self' data: {FONT_FILES}",
+        "img-src 'self' data: blob:",
+        "media-src 'self' blob:",
+        f"connect-src 'self'{ws}",
+        "worker-src 'self' blob:",
+        "frame-src 'self'",
+        "frame-ancestors 'self'",
+        "form-action 'self'",
+        "base-uri 'self'",
+        "object-src 'none'",
+        "manifest-src 'self'",
+    ))
 
 
 def _origin_of(url: str) -> Optional[str]:

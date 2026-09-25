@@ -333,7 +333,10 @@ def test_is_remote_request(monkeypatch):
     assert public_exposure.is_remote_request(_req("127.0.0.1", host=HOST))
     assert public_exposure.is_remote_request(_req("127.0.0.1", {"CF-Ray": "abc"}))
     assert not public_exposure.is_remote_request(_req("127.0.0.1"))
-    assert not public_exposure.is_remote_request(_req("192.168.1.9", {"CF-Ray": "abc"}))
+    # Cloudflare headers mark a request remote from any peer (uvicorn may have
+    # replaced the loopback peer already); forging them only adds restrictions.
+    assert public_exposure.is_remote_request(_req("192.168.1.9", {"CF-Ray": "abc"}))
+    assert not public_exposure.is_remote_request(_req("192.168.1.9"))
 
 
 # --------------------------------------------------------------------------- #
@@ -368,7 +371,8 @@ def test_security_headers(monkeypatch):
     monkeypatch.setitem(remote_access_service._settings, "hostname", HOST)
     local = TestClient(app).get("/dashboard")
     assert local.headers["x-content-type-options"] == "nosniff"
-    assert local.headers["content-security-policy"] == "frame-ancestors 'self'"
+    csp = local.headers["content-security-policy"]
+    assert "frame-ancestors 'self'" in csp and "script-src-elem 'self' 'sha256-" in csp
     assert local.headers["x-frame-options"] == "SAMEORIGIN"
     assert local.headers["referrer-policy"] == "same-origin"
     assert "strict-transport-security" not in local.headers  # plain-HTTP LAN: never HSTS

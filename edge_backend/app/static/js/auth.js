@@ -27,10 +27,17 @@
 
   // Over https (e.g. the remote-access tunnel) the session cookie must never be
   // sent on a plain-http request, so it is marked Secure there.
-  const COOKIE_ATTRS = `path=/; SameSite=Lax; max-age=604800${location.protocol === 'https:' ? '; Secure' : ''}`;
+  const COOKIE_ATTRS = `path=/; SameSite=Strict; max-age=604800${location.protocol === 'https:' ? '; Secure' : ''}`;
 
   function getToken() {
     try { return localStorage.getItem(TOKEN_KEY); } catch (_) { return null; }
+  }
+  // The session cookie's token, as the browser will send it (null if none).
+  function cookieToken() {
+    try {
+      const hit = document.cookie.split(';').map((c) => c.trim()).find((c) => c.startsWith(`${TOKEN_KEY}=`));
+      return hit ? decodeURIComponent(hit.slice(TOKEN_KEY.length + 1)) || null : null;
+    } catch (_) { return null; }
   }
   function setToken(t) {
     try {
@@ -421,9 +428,15 @@
       const gate = document.getElementById('authGate');
       return !!(gate && gate.style.display !== 'none');
     },
+    // For <img>/<a> URLs, which cannot send the Authorization header. The
+    // server also accepts the session cookie (verify_api_access), so while
+    // the cookie carries this same token the URL stays clean: a token in the
+    // query string ends up in browser history and proxy logs. Only without
+    // that cookie (blocked, or a stale one) is the token appended.
     authUrl(url) {
       const t = usableToken();
       if (!t) return url;
+      if (cookieToken() === t) return url;
       const sep = url.includes('?') ? '&' : '?';
       return `${url}${sep}token=${encodeURIComponent(t)}`;
     },

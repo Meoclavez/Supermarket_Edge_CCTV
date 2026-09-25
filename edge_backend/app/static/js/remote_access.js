@@ -2,7 +2,9 @@
 //
 // #settings-device  device id (copy) and store/device name (rename)
 //                   GET/PUT /api/v1/device/identity
-// #settings-remote  online dashboard on the operator's own domain
+// #settings-remote  online access: private HTTPS on the tailnet (tailscale serve,
+//                   read-only status) and the public dashboard on the operator's
+//                   own domain (Cloudflare Tunnel)
 //                   GET/PUT /api/v1/remote-access, POST /api/v1/remote-access/verify
 //
 // The tunnel token is write-only: the server only ever says whether one is
@@ -148,7 +150,7 @@
   }
 
   function stepsHtml(port) {
-    const origin = esc(`http://localhost:${port}`);
+    const origin = esc(`http://127.0.0.1:${port}`);
     return `
       <details class="ra-steps" id="raSteps">
         <summary>How to connect your domain with Cloudflare (step by step)</summary>
@@ -175,6 +177,48 @@
       </details>`;
   }
 
+  // Private access for the owner and staff: https://<machine>.<tailnet>.ts.net
+  // through `tailscale serve`. Read-only here: publishing needs root on this
+  // machine (deploy/install.sh with EDGE_TAILSCALE_SERVE=1 does it).
+  const TS_LABEL = {
+    not_installed: 'Tailscale not installed', unavailable: 'Tailscale status unavailable',
+    stopped: 'Tailscale not connected',
+  };
+
+  function tailscaleHtml(ts) {
+    if (!ts) return '';
+    const published = !!ts.url;
+    const label = published ? 'Published on your tailnet'
+      : TS_LABEL[ts.state] || (ts.https_enabled ? 'Not published yet' : 'HTTPS certificates not enabled');
+    const dot = published ? 'ra-dot-ok' : (ts.state === 'running' ? 'ra-dot-wait' : 'ra-dot-off');
+    const steps = ts.installed && !published ? `
+      <details class="ra-steps" id="raTsSteps">
+        <summary>How to turn on private HTTPS for staff (step by step)</summary>
+        <ol>
+          <li>In the Tailscale admin console open <b>DNS</b>
+              (<a class="ra-link" href="${esc(ts.admin_url)}" target="_blank" rel="noopener">${esc(ts.admin_url)}</a>)
+              and turn on <b>MagicDNS</b> and <b>HTTPS Certificates</b>.</li>
+          <li>On this machine run <code>${esc(ts.serve_command)}</code>
+              (or re-run the installer with <code>EDGE_TAILSCALE_SERVE=1</code>).</li>
+          <li>Open <code>https://${esc(ts.dns_name || '<machine>.<tailnet>.ts.net')}/dashboard</code> on any
+              phone or PC signed in to your tailnet. Only devices you added to the tailnet can reach it.</li>
+        </ol>
+      </details>` : '';
+    return `
+      <div class="ra-status-text ra-mt">Private access for you and your staff (Tailscale)</div>
+      <div class="ra-statusbar" id="raTsBar">
+        <span class="ra-dot ${dot}" id="raTsDot"></span>
+        <span class="ra-status-text" id="raTsState" data-state="${esc(ts.state || '')}">${esc(label)}</span>
+        ${published ? `<a class="ra-link" id="raTsUrl" href="${esc(ts.url)}" target="_blank" rel="noopener">${esc(ts.url)}</a>` : ''}
+        <span class="ra-spacer"></span>
+        ${ts.dns_name ? `<code class="ra-code" id="raTsName">${esc(ts.dns_name)}</code>` : ''}
+      </div>
+      <div class="form-status ${published ? '' : 'form-status-error'}" id="raTsMessage">${published ? '' : esc(ts.message || '')}</div>
+      ${ts.funnel ? '<div class="form-status form-status-error" id="raTsFunnel">Tailscale Funnel is on for this machine: the dashboard is also public on the internet through it, and is treated as remote access (first-run setup refused).</div>' : ''}
+      ${steps}
+      <div class="ra-status-text ra-mt">Public access on your own domain (Cloudflare Tunnel)</div>`;
+  }
+
   function renderRemote(errorText) {
     const host = $('settings-remote');
     if (!host) return;
@@ -197,7 +241,8 @@
       : (canVerify ? 'Check that the public hostname reaches this device' : 'Start remote access first; verify once it shows Connected');
 
     host.innerHTML = `
-      <div class="card-title"><span>Remote access — online dashboard</span></div>
+      <div class="card-title"><span>Online access</span></div>
+      ${tailscaleHtml(s.tailscale)}
       <div class="ra-hint">Publish this dashboard at <b>https://</b> on your own domain. It is online only while
         this is enabled and the hostname is connected. Everything still runs on this machine.</div>
 
@@ -383,11 +428,14 @@
     state = s;
     const structural = !prev.provider || prev.provider !== s.provider || prev.token_configured !== s.token_configured
       || prev.enabled !== s.enabled || prev.hostname !== s.hostname || prev.verified !== s.verified
-      || prev.cloudflared_found !== s.cloudflared_found || prev.caddy_site_block !== s.caddy_site_block;
+      || prev.cloudflared_found !== s.cloudflared_found || prev.caddy_site_block !== s.caddy_site_block
+      || JSON.stringify(prev.tailscale || null) !== JSON.stringify(s.tailscale || null);
     if (structural && !dirty && tokenMode === 'idle') {
       const keep = { stepsOpen: $('raSteps') ? $('raSteps').open : false };
+      const tsOpen = $('raTsSteps') ? $('raTsSteps').open : false;
       renderRemote();
       restoreForm(keep);
+      if ($('raTsSteps')) $('raTsSteps').open = tsOpen;
       return;
     }
     const dot = $('raDot');

@@ -78,6 +78,7 @@ import numpy as np
 
 from app.config import settings
 from app.services import amd_migraphx as amd
+from app.services import low_light
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +135,15 @@ class Detection:
     # (17, 3): x_px, y_px, visibility 0..1, in original frame coordinates.
     # None when the loaded model is a plain detector.
     keypoints: Optional[np.ndarray] = None
+    # Mean luminance (0-255) of the frame inside the box, measured on the
+    # frame the model saw. Decides which confidence threshold applies
+    # (``person_threshold``): a person in shade scores lower for the same
+    # evidence. None when not measured.
+    luma: Optional[float] = None
+
+    @property
+    def dark(self) -> bool:
+        return self.luma is not None and self.luma < float(settings.PERSON_DARK_LUMA)
 
     @property
     def center(self) -> tuple[float, float]:
@@ -180,6 +190,40 @@ class ObjectDetection:
             "label": self.label,
             "confidence": round(self.confidence, 3),
         }
+
+
+def person_threshold(det: "Detection", base: Optional[float] = None) -> float:
+    """The confidence a detection needs to count as a person.
+
+    ``base`` (default ``PERSON_CONF_THRESHOLD``) everywhere, except for a box
+    whose own pixels are dark (mean luminance below ``PERSON_DARK_LUMA``):
+    there ``PERSON_CONF_THRESHOLD_DARK`` applies, if lower. The detector's
+    confidence for the same person falls as the picture darkens, so a single
+    threshold loses most people in shade and at night. Measured on COCO
+    persons (352x288, yolo26n-pose), 0.35 for dark boxes / 0.50 elsewhere:
+    shade-region recall 0.34 -> 0.40 with lit-region precision unchanged
+    (0.940 -> 0.938); a uniformly dark (-3 EV) scene 0.30 -> 0.36 recall at
+    precision 0.947 -> 0.924; normal scenes unchanged.
+    """
+    base = float(settings.PERSON_CONF_THRESHOLD if base is None else base)
+    if det.dark:
+        return min(base, float(settings.PERSON_CONF_THRESHOLD_DARK))
+    return base
+
+
+def box_luma(frame: np.ndarray, box) -> float:
+    """Mean luminance (0-255) of ``frame`` inside ``box`` (clipped), from at
+    most ~1k strided samples: no full-frame conversion, so it costs the same
+    on a 3072x2048 frame as on a 352x288 one."""
+    h, w = frame.shape[:2]
+    x1, y1, x2, y2 = (int(round(float(v))) for v in box)
+    x1, y1 = min(max(x1, 0), w - 1), min(max(y1, 0), h - 1)
+    x2, y2 = max(min(x2, w), x1 + 1), max(min(y2, h), y1 + 1)
+    step = max(1, int(np.sqrt((x2 - x1) * (y2 - y1) / 1024.0)))
+    s = frame[y1:y2:step, x1:x2:step].astype(np.float32)
+    if s.ndim == 2:
+        return float(s.mean())
+    return float((s[..., 0] * 0.114 + s[..., 1] * 0.587 + s[..., 2] * 0.299).mean())
 
 
 def keypoints_to_list(kpts: Optional[np.ndarray]) -> Optional[list[list[float]]]:
@@ -322,8 +366,12 @@ def build_model_spec(path: Path, meta: dict[str, str], inputs, outputs) -> Model
     return ModelSpec(path, "detect", "v5", nc, {}, None, inp.name, input_size, dtype)
 
 
-def letterbox(frame: np.ndarray, size: tuple[int, int], dtype=np.float32):
+def letterbox(frame: np.ndarray, size: tuple[int, int], dtype=np.float32, enhance=None):
     """Resize preserving aspect ratio and pad to the network size.
+
+    ``enhance`` (image -> image), when given, is applied to the resized
+    picture before padding: at network resolution its cost does not depend
+    on the camera's resolution (see ``low_light``).
 
     Returns (blob [1,3,H,W], scale, pad_x, pad_y).
     """
@@ -334,6 +382,8 @@ def letterbox(frame: np.ndarray, size: tuple[int, int], dtype=np.float32):
     scale = min(net_w / w, net_h / h)
     new_w, new_h = int(round(w * scale)), int(round(h * scale))
     resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    if enhance is not None:
+        resized = enhance(resized)
 
     canvas = np.full((net_h, net_w, 3), 114, dtype=np.uint8)
     pad_x, pad_y = (net_w - new_w) // 2, (net_h - new_h) // 2
@@ -546,6 +596,27 @@ def refiner_crop(frame: np.ndarray, box, size_hw: tuple[int, int], padding: floa
     return crop, (cx, cy, bw, bh)
 
 
+def simcc_output_order(outputs, input_hw: tuple[int, int]) -> tuple[int, int]:
+    """Indices of the (simcc_x, simcc_y) outputs of a SimCC model.
+
+    By name first (mmpose/mmdeploy exports call them ``simcc_x`` and
+    ``simcc_y``), else by length: the x head has ``input_w x split`` bins and
+    the y head ``input_h x split``. Raises when neither tells them apart,
+    because guessing would transpose every skeleton.
+    """
+    names = [str(getattr(o, "name", o)).lower() for o in outputs]
+    ix = [i for i, n in enumerate(names) if n.endswith("simcc_x") or n.endswith("_x") or n == "x"]
+    iy = [i for i, n in enumerate(names) if n.endswith("simcc_y") or n.endswith("_y") or n == "y"]
+    if len(names) == 2 and len(ix) == 1 and len(iy) == 1 and ix[0] != iy[0]:
+        return ix[0], iy[0]
+    h, w = input_hw
+    lens = [getattr(o, "shape", [None])[-1] for o in outputs]
+    if len(lens) == 2 and all(isinstance(v, int) for v in lens) and h != w and lens[0] != lens[1]:
+        # Both heads use the same split ratio, so their lengths are in w:h.
+        return (0, 1) if (lens[0] < lens[1]) == (w < h) else (1, 0)
+    raise ValueError(f"cannot tell the SimCC x and y outputs apart: {names} {lens}")
+
+
 def refiner_decode(simcc_x: np.ndarray, simcc_y: np.ndarray, metas, size_hw, frame_w: int, frame_h: int,
                    split_ratio: float = 2.0) -> np.ndarray:
     """SimCC argmax decode -> (N, K, 3) keypoints in frame pixels.
@@ -621,11 +692,13 @@ class PersonDetector:
         self.refiner_session = None
         self.refiner_path: Optional[Path] = None
         self.refiner_input_hw: tuple[int, int] = (256, 192)
+        self.refiner_out_order: tuple[int, int] = (0, 1)     # (simcc_x, simcc_y) output indices
         self.refiner_enabled = False
         self.refiner_reason: str = "not initialised"
         self.refiner_batch_ms: Optional[float] = None
         self._refiner_lock = threading.Lock()
         self._refine_ms: deque[float] = deque(maxlen=120)
+        self._refine_reverted = 0      # refined skeletons rejected as turned (_torso_turned)
 
         self._initialised = False
         self._init_lock = threading.Lock()
@@ -1028,6 +1101,11 @@ class PersonDetector:
             self.refiner_reason = f"{path.name}: unexpected IO {inp.shape} -> {outs}"
             return
         h, w = int(inp.shape[2]), int(inp.shape[3])
+        try:
+            order = simcc_output_order(sess.get_outputs(), (h, w))
+        except ValueError as e:
+            self.refiner_reason = f"{path.name}: {e}"
+            return
         x = np.zeros((n, 3, h, w), np.float32)
         times = []
         for _ in range(max(1, int(settings.INFERENCE_WARMUP_RUNS)) + 1):
@@ -1037,6 +1115,7 @@ class PersonDetector:
         batch_ms = round(sum(times[1:]) / len(times[1:]), 2) if len(times) > 1 else round(times[0], 2)
         self._mark_compiled(path, f"b{n}")
         self.refiner_session, self.refiner_path, self.refiner_input_hw = sess, path, (h, w)
+        self.refiner_out_order = order
         self.refiner_batch_ms = batch_ms
         budget, _ = self.latency_budget()
         if mode == "auto" and batch_ms > 0.5 * budget:
@@ -1048,18 +1127,21 @@ class PersonDetector:
         self.refiner_reason = f"{mode}: {n} crops in {batch_ms} ms on {self.provider}"
         logger.info(f"Keypoint refiner {path.name} enabled ({self.refiner_reason})")
 
-    def _refine(self, frame: np.ndarray, dets: list["Detection"]) -> float:
+    def _refine(self, frame: np.ndarray, dets: list["Detection"], enhance=None) -> float:
         """Replace each detection's keypoints with the top-down estimate.
 
         Returns the milliseconds spent in the refiner session (device time).
 
         Runs on the ``POSE_REFINER_MAX_PERSONS`` most confident people in one
-        batch. Visibility becomes ``max(pose-model visibility, refiner
-        confidence x POSE_REFINER_SCORE_SCALE)`` clipped to 1, so a joint the
-        pose model saw clearly never loses its visibility.
+        batch. A joint takes the refiner's position where the refiner's
+        confidence x ``POSE_REFINER_SCORE_SCALE`` reaches
+        ``POSE_REFINER_MIN_SCORE`` (default 0: every joint); its visibility
+        becomes the max of both, so a joint the pose model saw clearly never
+        loses it. A refined skeleton whose torso is turned more than
+        ``POSE_REFINER_MAX_TURN_DEG`` from the pose model's is discarded.
         """
         with self._refiner_lock:
-            sess, hw = self.refiner_session, self.refiner_input_hw
+            sess, hw, (ix, iy) = self.refiner_session, self.refiner_input_hw, self.refiner_out_order
         if sess is None or not dets:
             return 0.0
         chosen = sorted((d for d in dets if d.keypoints is not None),
@@ -1070,7 +1152,7 @@ class PersonDetector:
         crops, metas = [], []
         for d in chosen:
             c, m = refiner_crop(frame, d.bbox, hw)
-            crops.append(c)
+            crops.append(c if enhance is None else enhance(c))
             metas.append(m)
         x = np.stack(crops)[..., ::-1].astype(np.float32)
         x = ((x - _RTM_MEAN) / _RTM_STD).transpose(0, 3, 1, 2)
@@ -1083,13 +1165,16 @@ class PersonDetector:
         if pad:
             x = np.concatenate([x, np.zeros((pad,) + x.shape[1:], np.float32)])
         name = sess.get_inputs()[0].name
+        # SimCC heads are matched by name, never by position: a model exported
+        # with simcc_y first would otherwise swap every joint's x and y.
         outs_x, outs_y = [], []
         run_ms = 0.0
         with self._refiner_lock:
             for i in range(0, x.shape[0], b):
                 with self._gate(self.provider):
                     t = time.perf_counter()
-                    ox, oy = sess.run(None, {name: np.ascontiguousarray(x[i: i + b])})
+                    outs = sess.run(None, {name: np.ascontiguousarray(x[i: i + b])})
+                    ox, oy = outs[ix], outs[iy]
                     run_ms += (time.perf_counter() - t) * 1000.0
                 outs_x.append(ox)
                 outs_y.append(oy)
@@ -1098,12 +1183,23 @@ class PersonDetector:
         fh, fw = frame.shape[:2]
         refined = refiner_decode(sx, sy, metas, hw, fw, fh)
         scale = float(settings.POSE_REFINER_SCORE_SCALE)
+        min_score = float(settings.POSE_REFINER_MIN_SCORE)
         for d, r in zip(chosen, refined):
             k = d.keypoints
             if k.shape != r.shape:
                 continue
-            out = r.copy()
-            out[:, 2] = np.clip(np.maximum(k[:, 2], r[:, 2] * scale), 0.0, 1.0)
+            score = r[:, 2] * scale
+            use = score >= min_score
+            out = k.copy()
+            out[use, :2] = r[use, :2]
+            out[:, 2] = np.clip(np.where(use, np.maximum(k[:, 2], score), k[:, 2]), 0.0, 1.0)
+            if _torso_turned(k, out, float(settings.POSE_REFINER_MAX_TURN_DEG)):
+                # On a blurred or dark crop RTMPose can return a skeleton
+                # turned on its side or folded; the pose model's own
+                # skeleton for the same person stands then.
+                with self._stats_lock:
+                    self._refine_reverted += 1
+                continue
             d.keypoints = out
         with self._stats_lock:
             self._refine_ms.append((time.perf_counter() - started) * 1000.0)
@@ -1251,7 +1347,8 @@ class PersonDetector:
         "session", "spec", "model_path", "provider", "execution_provider", "backend", "device_name",
         "last_error", "warmup_ms", "warmup_steady_ms", "load_ms", "selection",
         "object_session", "object_spec", "object_class_ids", "object_provider", "object_error",
-        "object_warmup_ms", "_object_label", "refiner_session", "refiner_path", "refiner_input_hw", "refiner_enabled",
+        "object_warmup_ms", "_object_label", "refiner_session", "refiner_path", "refiner_input_hw",
+        "refiner_out_order", "refiner_enabled",
         "refiner_reason", "refiner_batch_ms",
     )
 
@@ -1456,7 +1553,11 @@ class PersonDetector:
         the camera has one, a false giant box over shelving does not.
         """
         w, h = x2 - x1, y2 - y1
-        if w < settings.PERSON_MIN_BOX_PIXELS or h < settings.PERSON_MIN_BOX_PIXELS:
+        # Height and width have separate floors: a distant shopper on a
+        # 352x288 sub-stream is ~60 px tall but only 16-24 px wide, and a
+        # 24 px width floor rejected 31 of them against 3 false boxes on the
+        # COCO person evaluation (see PERSON_MIN_BOX_WIDTH_PIXELS).
+        if h < settings.PERSON_MIN_BOX_PIXELS or w < settings.PERSON_MIN_BOX_WIDTH_PIXELS:
             return False
         limit = settings.PERSON_MAX_FRAME_FRACTION if max_frame_fraction is None else float(max_frame_fraction)
         frac = (w * h) / frame_area
@@ -1468,8 +1569,8 @@ class PersonDetector:
             return _has_coherent_torso(keypoints)
         return True
 
-    def _run(self, session, spec, lock, frame, provider: Optional[str] = None):
-        blob, scale, px, py = letterbox(frame, spec.input_size, spec.input_dtype)
+    def _run(self, session, spec, lock, frame, provider: Optional[str] = None, enhance=None):
+        blob, scale, px, py = letterbox(frame, spec.input_size, spec.input_dtype, enhance=enhance)
         provider = provider or self.provider
         with lock, self._gate(provider):
             # Timed inside the locks: contention between cameras is not model time.
@@ -1478,6 +1579,29 @@ class PersonDetector:
             infer_ms = (time.perf_counter() - t) * 1000.0
         self._account(infer_ms, provider)
         return raw, scale, px, py, infer_ms
+
+    @staticmethod
+    def _lighting_enhancer(frame: np.ndarray, camera_id: Optional[str]):
+        """The enhancement to apply to this frame's model input, or None.
+
+        Decided from the frame's measured lighting (``low_light``), never
+        from the time of day. ``LOW_LIGHT_ENHANCE``: off (default; measured
+        to lower recall), auto (enhance in shade, low light and IR), always.
+        """
+        mode = (settings.LOW_LIGHT_ENHANCE or "off").strip().lower()
+        try:
+            # Always measured (~0.1 ms): the state is reported either way.
+            state, _ = low_light.lighting_monitor.observe(frame, camera_id)
+        except Exception as e:  # noqa: BLE001 - measuring must never stop detection
+            logger.debug(f"lighting measurement failed: {e}")
+            return None
+        if mode in ("off", "0", "false", "no", ""):
+            return None
+        if mode != "always" and state == "day":
+            return None
+        state = state if state != "day" else "mixed"
+        low_light.lighting_monitor.mark_enhanced(camera_id)
+        return lambda img: low_light.enhance_for_detection(img, state)
 
     @staticmethod
     def _is_accelerator(provider: Optional[str]) -> bool:
@@ -1501,11 +1625,23 @@ class PersonDetector:
         conf_threshold: Optional[float] = None,
         iou_threshold: Optional[float] = None,
         max_frame_fraction: Optional[float] = None,
+        camera_id: Optional[str] = None,
     ) -> list[Detection]:
         """Detect people (with keypoints when the model has them) in a BGR frame.
 
         ``max_frame_fraction`` overrides ``PERSON_MAX_FRAME_FRACTION`` for this
         call (the camera's ``person_max_frame_fraction`` setting).
+
+        Without ``conf_threshold`` each box is kept by its own threshold
+        (``person_threshold``: lower for a person in a dark box); an explicit
+        threshold applies to every box. Every returned detection carries the
+        mean luminance of its box (``Detection.luma``).
+
+        The frame's lighting is measured on every call (``low_light``) and,
+        only with ``LOW_LIGHT_ENHANCE`` on, the picture the model sees gets
+        local contrast enhancement. ``camera_id`` gives the state per-camera
+        hysteresis and makes it visible in ``status()["lighting"]``; without
+        it each frame is judged alone and not recorded.
 
         Returns an empty list when no backend is available. That emptiness is
         meaningful and must be propagated, not replaced with placeholder data.
@@ -1514,7 +1650,12 @@ class PersonDetector:
             self.initialise()
         if not self.available or frame is None or frame.size == 0:
             return []
-        conf = settings.PERSON_CONF_THRESHOLD if conf_threshold is None else conf_threshold
+        # Without an explicit threshold the per-box rule applies
+        # (person_threshold): decode down to the dark-box threshold, then keep
+        # each box by its own. An explicit threshold is taken as is.
+        per_box = conf_threshold is None
+        conf = (min(settings.PERSON_CONF_THRESHOLD, settings.PERSON_CONF_THRESHOLD_DARK) if per_box
+                else conf_threshold)
         iou = settings.PERSON_NMS_IOU if iou_threshold is None else iou_threshold
         # One consistent (session, spec) pair: a background GPU compile may swap both.
         with self._run_lock:
@@ -1523,8 +1664,9 @@ class PersonDetector:
             return []
 
         started = time.perf_counter()
+        enhance = self._lighting_enhancer(frame, camera_id)
         try:
-            raw, scale, px, py, infer_ms = self._run(session, spec, self._run_lock, frame)
+            raw, scale, px, py, infer_ms = self._run(session, spec, self._run_lock, frame, enhance=enhance)
             h, w = frame.shape[:2]
             boxes, scores, _cls, kpts = decode_output(raw, spec, conf, class_ids={PERSON_CLASS_ID})
             if len(boxes) == 0:
@@ -1541,14 +1683,18 @@ class PersonDetector:
                     if not self._is_plausible_person(bx1, by1, bx2, by2, frame_area, kp, max_frame_fraction):
                         rejected += 1
                         continue
-                    dets.append(Detection(bx1, by1, bx2, by2, confidence=float(scores[i]), keypoints=kp))
+                    det = Detection(bx1, by1, bx2, by2, confidence=float(scores[i]), keypoints=kp,
+                                    luma=box_luma(frame, (bx1, by1, bx2, by2)))
+                    if per_box and det.confidence < person_threshold(det):
+                        continue
+                    dets.append(det)
                 if rejected:
                     with self._stats_lock:
                         self._rejected += rejected
             refine_ms = 0.0
             if self.refiner_enabled and dets:
                 try:
-                    refine_ms = self._refine(frame, dets)
+                    refine_ms = self._refine(frame, dets, enhance)
                 except Exception as e:  # the pose model's own keypoints stand
                     logger.error(f"Keypoint refinement failed: {e}")
         except Exception as e:
@@ -1762,7 +1908,11 @@ class PersonDetector:
             "avg_latency_ms": avg_total if avg_total is not None else 0.0,
             "frames_inferred": frames,
             "conf_threshold": settings.PERSON_CONF_THRESHOLD,
+            "conf_threshold_dark": {"threshold": settings.PERSON_CONF_THRESHOLD_DARK,
+                                    "box_luma_below": settings.PERSON_DARK_LUMA},
             "implausible_boxes_rejected": rejected,
+            # Measured lighting per camera and whether its frames are enhanced.
+            "lighting": low_light.lighting_monitor.status(),
             "error": self.last_error,
             "last_error": self.last_error,
             "provider_attempts": list(self.provider_attempts),
@@ -1786,6 +1936,7 @@ class PersonDetector:
                 "reason": self.refiner_reason,
                 "batch_ms": self.refiner_batch_ms,
                 "avg_refine_ms": avg_refine,
+                "skeletons_kept_from_pose_model": self._refine_reverted,
             },
             "object_model": self.object_spec.path.name if self.object_session is not None else None,
             "object_detection": {
@@ -1809,6 +1960,33 @@ def _load_control_status() -> Optional[dict]:
         return inference_scheduler.status()
     except Exception as e:  # noqa: BLE001 - status must never fail
         return {"error": f"{type(e).__name__}: {e}"}
+
+
+def _torso_turned(before: np.ndarray, after: np.ndarray, max_deg: float) -> bool:
+    """True when the shoulder-to-hip axis of ``after`` is turned more than
+    ``max_deg`` from that of ``before`` (both torsos seen), i.e. a refinement
+    would rotate the person's skeleton rather than adjust its joints.
+
+    Measured on COCO persons at 352x288 (motion blur): 15 of ~380 refined
+    skeletons were turned >45 deg from the pose model's; reverting them kept
+    the refiner's accuracy gain (OKS 0.744 -> 0.776) and removed every
+    upright person drawn with shoulders below hips (1.3 % -> 0 %).
+    """
+    if max_deg <= 0 or before.shape[0] < 13 or after.shape[0] < 13:
+        return False
+    thr = settings.KEYPOINT_VISIBILITY_THRESHOLD
+
+    def axis(k):
+        v = k[:, 2] >= thr
+        if not (v[5] and v[6] and v[11] and v[12]):
+            return None
+        return k[[11, 12], :2].mean(0) - k[[5, 6], :2].mean(0)
+
+    a, b = axis(before), axis(after)
+    if a is None or b is None:
+        return False
+    cos = float(a @ b) / (float(np.linalg.norm(a) * np.linalg.norm(b)) + 1e-9)
+    return cos < float(np.cos(np.radians(max_deg)))
 
 
 def _has_coherent_torso(kpts: Optional[np.ndarray]) -> bool:

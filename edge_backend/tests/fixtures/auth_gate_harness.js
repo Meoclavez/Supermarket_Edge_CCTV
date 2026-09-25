@@ -6,13 +6,16 @@
 // object per scenario.
 //
 // usage: node auth_gate_harness.js <path/to/auth.js> <scenario>
-//   scenario: stale | valid | offline
+//   scenario: stale | valid | valid_nocookie | offline
+//   (valid_nocookie: the browser refuses to store cookies)
 'use strict';
 
 const fs = require('fs');
 const vm = require('vm');
 
-const [, , authPath, scenario] = process.argv;
+const [, , authPath, scenarioArg] = process.argv;
+const cookiesBlocked = scenarioArg.endsWith('_nocookie');
+const scenario = scenarioArg.replace(/_nocookie$/, '');
 const src = fs.readFileSync(authPath, 'utf8');
 
 function fakeElement(id) {
@@ -37,7 +40,8 @@ function fakeElement(id) {
 const registry = {};
 
 const storage = {};
-const cookies = [];
+const cookies = [];           // every cookie string written
+const jar = {};               // what the browser keeps (and would send)
 const network = [];           // requests that left the page: {path, auth}
 let settledState = null;
 const listeners = {};
@@ -69,8 +73,16 @@ const document = {
   createElement: () => fakeElement(),
   querySelector: () => null,
   addEventListener() {},
-  set cookie(v) { cookies.push(v); },
-  get cookie() { return ''; },
+  set cookie(v) {
+    cookies.push(v);
+    if (cookiesBlocked) return;
+    const [pair, ...attrs] = String(v).split(';');
+    const eq = pair.indexOf('=');
+    const name = pair.slice(0, eq).trim();
+    if (attrs.some((a) => /^\s*max-age=0\s*$/i.test(a))) delete jar[name];
+    else jar[name] = pair.slice(eq + 1).trim();
+  },
+  get cookie() { return Object.entries(jar).map(([k, v]) => `${k}=${v}`).join('; '); },
 };
 
 const window = {
@@ -112,7 +124,7 @@ vm.createContext(sandbox);
   const readyState = await window.edgeAuth.ready;
 
   process.stdout.write(JSON.stringify({
-    scenario,
+    scenario: scenarioArg,
     sent_before_resolve: beforeResolve,
     network: network.map((n) => ({ path: n.path, auth: n.auth })),
     statuses,
@@ -123,5 +135,6 @@ vm.createContext(sandbox);
     gate_shown: !!(registry.authGate && registry.authGate.style.display === 'flex'),
     is_authenticated: window.edgeAuth.isAuthenticated(),
     auth_url: window.edgeAuth.authUrl('/stream?camera_id=c1'),
+    cookie_jar: { ...jar },
   }) + '\n');
 })().catch((e) => { console.error(e); process.exit(2); });

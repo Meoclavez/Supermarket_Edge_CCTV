@@ -1185,7 +1185,7 @@
           <span class="fp-zone-name" style="color:${camColorFor(this.cameras, cam.camera_id)}">${escapeHtml(cam.name)}</span>
           <span class="badge ${online ? 'badge-green' : 'badge-danger'}">${escapeHtml(cam.status || 'UNKNOWN')}</span>
         </div>
-        <img id="fpCamThumb" class="fp-thumb" alt="Live frame from ${escapeHtml(cam.name)}" src="${window.edgeAuth && window.edgeAuth.authUrl ? window.edgeAuth.authUrl(`/api/v1/cameras/${encodeURIComponent(cam.camera_id)}/snapshot?annotate=false&_=${Date.now()}`) : `/api/v1/cameras/${encodeURIComponent(cam.camera_id)}/snapshot?annotate=false&_=${Date.now()}`}">
+        <img id="fpCamThumb" class="fp-thumb" alt="Live frame from ${escapeHtml(cam.name)}" src="${window.edgeAuth && window.edgeAuth.authUrl ? window.edgeAuth.authUrl(`/api/v1/cameras/${encodeURIComponent(cam.camera_id)}/snapshot?annotate=false&max_width=640&_=${Date.now()}`) : `/api/v1/cameras/${encodeURIComponent(cam.camera_id)}/snapshot?annotate=false&max_width=640&_=${Date.now()}`}">
         <div class="fp-kv">
           <span>Frame</span><b>${frame}</b>
           <span>Live tracks</span><b id="fpCamLive">${this.liveCountFor(cam.camera_id)}</b>
@@ -1244,7 +1244,7 @@
         const img = document.getElementById('fpCamThumb');
         const live = document.getElementById('fpCamLive');
         if (!img || !this.sel || this.sel.type !== 'camera' || this.sel.id !== cam.camera_id) { this._stopThumb(); return; }
-        const rawUrl = `/api/v1/cameras/${encodeURIComponent(cam.camera_id)}/snapshot?annotate=false&_=${Date.now()}`;
+        const rawUrl = `/api/v1/cameras/${encodeURIComponent(cam.camera_id)}/snapshot?annotate=false&max_width=640&_=${Date.now()}`;
         if (this.isVisible()) img.src = window.edgeAuth && window.edgeAuth.authUrl ? window.edgeAuth.authUrl(rawUrl) : rawUrl;
         if (live) live.textContent = this.liveCountFor(cam.camera_id);
       }, 2000);

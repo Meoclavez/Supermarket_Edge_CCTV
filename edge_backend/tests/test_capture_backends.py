@@ -309,6 +309,7 @@ def vaapi_worker(monkeypatch):
     probe = cb.DecodeProbe(backend=cb.VAAPI, device="/dev/dri/renderD128", chain="gpu_rgb", reason="test")
     monkeypatch.setattr(cb, "decode_probe", lambda force=False: probe)
     monkeypatch.setattr(lae, "_resolve_host_bounded", lambda *a: None)
+    monkeypatch.setattr(settings, "DECODE_GPU_MIN_PIXELS", 0)     # every camera on the GPU
     w = lae.CameraWorker(lae.CameraRuntime(camera_id="cam_hw", name="c", source=URL), lae.LiveAnalyticsEngine())
     soft = []
     monkeypatch.setattr(w, "_open_software", lambda src: soft.append(src) or _SoftCap())
@@ -355,13 +356,15 @@ def test_non_rtsp_sources_and_software_probe_use_opencv(vaapi_worker, monkeypatc
     assert soft[-1] == URL
 
 
-def test_worker_streams_on_the_gpu_reports_it_and_leaves_no_ffmpeg_behind(fake_ffmpeg, monkeypatch):
+def test_worker_streams_on_the_gpu_reports_it_and_leaves_no_ffmpeg_behind(fake_ffmpeg, monkeypatch, tmp_path):
     from app.services import hardware_detector as hd
     from app.services.inference_scheduler import inference_scheduler
 
     monkeypatch.setenv("FAKE_FFMPEG_MODE", "frames")
     probe = cb.DecodeProbe(backend=cb.VAAPI, device="/dev/dri/renderD128", chain="gpu_rgb", ffmpeg=sys.executable)
     monkeypatch.setattr(cb, "decode_probe", lambda force=False: probe)
+    monkeypatch.setattr(settings, "DECODE_GPU_MIN_PIXELS", 0)
+    monkeypatch.setattr(cb, "stream_sizes", cb.StreamSizes(tmp_path / "sizes.json"))
     monkeypatch.setattr(lae.CameraWorker, "_preflight", lambda self, src: None)
     monkeypatch.setattr(inference_scheduler, "admit", lambda *a, **k: False)
     monkeypatch.setattr(settings, "CAMERA_OPEN_TIMEOUT_SEC", 3.0)
@@ -409,3 +412,206 @@ def test_bundled_probe_clips_exist():
     for name in ("probe_h264.mp4", "probe_hevc.mp4"):
         assert (cb._SAMPLES / name).stat().st_size < 64 * 1024
     assert os.access(FAKE, os.X_OK)
+
+
+# ------------------------------------------------- per-camera decoder choice
+
+MIN_PX = 1280 * 720
+AUTO = cb.DecodeProbe(backend=cb.VAAPI, device="/dev/dri/renderD128", chain="cpu_rgb", requested="auto")
+
+
+def test_decoder_is_chosen_by_stream_size_in_auto_mode(monkeypatch):
+    monkeypatch.setattr(settings, "DECODE_GPU_MIN_PIXELS", MIN_PX)
+    small = cb.choose_decoder(AUTO, (352, 288))
+    assert not small.use_gpu and small.by_size
+    assert small.reason == "software: 352x288 is cheaper on the CPU than GPU decoding"
+    big = cb.choose_decoder(AUTO, (2560, 1440))
+    assert big.use_gpu and big.by_size and big.reason == "GPU (VA-API): 2560x1440 is cheaper to decode on the GPU"
+    assert cb.choose_decoder(AUTO, (1280, 720)).use_gpu                  # the threshold itself is GPU
+    unknown = cb.choose_decoder(AUTO, None)                               # opened like a CIF sub-stream
+    assert not unknown.use_gpu and unknown.by_size and "not known yet" in unknown.reason
+    monkeypatch.setattr(settings, "DECODE_GPU_MIN_PIXELS", 0)
+    assert cb.choose_decoder(AUTO, (352, 288)).use_gpu and cb.choose_decoder(AUTO, None).use_gpu
+
+
+def test_forced_backends_ignore_the_size(monkeypatch):
+    monkeypatch.setattr(settings, "DECODE_GPU_MIN_PIXELS", MIN_PX)
+    forced = cb.DecodeProbe(backend=cb.VAAPI, device="/dev/dri/renderD128", chain="cpu_rgb", requested="vaapi")
+    c = cb.choose_decoder(forced, (352, 288))
+    assert c.use_gpu and not c.by_size and c.reason == "GPU (VA-API): DECODE_BACKEND=vaapi"
+    soft = cb.DecodeProbe(backend=cb.SOFTWARE, requested="software", reason="DECODE_BACKEND=software")
+    c = cb.choose_decoder(soft, (3072, 2048))
+    assert not c.use_gpu and not c.by_size and c.reason == "DECODE_BACKEND=software"
+
+
+def test_stream_sizes_persist_per_camera_and_stream_without_credentials(tmp_path):
+    path = tmp_path / "sizes.json"
+    sizes = cb.StreamSizes(path)
+    main = "rtsp://admin:secret@10.0.0.9:554/cam/realmonitor?channel=1&subtype=0"
+    sub = main.replace("subtype=0", "subtype=1")
+    sizes.put("cam1", main, 3072, 2048)
+    sizes.put("cam1", sub, 704, 576)
+    assert "secret" not in path.read_text() and "10.0.0.9" not in path.read_text()
+    again = cb.StreamSizes(path)                                          # a restarted service
+    assert again.get("cam1", main) == (3072, 2048) and again.get("cam1", sub) == (704, 576)
+    assert again.get("cam1", main.replace("secret", "changed")) == (3072, 2048)   # new password, same stream
+    assert again.get("cam2", main) is None
+    mtime = path.stat().st_mtime_ns
+    again.put("cam1", main, 3072, 2048)                                   # unchanged: not rewritten
+    assert path.stat().st_mtime_ns == mtime
+    path.write_text("{not json")
+    assert cb.StreamSizes(path).get("cam1", main) is None                 # unreadable file: start empty
+
+
+class _FakeHw(cb.FfmpegHwCapture):
+    """An FfmpegHwCapture that opened (no ffmpeg is started)."""
+
+    def __init__(self, source_size=(2560, 1440)):  # noqa: D107 - skip the real open
+        self.decoder, self.source_size, self.source_fps, self.max_fps = cb.VAAPI, source_size, 25.0, 10.0
+        self.released, self.failure, self.pid = False, None, None
+
+    def isOpened(self):
+        return not self.released
+
+    def release(self, wait=0.5):
+        self.released = True
+
+
+@pytest.fixture
+def auto_worker(monkeypatch, tmp_path):
+    monkeypatch.setattr(cb, "decode_probe", lambda force=False: AUTO)
+    monkeypatch.setattr(settings, "DECODE_GPU_MIN_PIXELS", MIN_PX)
+    monkeypatch.setattr(cb, "stream_sizes", cb.StreamSizes(tmp_path / "sizes.json"))
+    monkeypatch.setattr(lae, "_resolve_host_bounded", lambda *a: None)
+    monkeypatch.setattr(lae, "_source_sizes", {})
+    opened = []
+    monkeypatch.setattr(cb, "open_hw_capture", lambda src, probe, cancel=None: opened.append("gpu") or _FakeHw())
+
+    def make(cam="cam_auto"):
+        w = lae.CameraWorker(lae.CameraRuntime(camera_id=cam, name="c", source=URL), lae.LiveAnalyticsEngine())
+        monkeypatch.setattr(w, "_open_software", lambda src: opened.append("software") or _SoftCap())
+        return w
+
+    return make, opened
+
+
+def test_a_large_stream_opened_in_software_moves_to_the_gpu_once(auto_worker):
+    make, opened = auto_worker
+    w = make()
+    first = w._open()
+    assert opened == ["software"] and not w._choice.use_gpu              # size unknown: CIF guess
+    cap = w._after_first_frame(first, URL, np.zeros((1440, 2560, 3), np.uint8))
+    assert isinstance(cap, _FakeHw) and first.released and opened == ["software", "gpu"]
+    assert w.rt.decoder == cb.VAAPI and w.rt.decoder_note == "GPU (VA-API): 2560x1440 is cheaper to decode on the GPU"
+    assert cb.stream_sizes.get("cam_auto", URL) == (2560, 1440)
+    # Bounded: whatever the next measurement says, this worker does not switch again.
+    w._choice = cb.choose_decoder(AUTO, None)
+    again = w._after_first_frame(cap, URL, np.zeros((288, 352, 3), np.uint8))
+    assert again is cap and opened == ["software", "gpu"]
+
+
+def test_a_small_stream_stays_in_software_and_says_why(auto_worker):
+    make, opened = auto_worker
+    w = make()
+    cap = w._open()
+    assert w._after_first_frame(cap, URL, np.zeros((288, 352, 3), np.uint8)) is cap
+    assert opened == ["software"]
+    w._report_decoder(cap, URL)
+    assert w.rt.decoder == cb.SOFTWARE and w.rt.decoder_note == "software: 352x288 is cheaper on the CPU than GPU decoding"
+
+
+def test_a_restart_opens_on_the_remembered_decoder_without_switching(auto_worker):
+    make, opened = auto_worker
+    cb.stream_sizes.put("cam_big", URL, 3072, 2048)
+    cb.stream_sizes.reset()                                               # as after a restart: read the file
+    w = make("cam_big")
+    cap = w._open()
+    assert opened == ["gpu"] and isinstance(cap, _FakeHw)
+    assert w._after_first_frame(cap, URL, np.zeros((2048, 3072, 3), np.uint8)) is cap
+    assert opened == ["gpu"] and not w._decoder_switched
+
+
+def test_forced_vaapi_never_switches_a_small_stream_to_software(auto_worker, monkeypatch):
+    make, opened = auto_worker
+    forced = cb.DecodeProbe(backend=cb.VAAPI, device="/dev/dri/renderD128", chain="cpu_rgb", requested="vaapi")
+    monkeypatch.setattr(cb, "decode_probe", lambda force=False: forced)
+    w = make()
+    cap = w._open()
+    assert w._after_first_frame(cap, URL, np.zeros((288, 352, 3), np.uint8)) is cap
+    assert opened == ["gpu"]
+
+
+def test_decoder_usage_counts_cameras_per_decoder():
+    rts = [SimpleNamespace(status="ONLINE", decoder=cb.VAAPI)] * 8 + [SimpleNamespace(status="ONLINE", decoder=cb.SOFTWARE)] * 25
+    rts += [SimpleNamespace(status="OFFLINE", decoder=None)]
+    u = cb.decoder_usage(rts)
+    assert u["in_use"] == "mixed" and u["cameras"] == {"vaapi": 8, "software": 25}
+    assert u["summary"] == "GPU (VA-API) for 8 cameras, software (CPU) for 25 cameras"
+
+
+# ------------------------------------------------------- thinned software capture
+
+class _StreamCap:
+    """cv2.VideoCapture stand-in: ``grab`` advances a stream clock at ``fps``."""
+
+    def __init__(self, fps=25.0, frames=50, stuck_clock=False):
+        import cv2
+
+        self._cv2, self.fps, self.frames, self.stuck = cv2, fps, frames, stuck_clock
+        self.i, self.retrieved = -1, 0
+
+    def grab(self):
+        self.i += 1
+        return self.i < self.frames
+
+    def retrieve(self):
+        self.retrieved += 1
+        return True, np.full((4, 4, 3), self.i % 256, np.uint8)
+
+    def get(self, prop):
+        if prop == self._cv2.CAP_PROP_FPS:
+            return self.fps
+        if prop == self._cv2.CAP_PROP_POS_MSEC:
+            return 0.0 if self.stuck else self.i * 1000.0 / self.fps
+        return 0.0
+
+    def isOpened(self):
+        return True
+
+    def release(self):
+        pass
+
+
+def _drain(cap):
+    got = []
+    while True:
+        ok, f = cap.read()
+        if not ok:
+            return got
+        got.append(int(f[0, 0, 0]))
+
+
+def test_thinned_capture_converts_ten_of_twenty_five_frames_a_second():
+    src = _StreamCap(fps=25.0, frames=50)                                 # 2 s of video
+    cap = cb.ThinnedCapture(src, 10)
+    got = _drain(cap)
+    assert len(got) == 20 and src.retrieved == 20 and cap.frames_skipped == 30
+    assert got[:5] == [0, 3, 5, 8, 10]                                    # first frame of every 0.1 s slot
+    assert cap.source_fps == 25.0 and cap.output_fps == 10.0
+
+
+def test_thinned_capture_keeps_every_frame_of_a_slow_camera_and_survives_a_stuck_clock(monkeypatch):
+    slow = cb.ThinnedCapture(_StreamCap(fps=6.0, frames=12), 10)
+    assert len(_drain(slow)) == 12 and slow.output_fps == 6.0
+    # No usable timestamps: wall-clock slots instead, never a stalled feed.
+    clock = iter(i * 0.04 for i in range(1000))
+    monkeypatch.setattr(cb.time, "monotonic", lambda: next(clock))
+    stuck = cb.ThinnedCapture(_StreamCap(fps=25.0, frames=50, stuck_clock=True), 10)
+    assert 18 <= len(_drain(stuck)) <= 21
+
+
+def test_clip_stride_of_a_thinned_software_camera_keeps_the_native_clip_rate():
+    w = lae.CameraWorker(lae.CameraRuntime(camera_id="c", name="c", source=URL), lae.LiveAnalyticsEngine())
+    n = settings.ANALYTICS_DETECT_EVERY_N_FRAMES
+    w.rt.fps = 10.0
+    assert w._clip_every(cb.ThinnedCapture(_StreamCap(fps=25.0), 10)) == max(1, round(n * 10 / 25))

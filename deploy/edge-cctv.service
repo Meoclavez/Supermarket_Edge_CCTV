@@ -16,6 +16,12 @@ User=edgecctv
 Group=edgecctv
 
 WorkingDirectory=/opt/edge-cctv/edge_backend
+# Defaults for the listen address; HOST/PORT in .env override them (values
+# from EnvironmentFile= take precedence over Environment=). Once tailscale
+# serve and/or cloudflared front the dashboard, set HOST=127.0.0.1 in .env so
+# the plain-HTTP port is not reachable from the network at all
+# (docs/DEPLOYMENT.md, "Online access").
+Environment=HOST=0.0.0.0 PORT=8000
 EnvironmentFile=/opt/edge-cctv/edge_backend/.env
 
 # Read-only preflight (deps, onnxruntime flavour/providers, GPU-vs-provider
@@ -28,8 +34,11 @@ ExecStartPre=/opt/edge-cctv/.venv/bin/python -m app.services.preflight
 
 # `python -m uvicorn` rather than .venv/bin/uvicorn: a venv that was copied or
 # moved keeps console scripts pointing at the old interpreter.
+# --no-server-header: do not announce "server: uvicorn" to every visitor.
+# uvicorn's proxy-header handling stays on: it believes X-Forwarded-For/-Proto
+# only from 127.0.0.1/::1 (tailscale serve, cloudflared), see public_exposure.py.
 ExecStart=/opt/edge-cctv/.venv/bin/python -m uvicorn app.main:app \
-    --host 0.0.0.0 --port 8000 --workers 1 --timeout-graceful-shutdown 5
+    --host ${HOST} --port ${PORT} --workers 1 --timeout-graceful-shutdown 5 --no-server-header
 
 # Single worker is deliberate: the camera workers, their frame buffers and the
 # in-memory fact buffer live in this process. A second worker would open a

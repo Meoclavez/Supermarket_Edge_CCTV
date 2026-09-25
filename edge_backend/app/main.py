@@ -203,25 +203,23 @@ app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
     description="Decentralized Edge AI CCTV with Studio & Multi-Cam Dashboard",
-    lifespan=lifespan
+    lifespan=lifespan,
+    # /docs, /redoc and /openapi.json exist only with DEBUG=true (web_delivery.install_docs).
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
 # CORS for this device's own origins only, security headers, and refusal of
 # first-run setup / API docs through the public hostname (public_exposure.py).
 from .services import public_exposure
+from .services import web_delivery
 
 public_exposure.install(app)
-
-
-@app.middleware("http")
-async def add_no_cache_headers(request: Request, call_next):
-    response = await call_next(request)
-    path = request.url.path
-    if path.startswith("/static/") or path in ("/dashboard", "/dashboard/studio", "/"):
-        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-        response.headers["Pragma"] = "no-cache"
-        response.headers["Expires"] = "0"
-    return response
+# gzip for text responses, Cache-Control: no-store on the API; pages and
+# static files set their own caching (content-hash URLs, ETags).
+web_delivery.install(app)
+web_delivery.install_docs(app)
 
 
 # Register API Routers
@@ -256,7 +254,8 @@ app.include_router(insights_routes.router)
 
 # Mount Static Files
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+# Content-hash URLs are cached for a year; anything else revalidates (web_delivery.py).
+app.mount("/static", web_delivery.CachedStaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 @app.get("/favicon.ico", include_in_schema=False)
@@ -277,37 +276,30 @@ def root(request: Request):
         "app": settings.APP_NAME,
         "version": settings.APP_VERSION,
         "health_url": "/api/v1/health",
-        "docs_url": "/docs"
+        "docs_url": "/docs" if settings.DEBUG else None,
     }
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
-def dashboard_home_view():
-    index_file = STATIC_DIR / "index.html"
-    if index_file.exists():
-        with open(index_file, "r") as f:
-            return HTMLResponse(content=f.read())
-    return HTMLResponse(content="<h1>Dashboard Loading...</h1>")
+def dashboard_home_view(request: Request):
+    """index.html with content-hashed asset URLs, an ETag and gzip (web_delivery.py)."""
+    return web_delivery.html_response(request, "index.html", "<h1>Dashboard Loading...</h1>")
 
 @app.get("/dashboard/analytics", response_class=HTMLResponse)
 @app.get("/analytics", response_class=HTMLResponse)
-def dashboard_analytics_view():
+def dashboard_analytics_view(request: Request):
     """The analytics view is a tab of the single dashboard page.
 
     ``static/analytics.html`` was a byte-for-byte copy of ``index.html`` and
     has been removed; both routes serve the one page and the client opens the
     analytics tab from the URL hash.
     """
-    return dashboard_home_view()
+    return dashboard_home_view(request)
 
 @app.get("/dashboard/studio", response_class=HTMLResponse)
 @app.get("/studio", response_class=HTMLResponse)
-def dashboard_studio_view():
-    studio_file = STATIC_DIR / "studio.html"
-    if studio_file.exists():
-        with open(studio_file, "r") as f:
-            return HTMLResponse(content=f.read())
-    return HTMLResponse(content="<h1>Studio Loading...</h1>")
+def dashboard_studio_view(request: Request):
+    return web_delivery.html_response(request, "studio.html", "<h1>Studio Loading...</h1>")
 
 # Live MJPEG for the Studio canvas and the dashboard camera matrix.
 def _encode_jpeg(frame, quality: int = 80):
@@ -327,7 +319,7 @@ def _placeholder_frame(message: str, width: int = 960, height: int = 540) -> byt
 
 @app.get("/stream")
 async def mjpeg_stream(request: Request, camera_id: str | None = None, fps: int = 0, overlay: int = 0,
-                       _auth: bool = Depends(auth_service.verify_api_access)):
+                       max_width: int = 0, _auth: bool = Depends(auth_service.verify_api_access)):
     """Stream real frames captured by the live pipeline.
 
     This used to synthesise a bouncing "PERSON 0.94" rectangle with OpenCV and
@@ -338,8 +330,12 @@ async def mjpeg_stream(request: Request, camera_id: str | None = None, fps: int 
     ``overlay=1`` draws the tracker's current boxes and ids on each frame from
     the worker's own snapshot -- no extra inference -- so what is shown is
     exactly what is being counted. The default is the raw frame.
+
+    ``max_width`` (> 0) scales frames down to at most that width, as for
+    ``/api/v1/cameras/{id}/snapshot``: the enlarged dashboard tile asks for
+    about its on-screen size instead of a 3072x2048 frame per picture.
     """
-    from .services.live_analytics_engine import render_overlay
+    from .services.live_analytics_engine import fit_width, render_overlay
     from .services.shutdown_signal import shutdown_requested
 
     async def iter_frames():
@@ -364,12 +360,13 @@ async def mjpeg_stream(request: Request, camera_id: str | None = None, fps: int 
                     payload = _placeholder_frame(str(reason))
                     await asyncio.sleep(0.5)
                 else:
+                    frame, scale = fit_width(frame, max_width)
                     if overlay:
                         rt = live_engine.runtimes.get(cam)
                         if rt is not None:
                             # get_frame() already returned a copy, so drawing here
                             # never touches the frame the worker is analysing.
-                            frame = render_overlay(frame, rt)
+                            frame = render_overlay(frame, rt, scale=scale)
                     payload = _encode_jpeg(frame)
                     # Dashboard tiles ask for a low frame rate: a wall of 32 feeds
                     # re-encoding at full rate would spend the whole CPU budget on

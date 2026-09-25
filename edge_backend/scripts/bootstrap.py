@@ -801,8 +801,11 @@ def main() -> None:
     # app/services/shutdown_signal.py for the primary fix).
     graceful = [] if any(a.startswith("--timeout-graceful-shutdown") for a in passthrough) \
         else ["--timeout-graceful-shutdown", "5"]
+    # No "server: uvicorn" banner on every response.
+    banner = [] if "--server-header" in passthrough or "--no-server-header" in passthrough \
+        else ["--no-server-header"]
     cmd = [str(py), "-m", "uvicorn", "app.main:app", "--host", str(args.host), "--port", str(args.port),
-           *graceful, *passthrough]
+           *graceful, *banner, *passthrough]
     print(f"== exec {' '.join(cmd)}  (cwd {EDGE_BACKEND_DIR})", flush=True)
     os.chdir(EDGE_BACKEND_DIR)
     if IS_WINDOWS:

@@ -18,11 +18,14 @@
   <link rel="stylesheet" href="/static/css/insights.css?v=2.3.0" />
   <link rel="stylesheet" href="/static/css/camera_roles.css?v=2.3.0" />
   <link rel="stylesheet" href="/static/css/heatmap_history.css?v=2.3.0" />
+  <!-- auth.js stays a classic (blocking) script: it must wrap fetch before any
+       module runs. Everything else is deferred and runs in document order after
+       parsing; theme.js is listed last so it still runs after the modules.
+       The server rewrites each ?v= to a hash of the file (web_delivery.py). -->
   <script src="/static/js/auth.js?v=2.3.0"></script>
-  <script src="/static/js/theme.js?v=2.3.0" defer></script>
 
-  <!-- Chart.js for the visitors-by-hour charts -->
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <!-- Chart.js 4.4.1 for the visitors-by-hour charts (vendored: vendor/chartjs/SOURCE.txt) -->
+  <script src="/static/vendor/chartjs/chart.umd.min.js" defer></script>
 </head>
 <body>
   <div class="dashboard-shell">
@@ -881,18 +884,19 @@
   <div class="toast" id="toast" role="status" aria-live="polite">Notification</div>
 
   <!-- Scripts -->
-  <script src="/static/js/floorplan.js?v=2.3.0"></script>
-  <script src="/static/js/devices.js?v=2.3.0"></script>
-  <script src="/static/js/calibration.js?v=2.3.0"></script>
-  <script src="/static/js/analytics.js?v=2.3.0"></script>
-  <script src="/static/js/camera_roles.js?v=2.3.0"></script>
-  <script src="/static/js/today.js?v=2.3.0"></script>
-  <script src="/static/js/loss.js?v=2.3.0"></script>
-  <script src="/static/js/insights.js?v=2.3.0"></script>
-  <script src="/static/js/heatmap_history.js?v=2.3.0"></script>
-  <script src="/static/js/product_reach.js?v=2.3.0"></script>
-  <script src="/static/js/entrances.js?v=2.3.0"></script>
-  <script src="/static/js/remote_access.js?v=2.3.0"></script>
-  <script src="/static/js/pairing.js?v=2.3.0"></script>
+  <script src="/static/js/floorplan.js?v=2.3.0" defer></script>
+  <script src="/static/js/devices.js?v=2.3.0" defer></script>
+  <script src="/static/js/calibration.js?v=2.3.0" defer></script>
+  <script src="/static/js/analytics.js?v=2.3.0" defer></script>
+  <script src="/static/js/camera_roles.js?v=2.3.0" defer></script>
+  <script src="/static/js/today.js?v=2.3.0" defer></script>
+  <script src="/static/js/loss.js?v=2.3.0" defer></script>
+  <script src="/static/js/insights.js?v=2.3.0" defer></script>
+  <script src="/static/js/heatmap_history.js?v=2.3.0" defer></script>
+  <script src="/static/js/product_reach.js?v=2.3.0" defer></script>
+  <script src="/static/js/entrances.js?v=2.3.0" defer></script>
+  <script src="/static/js/remote_access.js?v=2.3.0" defer></script>
+  <script src="/static/js/pairing.js?v=2.3.0" defer></script>
+  <script src="/static/js/theme.js?v=2.3.0" defer></script>
 </body>
 </html>

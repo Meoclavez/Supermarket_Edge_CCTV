@@ -25,6 +25,12 @@ and it is never logged or returned by the API.
 The tunnel only runs when remote access is enabled AND a hostname AND a token
 are configured AND authentication is on. ``AUTH_DISABLED`` refuses it: an
 unauthenticated system must never be reachable from the internet.
+
+The private route, ``tailscale serve`` on the owner's tailnet, is set up by
+``deploy/install.sh`` (``EDGE_TAILSCALE_SERVE=1``) because it needs root.
+This module only reports it, read-only (:func:`read_tailscale_status`,
+``status()["tailscale"]``), so Settings -> Online access can show the
+``https://<machine>.<tailnet>.ts.net`` address or say what is missing.
 """
 
 from __future__ import annotations
@@ -244,6 +250,122 @@ def this_device_id() -> Optional[str]:
         return None
 
 
+# --------------------------------------------------------------------------- #
+# Tailscale (private HTTPS for the owner's tailnet): read-only status
+# --------------------------------------------------------------------------- #
+
+TAILSCALE_ADMIN_DNS_URL = "https://login.tailscale.com/admin/dns"
+TAILSCALE_CACHE_SECONDS = 30.0
+
+
+def find_tailscale() -> Optional[str]:
+    explicit = os.environ.get("TAILSCALE_PATH")
+    if explicit and os.access(explicit, os.X_OK):
+        return explicit
+    return shutil.which("tailscale")
+
+
+def _run_tailscale(binary: str, *args: str, timeout: float = 5.0) -> subprocess.CompletedProcess:
+    return subprocess.run([binary, *args], capture_output=True, text=True, timeout=timeout,
+                          stdin=subprocess.DEVNULL)
+
+
+def _serve_targets(serve: dict[str, Any], dns_name: str) -> tuple[list[str], bool]:
+    """(proxy targets published on https://<dns_name>:443, whether Funnel is on for it)."""
+    targets: list[str] = []
+    web = serve.get("Web") or {}
+    for hostport, cfg in web.items():
+        host, _, port = str(hostport).rpartition(":")
+        if port != "443" or (dns_name and host.rstrip(".").lower() != dns_name):
+            continue
+        for handler in ((cfg or {}).get("Handlers") or {}).values():
+            proxy = (handler or {}).get("Proxy")
+            if proxy:
+                targets.append(str(proxy))
+    funnel = any(bool(v) and str(k).rpartition(":")[0].rstrip(".").lower() == dns_name
+                 for k, v in (serve.get("AllowFunnel") or {}).items())
+    return targets, funnel
+
+
+def _targets_this_port(target: str, port: int) -> bool:
+    from urllib.parse import urlsplit
+
+    raw = target if "://" in target else f"http://{target}"
+    try:
+        parts = urlsplit(raw)
+        return parts.hostname in ("127.0.0.1", "localhost", "::1") and parts.port == port
+    except ValueError:
+        return False
+
+
+def read_tailscale_status(port: Optional[int] = None,
+                          finder: Callable[[], Optional[str]] = find_tailscale,
+                          runner: Callable[..., subprocess.CompletedProcess] = _run_tailscale) -> dict[str, Any]:
+    """What ``tailscale status``/``serve status`` say about private HTTPS for this dashboard.
+
+    Read-only and never raises: a machine without Tailscale, a daemon that is
+    down, or a CLI this user may not run all come back as a state + message.
+    """
+    port = port or settings.PORT
+    serve_cmd = f"sudo tailscale serve --bg --https=443 http://127.0.0.1:{port}"
+    out: dict[str, Any] = {
+        "installed": False, "state": "not_installed", "message": None, "dns_name": None,
+        "tailnet": None, "https_enabled": False, "serving": None, "funnel": False, "url": None,
+        "serve_command": serve_cmd, "admin_url": TAILSCALE_ADMIN_DNS_URL,
+    }
+    binary = finder()
+    if not binary:
+        out["message"] = "Tailscale is not installed on this machine."
+        return out
+    out["installed"] = True
+    try:
+        res = runner(binary, "status", "--json")
+    except (OSError, subprocess.SubprocessError) as exc:
+        out.update(state="unavailable", message=f"tailscale status could not run: {exc.__class__.__name__}")
+        return out
+    try:
+        data = json.loads(res.stdout or "")
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        text = re.sub(r"\s+", " ", (res.stderr or res.stdout or "")).strip()[:200]
+        out.update(state="unavailable", message=text or f"tailscale status failed (exit {res.returncode}).")
+        return out
+    backend = data.get("BackendState") or ""
+    this = data.get("Self") or {}
+    dns_name = str(this.get("DNSName") or "").rstrip(".").lower() or None
+    cert_domains = [str(d).rstrip(".").lower() for d in (data.get("CertDomains") or [])]
+    out.update(dns_name=dns_name, tailnet=(data.get("CurrentTailnet") or {}).get("Name"),
+               https_enabled=bool(dns_name and dns_name in cert_domains))
+    if backend != "Running":
+        out.update(state="stopped", message=f"Tailscale is not connected (state: {backend or 'unknown'}).")
+        return out
+    out["state"] = "running"
+    if not dns_name:
+        out["message"] = "MagicDNS is off, so this machine has no tailnet name. Turn on MagicDNS."
+        return out
+    if not out["https_enabled"]:
+        out["message"] = ("HTTPS certificates are not enabled for this tailnet. In the Tailscale admin "
+                          "console open DNS, turn on MagicDNS and HTTPS Certificates.")
+    try:
+        sres = runner(binary, "serve", "status", "--json")
+        serve = json.loads(sres.stdout or "{}") if sres.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        serve = None
+    if isinstance(serve, dict):
+        targets, funnel = _serve_targets(serve, dns_name)
+        out["serving"] = any(_targets_this_port(t, port) for t in targets)
+        out["funnel"] = funnel
+        if out["serving"]:
+            out["url"] = f"https://{dns_name}/dashboard"
+        elif targets:
+            out["message"] = (f"tailscale serve publishes https://{dns_name} but not to this dashboard "
+                              f"({', '.join(targets)[:120]}). Run: {serve_cmd}")
+        elif out["https_enabled"]:
+            out["message"] = f"Not published on the tailnet yet. On this machine run: {serve_cmd}"
+    return out
+
+
 def find_cloudflared() -> Optional[str]:
     """``CLOUDFLARED_PATH``, then PATH, then ``<repo>/bin/cloudflared`` (bootstrap.py)."""
     explicit = os.environ.get("CLOUDFLARED_PATH")
@@ -285,6 +407,8 @@ class RemoteAccessService:
         self._secret_redactions: tuple[str, ...] = ()
         # Injectable for tests.
         self.binary_finder: Callable[[], Optional[str]] = find_cloudflared
+        self.tailscale_reader: Callable[[], dict[str, Any]] = read_tailscale_status
+        self._tailscale_cache: Optional[tuple[float, dict[str, Any]]] = None
 
     # -- settings -----------------------------------------------------------
 
@@ -644,6 +768,20 @@ class RemoteAccessService:
 
     # -- status -----------------------------------------------------------------
 
+    def tailscale_status(self, max_age: float = TAILSCALE_CACHE_SECONDS) -> dict[str, Any]:
+        """Private tailnet HTTPS status, cached (the Settings page polls every 3 s)."""
+        with self._lock:
+            cached = self._tailscale_cache
+        if cached and time.monotonic() - cached[0] < max_age:
+            return dict(cached[1])
+        try:
+            data = self.tailscale_reader()
+        except Exception as exc:  # never break the remote-access page over it
+            data = {"installed": None, "state": "unavailable", "message": f"{exc.__class__.__name__}"}
+        with self._lock:
+            self._tailscale_cache = (time.monotonic(), data)
+        return dict(data)
+
     def status(self) -> dict[str, Any]:
         self._periodic_verify()
         s = self.settings
@@ -666,9 +804,12 @@ class RemoteAccessService:
             "verify_error": s.get("verify_error"),
             "cloudflared_found": bool(binary) if s.get("provider") == "cloudflare_tunnel" else None,
             "auth_disabled": bool(settings.AUTH_DISABLED),
-            "local_origin": f"http://localhost:{settings.PORT}",
+            # 127.0.0.1 rather than localhost: with HOST=127.0.0.1 uvicorn
+            # listens on IPv4 only, and "localhost" may resolve to ::1 first.
+            "local_origin": f"http://127.0.0.1:{settings.PORT}",
             "caddy_site_block": caddy_site_block(s.get("hostname") or "", settings.PORT)
             if s.get("provider") == "direct" else None,
+            "tailscale": self.tailscale_status(),
         }
 
     # -- lifespan ---------------------------------------------------------------

@@ -416,6 +416,11 @@ class CameraWorker(threading.Thread):
         # URL, camera off/on, service restart).
         self._hw_disabled: Optional[str] = None
         self._hw_no_frames = 0
+        # Where the current capture decodes and why (capture_backends.choose_decoder),
+        # and whether this worker already moved its camera to the other decoder
+        # after measuring the stream (at most once per worker).
+        self._choice: Optional[capture_backends.DecoderChoice] = None
+        self._decoder_switched = False
         # Every how many delivered frames one goes to the clip ring (_clip_every).
         self._clip_n = max(1, int(settings.ANALYTICS_DETECT_EVERY_N_FRAMES))
         # Latest retail objects; refreshed every OBJECT_DETECT_EVERY_N
@@ -477,23 +482,38 @@ class CameraWorker(threading.Thread):
     # ------------------------------------------------------------------ capture
 
     def _open(self, source_url: Optional[str] = None):
-        """Open the camera on the GPU decoder when one works, else with OpenCV.
+        """Open the camera on the GPU decoder where that is cheaper, else with OpenCV.
 
-        The decoder is chosen per open (capture_backends): an RTSP camera goes
-        to the probed GPU backend unless GPU decoding already failed for this
-        camera; everything else, and every fallback, is today's OpenCV path.
+        The decoder is chosen per open (capture_backends.choose_decoder): an
+        RTSP camera goes to the probed GPU backend when its last measured
+        stream size is at least DECODE_GPU_MIN_PIXELS (every RTSP camera with
+        DECODE_BACKEND=cuda/vaapi), unless GPU decoding already failed for
+        this camera; everything else, and every fallback, is the OpenCV path.
         """
         src = source_url or self.rt.source
+        self._choice = None
         probe = None
         if self._hw_disabled is None and capture_backends.hw_eligible(src):
             probe = capture_backends.decode_probe()
             if probe.backend == capture_backends.SOFTWARE:
                 probe = None
         if probe is not None:
-            cap = self._open_hw(src, probe)
-            if cap is not None:
-                return cap
+            self._choice = capture_backends.choose_decoder(probe, self._known_size(src))
+            if self._choice.use_gpu:
+                cap = self._open_hw(src, probe)
+                if cap is not None:
+                    return cap
+                self._choice = None          # GPU failed for this stream: _hw_disabled says why
         return self._open_software(src)
+
+    def _known_size(self, src: str) -> Optional[tuple[int, int]]:
+        """The stream's last measured native size: this process, else the saved one."""
+        size = _source_sizes.get(src)
+        if size is None:
+            size = capture_backends.stream_sizes.get(self.rt.camera_id, src)
+            if size is not None:
+                _source_sizes[src] = size
+        return size
 
     def _open_hw(self, src: str, probe):
         """A GPU capture; None means "decode this camera in software instead".
@@ -561,6 +581,10 @@ class CameraWorker(threading.Thread):
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         except Exception:
             pass
+        # An RTSP camera delivers at most DECODE_MAX_FPS frames, like the GPU
+        # path: the others are decoded but never converted to BGR.
+        if capture_backends.hw_eligible(src) and settings.DECODE_MAX_FPS > 0:
+            cap = capture_backends.ThinnedCapture(cap, settings.DECODE_MAX_FPS)
         return cap
 
     def _software_reason(self, source: str) -> str:
@@ -568,8 +592,19 @@ class CameraWorker(threading.Thread):
             return self._hw_disabled
         if not capture_backends.hw_eligible(source):
             return "only RTSP cameras are decoded on the GPU"
+        if self._choice is not None and not self._choice.use_gpu:
+            return self._choice.reason
         probe = capture_backends.cached_probe()
         return probe.reason if probe is not None else "GPU decoding not probed"
+
+    def _report_decoder(self, cap, source: str) -> None:
+        """What this connection really decodes with, and why, for status and health."""
+        if isinstance(cap, capture_backends.FfmpegHwCapture):
+            self.rt.decoder = cap.decoder
+            self.rt.decoder_note = self._choice.reason if self._choice is not None else None
+        else:
+            self.rt.decoder = capture_backends.SOFTWARE
+            self.rt.decoder_note = self._software_reason(source)
 
     def run(self) -> None:
         import cv2
@@ -630,9 +665,7 @@ class CameraWorker(threading.Thread):
                                        + (f" ({why})" if why else ""))
 
                 self._cap = cap
-                hw = isinstance(cap, capture_backends.FfmpegHwCapture)
-                self.rt.decoder = cap.decoder if hw else capture_backends.SOFTWARE
-                self.rt.decoder_note = None if hw else self._software_reason(active_source)
+                self._report_decoder(cap, active_source)
                 self.rt.status = "ONLINE"
                 self.rt.last_error = None
                 self.rt.next_retry_at = None
@@ -643,7 +676,7 @@ class CameraWorker(threading.Thread):
 
                 last_tick = time.time()
                 frames_in_window = 0
-                sized = hw   # a GPU capture has no decode threads to fit
+                sized = False
                 self._clip_n = self._clip_every(cap)
 
                 while not self._stop.is_set():
@@ -655,8 +688,9 @@ class CameraWorker(threading.Thread):
                         raise RuntimeError("Stream ended or frame read failed" + (f" ({why})" if why else ""))
                     if not sized:
                         sized = True
-                        cap = self._fit_decode_threads(cap, active_source, frame)
+                        cap = self._after_first_frame(cap, active_source, frame)
                         self._cap = cap
+                        self._clip_n = self._clip_every(cap)
 
                     self.rt.frames_read += 1
                     self.rt.last_frame_at = time.time()
@@ -743,6 +777,47 @@ class CameraWorker(threading.Thread):
         current = self.engine.runtimes.get(self.rt.camera_id)
         if current is None or not current.enabled:
             _drop_clip_buffer(self.rt.camera_id)
+
+    def _after_first_frame(self, cap, source: str, frame: np.ndarray):
+        """Remember the stream's size; move the camera to the cheaper decoder once.
+
+        A camera whose size was not known (first start, new stream) opened on
+        the decoder chosen for an unknown size. If its measured size says the
+        other decoder is cheaper, it is reopened there, once per worker life
+        and logged (the login already succeeded, so this costs no failed
+        attempt). Otherwise a software capture gets its decode threads fitted.
+        """
+        hw = isinstance(cap, capture_backends.FfmpegHwCapture)
+        h, w = frame.shape[:2]
+        if hw and cap.source_size:
+            w, h = cap.source_size            # native, before any DECODE_MAX_WIDTH scaling
+        _source_sizes[source] = (int(w), int(h))
+        capture_backends.stream_sizes.put(self.rt.camera_id, source, int(w), int(h))
+
+        choice = self._choice
+        want_gpu = capture_backends.size_prefers_gpu(w, h)
+        if choice is not None and choice.by_size and want_gpu == hw:
+            # Opened on the right decoder: state the measured reason.
+            self._choice = capture_backends.choose_decoder(capture_backends.decode_probe(), (int(w), int(h)))
+            self._report_decoder(cap, source)
+        if (choice is not None and choice.by_size and want_gpu is not None and want_gpu != hw
+                and not self._decoder_switched and not self._stop.is_set()):
+            self._decoder_switched = True
+            before = capture_backends.BACKEND_LABELS[cap.decoder if hw else capture_backends.SOFTWARE]
+            try:
+                cap.release()
+            except Exception:
+                pass
+            cap = self._open(source)
+            if not cap or not cap.isOpened():
+                raise RuntimeError(f"Cannot reopen {redact_url(source)} on the cheaper decoder")
+            self._report_decoder(cap, source)
+            logger.info(f"Camera {self.rt.camera_id}: {w}x{h} stream moved from {before} to "
+                        f"{capture_backends.BACKEND_LABELS[self.rt.decoder]} decoding ({self.rt.decoder_note})")
+            return cap
+        if hw:
+            return cap   # a GPU capture has no decode threads to fit
+        return self._fit_decode_threads(cap, source, frame)
 
     def _fit_decode_threads(self, cap, source: str, frame: np.ndarray):
         """Remember the stream's size; reopen once if it needs more decode threads.
@@ -1271,7 +1346,33 @@ class LiveAnalyticsEngine:
         self._started = True
 
 
-def render_overlay(frame: np.ndarray, rt: CameraRuntime) -> np.ndarray:
+# Smallest width a preview may be scaled to (snapshot / stream ``max_width``).
+PREVIEW_MIN_WIDTH = 64
+
+
+def fit_width(frame: np.ndarray, max_width: Optional[int]) -> tuple[np.ndarray, float]:
+    """``frame`` scaled down to at most ``max_width`` pixels wide, and the scale used.
+
+    For previews (dashboard tiles, the enlarged live view): a 3072x2048 frame
+    is ~850 KB as a JPEG, 9-18 s over a slow remote link, while the tile shows
+    it ~500 px wide. INTER_AREA keeps the downscaled picture sharp without
+    aliasing; the aspect ratio is kept, and a frame is never enlarged.
+    ``max_width`` of 0 / None means native size (evidence and downloads).
+    """
+    import cv2
+
+    if not max_width or max_width <= 0:
+        return frame, 1.0
+    h, w = frame.shape[:2]
+    target = max(PREVIEW_MIN_WIDTH, int(max_width))
+    if w <= target:
+        return frame, 1.0
+    scale = target / float(w)
+    size = (target, max(1, int(round(h * scale))))
+    return cv2.resize(frame, size, interpolation=cv2.INTER_AREA), scale
+
+
+def render_overlay(frame: np.ndarray, rt: CameraRuntime, scale: float = 1.0) -> np.ndarray:
     """Draw the worker's current track boxes onto a copy of ``frame``.
 
     Uses only the snapshot the worker already produced -- no inference runs
@@ -1281,6 +1382,10 @@ def render_overlay(frame: np.ndarray, rt: CameraRuntime) -> np.ndarray:
     whether the camera is calibrated so nobody mistakes boxes for positions.
     When the pose model supplied keypoints on the latest detection frame, the
     visible limbs are drawn too (wrists marked larger).
+
+    ``scale`` is the size of ``frame`` relative to the camera's frames (a
+    preview from ``fit_width``): boxes are drawn scaled onto the small frame,
+    so lines and labels stay legible instead of being shrunk with it.
     """
     import cv2
 
@@ -1290,7 +1395,7 @@ def render_overlay(frame: np.ndarray, rt: CameraRuntime) -> np.ndarray:
     tentative_colour = (60, 200, 255)    # BGR amber
 
     for t in tracks:
-        x1, y1, x2, y2 = int(t["x1"]), int(t["y1"]), int(t["x2"]), int(t["y2"])
+        x1, y1, x2, y2 = (int(t[k] * scale) for k in ("x1", "y1", "x2", "y2"))
         colour = confirmed_colour if t["confirmed"] else tentative_colour
         thickness = 2 if t["confirmed"] else 1
         cv2.rectangle(out, (x1, y1), (x2, y2), colour, thickness)
@@ -1304,6 +1409,8 @@ def render_overlay(frame: np.ndarray, rt: CameraRuntime) -> np.ndarray:
 
         kpts = t.get("keypoints")
         if kpts:
+            if scale != 1.0:
+                kpts = [(p[0] * scale, p[1] * scale, p[2]) for p in kpts]
             _draw_skeleton(out, kpts, colour)
 
     tag = "calibrated" if rt.calibrated else "uncalibrated"

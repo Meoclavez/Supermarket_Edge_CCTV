@@ -37,7 +37,7 @@ from typing import Optional
 import numpy as np
 
 from app.config import settings
-from app.services.inference_backend import Detection
+from app.services.inference_backend import Detection, person_threshold
 
 logger = logging.getLogger(__name__)
 
@@ -302,8 +302,10 @@ class ByteTracker:
                 t._mean, t._cov = _KF.predict(t._mean, t._cov)
             t.age += 1
 
-        high = [d for d in detections if d.confidence >= self.high_threshold]
-        low = [d for d in detections if d.confidence < self.high_threshold]
+        # A box in shade needs less confidence than one in light
+        # (inference_backend.person_threshold).
+        high = [d for d in detections if d.confidence >= person_threshold(d, self.high_threshold)]
+        low = [d for d in detections if d.confidence < person_threshold(d, self.high_threshold)]
 
         # Stage 1: every live track against the confident detections.
         pool = list(self.tracks.values())
@@ -328,7 +330,7 @@ class ByteTracker:
 
         # Only confident, unexplained detections may start a new identity.
         for ci, d in enumerate(high):
-            if ci not in used_high and d.confidence >= settings.TRACK_NEW_TRACK_THRESHOLD:
+            if ci not in used_high and d.confidence >= person_threshold(d, settings.TRACK_NEW_TRACK_THRESHOLD):
                 self._spawn(d, now)
 
         # Retire tracks that have gone missing for too long.

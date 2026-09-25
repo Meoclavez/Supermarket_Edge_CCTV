@@ -43,9 +43,10 @@ class Settings(BaseSettings):
     APP_NAME: str = "Universal Edge AI CCTV System"
     APP_VERSION: str = "2.1.0"
     VERSION: str = "2.1.0"
-    # DEBUG only makes logging more verbose. It never weakens security: the
-    # one switch that bypasses authentication is AUTH_DISABLED, which is off
-    # by default and logged loudly at startup when on.
+    # DEBUG makes logging more verbose and serves the API docs (/docs, /redoc,
+    # /openapi.json) on the local address; never through the public hostname.
+    # It never disables authentication: the one switch that does is
+    # AUTH_DISABLED, which is off by default and logged loudly when on.
     DEBUG: bool = False
     AUTH_DISABLED: bool = False
     # Echo every SQL statement to the log (very noisy). Independent of DEBUG.
@@ -112,6 +113,15 @@ class Settings(BaseSettings):
     # Crops per refiner run (fixed batch: shape changes are slow on CUDA).
     POSE_REFINER_BUDGET_PERSONS: int = int(os.getenv("POSE_REFINER_BUDGET_PERSONS", "4"))
     POSE_REFINER_SCORE_SCALE: float = float(os.getenv("POSE_REFINER_SCORE_SCALE", "1.0"))
+    # A joint takes the refiner's position only when its refiner score
+    # (x POSE_REFINER_SCORE_SCALE) reaches this; otherwise the pose model's
+    # joint stands. 0 = every joint (measured best: gating at 0.3-0.7 cost
+    # part of the refiner's keypoint accuracy gain).
+    POSE_REFINER_MIN_SCORE: float = float(os.getenv("POSE_REFINER_MIN_SCORE", "0"))
+    # A refined skeleton whose shoulder-to-hip axis is turned more than this
+    # from the pose model's is discarded (the refiner turned a blurred or
+    # dark person on its side); 0 disables the check.
+    POSE_REFINER_MAX_TURN_DEG: float = float(os.getenv("POSE_REFINER_MAX_TURN_DEG", "45"))
     # Optional COCO object model for retail context (bags, bottles, phones).
     # Empty string disables it.
     OBJECT_MODEL_PATH: str = os.getenv(
@@ -149,6 +159,14 @@ class Settings(BaseSettings):
     INFERENCE_CPU_THREADS: int = int(os.getenv("INFERENCE_CPU_THREADS", "0"))
     INFERENCE_CPU_SPINNING: bool = os.getenv("INFERENCE_CPU_SPINNING", "0").lower() in ("1", "true", "yes")
     PERSON_CONF_THRESHOLD: float = float(os.getenv("PERSON_CONF_THRESHOLD", "0.50"))
+    # A person whose own box is dark (mean luminance below PERSON_DARK_LUMA,
+    # 0-255) needs only PERSON_CONF_THRESHOLD_DARK: the model's confidence
+    # falls with the light, and a box-local rule lifts recall in shade and at
+    # night without lowering the bar in the lit parts of the same frame.
+    # Measured (COCO persons, 352x288): shade recall 0.34 -> 0.40, lit-region
+    # precision unchanged. Set equal to PERSON_CONF_THRESHOLD to disable.
+    PERSON_CONF_THRESHOLD_DARK: float = float(os.getenv("PERSON_CONF_THRESHOLD_DARK", "0.35"))
+    PERSON_DARK_LUMA: float = float(os.getenv("PERSON_DARK_LUMA", "60"))
     PERSON_NMS_IOU: float = float(os.getenv("PERSON_NMS_IOU", "0.45"))
     # A keypoint counts as seen when its visibility score reaches this.
     KEYPOINT_VISIBILITY_THRESHOLD: float = float(os.getenv("KEYPOINT_VISIBILITY_THRESHOLD", "0.5"))
@@ -165,7 +183,28 @@ class Settings(BaseSettings):
     # coherent skeleton (shoulders + hips or head), up to this fraction.
     PERSON_MAX_FRAME_FRACTION_WITH_SKELETON: float = float(
         os.getenv("PERSON_MAX_FRAME_FRACTION_WITH_SKELETON", "0.9"))
+    # Minimum box height in pixels; the width floor is separate
+    # (PERSON_MIN_BOX_WIDTH_PIXELS): a distant shopper on a 352x288 sub-stream
+    # is ~60 px tall but only 16-24 px wide.
     PERSON_MIN_BOX_PIXELS: int = int(os.getenv("PERSON_MIN_BOX_PIXELS", "24"))
+    PERSON_MIN_BOX_WIDTH_PIXELS: int = int(os.getenv("PERSON_MIN_BOX_WIDTH_PIXELS", "16"))
+    # Measured lighting per camera (services/low_light.py): every inferred
+    # frame's luminance and colour saturation give a state (day | mixed |
+    # low_light | ir), with hysteresis, never from the clock; reported in the
+    # detector status. LOW_LIGHT_ENHANCE additionally applies CLAHE on the
+    # luminance of the model input in non-day states (auto), on every frame
+    # (always), or never (off, the default): measured on COCO persons it
+    # LOWERED recall in every dark condition (e.g. -3 EV 0.36 -> 0.26, shade
+    # 0.48 -> 0.46), because it amplifies sensor noise and JPEG blocking.
+    LOW_LIGHT_ENHANCE: str = os.getenv("LOW_LIGHT_ENHANCE", "off")
+    LOW_LIGHT_DARK_LEVEL: float = float(os.getenv("LOW_LIGHT_DARK_LEVEL", "50"))        # luma 0-255
+    LOW_LIGHT_MEAN_LEVEL: float = float(os.getenv("LOW_LIGHT_MEAN_LEVEL", "70"))        # mean luma below -> low_light
+    LOW_LIGHT_MIXED_DARK_FRACTION: float = float(os.getenv("LOW_LIGHT_MIXED_DARK_FRACTION", "0.30"))
+    LOW_LIGHT_IR_SATURATION: float = float(os.getenv("LOW_LIGHT_IR_SATURATION", "12"))  # mean saturation 0-255
+    LOW_LIGHT_DEAD_BAND: float = float(os.getenv("LOW_LIGHT_DEAD_BAND", "0.15"))       # relative
+    LOW_LIGHT_HYSTERESIS_FRAMES: int = int(os.getenv("LOW_LIGHT_HYSTERESIS_FRAMES", "5"))
+    LOW_LIGHT_CLAHE_CLIP: float = float(os.getenv("LOW_LIGHT_CLAHE_CLIP", "2.0"))
+    LOW_LIGHT_CLAHE_TILES: int = int(os.getenv("LOW_LIGHT_CLAHE_TILES", "8"))
     # Analytics runs on a decimated stream: detection every Nth frame is ample
     # for footfall and dwell, and leaves decode budget for the other channels.
     ANALYTICS_DETECT_EVERY_N_FRAMES: int = int(os.getenv("ANALYTICS_DETECT_EVERY_N_FRAMES", "5"))
@@ -453,8 +492,10 @@ class Settings(BaseSettings):
     # (/dev/dri/renderD129) or CUDA device index; empty = first that works.
     DECODE_BACKEND: str = os.getenv("DECODE_BACKEND", "auto")
     DECODE_DEVICE: str = os.getenv("DECODE_DEVICE", "")
-    # GPU-decoded cameras deliver at most this many frames a second (0 = all);
-    # the rest are dropped on the GPU before they cost any CPU. Analysis runs
+    # RTSP cameras deliver at most this many frames a second (0 = all). On the
+    # GPU the rest are dropped before they cost any CPU; in software they are
+    # still decoded but not converted to BGR (grab without retrieve: 17-33 %
+    # less CPU than reading every frame, measured 704x576..3072x2048). Analysis runs
     # on at most every ANALYTICS_DETECT_EVERY_N_FRAMES-th delivered frame, so
     # this / N is each camera's detection ceiling (10 / 5 = 2 fps, the
     # ANALYTICS_TARGET_DETECT_FPS default). The enlarged live view and clips
@@ -465,6 +506,19 @@ class Settings(BaseSettings):
     # in pixels of the frames the camera delivers: recalibrate a camera after
     # changing its delivered size.
     DECODE_MAX_WIDTH: int = int(os.getenv("DECODE_MAX_WIDTH", "0"))
+    # With DECODE_BACKEND=auto, only streams of at least this many pixels
+    # (width x height) are decoded on the GPU, smaller ones in software.
+    # 0 = every RTSP camera on the GPU (the default). Measured on the store
+    # box (i5-14400F, RX 9060 XT VA-API, 8 cameras per size, 25 fps H.264 and
+    # H.265, % of one core per camera incl. ffmpeg): GPU path at 10 fps vs
+    # software at 10 fps (grab-skip) -> 352x288 2.2 vs 2.2 (H.265 2.1 vs 2.9),
+    # 704x576 3.9 vs 5.6, 1280x720 7.6 vs 12, 2560x1440 23-27 vs 37-40,
+    # 3072x2048 33-37 vs 51-60. The GPU path was never dearer, so nothing
+    # moves off it here; raise this on a box where small streams are cheaper
+    # in software (e.g. a weak iGPU). A camera's size is remembered
+    # (STORAGE_DIR/decode_stream_sizes.json); one of unknown size is opened
+    # as a 352x288 stream would be and moves once, after its first frame.
+    DECODE_GPU_MIN_PIXELS: int = int(os.getenv("DECODE_GPU_MIN_PIXELS", "0"))
 
     # ---------------- Footfall track quality (services/retail_metrics_service.py) ----------------
     # Occlusion and detector flicker split one person into many ~1 s tracks.

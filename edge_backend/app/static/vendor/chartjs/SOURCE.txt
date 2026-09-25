@@ -1,0 +1,13 @@
+Chart.js 4.4.1 (MIT License, see LICENSE.md in this directory)
+
+chart.umd.min.js is dist/chart.umd.js from the npm package, unmodified
+(the UMD build is already minified; it is the same file the CDN served as
+chart.umd.min.js, minus the CDN's "skipped minification" banner).
+
+  package:   https://registry.npmjs.org/chart.js/-/chart.js-4.4.1.tgz
+  integrity: sha512-C74QN1bxwV1v2PEujhmKjOZ7iUM4w6BWs23Md/6aOZZSlwMzeCIDGuZay++rBgChYru7/+QFeoQW0fQoP534Dg==
+  sha256 of chart.umd.min.js: 74401d738dd3e03ee5dfb3b6841210fe2c4ead8a960c4011ca4ba0b78a9fd8f3
+
+Served locally so the dashboard has no third-party script dependency and the
+Content-Security-Policy can restrict scripts to this origin. To upgrade,
+replace the file from the npm package and update this note.

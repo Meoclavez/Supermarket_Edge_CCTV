@@ -16,6 +16,16 @@
 #   EDGE_MODELS_FROM  directory of pre-exported *.onnx models to copy into
 #                     edge_backend/models/ first; unset means bootstrap.py
 #                     verifies/exports them itself (scripts/fetch_models.py)
+#   EDGE_TAILSCALE_SERVE=1
+#                     publish the dashboard on the tailnet with HTTPS:
+#                     tailscale serve --bg --https=443 http://127.0.0.1:<PORT>
+#                     (needs MagicDNS + HTTPS Certificates enabled for the
+#                     tailnet; the installer checks and says what to turn on)
+#
+# HOST/PORT come from edge_backend/.env (defaults 0.0.0.0 / 8000). With
+# HOST=127.0.0.1 the plain-HTTP port is closed to the network: the dashboard is
+# then reached only through tailscale serve / cloudflared, and the installer
+# removes the old "port 8000 on tailscale0" firewall rule.
 #
 # The install path is fixed: deploy/edge-cctv.service hard-codes /opt/edge-cctv.
 set -euo pipefail
@@ -23,7 +33,6 @@ set -euo pipefail
 REPO="${EDGE_REPO_URL:-https://github.com/Meoclavez/Supermarket_Edge_CCTV.git}"
 DEST=/opt/edge-cctv
 SVC_USER=edgecctv
-PORT=8000
 MODELS_FROM="${EDGE_MODELS_FROM:-}"
 
 [ "$(id -u)" = 0 ] || { echo "Run with sudo: sudo bash $0" >&2; exit 1; }
@@ -34,7 +43,7 @@ done
 step() { printf '\n== %s\n' "$*"; }
 as_svc() { sudo -u "$SVC_USER" -H "$@"; }
 
-step "1/8 service user '$SVC_USER' (no login shell, camera + GPU groups)"
+step "1/9 service user '$SVC_USER' (no login shell, camera + GPU groups)"
 # No --create-home: skeleton dotfiles would make $DEST non-empty and git clone would refuse it.
 id "$SVC_USER" >/dev/null 2>&1 \
   || useradd --system --no-create-home --home-dir "$DEST" --shell /usr/sbin/nologin "$SVC_USER"
@@ -43,7 +52,7 @@ for grp in video render; do
 done
 install -d -o "$SVC_USER" -g "$SVC_USER" "$DEST"
 
-step "2/8 code from $REPO into $DEST"
+step "2/9 code from $REPO into $DEST"
 if [ -d "$DEST/.git" ]; then
   as_svc git -C "$DEST" pull --ff-only
 elif [ -z "$(ls -A "$DEST")" ]; then
@@ -54,7 +63,7 @@ else
 fi
 as_svc git -C "$DEST" log -1 --format='HEAD %h %s'
 
-step "3/8 models"
+step "3/9 models"
 if [ -n "$MODELS_FROM" ]; then
   shopt -s nullglob
   staged=("$MODELS_FROM"/*.onnx)
@@ -66,7 +75,7 @@ else
   echo "EDGE_MODELS_FROM not set: bootstrap verifies and exports the models (step 4)"
 fi
 
-step "4/8 venv + dependencies (onnxruntime flavour: ${EDGE_ORT:-auto})"
+step "4/9 venv + dependencies (onnxruntime flavour: ${EDGE_ORT:-auto})"
 cd "$DEST"
 # Stop the running service first: bootstrap may swap the onnxruntime build in
 # the venv that process is using (e.g. onnxruntime-gpu -> the AMD MIGraphX
@@ -89,14 +98,19 @@ if ! as_svc python3 edge_backend/scripts/bootstrap.py --check-only --ort "${EDGE
   echo "preflight passed (warnings only): continuing"
 fi
 
-step "5/8 .env (defaults: DEBUG=false, AUTH_DISABLED=false, secrets generated on first start)"
+step "5/9 .env (defaults: DEBUG=false, AUTH_DISABLED=false, secrets generated on first start)"
 ENV_FILE="$DEST/edge_backend/.env"
 [ -f "$ENV_FILE" ] || as_svc cp "$DEST/edge_backend/.env.example" "$ENV_FILE"
 # STORAGE_DIR may be moved in .env (another local disk, never the store NAS); the setup code lives there.
 STORAGE="$(sed -n 's/^[[:space:]]*STORAGE_DIR[[:space:]]*=[[:space:]]*//p' "$ENV_FILE" | tail -1 | tr -d "\"'")"
 STORAGE="${STORAGE:-$DEST/storage}"
+env_value() { sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$ENV_FILE" | tail -1 | tr -d "\"'[:space:]"; }
+HOST="$(env_value HOST)"; HOST="${HOST:-0.0.0.0}"
+PORT="$(env_value PORT)"; PORT="${PORT:-8000}"
+case "$HOST" in 127.0.0.1|localhost|::1) LOOPBACK_ONLY=true ;; *) LOOPBACK_ONLY=false ;; esac
+echo "listen address from .env: $HOST:$PORT"
 
-step "6/8 file permissions (database, secrets and .env are not world-readable)"
+step "6/9 file permissions (database, secrets and .env are not world-readable)"
 # The database holds operator password hashes and camera credentials. The unit's
 # UMask=0027 covers new files; this tightens what earlier installs left 0644/0755.
 install -d -o "$SVC_USER" -g "$SVC_USER" -m 0750 "$STORAGE"
@@ -108,15 +122,20 @@ done
 chown "$SVC_USER:$SVC_USER" "$ENV_FILE"
 chmod 0640 "$ENV_FILE"
 
-step "7/8 systemd service"
+step "7/9 systemd service"
 install -m 0644 "$DEST/deploy/edge-cctv.service" /etc/systemd/system/edge-cctv.service
 systemctl daemon-reload
 systemctl enable edge-cctv
 systemctl restart edge-cctv
 
-step "8/8 firewall"
+step "8/9 firewall"
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then
-  if ip link show tailscale0 >/dev/null 2>&1; then
+  if [ "$LOOPBACK_ONLY" = true ]; then
+    # HOST=127.0.0.1: nothing on the network may reach the plain-HTTP port;
+    # tailscale serve / cloudflared connect to it over loopback.
+    ufw delete allow in on tailscale0 to any port "$PORT" proto tcp >/dev/null 2>&1 \
+      && echo "removed the tailscale0 port $PORT rule (HOST=127.0.0.1)" || true
+  elif ip link show tailscale0 >/dev/null 2>&1; then
     ufw allow in on tailscale0 to any port "$PORT" proto tcp comment 'edge-cctv dashboard via tailscale'
   else
     echo "no tailscale0 interface: dashboard rule not added (the store LAN needs its own rule for port $PORT)"
@@ -127,6 +146,54 @@ if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; the
   fi
 else
   echo "ufw not installed or not active: no firewall rules changed"
+fi
+
+step "9/9 private HTTPS on the tailnet (tailscale serve)"
+TS_URL=""
+if [ "${EDGE_TAILSCALE_SERVE:-0}" != 1 ]; then
+  echo "skipped (set EDGE_TAILSCALE_SERVE=1 to publish https://<machine>.<tailnet>.ts.net)"
+elif ! command -v tailscale >/dev/null 2>&1; then
+  echo "tailscale is not installed: see https://tailscale.com/download/linux, then re-run with EDGE_TAILSCALE_SERVE=1"
+else
+  ts_json="$(tailscale status --json 2>/dev/null || true)"
+  ts_info="$(printf '%s' "$ts_json" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except ValueError:
+    print("error -"); sys.exit()
+name = ((d.get("Self") or {}).get("DNSName") or "").rstrip(".").lower()
+certs = [c.rstrip(".").lower() for c in (d.get("CertDomains") or [])]
+state = d.get("BackendState") or "unknown"
+print(state, name or "-", "yes" if name and name in certs else "no")' 2>/dev/null || echo "error - no")"
+  read -r ts_state ts_name ts_https <<EOF_TS
+$ts_info
+EOF_TS
+  if [ "$ts_state" != Running ] || [ "$ts_name" = - ]; then
+    echo "tailscale is not connected (state: $ts_state) or MagicDNS is off: run 'sudo tailscale up',"
+    echo "turn on MagicDNS in https://login.tailscale.com/admin/dns, then re-run with EDGE_TAILSCALE_SERVE=1"
+  elif [ "$ts_https" != yes ]; then
+    echo "HTTPS certificates are not enabled for this tailnet. In the Tailscale admin console:"
+    echo "  https://login.tailscale.com/admin/dns -> turn on MagicDNS and 'HTTPS Certificates'"
+    echo "then re-run: sudo EDGE_TAILSCALE_SERVE=1 bash deploy/install.sh"
+  else
+    target="http://127.0.0.1:$PORT"
+    if tailscale serve status --json 2>/dev/null | grep -q "\"$target\""; then
+      echo "already published: https://$ts_name -> $target"
+      TS_URL="https://$ts_name/dashboard"
+    # timeout: serve waits for approval in the browser when the tailnet has
+    # not enabled HTTPS/Serve, instead of failing.
+    elif timeout 60 tailscale serve --bg --https=443 "$target"; then
+      TS_URL="https://$ts_name/dashboard"
+      # tailscaled answers :443 itself; allow it anyway on hosts where ufw filters it.
+      if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then
+        ufw allow in on tailscale0 to any port 443 proto tcp comment 'edge-cctv https via tailscale serve' >/dev/null
+      fi
+    else
+      echo "tailscale serve failed. Check that MagicDNS and HTTPS Certificates are on"
+      echo "(https://login.tailscale.com/admin/dns) and run by hand: sudo tailscale serve --bg --https=443 $target"
+    fi
+  fi
 fi
 
 step "waiting for the service to answer"
@@ -187,7 +254,12 @@ fi
 
 echo
 echo "Dashboard:"
-for ip in $(hostname -I 2>/dev/null); do
-  case "$ip" in *:*) continue ;; esac
-  echo "  http://$ip:$PORT/dashboard"
-done
+[ -n "$TS_URL" ] && echo "  $TS_URL   (tailnet devices, HTTPS)"
+if [ "$LOOPBACK_ONLY" = true ]; then
+  echo "  http://127.0.0.1:$PORT/dashboard   (this machine only: HOST=127.0.0.1)"
+else
+  for ip in $(hostname -I 2>/dev/null); do
+    case "$ip" in *:*) continue ;; esac
+    echo "  http://$ip:$PORT/dashboard"
+  done
+fi

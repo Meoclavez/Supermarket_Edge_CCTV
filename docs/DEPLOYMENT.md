@@ -187,10 +187,23 @@ To get a code again:
 
 ### Viewing the dashboard over Tailscale
 
-With Tailscale on the server, open `http://<tailscale-ip>:8000/dashboard` from
-any device on the same tailnet (`tailscale ip -4` on the server prints the
-address). Two firewall rules make this work without exposing the dashboard
-anywhere else; `deploy/install.sh` adds them when `ufw` is active:
+**Recommended: private HTTPS with `tailscale serve`.** The owner and staff
+open `https://<machine>.<tailnet>.ts.net/dashboard` from any device signed in
+to the tailnet. Tailscale provides a real certificate and HTTP/2 (many files
+over one connection, which matters on a slow store uplink), and nothing is
+published outside the tailnet. Section 7a has the steps; in short:
+
+1. Tailscale admin console → **DNS** (https://login.tailscale.com/admin/dns):
+   turn on **MagicDNS** and **HTTPS Certificates**.
+2. On the server: `sudo EDGE_TAILSCALE_SERVE=1 bash deploy/install.sh`
+   (or by hand: `sudo tailscale serve --bg --https=443 http://127.0.0.1:8000`).
+3. **Settings → Online access** shows the address and whether it is published.
+
+**Plain HTTP on the tailnet address** keeps working as before:
+`http://<tailscale-ip>:8000/dashboard` (`tailscale ip -4` prints the address).
+Two firewall rules allow it without exposing the dashboard anywhere else;
+`deploy/install.sh` adds them when `ufw` is active and `HOST` is not
+`127.0.0.1`:
 
 ```bash
 sudo ufw allow in on tailscale0 to any port 8000 proto tcp   # dashboard, tailnet only
@@ -201,12 +214,11 @@ Without UDP 41641 open, peers still connect but through a Tailscale DERP relay,
 which is slower and adds latency to live video. `tailscale ping <peer>` shows
 which you have: `via DERP(...)` is relayed, `via <ip>:<port>` is direct.
 
-Tailscale peers count as local, not remote: the app treats a request as
-remote only when it names the public remote-access hostname or arrives
-through the local tunnel proxy with Cloudflare headers
-(`is_remote_request` in `app/services/public_exposure.py`). A request to the
-`100.x` address therefore gets the same access as one from the store LAN,
-including first-run setup, so only add devices you trust to the tailnet.
+Tailnet requests count as local, not remote, whether they use the `.ts.net`
+HTTPS name or the `100.x` address: they get the same access as the store LAN,
+including first-run setup, so only add devices you trust to the tailnet. (A
+request through **Tailscale Funnel**, which is public, is treated as remote.)
+See "Trusted proxies" in section 7a.
 
 A fresh install is empty: no zones, no rooms or walls, no cameras and no
 metrics. The dashboard shows a data-state banner and the **Blueprint** tab
@@ -402,61 +414,109 @@ that now performs the same full reset; it no longer keeps cameras or zones.
 
 ---
 
-## 7a. Remote access: the dashboard on your own domain
+## 7a. Online access: private (Tailscale) and public (your domain)
 
-The dashboard can be published at `https://cctv.<your-domain>` so the owner
-can open it from anywhere. It is online **only** while remote access is
-enabled in **Settings → Remote access** and the hostname is connected;
-disable it there and the public address stops working within seconds.
-Nothing moves to the cloud: footage, detection and the database stay on this
-machine, and the tunnel carries only the pages and streams a signed-in
-operator asks for.
+Two routes, which can run side by side. Both are configured and monitored in
+**Settings → Online access**; nothing moves to the cloud: footage, detection
+and the database stay on this machine.
 
-### How it works
+| Route | Address | Who can reach it | TLS |
+|---|---|---|---|
+| Private: `tailscale serve` | `https://<machine>.<tailnet>.ts.net` | devices signed in to the owner's tailnet | Tailscale certificate, HTTP/2 |
+| Public: Cloudflare Tunnel | `https://cctv.<your-domain>` | anyone on the internet (put Cloudflare Access in front) | Cloudflare certificate, HTTP/2 / HTTP/3 |
 
-The primary provider is a **Cloudflare Tunnel** that the app runs itself
-(`cloudflared tunnel run`, supervised and restarted with backoff by
-`app/services/remote_access_service.py`). The tunnel is an *outbound*
-connection from the store to Cloudflare, so:
+Both proxies run on this machine and connect to the app over loopback
+(`http://127.0.0.1:8000`), so once they are in place the app itself can stop
+listening on the network (`HOST=127.0.0.1`, below).
 
-- no router port forwarding and no public IP are needed, and it works behind
-  carrier-grade NAT (4G/5G routers, NBN CGNAT);
-- Cloudflare issues and renews the HTTPS certificate for your domain;
-- the store's LAN address keeps working exactly as before.
+### Private HTTPS for the owner and staff (tailscale serve)
+
+1. Tailscale admin console → **DNS** (https://login.tailscale.com/admin/dns):
+   turn on **MagicDNS** and **HTTPS Certificates** (once per tailnet).
+2. On the server:
+
+   ```bash
+   sudo EDGE_TAILSCALE_SERVE=1 bash deploy/install.sh
+   ```
+
+   The installer checks that the tailnet has HTTPS certificates (and says what
+   to turn on if not), then runs, only if not already configured,
+   `tailscale serve --bg --https=443 http://127.0.0.1:<PORT>`. The setting is
+   kept by tailscaled across reboots. To do it by hand:
+   `sudo tailscale serve --bg --https=443 http://127.0.0.1:8000`;
+   `tailscale serve status` shows it, `sudo tailscale serve --https=443 off`
+   removes it.
+3. **Settings → Online access** shows *Published on your tailnet* and the
+   `https://<machine>.<tailnet>.ts.net/dashboard` link (read from
+   `tailscale status --json`; the page says so when Tailscale is missing,
+   stopped, or HTTPS certificates are off).
+4. Staff install Tailscale on their phone/PC and are invited to the tailnet;
+   they sign in to the dashboard with their operator account as usual.
+
+Do **not** enable Tailscale Funnel for this port: that publishes it on the
+internet. If it is on, the page warns and the app treats those requests as
+remote (the public rules below apply).
+
+### Public dashboard on your domain (Cloudflare Tunnel)
+
+The app runs the tunnel itself (`cloudflared tunnel run`, supervised and
+restarted with backoff by `app/services/remote_access_service.py`). The
+tunnel is an *outbound* connection from the store to Cloudflare, so no router
+port forwarding or public IP is needed, it works behind carrier-grade NAT
+(4G/5G routers, NBN CGNAT), and Cloudflare issues and renews the certificate.
+It is online **only** while enabled in **Settings → Online access**; disable
+it there and the public address stops working within seconds.
 
 The tunnel token is stored encrypted under `storage/secrets/named/`, passed
 to cloudflared in an environment variable (never on its command line), never
-logged and never returned by the API — the dashboard only shows
-"configured / not configured".
+logged and never returned by the API: the dashboard only shows
+"configured / not configured". `cloudflared` is found on `PATH`, else in
+`<repo>/bin/`; `./run.sh --with-tunnel` downloads the official release into
+`bin/` and checks its published SHA-256 (also done automatically on start when
+remote access is enabled). No sudo is used.
 
-`cloudflared` is found on `PATH`, else in `<repo>/bin/`. `./run.sh
---with-tunnel` downloads the official release for this OS and CPU into `bin/`
-and checks it against the SHA-256 Cloudflare publishes (this also happens
-automatically on start when remote access is enabled). No sudo is used.
+Nothing assumes a fixed domain: the hostname is a setting in the dashboard and
+can change at any time (test domain now, the customer's domain at handover).
+Changing it clears the *Verified* badge, the old name stops being treated as
+this device's public name (CORS, remote rules), and a new token restarts
+cloudflared with it.
 
-### Go live (step by step)
+#### Go live (step by step)
+
+`<your-domain>` below is a placeholder: the owner's test domain now, the
+customer's domain at handover.
 
 1. Put the domain on Cloudflare (free plan is enough): **Add a domain**, then
    change the nameservers at your registrar to the two Cloudflare shows. Wait
    until the domain shows **Active**.
-2. In **Zero Trust** (one.dash.cloudflare.com) → **Networks → Tunnels →
-   Create a tunnel** → **Cloudflared**. Name it after the store.
+2. **Zero Trust** (one.dash.cloudflare.com) → **Networks → Tunnels → Create a
+   tunnel** → **Cloudflared**. Name it after the store.
 3. On *Install and run connector*, copy the command for any OS — **do not run
    it**. Paste the whole command (or just the long value starting `eyJ`) into
-   **Settings → Remote access → Tunnel token** on the local dashboard.
-4. **Public hostname**: subdomain `cctv`, your domain, **Service type** `HTTP`,
-   **URL** `localhost:8000` (the port the app listens on). Save.
-5. In the dashboard enter the same hostname, tick **Enable remote access**,
+   **Settings → Online access → Tunnel token** on the dashboard.
+4. **Public hostname**: subdomain `cctv`, domain `<your-domain>`, **Service
+   type** `HTTP`, **URL** `127.0.0.1:8000`. Save. (Use `127.0.0.1`, not
+   `localhost`: with `HOST=127.0.0.1` the app listens on IPv4 only.)
+5. In the dashboard enter `cctv.<your-domain>`, tick **Enable remote access**,
    press **Save**. The status goes *Connecting… → Connected*.
 6. Press **Verify now**. The app fetches
-   `https://<hostname>/api/v1/device/identity` and checks that the device id
-   is *this* machine's, so a hostname routed to another store's box (or a
-   stale tunnel) is caught. The badge shows *Verified* with the time.
-7. Recommended: **Zero Trust → Access → Applications → Add a self-hosted
-   application** for the hostname with an e-mail one-time-PIN policy, so
-   Cloudflare challenges visitors before the dashboard's own sign-in. If the
-   phone app must use the remote URL, add a bypass policy for `/api/*` and
-   `/stream*` (those still require the app's token).
+   `https://cctv.<your-domain>/api/v1/device/identity` and checks that the
+   device id is *this* machine's, so a hostname routed to another store's box
+   (or a stale tunnel) is caught. The badge shows *Verified* with the time.
+7. **Strongly recommended — Cloudflare Access (e-mail one-time PIN):**
+   Zero Trust → **Access → Applications → Add an application → Self-hosted**.
+   Application domain `cctv.<your-domain>`, session duration e.g. 24 h.
+   Policy *Allow* → *Include* → **Emails** → the owner's and staff addresses
+   (or *Emails ending in* `@<customer-domain>`). Under **Authentication**
+   enable **One-time PIN**. Cloudflare then challenges every visitor before
+   the dashboard's own sign-in, so the app's login page is not exposed to the
+   whole internet. The phone app cannot answer the e-mail challenge: if it
+   must connect through the public hostname, add a second application for
+   the paths `cctv.<your-domain>/api/*` and `cctv.<your-domain>/stream` with a
+   **Bypass** policy (those still require the app's token), or keep the
+   phone on Tailscale instead.
+8. Open `https://cctv.<your-domain>/dashboard` from a phone on mobile data:
+   Cloudflare's PIN page, then the dashboard sign-in.
 
 **Direct provider** (sites with a public IP and port forwarding): choose
 *Direct* in Settings; the panel shows a Caddy site block for the hostname
@@ -464,23 +524,116 @@ automatically on start when remote access is enabled). No sudo is used.
 Run Caddy yourself, forward TCP 80/443 to this machine, then *Verify now*.
 The app does not run Caddy.
 
+### Close the plain-HTTP port (HOST=127.0.0.1)
+
+Once the dashboard is reached through `tailscale serve` and/or cloudflared,
+nothing needs the unencrypted `http://<ip>:8000` any more:
+
+```bash
+sudoedit /opt/edge-cctv/edge_backend/.env        # set HOST=127.0.0.1 (add the line if missing)
+sudo bash /opt/edge-cctv/deploy/install.sh     # re-applies the unit, removes the tailscale0:8000 ufw rule
+ss -ltnp | grep :8000                           # expect 127.0.0.1:8000 only
+```
+
+The systemd unit passes `--host ${HOST} --port ${PORT}` from `.env`
+(default `0.0.0.0:8000`). If store PCs must keep using the LAN address, leave
+`HOST=0.0.0.0` and limit the port to the LAN instead, e.g.
+`sudo ufw allow from 192.168.1.0/24 to any port 8000 proto tcp` (your
+subnet), with no rule for any other interface. First-run setup then needs the
+LAN or the tailnet HTTPS address; it is never allowed through the public
+hostname.
+
+### Trusted proxies: who is believed about the client
+
+| Arrives as | Classified | Client address (lockouts, rate limits, audit) | HTTPS (HSTS) |
+|---|---|---|---|
+| Peer 127.0.0.1/::1, `Host` `*.ts.net` (`tailscale serve`) | private (like the LAN) | `X-Forwarded-For` (set by tailscaled, never appended) | `X-Forwarded-Proto: https` |
+| … plus `Tailscale-Funnel-Request` (Funnel) | **remote** | `X-Forwarded-For` | as above |
+| Peer loopback with `CF-Connecting-IP` / `CF-Ray` (cloudflared) | **remote** | `CF-Connecting-IP` | `X-Forwarded-Proto` / `CF-Visitor` |
+| `Host` = the configured public hostname (any peer) | **remote** | as per the row that applies | |
+| Any other peer (store LAN, `100.x` tailnet address) | private | the TCP peer; forwarding headers ignored | only if the connection itself was TLS |
+
+tailscaled deletes client-sent `Tailscale-User-*` / `Tailscale-Funnel-Request`
+and replaces `X-Forwarded-*`; other client headers pass through, so a
+`.ts.net` request carrying `CF-*` headers is still treated as Tailscale.
+uvicorn's own proxy-header handling (on by default, trusting only
+127.0.0.1/::1) may already have rewritten the peer and scheme;
+`app/services/public_exposure.py` gives the same answers either way. Being
+classified remote only adds restrictions, so a direct client forging
+Cloudflare or Funnel headers gains nothing.
+
 ### What is hardened when the dashboard is public
 
-- Requests from the internet all arrive from `cloudflared` on 127.0.0.1, so
-  the real client address comes from `CF-Connecting-IP` / `X-Forwarded-For` —
-  trusted **only** from a loopback peer. Lockouts and rate limits apply per
-  remote user; a LAN client cannot spoof those headers.
 - First-run setup (`/api/v1/setup/*`, which creates the owner account from the
-  one-time code) and `/docs` / `/openapi.json` are refused through the public
-  hostname. Create the operator account on the store network first.
+  one-time code) is refused for remote requests. Create the operator account
+  on the store network or the tailnet first.
+- `/docs`, `/redoc` and `/openapi.json` exist only with `DEBUG=true`, and even
+  then never through the public hostname. The dashboard and phone app do not
+  use them.
 - Remote access cannot be enabled, and remote requests are refused, while
   `AUTH_DISABLED=true`.
-- Security headers on every response: `X-Content-Type-Options: nosniff`,
-  `Content-Security-Policy: frame-ancestors 'self'` (Camera Studio's own
-  iframes keep working), `Referrer-Policy: same-origin`, and HSTS only on
-  responses served through the HTTPS hostname.
+- Security headers on every response: a Content-Security-Policy that allows
+  scripts only from this origin plus the pages' own inline blocks by SHA-256
+  (no CDN: Chart.js is served from `static/vendor/`), `frame-ancestors
+  'self'`, `object-src 'none'`, `X-Content-Type-Options: nosniff`,
+  `Referrer-Policy: same-origin`, and HSTS only when the request really came
+  over HTTPS (Cloudflare or `tailscale serve`), never on plain HTTP. Inline
+  `onclick=` handlers are still allowed (`script-src-attr`); moving them to
+  `addEventListener` would allow removing that too.
+- No `server: uvicorn` banner (`--no-server-header` in the unit,
+  `entrypoint.sh` and `run.sh`).
+- The session cookie is `SameSite=Lax` and `Secure` when the page is HTTPS.
 - CORS is limited to this device's own origins (the public hostname,
   `EDGE_BASE_URL`, explicit `ALLOWED_CORS_ORIGINS` entries; `*` is ignored).
+- API responses carry `Cache-Control: no-store`, so neither the browser nor
+  Cloudflare keeps store data.
+
+### Speed over a slow uplink
+
+The box is often on store Wi-Fi behind a home-grade uplink. Measured from
+outside: ~360 ms round trip and ~55 KB/s per request. What keeps page loads
+short (`app/services/web_delivery.py`):
+
+- gzip for HTML, CSS, JS, JSON and SVG above 1 KB (~740 KB → ~270 KB for a
+  first dashboard load, Chart.js included). The MJPEG stream, images, video
+  and event streams are never compressed or buffered.
+- Asset URLs carry a hash of the file (`?v=<hash>`, computed by the server),
+  served with `Cache-Control: public, max-age=31536000, immutable`: a repeat
+  visit downloads only the ~13 KB page (or a 304). Editing a file changes its
+  hash, so nothing stale is ever used.
+- Scripts are deferred, so the page renders before Chart.js and the modules
+  arrive.
+- HTTP/2 through `tailscale serve` or Cloudflare multiplexes all files over
+  one connection; plain `http://<ip>:8000` is HTTP/1.1 (six connections).
+
+### Handover to a customer
+
+When the box moves from the installer's test domain to the customer's own:
+
+1. In the **customer's** Cloudflare account (their domain on Cloudflare,
+   step 1 above): create a **new tunnel** and a public hostname
+   `cctv.<customer-domain>` → `HTTP` `127.0.0.1:8000`. Do not reuse the
+   test tunnel.
+2. **Settings → Online access**: enter `cctv.<customer-domain>`, paste the
+   customer tunnel token (**Replace**), keep *Enable* ticked, **Save**. The
+   old token is overwritten and cloudflared restarts with the new one; the
+   *Verified* badge resets.
+3. Wait for *Connected*, press **Verify now**, confirm *Verified*.
+4. Customer Cloudflare account: **Access** application for
+   `cctv.<customer-domain>` with an e-mail one-time-PIN policy listing the
+   store's staff e-mails (step 7 above).
+5. In the **test** Cloudflare account: delete the test tunnel and its public
+   hostname / DNS record, so the old name no longer reaches this box.
+6. Dashboard: **change the operator password** (and remove installer
+   accounts); the customer sets their own.
+7. **Rotate phone pairing**: revoke every paired phone under **Settings →
+   Paired phones** and pair the customer's phones afresh with new codes.
+8. Tailscale: move the box to the customer's tailnet (`sudo tailscale
+   logout`, `sudo tailscale up` with their account, enable MagicDNS + HTTPS
+   Certificates there, then `sudo EDGE_TAILSCALE_SERVE=1 bash
+   deploy/install.sh`), or remove the installer's devices from the tailnet.
+9. From a phone on mobile data: open `https://cctv.<customer-domain>/dashboard`
+   (PIN, then sign-in), and check the old test URL no longer loads.
 
 ### Why there is no TURN server (coturn) by default
 

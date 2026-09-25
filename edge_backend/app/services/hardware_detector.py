@@ -25,6 +25,7 @@ import subprocess
 from typing import Optional, Tuple
 
 from ..models.schemas import HardwareProfile
+from ..config import settings
 
 
 def get_ram_info() -> Tuple[Optional[float], Optional[float]]:
@@ -167,6 +168,11 @@ def _decoder_in_use(capability: str, runtimes=None, probe=None) -> Tuple[str, st
     note = f"camera video decoding: {usage['summary']}"
     if probe is not None:
         note += f". GPU decoder test at start-up: {probe.label} ({probe.reason})"
+        if probe.backend != "software" and probe.requested == "auto":
+            px = int(settings.DECODE_GPU_MIN_PIXELS)
+            note += (f". Each camera is decoded where it costs less CPU: on the GPU from {px} pixels "
+                     "(DECODE_GPU_MIN_PIXELS), in software below" if px > 0
+                     else ". DECODE_GPU_MIN_PIXELS=0: every RTSP camera on the GPU")
     elif capability != "cpu":
         note += f". {capability} decode hardware is present; the GPU decoder test has not run yet"
     return usage["in_use"], note, usage["cameras"]

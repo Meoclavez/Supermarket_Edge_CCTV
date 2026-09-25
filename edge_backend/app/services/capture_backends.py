@@ -745,6 +745,241 @@ def open_hw_capture(url: str, probe: DecodeProbe, cancel: Optional[threading.Eve
     )
 
 
+# --------------------------------------------------- software capture, thinned
+
+class ThinnedCapture:
+    """An OpenCV capture that converts at most ``max_fps`` frames a second to BGR.
+
+    ``read()`` would decode *and* convert every frame (25 fps) although the
+    worker needs DECODE_MAX_FPS (10), like the GPU path delivers. ``grab()``
+    still decodes every frame (it must: each is a reference for the next) but
+    skips the YUV -> BGR conversion; ``retrieve()`` converts only the frames
+    kept. Frames are kept like the GPU path's select filter: the first of
+    every 1/max_fps slot by stream time (wall-clock time when the stream has
+    no usable timestamps), and every frame of a slower camera.
+    """
+
+    interruptible = False
+    decoder = SOFTWARE
+
+    def __init__(self, cap, max_fps: float):
+        import cv2
+
+        self._cv2 = cv2
+        self._cap = cap
+        self.max_fps = float(max_fps or 0)
+        fps = 0.0
+        try:
+            fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        except Exception:  # noqa: BLE001 - a capture without the property
+            pass
+        self.source_fps: Optional[float] = fps if 0.0 < fps <= 240.0 else None
+        self._kept_clock: Optional[str] = None
+        self._kept_slot: Optional[int] = None
+        self._last_t: Optional[float] = None
+        self.frames_delivered = 0
+        self.frames_skipped = 0
+
+    @property
+    def output_fps(self) -> Optional[float]:
+        if self.source_fps and self.max_fps > 0:
+            return min(self.source_fps, self.max_fps)
+        return self.source_fps
+
+    def _keep(self) -> bool:
+        if self.max_fps <= 0:
+            return True
+        try:
+            t = float(self._cap.get(self._cv2.CAP_PROP_POS_MSEC)) / 1000.0
+        except Exception:  # noqa: BLE001
+            t = float("nan")
+        valid = t >= 0.0                     # False for NaN too
+        advancing = valid and (self._last_t is None or t > self._last_t)
+        if valid:
+            self._last_t = t
+        # Stream time while it advances; wall-clock time for a stream without
+        # usable timestamps (always 0, repeated, or jumping back).
+        clock, now = ("stream", t) if advancing else ("wall", time.monotonic())
+        slot = int(now * self.max_fps)
+        if clock != self._kept_clock or self._kept_slot is None or slot > self._kept_slot:
+            self._kept_clock, self._kept_slot = clock, slot
+            return True
+        return False
+
+    def read(self):
+        while True:
+            if not self._cap.grab():
+                return False, None
+            if self._keep():
+                break
+            self.frames_skipped += 1
+        ok, frame = self._cap.retrieve()
+        if ok and frame is not None:
+            self.frames_delivered += 1
+        return ok, frame
+
+    def isOpened(self) -> bool:  # noqa: N802 - cv2.VideoCapture's name
+        return bool(self._cap.isOpened())
+
+    def get(self, prop) -> float:
+        return self._cap.get(prop)
+
+    def set(self, prop, value) -> bool:
+        return self._cap.set(prop, value)
+
+    def release(self) -> None:
+        self._cap.release()
+
+
+# ------------------------------------------------------- per-camera decoder choice
+#
+# GPU decoding need not be cheaper for every stream. Its CPU cost is partly
+# fixed per camera and per delivered frame (a separate ffmpeg, the NV12
+# download, yuv420p -> bgr24 on the CPU, the pipe), while software decoding
+# scales with the picture size. So with DECODE_BACKEND=auto each camera can be
+# decoded where its stream size says it is cheaper: on the GPU from
+# DECODE_GPU_MIN_PIXELS up, in software below. On the store box (RX 9060 XT)
+# the GPU path was cheaper or equal at every size, so the default is 0 (all
+# GPU); see config.py for the numbers. DECODE_BACKEND=cuda / vaapi put every
+# camera on the GPU regardless.
+
+
+@dataclass
+class DecoderChoice:
+    """Where one camera's stream is decoded, and why."""
+
+    use_gpu: bool
+    reason: str
+    size: Optional[tuple[int, int]] = None
+    # Decided from the stream size (auto mode): a first measured size that
+    # says otherwise switches the camera once.
+    by_size: bool = False
+
+
+# What an RTSP camera of unknown size is opened as: NVR/IP camera sub-streams
+# are the most common (16 of the store's 33 streams are 352x288).
+UNKNOWN_SIZE_GUESS = (352, 288)
+
+
+def gpu_min_pixels() -> int:
+    return max(0, int(settings.DECODE_GPU_MIN_PIXELS))
+
+
+def size_prefers_gpu(width: Optional[int], height: Optional[int]) -> Optional[bool]:
+    """True when a stream of this size costs less CPU on the GPU path; None if unknown."""
+    if not width or not height:
+        return None
+    return int(width) * int(height) >= gpu_min_pixels()
+
+
+def choose_decoder(probe: DecodeProbe, size: Optional[tuple[int, int]]) -> DecoderChoice:
+    """GPU or software for one RTSP camera, from the probe and its last known size."""
+    if probe.backend == SOFTWARE:
+        return DecoderChoice(False, probe.reason, size)
+    label = BACKEND_LABELS.get(probe.backend, probe.backend)
+    if probe.requested in (CUDA, VAAPI):
+        return DecoderChoice(True, f"{label}: DECODE_BACKEND={probe.requested}", size)
+    if gpu_min_pixels() <= 0:
+        return DecoderChoice(True, f"{label}: DECODE_GPU_MIN_PIXELS=0 puts every camera on the GPU", size)
+    if size is None or size_prefers_gpu(*size) is None:
+        # Unknown until the first frame: open it where the most common camera
+        # stream (a CIF sub-stream) is cheaper; switch once after the first
+        # frame if the measured size says otherwise.
+        where = size_prefers_gpu(*UNKNOWN_SIZE_GUESS)
+        return DecoderChoice(where, f"{label if where else 'software'}: stream size not known yet "
+                                    "(checked after the first frame)", None, by_size=True)
+    w, h = size
+    prefers = size_prefers_gpu(w, h)
+    if prefers:
+        return DecoderChoice(True, f"{label}: {w}x{h} is cheaper to decode on the GPU", size, by_size=True)
+    return DecoderChoice(False, f"software: {w}x{h} is cheaper on the CPU than GPU decoding", size, by_size=True)
+
+
+class StreamSizes:
+    """Last measured frame size per camera and stream, kept across restarts.
+
+    So a restarted service opens each camera on the right decoder at once
+    instead of switching after the first frame. Keyed by camera id and a hash
+    of the credential-free URL (main and sub stream differ); stored as a small
+    JSON under STORAGE_DIR, written only when a size changes.
+    """
+
+    FILE_NAME = "decode_stream_sizes.json"
+    MAX_STREAMS_PER_CAMERA = 4
+
+    def __init__(self, path: Optional[Path] = None):
+        self._path = path
+        self._lock = threading.Lock()
+        self._data: Optional[dict] = None
+
+    @property
+    def path(self) -> Path:
+        return self._path or (Path(settings.STORAGE_DIR) / self.FILE_NAME)
+
+    @staticmethod
+    def stream_key(source: str) -> str:
+        import hashlib
+
+        return hashlib.sha256(redact_url(source or "").encode("utf-8", "replace")).hexdigest()[:16]
+
+    def _load(self) -> dict:
+        if self._data is None:
+            data: dict = {}
+            try:
+                import json
+
+                raw = json.loads(self.path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    data = {str(k): v for k, v in raw.items() if isinstance(v, dict)}
+            except FileNotFoundError:
+                pass
+            except (OSError, ValueError) as e:
+                logger.warning(f"Ignoring unreadable {self.path.name}: {e}")
+            self._data = data
+        return self._data
+
+    def get(self, camera_id: str, source: str) -> Optional[tuple[int, int]]:
+        with self._lock:
+            entry = self._load().get(camera_id, {}).get(self.stream_key(source))
+        try:
+            w, h = int(entry[0]), int(entry[1])
+        except (TypeError, ValueError, IndexError, KeyError):
+            return None
+        return (w, h) if w > 0 and h > 0 else None
+
+    def put(self, camera_id: str, source: str, width: int, height: int) -> None:
+        key, size = self.stream_key(source), [int(width), int(height)]
+        with self._lock:
+            data = self._load()
+            streams = data.setdefault(camera_id, {})
+            if streams.get(key) == size:
+                return
+            streams.pop(key, None)
+            streams[key] = size
+            while len(streams) > self.MAX_STREAMS_PER_CAMERA:
+                streams.pop(next(iter(streams)))
+            self._save_locked(data)
+
+    def _save_locked(self, data: dict) -> None:
+        import json
+
+        path = self.path
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError as e:
+            logger.warning(f"Could not save {path.name}: {e}")   # memory still has it
+
+    def reset(self) -> None:
+        with self._lock:
+            self._data = None
+
+
+stream_sizes = StreamSizes()
+
+
 def decoder_usage(runtimes) -> dict:
     """What the cameras that are streaming right now actually decode with.
 

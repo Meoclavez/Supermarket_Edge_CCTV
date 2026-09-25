@@ -363,7 +363,11 @@ async function loadSystemHealth() {
         const inUse = hw.decoder_in_use;
         const labels = { cpu: 'SOFTWARE (CPU)', vaapi: 'GPU (VA-API)', cuda: 'GPU (NVDEC)',
                          mixed: 'GPU + SOFTWARE', none: 'NO STREAMS' };
-        set('telemetryDecoderBadge', inUse ? (labels[inUse] || String(inUse).toUpperCase()) : DASH);
+        // Mixed: each camera decodes where it is cheaper; say how many go where.
+        const n = hw.decoder_cameras || {};
+        const gpu = (n.vaapi || 0) + (n.cuda || 0);
+        const mixed = inUse === 'mixed' && (gpu || n.software) ? `GPU ${gpu} + CPU ${n.software || 0}` : null;
+        set('telemetryDecoderBadge', inUse ? (mixed || labels[inUse] || String(inUse).toUpperCase()) : DASH);
         const badge = el('telemetryDecoderBadge');
         if (badge) badge.title = hw.decoder_note || '';
       }),
@@ -549,9 +553,31 @@ function setDecimationFPS(fps) {
   showToast(`Video smoothness: ${FPS_LABEL[fps] || `${fps} pictures per second`} (tiles every ${every} s)`, 'ok');
 }
 
-function streamUrl(cameraId) {
-  const base = `/stream?camera_id=${encodeURIComponent(cameraId)}&fps=${currentDecimationFPS}&overlay=1`;
+function streamUrl(cameraId, maxWidth) {
+  const size = maxWidth ? `&max_width=${maxWidth}` : '';
+  const base = `/stream?camera_id=${encodeURIComponent(cameraId)}&fps=${currentDecimationFPS}&overlay=1${size}`;
   return window.edgeAuth && window.edgeAuth.authUrl ? window.edgeAuth.authUrl(base) : base;
+}
+
+/*
+ * Picture width to ask the server for: what the <img> really shows
+ * (object-fit: contain in its box) times devicePixelRatio, rounded up to one
+ * of a few sizes so a tile does not ask for a new size on every pixel of a
+ * resize. A 3072x2048 camera is ~850 KB at native size, too slow for a tile
+ * over a remote link; the server scales it down before encoding.
+ */
+const PREVIEW_WIDTHS = [320, 480, 640, 960, 1280, 1920];
+function previewWidth(img) {
+  if (!img || typeof img.getBoundingClientRect !== 'function') return PREVIEW_WIDTHS[2];
+  const box = img.getBoundingClientRect();
+  let css = box.width;
+  // Letterboxed: a picture narrower than the box (4:3, 3:2) shows at the box height.
+  if (img.naturalWidth && img.naturalHeight && box.height > 0) {
+    css = Math.min(css, box.height * (img.naturalWidth / img.naturalHeight));
+  }
+  if (!(css > 0)) return PREVIEW_WIDTHS[2];
+  const px = Math.ceil(css * Math.min(Math.max(window.devicePixelRatio || 1, 1), 3));
+  return PREVIEW_WIDTHS.find((w) => w >= px) || PREVIEW_WIDTHS[PREVIEW_WIDTHS.length - 1];
 }
 
 /*
@@ -1193,7 +1219,7 @@ async function fetchTilePicture(t) {
   tileFeed.inFlight += 1;
   const timer = setTimeout(() => ctl.abort(), TILE_TIMEOUT_MS);
   try {
-    const url = `/api/v1/cameras/${encodeURIComponent(t.id)}/snapshot?annotate=false&overlay=1`;
+    const url = `/api/v1/cameras/${encodeURIComponent(t.id)}/snapshot?annotate=false&overlay=1&max_width=${previewWidth(t.img)}`;
     const res = await fetch(url, { signal: ctl.signal, cache: 'no-store', priority: 'low' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const source = res.headers.get('X-Frame-Source') || 'live';
@@ -1316,7 +1342,7 @@ function openFocusStream(id) {
     }, 1500);
   };
   t.streamHash = null;
-  img.src = `${streamUrl(id)}&_t=${Date.now()}`;
+  img.src = `${streamUrl(id, previewWidth(img))}&_t=${Date.now()}`;
 }
 
 /** Drop the live stream (removing the src closes its connection). */
