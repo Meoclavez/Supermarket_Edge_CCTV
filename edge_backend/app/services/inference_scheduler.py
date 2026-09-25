@@ -142,6 +142,9 @@ class _Camera:
     first_seen: float
     last_seen: float
     fps: float = 0.0
+    # Frames between analyses for this camera; 0 = ANALYTICS_DETECT_EVERY_N_FRAMES.
+    # Set when decoding already drops frames (GPU path, DECODE_MAX_FPS).
+    every_n: int = 0
     idle: bool = False
     rate: float = 0.0
     next_due: float = 0.0
@@ -203,25 +206,33 @@ class InferenceScheduler:
 
     def _ceiling(self, cam: _Camera) -> float:
         fps = cam.fps if cam.fps > 0 else float(settings.RECORDING_FPS)
-        return max(fps, 0.1) / self._every_n()
+        return max(fps, 0.1) / (cam.every_n or self._every_n())
 
-    def admit(self, camera_id: str, fps: float = 0.0, frame_index: Optional[int] = None) -> bool:
-        """Should this camera analyse the frame it just decoded? Call ``done()`` after."""
+    def admit(self, camera_id: str, fps: float = 0.0, frame_index: Optional[int] = None,
+              every_n: Optional[int] = None) -> bool:
+        """Should this camera analyse the frame it just decoded? Call ``done()`` after.
+
+        ``every_n`` overrides ANALYTICS_DETECT_EVERY_N_FRAMES for a camera whose
+        decoder already thins frames, so the ceiling stays native fps / N
+        (25 / 5 = 5 fps) rather than delivered fps / N (10 / 5 = 2 fps).
+        """
         now = self._clock()
         self._maybe_tick(now)
-        every_n = self._every_n()
+        every_n = max(1, int(every_n)) if every_n else self._every_n()
         with self._lock:
             c = self._cams.get(camera_id)
             if c is None:
                 c = self._cams[camera_id] = _Camera(first_seen=now, last_seen=now)
                 if fps > 0:
                     c.fps = fps
+                c.every_n = every_n
                 self._recompute_locked(now)
                 # Stagger the cameras so their turns do not all fall on one frame.
                 c.next_due = now + self._rng() / max(c.rate, 1e-3)
             c.last_seen = now
             if fps > 0:
                 c.fps = fps
+            c.every_n = every_n
             if not settings.ANALYTICS_SCHEDULER:
                 ok = frame_index is None or frame_index % every_n == 0
                 if ok:

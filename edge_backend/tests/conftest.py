@@ -31,6 +31,10 @@ os.environ.setdefault("BACKUPS_DIR", str(_TMP / "backups"))
 # off to exercise real authentication.
 os.environ.setdefault("DEBUG", "true")
 os.environ.setdefault("AUTH_DISABLED", "true")
+# Camera capture stays on OpenCV unless a test selects a GPU backend itself,
+# so no test depends on this machine's GPU or its ffmpeg build
+# (tests/test_capture_backends.py covers the GPU path with a stand-in ffmpeg).
+os.environ.setdefault("DECODE_BACKEND", "software")
 
 
 @pytest.fixture(scope="session")

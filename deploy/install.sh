@@ -92,7 +92,7 @@ fi
 step "5/8 .env (defaults: DEBUG=false, AUTH_DISABLED=false, secrets generated on first start)"
 ENV_FILE="$DEST/edge_backend/.env"
 [ -f "$ENV_FILE" ] || as_svc cp "$DEST/edge_backend/.env.example" "$ENV_FILE"
-# STORAGE_DIR may be moved in .env (e.g. to a NAS); the setup code lives there.
+# STORAGE_DIR may be moved in .env (another local disk, never the store NAS); the setup code lives there.
 STORAGE="$(sed -n 's/^[[:space:]]*STORAGE_DIR[[:space:]]*=[[:space:]]*//p' "$ENV_FILE" | tail -1 | tr -d "\"'")"
 STORAGE="${STORAGE:-$DEST/storage}"
 

@@ -358,9 +358,12 @@ async function loadSystemHealth() {
   try {
     await Promise.all([
       getJSON('/api/v1/system/hardware', {}).then((hw) => {
-        // What capture really decodes with, not merely the hardware present.
+        // What the streaming cameras really decode with, not merely the
+        // hardware present; the tooltip has the per-camera split and why.
         const inUse = hw.decoder_in_use;
-        set('telemetryDecoderBadge', inUse === 'cpu' ? 'SOFTWARE (CPU)' : (inUse ? String(inUse).toUpperCase() : DASH));
+        const labels = { cpu: 'SOFTWARE (CPU)', vaapi: 'GPU (VA-API)', cuda: 'GPU (NVDEC)',
+                         mixed: 'GPU + SOFTWARE', none: 'NO STREAMS' };
+        set('telemetryDecoderBadge', inUse ? (labels[inUse] || String(inUse).toUpperCase()) : DASH);
         const badge = el('telemetryDecoderBadge');
         if (badge) badge.title = hw.decoder_note || '';
       }),

@@ -442,6 +442,29 @@ class Settings(BaseSettings):
     # CPU (plus helpers, ~31 threads per stream on a 16-CPU box); a 352x288
     # sub-stream decodes at hundreds of fps on one.
     CAMERA_DECODE_THREADS: int = int(os.getenv("CAMERA_DECODE_THREADS", "0"))
+    # Camera video decoding (services/capture_backends.py). "auto" probes at
+    # start-up: NVIDIA NVDEC, then VA-API on each /dev/dri render node (AMD /
+    # Intel), each checked by decoding a test clip through the real filter
+    # chain; software (OpenCV on the CPU, as before) when none works or no
+    # ffmpeg binary is installed. "cuda" / "vaapi" insist on one (and fall back
+    # to software, logged as an error, if it fails); "software" never uses the
+    # GPU. A camera whose stream the GPU cannot decode falls back on its own.
+    # Only RTSP cameras are GPU-decoded. DECODE_DEVICE picks the render node
+    # (/dev/dri/renderD129) or CUDA device index; empty = first that works.
+    DECODE_BACKEND: str = os.getenv("DECODE_BACKEND", "auto")
+    DECODE_DEVICE: str = os.getenv("DECODE_DEVICE", "")
+    # GPU-decoded cameras deliver at most this many frames a second (0 = all);
+    # the rest are dropped on the GPU before they cost any CPU. Analysis runs
+    # on at most every ANALYTICS_DETECT_EVERY_N_FRAMES-th delivered frame, so
+    # this / N is each camera's detection ceiling (10 / 5 = 2 fps, the
+    # ANALYTICS_TARGET_DETECT_FPS default). The enlarged live view and clips
+    # show at most this rate too.
+    DECODE_MAX_FPS: float = float(os.getenv("DECODE_MAX_FPS", "10"))
+    # GPU-decoded frames wider than this are scaled down on the GPU, keeping
+    # the aspect ratio (0 = native size). Camera calibrations (homography) are
+    # in pixels of the frames the camera delivers: recalibrate a camera after
+    # changing its delivered size.
+    DECODE_MAX_WIDTH: int = int(os.getenv("DECODE_MAX_WIDTH", "0"))
 
     # ---------------- Footfall track quality (services/retail_metrics_service.py) ----------------
     # Occlusion and detector flicker split one person into many ~1 s tracks.

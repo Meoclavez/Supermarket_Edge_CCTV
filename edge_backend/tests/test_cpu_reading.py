@@ -71,12 +71,21 @@ def test_real_machine_reading_in_range():
 
 
 def test_video_decoding_reports_what_capture_uses():
-    """A VA-API render node is a capability; capture still decodes on the CPU."""
+    """Decode hardware is a capability; decoder_in_use counts what streaming cameras use."""
+    from types import SimpleNamespace
+
     from app.services import hardware_detector as hd
 
-    in_use, note = hd._decoder_in_use("vaapi_amd")
-    assert in_use == "cpu"
-    assert "software" in note and "vaapi_amd decode hardware is present but not used" in note
-    assert hd._decoder_in_use("cpu") == ("cpu", "camera streams are decoded in software (FFmpeg via OpenCV) on the CPU")
+    def rt(status, decoder):
+        return SimpleNamespace(status=status, decoder=decoder)
+
+    in_use, note, counts = hd._decoder_in_use("vaapi_amd", runtimes=[])
+    assert in_use == "none" and counts == {} and "no camera is streaming" in note
+    in_use, _, counts = hd._decoder_in_use("vaapi_amd", runtimes=[rt("ONLINE", "software"), rt("OFFLINE", None)])
+    assert in_use == "cpu" and counts == {"software": 1}
+    in_use, note, counts = hd._decoder_in_use(
+        "vaapi_amd", runtimes=[rt("ONLINE", "vaapi"), rt("ONLINE", "vaapi"), rt("ONLINE", "software")])
+    assert in_use == "mixed" and counts == {"vaapi": 2, "software": 1}
+    assert "GPU (VA-API) for 2 cameras, software (CPU) for 1 camera" in note
     profile = hd.HardwareDetector.detect_hardware()
-    assert profile.decoder_in_use == "cpu" and profile.decoder_note
+    assert profile.decoder_in_use in ("none", "cpu", "vaapi", "cuda", "mixed") and profile.decoder_note

@@ -38,7 +38,10 @@ from typing import Optional
 import numpy as np
 
 from app.config import settings
+from app.services import capture_backends
 from app.services.camera_drivers import alternate_stream_url, redact_url
+# Defined with the capture backends (which raise them too); imported here by name.
+from app.services.capture_backends import CameraAuthError, CameraUnreachableError
 from app.services.inference_backend import (
     SKELETON_EDGES,
     ObjectDetection,
@@ -188,9 +191,15 @@ class CameraRuntime:
     fps: float = 0.0
     last_frame_at: float = 0.0
     connected_at: Optional[float] = None
-    # Native pixel size of the frames being read; None until the first frame.
+    # Pixel size of the frames being read (native, or DECODE_MAX_WIDTH-capped
+    # on the GPU path); None until the first frame.
     frame_width: Optional[int] = None
     frame_height: Optional[int] = None
+    # What the current connection really decodes with (capture_backends:
+    # "cuda" / "vaapi" / "software"), None while not streaming, and why when
+    # it is software.
+    decoder: Optional[str] = None
+    decoder_note: Optional[str] = None
     # Per-camera feature toggles as last read by the worker.
     analysis_flags: dict = field(default_factory=dict)
     _frame: Optional[np.ndarray] = field(default=None, repr=False)
@@ -248,6 +257,8 @@ class CameraRuntime:
             "has_frame": self._frame is not None,
             "frame_width": self.frame_width,
             "frame_height": self.frame_height,
+            "decoder": self.decoder,
+            "decoder_note": self.decoder_note,
             "calibrated": self.calibrated,
             "analysis_flags": dict(self.analysis_flags),
             "seconds_since_frame": (
@@ -286,14 +297,6 @@ AUTH_QUICK_RETRY_SEC = 60.0
 AUTH_RETRY_SEC = 1800.0
 AUTH_FAILED_HINT = ("Check the username and password in this camera's settings. "
                     "Automatic retries are paused so the camera does not lock the account.")
-
-
-class CameraAuthError(RuntimeError):
-    """The camera answered and rejected (or demanded) a login."""
-
-
-class CameraUnreachableError(RuntimeError):
-    """Nothing usable answered at the camera's address."""
 
 
 _FFMPEG_OPTIONS: Optional[str] = None
@@ -406,6 +409,15 @@ class CameraWorker(threading.Thread):
         self._detect_index = 0
         # FFmpeg decode threads the current capture was opened with.
         self._decode_threads: Optional[int] = None
+        # The open capture, so stop() can end a GPU capture's ffmpeg at once.
+        self._cap = None
+        # Set when GPU decoding failed for this camera's stream: the worker
+        # then decodes in software until it is restarted (new credentials or
+        # URL, camera off/on, service restart).
+        self._hw_disabled: Optional[str] = None
+        self._hw_no_frames = 0
+        # Every how many delivered frames one goes to the clip ring (_clip_every).
+        self._clip_n = max(1, int(settings.ANALYTICS_DETECT_EVERY_N_FRAMES))
         # Latest retail objects; refreshed every OBJECT_DETECT_EVERY_N
         # detection frames, so at most N-1 detection frames old.
         self._objects: list[ObjectDetection] = []
@@ -413,6 +425,13 @@ class CameraWorker(threading.Thread):
     def stop(self) -> None:
         self._stop.set()
         self._wake.set()
+        # A GPU capture can be ended from here (its ffmpeg is killed and a
+        # blocked read returns); an OpenCV capture is released by the worker.
+        # On a helper thread, so stop_all() ends every camera's ffmpeg at once
+        # instead of one after another.
+        cap = self._cap
+        if cap is not None and getattr(cap, "interruptible", False):
+            threading.Thread(target=cap.release, daemon=True, name=f"stop-{self.rt.camera_id}").start()
 
     def wake(self) -> None:
         """Retry the connection now, even while paused after an auth failure."""
@@ -458,9 +477,59 @@ class CameraWorker(threading.Thread):
     # ------------------------------------------------------------------ capture
 
     def _open(self, source_url: Optional[str] = None):
+        """Open the camera on the GPU decoder when one works, else with OpenCV.
+
+        The decoder is chosen per open (capture_backends): an RTSP camera goes
+        to the probed GPU backend unless GPU decoding already failed for this
+        camera; everything else, and every fallback, is today's OpenCV path.
+        """
+        src = source_url or self.rt.source
+        probe = None
+        if self._hw_disabled is None and capture_backends.hw_eligible(src):
+            probe = capture_backends.decode_probe()
+            if probe.backend == capture_backends.SOFTWARE:
+                probe = None
+        if probe is not None:
+            cap = self._open_hw(src, probe)
+            if cap is not None:
+                return cap
+        return self._open_software(src)
+
+    def _open_hw(self, src: str, probe):
+        """A GPU capture; None means "decode this camera in software instead".
+
+        A rejected login or an unreachable address raises (the software path
+        would only fail the same way, costing the camera another login). A
+        failure of the GPU half of the chain disables GPU decoding for this
+        camera at once; a stream that opens but yields no frame does so after
+        two attempts in a row. Anything else returns the closed capture, so
+        the caller tries the alternate stream and reports the reason.
+        """
+        # FFmpeg's DNS lookup ignores its timeouts; resolve first, bounded.
+        _resolve_host_bounded(src, settings.CAMERA_OPEN_TIMEOUT_SEC)
+        cap = capture_backends.open_hw_capture(src, probe, cancel=self._stop)
+        if cap.isOpened():
+            self._hw_no_frames = 0
+            return cap
+        detail = cap.error_summary or cap.failure
+        if cap.failure == capture_backends.AUTH:
+            raise CameraAuthError(f"camera rejected the username/password ({detail})")
+        if cap.failure == capture_backends.UNREACHABLE:
+            raise CameraUnreachableError(detail)
+        if self._stop.is_set():
+            return cap
+        if cap.failure == capture_backends.NO_FRAMES:
+            self._hw_no_frames += 1
+        if cap.failure == capture_backends.DECODE or self._hw_no_frames >= 2:
+            self._hw_disabled = f"{probe.label} decoding failed for this stream ({detail})"
+            logger.warning(f"Camera {self.rt.camera_id}: {self._hw_disabled}; decoding it in software "
+                           "until the camera is restarted")
+            return None
+        return cap
+
+    def _open_software(self, src: str):
         import cv2
 
-        src = source_url or self.rt.source
         # A bare /dev/videoN path and a network URL both go through
         # VideoCapture. Network streams get a latency-bounded transport and
         # real open/read timeouts: without them one unreachable camera held
@@ -478,8 +547,8 @@ class CameraWorker(threading.Thread):
             open_ms = int(max(0.5, settings.CAMERA_OPEN_TIMEOUT_SEC) * 1000)
             read_ms = int(max(0.5, settings.CAMERA_READ_TIMEOUT_SEC) * 1000)
             params = [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, open_ms, cv2.CAP_PROP_READ_TIMEOUT_MSEC, read_ms]
-            # Decoding stays on the CPU; only its thread count is bounded
-            # (a per-capture open parameter, so concurrent opens cannot race).
+            # Software decoding: only its thread count is bounded (a
+            # per-capture open parameter, so concurrent opens cannot race).
             n_threads = getattr(cv2, "CAP_PROP_N_THREADS", None)
             if n_threads is not None:
                 self._decode_threads = decode_threads_for(*_source_sizes.get(src, (None, None)))
@@ -493,6 +562,14 @@ class CameraWorker(threading.Thread):
         except Exception:
             pass
         return cap
+
+    def _software_reason(self, source: str) -> str:
+        if self._hw_disabled:
+            return self._hw_disabled
+        if not capture_backends.hw_eligible(source):
+            return "only RTSP cameras are decoded on the GPU"
+        probe = capture_backends.cached_probe()
+        return probe.reason if probe is not None else "GPU decoding not probed"
 
     def run(self) -> None:
         import cv2
@@ -511,7 +588,10 @@ class CameraWorker(threading.Thread):
                     # password, let FFmpeg try once, so a quirk in the probe can
                     # never block a camera that works (at most one more failed
                     # login per attempt, still well under a lockout).
-                    cap = self._open(self.rt.source)
+                    try:
+                        cap = self._open(self.rt.source)
+                    except CameraAuthError:
+                        cap = None   # ffmpeg was refused too: report the probe's clearer reason
                     if not cap or not cap.isOpened():
                         if cap is not None:
                             try:
@@ -545,26 +625,38 @@ class CameraWorker(threading.Thread):
                             active_source = alt
 
                 if not cap or not cap.isOpened():
-                    raise RuntimeError(f"Cannot open RTSP source {redact_url(self.rt.source)}")
+                    why = getattr(cap, "error_summary", "") if cap is not None else ""
+                    raise RuntimeError(f"Cannot open RTSP source {redact_url(self.rt.source)}"
+                                       + (f" ({why})" if why else ""))
 
+                self._cap = cap
+                hw = isinstance(cap, capture_backends.FfmpegHwCapture)
+                self.rt.decoder = cap.decoder if hw else capture_backends.SOFTWARE
+                self.rt.decoder_note = None if hw else self._software_reason(active_source)
                 self.rt.status = "ONLINE"
                 self.rt.last_error = None
                 self.rt.next_retry_at = None
                 self.rt.connected_at = time.time()
                 backoff = 1.0
-                logger.info(f"Camera {self.rt.camera_id} connected (source: {redact_url(active_source)})")
+                logger.info(f"Camera {self.rt.camera_id} connected (source: {redact_url(active_source)}, "
+                            f"decoding: {capture_backends.BACKEND_LABELS[self.rt.decoder]})")
 
                 last_tick = time.time()
                 frames_in_window = 0
-                sized = False
+                sized = hw   # a GPU capture has no decode threads to fit
+                self._clip_n = self._clip_every(cap)
 
                 while not self._stop.is_set():
                     ok, frame = cap.read()
                     if not ok or frame is None:
-                        raise RuntimeError("Stream ended or frame read failed")
+                        if self._stop.is_set():
+                            break   # stop() ended the capture
+                        why = getattr(cap, "error_summary", "")
+                        raise RuntimeError("Stream ended or frame read failed" + (f" ({why})" if why else ""))
                     if not sized:
                         sized = True
                         cap = self._fit_decode_threads(cap, active_source, frame)
+                        self._cap = cap
 
                     self.rt.frames_read += 1
                     self.rt.last_frame_at = time.time()
@@ -573,20 +665,24 @@ class CameraWorker(threading.Thread):
                     self._frame_index += 1
                     # Feed the pre-event ring buffer so incident clips and
                     # the clip export action are cut from real footage.
-                    if self._frame_index % settings.ANALYTICS_DETECT_EVERY_N_FRAMES == 0:
+                    if self._frame_index % self._clip_n == 0:
                         self._push_clip_buffer(frame)
 
                     now = time.time()
                     if now - last_tick >= 2.0:
+                        # Delivered frames: on the GPU path at most DECODE_MAX_FPS.
                         self.rt.fps = frames_in_window / (now - last_tick)
                         frames_in_window = 0
                         last_tick = now
+                        self._clip_n = self._clip_every(cap)
 
                     # The scheduler decides whether this frame gets inferred:
                     # the camera's fair share of the accelerator, never more
-                    # than every Nth frame. Frames it skips are still shown.
+                    # than every Nth frame of the camera's native rate (the
+                    # clip stride already accounts for frames the GPU decoder
+                    # dropped). Frames it skips are still shown.
                     if inference_scheduler.admit(self.rt.camera_id, fps=self.rt.fps,
-                                                 frame_index=self._frame_index):
+                                                 frame_index=self._frame_index, every_n=self._clip_n):
                         try:
                             self._analyse(frame, now)
                         finally:
@@ -605,6 +701,7 @@ class CameraWorker(threading.Thread):
                     self.rt.status = "OFFLINE"
                     self.rt.last_error = clean_err
                 self.rt.next_retry_at = time.time() + wait
+                self.rt.decoder = None
                 # A camera that drops out contributes nothing until it returns,
                 # and its share of the accelerator goes to the others.
                 inference_scheduler.forget(self.rt.camera_id)
@@ -624,6 +721,7 @@ class CameraWorker(threading.Thread):
                 else:
                     logger.warning(f"Camera {self.rt.camera_id} error: {clean_err}; retrying in {wait:.0f}s")
             finally:
+                self._cap = None
                 if cap is not None:
                     try:
                         cap.release()
@@ -636,6 +734,7 @@ class CameraWorker(threading.Thread):
                 backoff = min(backoff * 2, CAMERA_RETRY_MAX_SEC)
 
         self.rt.status = "DISABLED" if not self.rt.enabled else "OFFLINE"
+        self.rt.decoder = None
         inference_scheduler.forget(self.rt.camera_id)
         for t in self.tracker.flush_all():
             self.engine.close_track(t, reason="worker_stopped")
@@ -669,6 +768,21 @@ class CameraWorker(threading.Thread):
             raise RuntimeError(f"Cannot reopen {redact_url(source)} with {wanted} decode threads")
         return cap
 
+    def _clip_every(self, cap) -> int:
+        """Buffer every Nth delivered frame for evidence clips.
+
+        N keeps the clip rate at the camera's native fps /
+        ANALYTICS_DETECT_EVERY_N_FRAMES (25 / 5 = 5 fps) when the GPU path
+        delivers fewer frames (DECODE_MAX_FPS): every 2nd of 10 fps, not every
+        5th. Software capture delivers the native rate: every Nth, as before.
+        """
+        n = max(1, int(settings.ANALYTICS_DETECT_EVERY_N_FRAMES))
+        native = getattr(cap, "source_fps", None)
+        delivered = self.rt.fps or getattr(cap, "output_fps", None)
+        if not native or not delivered:
+            return n
+        return max(1, min(n, int(round(n * float(delivered) / float(native)))))
+
     def _push_clip_buffer(self, frame: np.ndarray) -> None:
         try:
             from app.services.clip_recorder import clip_recorder_service
@@ -676,7 +790,10 @@ class CameraWorker(threading.Thread):
             # Clips are saved footage: privacy masks apply.
             frame = apply_privacy_masks(frame, self.rt.camera_id)
 
-            fps = max(1, int(round((self.rt.fps or 5.0) / settings.ANALYTICS_DETECT_EVERY_N_FRAMES)) or 1)
+            # The ring is sized on its first push, usually before the fps is
+            # measured: estimate it from the capture (was: 1 fps, a 1 s ring).
+            rate = self.rt.fps or getattr(self._cap, "output_fps", None) or float(settings.RECORDING_FPS)
+            fps = max(1, int(round(float(rate) / self._clip_n)))
             clip_recorder_service.get_or_create_buffer(self.rt.camera_id, fps=fps).push_frame(frame)
         except Exception as e:  # never let the recorder take the capture loop down
             logger.debug(f"clip buffer push failed for {self.rt.camera_id}: {e}")

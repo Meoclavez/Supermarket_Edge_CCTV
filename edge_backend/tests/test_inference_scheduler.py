@@ -618,3 +618,14 @@ def test_real_decoder_honours_the_thread_cap(tmp_path):
     assert capped <= 1
     if (os.cpu_count() or 1) >= 4:
         assert default > capped + 2, f"default decoder added {default} threads, capped {capped}"
+
+
+def test_thinned_camera_keeps_the_native_rate_ceiling():
+    """GPU decode delivers 10 of 25 fps: stride 2 keeps the ceiling at 5 fps, not 2."""
+    from app.services.inference_scheduler import InferenceScheduler, _Camera
+
+    s = InferenceScheduler.__new__(InferenceScheduler)
+    thinned = _Camera(first_seen=0, last_seen=0, fps=10.0, every_n=2)
+    native = _Camera(first_seen=0, last_seen=0, fps=25.0)
+    assert s._ceiling(thinned) == 5.0
+    assert s._ceiling(native) == 25.0 / max(1, int(__import__("app.config", fromlist=["settings"]).settings.ANALYTICS_DETECT_EVERY_N_FRAMES))

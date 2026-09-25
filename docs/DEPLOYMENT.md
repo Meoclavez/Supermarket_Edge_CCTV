@@ -13,7 +13,7 @@ no analytics leave the premises.
 | CPU | 4 cores | Detection runs here if no GPU is fitted |
 | RAM | 8 GB | 16 GB for more than ~12 cameras |
 | GPU | Optional | NVIDIA (CUDA) or AMD (ROCm, via MIGraphX) is detected and used automatically |
-| Disk | 256 GB SSD + NAS | Recordings go to `STORAGE_DIR` |
+| Disk | 256 GB SSD | Theft evidence (stills, optional short clips) goes to `STORAGE_DIR` on this SSD. Continuous recording is the store NAS's job; this software never writes to the NAS |
 | Network | Wired gigabit | Cameras and the server on the same VLAN |
 
 **No hardware is selected at build time.** On startup the system probes for a
@@ -373,7 +373,8 @@ the floor right now (positions only from calibrated cameras), and
 you can see what the detector is doing.
 
 **Backups.** A snapshot is taken at every startup into `storage/backups/`,
-pruned to 7 days. Copy that directory to the NAS on a schedule.
+pruned to 7 days. To keep copies, pull that directory to another machine;
+do not point the service at the store NAS (it must not write there).
 
 **Updating a running device.** Install the new release and restart the
 service: on start the database migrates itself (versioned migrations in

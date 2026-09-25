@@ -44,8 +44,15 @@ RestartSec=5
 # alone map well over 1 GB, and their page cache is charged to this cgroup.
 # On AMD a first-time MIGraphX compile peaks at about 3 GB on top of the
 # running service (it runs one model at a time); see docs/DEPLOYMENT.md.
-MemoryHigh=6G
-MemoryMax=8G
+# Each GPU-decoded camera adds an ffmpeg child to this cgroup: measured ~40 MB
+# private for a 720p stream, ~95 MB for 1440p, while the service's own memory
+# drops ~20 MB per camera (no in-process decoder), i.e. ~+0.7 GB for 33 cameras.
+# Measured on a 16 GB box with 33 cameras: ~4.3 GB running, so a cold compile
+# (+3 GB) would pass 6G and be throttled, and approach 8G. The installer
+# pre-compiles every model, so compiles at run time are rare; the limits leave
+# room for one anyway and still keep ~5 GB for the rest of the machine.
+MemoryHigh=7G
+MemoryMax=9G
 
 # Hardening. The service needs its storage directory, the video devices and
 # the network, and nothing else.
@@ -76,6 +83,12 @@ ProtectControlGroups=true
 RestrictSUIDSGID=true
 RestrictRealtime=true
 LockPersonality=true
+# The service (and its per-camera ffmpeg decoders) sees only its own
+# processes in /proc. This limits what the service can read; it does not hide
+# the service from other users. Camera logins are kept off ffmpeg's command
+# line for that reason (they reach it over a pipe; see capture_backends.py).
+# ProcSubset=pid is not set: CPU/RAM readings need /proc/stat and /proc/meminfo.
+ProtectProc=invisible
 
 # USB/CSI cameras and GPU render nodes for hardware decode and inference.
 DeviceAllow=char-video4linux rw

@@ -144,9 +144,14 @@ class HardwareProfile(BaseModel):
     """
     decoder_type: str
     decoder_capability: str
-    # What camera capture really decodes with, and why (see hardware_detector).
-    decoder_in_use: str = "cpu"
+    # What camera capture really decodes with, and why (see hardware_detector):
+    # cuda | vaapi | cpu | mixed | none (no camera streaming).
+    decoder_in_use: str = "none"
     decoder_note: Optional[str] = None
+    # Streaming cameras per decoder, e.g. {"vaapi": 31, "software": 2}.
+    decoder_cameras: dict[str, int] = Field(default_factory=dict)
+    # The start-up GPU decoder test (capture_backends.DecodeProbe); None until it ran.
+    decoder_probe: Optional[dict] = None
     inference_backend: str
     inference_provider: str
     inference_available: bool
