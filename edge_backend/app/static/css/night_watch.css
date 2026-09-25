@@ -1,0 +1,62 @@
+/* Night watch (js/night_watch.js): the camera settings section and the
+   Loss prevention card. Theme tokens only, so light and dark both work. */
+
+.nw-settings { display: flex; flex-direction: column; gap: 8px; }
+.nw-settings.nw-disabled .form-grid-2col,
+.nw-settings.nw-disabled .nw-days,
+.nw-settings.nw-disabled label[for="nwDark"] { opacity: 0.55; }
+.nw-zone { font-weight: 500; color: var(--text-dim); }
+.nw-label { display: block; font-size: 11px; font-weight: 600; color: var(--text-dim); margin-bottom: 4px; }
+.nw-days { display: flex; flex-wrap: wrap; gap: 6px; }
+.nw-day {
+  display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; color: var(--text-2);
+  padding: 4px 8px; border-radius: var(--radius-sm); background: rgba(var(--tint-rgb), 0.05);
+  border: 1px solid rgba(var(--tint-rgb), 0.1); cursor: pointer;
+}
+.nw-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.nw-actions .form-status { margin-top: 0; }
+.nw-status { font-size: 11.5px; line-height: 1.6; }
+
+.nw-state {
+  display: inline-block; font-size: 10.5px; font-weight: 700; padding: 2px 8px; border-radius: 999px;
+  background: rgba(var(--tint-rgb), 0.08); color: var(--text-dim); white-space: nowrap;
+}
+.nw-state.nw-on { background: rgba(var(--ok-rgb), 0.16); color: var(--ok); }
+.nw-state.nw-motion { background: rgba(var(--amber-rgb), 0.16); color: var(--amber); }
+.nw-state.nw-alert { background: rgba(var(--rose-rgb), 0.18); color: var(--rose); }
+.nw-state.nw-warn { background: rgba(var(--amber-rgb), 0.12); color: var(--amber); }
+.nw-meta { font-size: 11px; color: var(--text-dim); }
+.nw-note { font-size: 11px; color: var(--amber); margin-top: 2px; }
+.nw-store-time { color: var(--text-main); font-weight: 600; }
+.nw-viewer-time { color: var(--text-dim); }
+
+.nw-clock { font-size: 11.5px; color: var(--text-dim); margin-bottom: 6px; }
+.nw-headline { font-size: 12.5px; color: var(--text-main); margin-bottom: 8px; }
+.nw-events-title { font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em;
+  color: var(--text-dim); margin: 14px 0 6px; }
+.nw-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.nw-row {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 8px 10px;
+  border-radius: var(--radius-sm); background: rgba(var(--tint-rgb), 0.03);
+  border: 1px solid rgba(var(--tint-rgb), 0.07); min-width: 0;
+}
+.nw-cam { font-weight: 700; font-size: 12px; color: var(--text-main); overflow-wrap: anywhere; }
+.nw-event {
+  display: flex; gap: 10px; align-items: flex-start; padding: 8px; border-radius: var(--radius-sm);
+  background: rgba(var(--tint-rgb), 0.03); border: 1px solid rgba(var(--tint-rgb), 0.07); min-width: 0;
+}
+.nw-event-person { border-color: rgba(var(--rose-rgb), 0.35); }
+.nw-event-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
+.nw-event-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.nw-event-time { font-size: 11.5px; overflow-wrap: anywhere; }
+.nw-thumb-link { flex: 0 0 auto; }
+.nw-thumb {
+  display: block; width: 96px; height: 60px; object-fit: cover; border-radius: var(--radius-sm);
+  background: rgba(var(--well-rgb), 0.3);
+}
+.nw-thumb-empty { display: flex; align-items: center; justify-content: center; font-size: 10px; color: var(--text-faint); }
+
+@media (max-width: 480px) {
+  .nw-thumb { width: 72px; height: 48px; }
+  .nw-event { gap: 8px; }
+}

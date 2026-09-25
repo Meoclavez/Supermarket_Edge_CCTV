@@ -459,10 +459,38 @@ class Settings(BaseSettings):
     RESTRICTED_AREA_COOLDOWN_SEC: float = float(os.getenv("RESTRICTED_AREA_COOLDOWN_SEC", "300"))
     # A foot point may leave an area this long (boundary jitter) without resetting its dwell.
     RESTRICTED_AREA_EXIT_GRACE_SEC: float = float(os.getenv("RESTRICTED_AREA_EXIT_GRACE_SEC", "1.5"))
-    # IANA zone for restricted-area schedules; empty = the host's local time zone.
+    # The store's IANA time zone (e.g. Australia/Melbourne): "today", hourly
+    # curves, restricted-area and night-watch schedules and alert times are
+    # store-local. Empty = the host's own time zone.
     SITE_TIMEZONE: str = os.getenv("SITE_TIMEZONE", "")
     # Where alert snapshots are written; empty means <STORAGE_DIR>/zone_alerts.
     ZONE_ALERT_EVIDENCE_DIR: str = os.getenv("ZONE_ALERT_EVIDENCE_DIR", "")
+
+    # ---------------- Night watch (services/night_watch.py) ----------------
+    # Per camera (Settings > camera > Night watch): while armed and nothing
+    # moves, the pose model does not run for that camera; a cheap motion check
+    # on a small grayscale copy runs instead, and motion triggers a short
+    # person-detection burst to confirm.
+    # Motion samples per second per armed camera.
+    NIGHT_WATCH_MOTION_FPS: float = float(os.getenv("NIGHT_WATCH_MOTION_FPS", "4"))
+    # Width of the grayscale copy the motion check works on (pixels).
+    NIGHT_WATCH_MOTION_WIDTH: int = int(os.getenv("NIGHT_WATCH_MOTION_WIDTH", "320"))
+    # A sample where more than this share of the picture changes at once is a
+    # lighting event (IR switching, lights on/off, headlights), not motion.
+    NIGHT_WATCH_LIGHTING_FRACTION: float = float(os.getenv("NIGHT_WATCH_LIGHTING_FRACTION", "0.45"))
+    # Seconds of person detection after motion, and the detections needed to confirm.
+    NIGHT_WATCH_CONFIRM_SEC: float = float(os.getenv("NIGHT_WATCH_CONFIRM_SEC", "4"))
+    NIGHT_WATCH_CONFIRM_HITS: int = int(os.getenv("NIGHT_WATCH_CONFIRM_HITS", "2"))
+    # After a burst found nobody, motion must continue this long before the next burst.
+    NIGHT_WATCH_RECONFIRM_SEC: float = float(os.getenv("NIGHT_WATCH_RECONFIRM_SEC", "10"))
+    # At most this many night-watch events (alerts + motion) per camera per hour.
+    NIGHT_WATCH_MAX_EVENTS_PER_HOUR: int = int(os.getenv("NIGHT_WATCH_MAX_EVENTS_PER_HOUR", "12"))
+    # Save a short clip (pre-event buffer + NIGHT_WATCH_CLIP_POST_SEC) with a person alert.
+    NIGHT_WATCH_CLIP: bool = os.getenv("NIGHT_WATCH_CLIP", "false").lower() in ("1", "true", "yes", "on")
+    NIGHT_WATCH_CLIP_POST_SEC: float = float(os.getenv("NIGHT_WATCH_CLIP_POST_SEC", "5"))
+    # Evidence stills/clips; empty = <STORAGE_DIR>/night_watch. Oldest deleted first above the cap.
+    NIGHT_WATCH_EVIDENCE_DIR: str = os.getenv("NIGHT_WATCH_EVIDENCE_DIR", "")
+    NIGHT_WATCH_EVIDENCE_MAX_MB: float = float(os.getenv("NIGHT_WATCH_EVIDENCE_MAX_MB", "1024"))
 
     # Camera roles (services/camera_roles.py). Pipeline threads re-read the
     # cameras' roles at most this often.

@@ -245,7 +245,7 @@ def moving_person(monkeypatch):
     """Stub detector: one person whose foot point follows ``path`` frame by frame."""
     state = {"path": [], "i": 0}
 
-    def detect(frame, conf_threshold=None, iou_threshold=None):
+    def detect(frame, conf_threshold=None, iou_threshold=None, camera_id=None, **_kw):
         i = min(state["i"], len(state["path"]) - 1)
         state["i"] += 1
         fx, fy = state["path"][i]

@@ -459,7 +459,10 @@ class FfmpegHwCapture:
         deadline = time.monotonic() + self.read_timeout
         with self._cond:
             while self._seq == self._returned:
-                if self._eof or self.released:
+                if self.released:
+                    self.failure = self.failure or EXITED
+                    break
+                if self._eof:
                     self.failure = self.failure or EXITED
                     return False, None
                 remaining = deadline - time.monotonic()
@@ -467,10 +470,18 @@ class FfmpegHwCapture:
                     self.failure = STALLED
                     return False, None
                 self._cond.wait(min(remaining, 0.5))
-            self._returned = self._seq
-            frame, self._latest = self._latest, None
-        self.frames_delivered += 1
-        return True, frame
+            else:
+                self._returned = self._seq
+                frame, self._latest = self._latest, None
+                self.frames_delivered += 1
+                return True, frame
+        # Released (possibly from another thread) while waiting. ``released``
+        # is set before ffmpeg is signalled, so returning here at once let
+        # the caller run on while ffmpeg was still alive (and a stop() that
+        # joined the worker could see it). Wait, outside the lock the
+        # releasing thread needs, until release() has really finished.
+        self._release_done.wait(5.0)
+        return False, None
 
     def get(self, prop) -> float:
         import cv2
@@ -504,6 +515,10 @@ class FfmpegHwCapture:
         if not first:
             self._release_done.wait(5.0)
             return
+        # Wake a blocked read() now rather than at its next 0.5 s poll; it
+        # then waits for _release_done, so it returns only once ffmpeg is gone.
+        with self._cond:
+            self._cond.notify_all()
         try:
             self._terminate(wait)
         finally:

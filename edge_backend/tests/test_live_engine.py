@@ -45,7 +45,7 @@ def stub_detector(monkeypatch):
     """Always report one person (with a skeleton) at a fixed spot in a 640x480 frame."""
     calls = {"n": 0, "conf": []}
 
-    def detect(frame, conf_threshold=None, iou_threshold=None):
+    def detect(frame, conf_threshold=None, iou_threshold=None, camera_id=None, **_kw):
         calls["n"] += 1
         calls["conf"].append(conf_threshold)
         calls["frame"] = frame

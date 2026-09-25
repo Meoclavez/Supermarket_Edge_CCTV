@@ -32,7 +32,7 @@ def test_legacy_stored_keys_are_ignored():
     }
     cfg = CameraFeatureConfig.model_validate(legacy)
     assert cfg.model_dump() == {"people_counting": True, "shelf_interaction": False, "theft_detection": True,
-                                "person_max_frame_fraction": None}
+                                "person_max_frame_fraction": None, "night_watch": None}
 
     fm = FeatureManager()
     assert fm.get_camera_features("cam_old", stored=legacy).shelf_interaction is False

@@ -251,6 +251,9 @@ app.include_router(camera_roles_routes.router)
 from .routes import insights as insights_routes  # noqa: E402
 
 app.include_router(insights_routes.router)
+from .routes import night_watch as night_watch_routes  # noqa: E402
+
+app.include_router(night_watch_routes.router)
 
 # Mount Static Files
 STATIC_DIR = Path(__file__).resolve().parent / "static"

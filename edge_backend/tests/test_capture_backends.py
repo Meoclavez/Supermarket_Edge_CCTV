@@ -34,12 +34,12 @@ def _alive(pid: int) -> bool:
         return False
 
 
-def _open_fake(monkeypatch, mode="frames", url=URL, **env):
+def _open_fake(monkeypatch, mode="frames", url=URL, read_timeout=1.5, **env):
     monkeypatch.setenv("FAKE_FFMPEG_MODE", mode)
     for k, v in env.items():
         monkeypatch.setenv(k, str(v))
     return cb.FfmpegHwCapture(url, cb.VAAPI, "/dev/dri/renderD128", "gpu_rgb", max_fps=10, max_width=0,
-                              open_timeout=3, read_timeout=1.5, ffmpeg="ffmpeg")
+                              open_timeout=3, read_timeout=read_timeout, ffmpeg="ffmpeg")
 
 
 @pytest.fixture
@@ -171,14 +171,19 @@ def test_only_the_newest_frame_is_kept_for_a_slow_consumer(fake_ffmpeg, monkeypa
 def test_release_from_another_thread_ends_ffmpeg_and_a_blocked_read(fake_ffmpeg, monkeypatch):
     import threading
 
-    cap = _open_fake(monkeypatch, "burst", FAKE_FFMPEG_BURST=1)
+    # A read timeout far beyond the bound below, so the read can only end
+    # because of release() (with 1.5 s a late timer let it end as STALLED,
+    # ffmpeg still running).
+    cap = _open_fake(monkeypatch, "burst", read_timeout=30, FAKE_FFMPEG_BURST=1)
     assert cap.read()[0]
     threading.Timer(0.2, cap.release).start()
     t0 = time.monotonic()
     assert cap.read() == (False, None)
+    assert cap.failure == cb.EXITED
     # Terminate then kill after 0.5 s; the bound only has to tell "ends" from
-    # "blocked forever", with headroom for a loaded test machine.
-    assert time.monotonic() - t0 < 3.0
+    # "blocked until the read timeout", with headroom for a loaded machine.
+    assert time.monotonic() - t0 < 10.0
+    # read() returns only once release() has finished: ffmpeg is already gone.
     assert not _alive(cap.pid) and cap.pid not in cb.live_ffmpeg_pids()
 
 

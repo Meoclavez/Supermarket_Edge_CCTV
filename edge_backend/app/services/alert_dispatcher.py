@@ -350,13 +350,17 @@ class AlertDispatcher:
 
     # ---- public API
     async def dispatch(self, event_type: str, severity: str, title: str, body: str, data: Optional[dict] = None,
-                       *, persist: bool = True, broadcast: bool = True, bypass_cooldown: bool = False) -> dict:
+                       *, persist: bool = True, broadcast: bool = True, bypass_cooldown: bool = False,
+                       push: bool = True) -> dict:
         """Log, broadcast and push one alert.
 
         ``bypass_cooldown`` is for alerts a person asked for explicitly (e.g.
         "staff sent" on a theft incident): the per-camera cooldown exists to
         stop automatic alerts repeating, not to swallow an operator's action.
         Phone preferences and camera mutes still apply.
+
+        ``push=False`` logs and broadcasts only (e.g. night-watch motion that
+        no person detection confirmed); the report says it was not pushed.
         """
         from app.models.schemas import EventSeverity, EventType
         from app.services import device_identity
@@ -397,14 +401,18 @@ class AlertDispatcher:
             ws_clients = await alert_hub.broadcast_event(jsonable_encoder({
                 "id": alert_id, "title": title, "body": body, **data,
             }))
-        push = await self._push(title, body, data, camera, bypass_cooldown=bypass_cooldown)
+        if push:
+            push_report = await self._push(title, body, data, camera, bypass_cooldown=bypass_cooldown)
+        else:
+            push_report = {"provider": "fcm_v1", "devices": 0, "targets": 0, "sent": 0, "failed": 0,
+                           "skipped": "not pushed: dashboard-only event", "results": []}
         return {
             "alert_id": alert_id,
             "event_type": et,
             "severity": sev,
             "logged": logged,
             "websocket_clients": ws_clients,
-            "push": push,
+            "push": push_report,
         }
 
     async def send_test(self, paired_device_id: str) -> dict:

@@ -47,8 +47,10 @@ from app.services.inference_backend import (
     ObjectDetection,
     keypoints_to_list,
     person_detector,
+    person_threshold,
 )
 from app.services.inference_scheduler import inference_scheduler
+from app.services import night_watch as nw
 from app.services.privacy_mask import (
     apply_privacy_masks,
     camera_masks,
@@ -270,7 +272,29 @@ class CameraRuntime:
             ),
             # How often this camera is really analysed (inference_scheduler).
             "analysis_rate": inference_scheduler.camera_status(self.camera_id),
+            # Measured lighting (day | mixed | low_light | ir, with hysteresis);
+            # None until the camera's first analysed frame.
+            "lighting": _lighting_status(self.camera_id),
+            # disarmed | armed_idle | motion | person_confirmed | cooldown | unavailable,
+            # with the next arm / disarm time in store time.
+            "night_watch": _night_watch_status(self.camera_id, self.status == "ONLINE"),
         }
+
+
+def _lighting_status(camera_id: str) -> Optional[dict]:
+    try:
+        from app.services.low_light import lighting_monitor
+
+        return lighting_monitor.camera_status(camera_id)
+    except Exception:  # noqa: BLE001 - status must answer regardless
+        return None
+
+
+def _night_watch_status(camera_id: str, streaming: bool) -> Optional[dict]:
+    try:
+        return nw.night_watch.camera_status(camera_id, streaming=streaming)
+    except Exception as e:  # noqa: BLE001 - status must answer regardless
+        return {"state": "unknown", "error": f"{type(e).__name__}: {e}"}
 
 
 def _drop_clip_buffer(camera_id: str) -> None:
@@ -426,6 +450,8 @@ class CameraWorker(threading.Thread):
         # Latest retail objects; refreshed every OBJECT_DETECT_EVERY_N
         # detection frames, so at most N-1 detection frames old.
         self._objects: list[ObjectDetection] = []
+        # Night watch armed on this camera (the normal analysis is paused).
+        self._night_armed = False
 
     def stop(self) -> None:
         self._stop.set()
@@ -710,6 +736,12 @@ class CameraWorker(threading.Thread):
                         last_tick = now
                         self._clip_n = self._clip_every(cap)
 
+                    # Night watch: while armed, a cheap motion check replaces
+                    # the pose model (the scheduler holds this camera); motion
+                    # asks for a short person-detection burst to confirm.
+                    mode = self._night_watch_step(frame, now)
+                    if mode == nw.HOLD:
+                        continue
                     # The scheduler decides whether this frame gets inferred:
                     # the camera's fair share of the accelerator, never more
                     # than every Nth frame of the camera's native rate (the
@@ -718,7 +750,10 @@ class CameraWorker(threading.Thread):
                     if inference_scheduler.admit(self.rt.camera_id, fps=self.rt.fps,
                                                  frame_index=self._frame_index, every_n=self._clip_n):
                         try:
-                            self._analyse(frame, now)
+                            if mode == nw.CONFIRM:
+                                self._night_confirm(frame, now)
+                            else:
+                                self._analyse(frame, now)
                         finally:
                             inference_scheduler.done(self.rt.camera_id)
 
@@ -739,6 +774,8 @@ class CameraWorker(threading.Thread):
                 # A camera that drops out contributes nothing until it returns,
                 # and its share of the accelerator goes to the others.
                 inference_scheduler.forget(self.rt.camera_id)
+                nw.night_watch.forget(self.rt.camera_id)
+                self._night_armed = False
                 for t in self.tracker.flush_all():
                     self.engine.close_track(t, reason="camera_offline")
                 self.rt.set_tracks([])
@@ -770,6 +807,7 @@ class CameraWorker(threading.Thread):
         self.rt.status = "DISABLED" if not self.rt.enabled else "OFFLINE"
         self.rt.decoder = None
         inference_scheduler.forget(self.rt.camera_id)
+        nw.night_watch.forget(self.rt.camera_id)
         for t in self.tracker.flush_all():
             self.engine.close_track(t, reason="worker_stopped")
         _reset_pose_camera(self.rt.camera_id)
@@ -875,6 +913,51 @@ class CameraWorker(threading.Thread):
 
     # ----------------------------------------------------------------- analysis
 
+    def _night_watch_step(self, frame: np.ndarray, now: float) -> str:
+        """NORMAL, HOLD or CONFIRM for this frame (services/night_watch.py).
+
+        On arming, the camera's tracks are finished as when every analysis
+        feature is off: nobody is counted while the pose model is paused.
+        A night-watch failure falls back to the normal pipeline.
+        """
+        cam = self.rt.camera_id
+        try:
+            mode = nw.night_watch.step(cam, self.rt.name, frame, now)
+        except Exception as e:  # noqa: BLE001 - never take the capture loop down
+            _log_once(f"night_watch:{type(e).__name__}",
+                      f"night watch failed on {cam} ({type(e).__name__}: {e}); running the normal analysis")
+            inference_scheduler.hold(cam, False)
+            mode = nw.NORMAL
+        armed = mode != nw.NORMAL
+        if armed and not self._night_armed:
+            for t in self.tracker.flush_all():
+                self.engine.close_track(t, reason="night_watch")
+            self._objects = []
+            self.rt.set_tracks([], now)
+            self.rt.live_track_count = 0
+            self.rt.detections_last = 0
+            _reset_pose_camera(cam)
+        self._night_armed = armed
+        return mode
+
+    def _night_confirm(self, frame: np.ndarray, now: float) -> None:
+        """Person detection on a frame of a night-watch confirmation burst.
+
+        Per-box thresholds (a dark box needs less confidence) and AI_IGNORE
+        regions apply as in the live pipeline; no tracking, counting or pose
+        analytics run.
+        """
+        cam = self.rt.camera_id
+        h, w = frame.shape[:2]
+        kw = {}
+        max_frac = camera_setting(cam, "person_max_frame_fraction")
+        if max_frac is not None:
+            kw["max_frame_fraction"] = max_frac
+        dets = person_detector.detect(frame, camera_id=cam, **kw)
+        dets = outside_ignore_regions(dets, ignore_polygons(cam, w, h))
+        self.rt.detections_last = len(dets)
+        nw.night_watch.confirm(cam, frame, dets, now)
+
     def _analyse(self, frame: np.ndarray, now: float) -> None:
         cam = self.rt.camera_id
         flags = {f: camera_flag(cam, f) for f in ANALYSIS_FLAGS}
@@ -906,11 +989,13 @@ class CameraWorker(threading.Thread):
         max_frac = camera_setting(cam, "person_max_frame_fraction")
         if max_frac is not None:
             detect_kw["max_frame_fraction"] = max_frac
-        detections = person_detector.detect(frame, **detect_kw)
+        # ``camera_id`` gives the lighting measurement per-camera hysteresis
+        # (low_light), reported in this camera's status as ``lighting``.
+        detections = person_detector.detect(frame, camera_id=cam, **detect_kw)
         detections = outside_ignore_regions(detections, ignore)
-        self.rt.detections_last = sum(
-            1 for d in detections if d.confidence >= settings.PERSON_CONF_THRESHOLD
-        )
+        # People by the per-box rule (a dark box needs less confidence), as
+        # the detector itself keeps them when no explicit threshold is given.
+        self.rt.detections_last = sum(1 for d in detections if d.confidence >= person_threshold(d))
 
         self._detect_index += 1
         every_n = settings.OBJECT_DETECT_EVERY_N

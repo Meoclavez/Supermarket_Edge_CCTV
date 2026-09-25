@@ -89,9 +89,11 @@ class PipelineSupervisor:
             return
         self._running = True
         # Tripwire / restricted-area alerts are scheduled onto this loop.
+        from app.services.night_watch import night_watch
         from app.services.tripwire_engine import tripwire_engine
 
         tripwire_engine.bind_loop()
+        night_watch.bind_loop()
         await self._close_orphaned_visits()
         await self.reload_layout()
         await self.reconcile_cameras()

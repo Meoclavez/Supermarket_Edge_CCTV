@@ -40,6 +40,14 @@ steps up only to a level already measured on this device that fits within
 thread; the detector swaps the model atomically while the old one serves (on
 MIGraphX a cold model is compiled in a child process first).
 
+Night watch (services/night_watch.py). A camera whose night watch is armed
+and sees no motion is *held*: ``admit()`` refuses its frames and it takes no
+share, so its part of the budget goes to the other cameras. When motion is
+seen it is *boosted* for a few seconds to confirm a person: admitted at its
+ceiling (fps / N) ahead of the fair share, which the other cameras split
+what is left of the budget, with one in-flight slot above the cap so a busy
+device cannot starve the confirmation.
+
 Everything is reported in ``status()`` (``person_detector.status()
 ["load_control"]``) and per camera in ``camera_status()``: rates allocated and
 measured, target and measured utilisation, the model / refiner in use and why.
@@ -146,6 +154,9 @@ class _Camera:
     # Set when decoding already drops frames (GPU path, DECODE_MAX_FPS).
     every_n: int = 0
     idle: bool = False
+    # Night watch: held = no inference at all; boosted until = confirmation burst.
+    held: bool = False
+    boost_until: float = 0.0
     rate: float = 0.0
     next_due: float = 0.0
     last_frame: int = -(10 ** 9)
@@ -233,6 +244,9 @@ class InferenceScheduler:
             if fps > 0:
                 c.fps = fps
             c.every_n = every_n
+            boosted = c.boost_until > now
+            if c.held and not boosted:
+                return False
             if not settings.ANALYTICS_SCHEDULER:
                 ok = frame_index is None or frame_index % every_n == 0
                 if ok:
@@ -244,7 +258,7 @@ class InferenceScheduler:
                 return False
             if now < c.next_due:
                 return False
-            if self._inflight >= max(1, int(settings.ANALYTICS_MAX_INFLIGHT)):
+            if self._inflight >= max(1, int(settings.ANALYTICS_MAX_INFLIGHT)) + (1 if boosted else 0):
                 c.skipped_busy += 1
                 self._skipped_busy += 1
                 return False
@@ -273,6 +287,34 @@ class InferenceScheduler:
             if c is not None and c.idle != bool(idle):
                 c.idle = bool(idle)
                 self._recompute_locked(self._clock())
+
+    def hold(self, camera_id: str, held: bool) -> None:
+        """Night watch armed, no motion: admit nothing for this camera and give its share away."""
+        now = self._clock()
+        with self._lock:
+            c = self._cams.get(camera_id)
+            if c is None:
+                if not held:
+                    return
+                c = self._cams[camera_id] = _Camera(first_seen=now, last_seen=now)
+            if c.held != bool(held):
+                c.held = bool(held)
+                if not held:
+                    c.boost_until = 0.0
+                self._recompute_locked(now)
+
+    def boost(self, camera_id: str, seconds: float) -> None:
+        """Night watch saw motion: admit this camera at its ceiling for ``seconds`` (0 ends it)."""
+        now = self._clock()
+        with self._lock:
+            c = self._cams.get(camera_id)
+            if c is None:
+                c = self._cams[camera_id] = _Camera(first_seen=now, last_seen=now)
+            starting = c.boost_until <= now
+            c.boost_until = now + max(0.0, float(seconds)) if seconds > 0 else 0.0
+            if starting and c.boost_until > now:
+                c.next_due = now              # the first frame of the burst is due at once
+            self._recompute_locked(now)
 
     def forget(self, camera_id: str) -> None:
         """The camera stopped or lost its stream: give its share to the others."""
@@ -373,10 +415,14 @@ class InferenceScheduler:
 
     def _recompute_locked(self, now: float) -> None:
         live = {k: c for k, c in self._cams.items() if now - c.last_seen <= ACTIVE_SEC}
-        analysing = {k: c for k, c in live.items() if not c.idle}
+        for c in self._cams.values():
+            if c.held and c.boost_until <= now:
+                c.rate = 0.0
+        analysing = {k: c for k, c in live.items() if not c.idle and (not c.held or c.boost_until > now)}
+        boosted = {k: c for k, c in analysing.items() if c.boost_until > now}
         floor = max(0.0, float(settings.ANALYTICS_MIN_DETECT_FPS))
         for c in live.values():
-            if c.idle:
+            if c.idle and not c.held:
                 c.rate = min(IDLE_FPS, self._ceiling(c))
         if not settings.ANALYTICS_SCHEDULER or not self._cost_ms:
             # Legacy rule, or nothing to measure against (no detector): the ceiling.
@@ -385,10 +431,16 @@ class InferenceScheduler:
             self._budget, self._floor_bound = None, False
             return
         self._budget = float(settings.POSE_BUDGET_UTILISATION) * 1000.0 / self._cost_ms
-        rates = allocate_rates(self._budget, {k: self._ceiling(c) for k, c in analysing.items()}, floor)
+        # A confirmation burst runs at its ceiling; the others share the rest.
+        for c in boosted.values():
+            c.rate = self._ceiling(c)
+        rest = max(0.0, self._budget - sum(c.rate for c in boosted.values()))
+        others = {k: c for k, c in analysing.items() if k not in boosted}
+        rates = allocate_rates(rest, {k: self._ceiling(c) for k, c in others.items()}, floor)
         for k, r in rates.items():
-            analysing[k].rate = r
-        self._floor_bound = sum(rates.values()) > self._budget * 1.001
+            others[k].rate = r
+        self._floor_bound = (sum(rates.values()) + sum(c.rate for c in boosted.values())
+                             > self._budget * 1.001)
 
     # ------------------------------------------------------------- re-fit
 
@@ -411,7 +463,8 @@ class InferenceScheduler:
             costs[cur] = round(self._cost_ms, 2)      # the truth for the running level
 
         with self._lock:
-            live = {k: c for k, c in self._cams.items() if now - c.last_seen <= ACTIVE_SEC and not c.idle}
+            live = {k: c for k, c in self._cams.items() if now - c.last_seen <= ACTIVE_SEC and not c.idle
+                    and not (c.held and c.boost_until <= now)}
             want = max(float(settings.ANALYTICS_TARGET_DETECT_FPS), float(settings.ANALYTICS_MIN_DETECT_FPS))
             demand = sum(min(want, self._ceiling(c)) for c in live.values())
         names = frozenset(live)
@@ -505,6 +558,9 @@ class InferenceScheduler:
                 "ceiling_fps": round(self._ceiling(c), 2),
                 "floor_fps": float(settings.ANALYTICS_MIN_DETECT_FPS),
                 "idle": c.idle,
+                # Night watch: no inference while held; boosted = confirming motion.
+                "night_hold": c.held and c.boost_until <= now,
+                "boosted": c.boost_until > now,
                 "skipped_busy": c.skipped_busy,
             }
 
@@ -512,7 +568,8 @@ class InferenceScheduler:
         now = self._clock()
         with self._lock:
             live = [c for c in self._cams.values() if now - c.last_seen <= ACTIVE_SEC]
-            analysing = [c for c in live if not c.idle]
+            held = [c for c in live if c.held and c.boost_until <= now]
+            analysing = [c for c in live if not c.idle and not any(c is h for h in held)]
             rates = [c.rate for c in analysing]
             measured = sum(self._measured_fps(c, now) for c in analysing)
             pending = dict(self._pending) if self._pending else None
@@ -537,7 +594,8 @@ class InferenceScheduler:
             "capacity_frames_per_s": round(1000.0 / cost, 1) if cost else None,
             "budget_frames_per_s": round(self._budget, 1) if self._budget is not None else None,
             "cameras_analysing": len(analysing),
-            "cameras_idle": len(live) - len(analysing),
+            "cameras_idle": len(live) - len(analysing) - len(held),
+            "cameras_night_watch_held": len(held),
             "allocated_frames_per_s": round(sum(rates), 1),
             "measured_frames_per_s": round(measured, 1),
             "per_camera_fps": ({"min": round(min(rates), 2), "max": round(max(rates), 2),

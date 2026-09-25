@@ -18,6 +18,7 @@
   <link rel="stylesheet" href="/static/css/insights.css?v=2.3.0" />
   <link rel="stylesheet" href="/static/css/camera_roles.css?v=2.3.0" />
   <link rel="stylesheet" href="/static/css/heatmap_history.css?v=2.3.0" />
+  <link rel="stylesheet" href="/static/css/night_watch.css?v=2.3.0" />
   <!-- auth.js stays a classic (blocking) script: it must wrap fetch before any
        module runs. Everything else is deferred and runs in document order after
        parsing; theme.js is listed last so it still runs after the modules.
@@ -666,6 +667,21 @@
         </div>
       </div>
       <!-- LOSS:END -->
+
+      <!-- Night watch (js/night_watch.js): cameras armed now, the next window, recent night events. -->
+      <div class="glass-card" id="nightWatchCard">
+        <div class="card-title">
+          <span>Night watch</span>
+          <button type="button" class="btn btn-sm" data-nw="refresh">Refresh</button>
+        </div>
+        <p class="loss-intro">
+          Cameras set to watch at night pause their normal analysis and look for movement; a person seen then is a
+          high alert. Times are the store's; your own time is shown next to them when it differs.
+        </p>
+        <div id="nwSummary"><div class="fp-empty">Loading…</div></div>
+        <div class="nw-events-title">Recent night events</div>
+        <div id="nwEvents"><div class="fp-empty">Loading…</div></div>
+      </div>
     </section>
 
     <!-- ==========================================
@@ -858,6 +874,9 @@
           </div>
         </div>
 
+        <!-- Night watch section (js/night_watch.js mounts it when the dialog opens). -->
+        <div id="nightWatchMount" data-mount="night-watch" style="margin-top: 10px;"></div>
+
         <div id="cameraConfigStatus" class="form-status" aria-live="polite"></div>
 
         <div style="display: flex; justify-content: space-between; gap: 8px; margin-top: 14px; flex-wrap: wrap;">
@@ -897,6 +916,7 @@
   <script src="/static/js/entrances.js?v=2.3.0" defer></script>
   <script src="/static/js/remote_access.js?v=2.3.0" defer></script>
   <script src="/static/js/pairing.js?v=2.3.0" defer></script>
+  <script src="/static/js/night_watch.js?v=2.3.0" defer></script>
   <script src="/static/js/theme.js?v=2.3.0" defer></script>
 </body>
 </html>

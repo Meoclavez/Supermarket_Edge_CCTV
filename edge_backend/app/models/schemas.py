@@ -32,6 +32,11 @@ class EventType(str, Enum):
     # schedule is active, and an alerting tripwire crossed in its alert direction.
     RESTRICTED_AREA = "RESTRICTED_AREA"
     TRIPWIRE_ALERT = "TRIPWIRE_ALERT"
+    # Night watch (services/night_watch.py): a person confirmed on a camera
+    # while its night watch is armed (HIGH, pushed), and motion that no
+    # person detection confirmed (INFO, dashboard only).
+    NIGHT_INTRUSION = "NIGHT_INTRUSION"
+    NIGHT_MOTION = "NIGHT_MOTION"
 
 
 class EventSeverity(str, Enum):
@@ -113,6 +118,68 @@ class Keypoint(BaseModel):
 
 # ---------------- Feature Toggles & Hardware Profile ----------------
 
+NIGHT_WATCH_DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+class NightWatchConfig(BaseModel):
+    """One camera's night watch (services/night_watch.py). Off unless enabled.
+
+    ``start`` / ``end`` are store-local wall-clock times (SITE_TIMEZONE); an
+    ``end`` at or before ``start`` runs past midnight into the next day, and
+    ``days`` are the days a window *starts* on. ``when_dark`` also arms the
+    camera whenever its measured lighting is low_light or ir.
+    """
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = False
+    start: str = Field("22:00", description="Store-local start, HH:MM")
+    end: str = Field("06:00", description="Store-local end, HH:MM; at or before start = next day")
+    days: List[str] = Field(default_factory=lambda: list(NIGHT_WATCH_DAYS),
+                            description="Days a window starts on (mon..sun)")
+    when_dark: bool = Field(False, description="Also armed while the camera is in IR / low light")
+    sensitivity: str = Field("medium", description="low | medium | high")
+    cooldown_sec: int = Field(120, ge=10, le=3600, description="Per-camera quiet time after an event")
+
+    @field_validator("start", "end")
+    @classmethod
+    def _hhmm(cls, v: str) -> str:
+        try:
+            hh, mm = str(v).strip().split(":")[:2]
+            h, m = int(hh), int(mm)
+        except (ValueError, AttributeError):
+            raise ValueError("time must be HH:MM") from None
+        if not (0 <= h <= 23 and 0 <= m <= 59):
+            raise ValueError("time must be HH:MM between 00:00 and 23:59")
+        return f"{h:02d}:{m:02d}"
+
+    @field_validator("days", mode="before")
+    @classmethod
+    def _days(cls, v: Any) -> List[str]:
+        out: List[str] = []
+        for d in v or []:
+            if isinstance(d, bool):
+                raise ValueError(f"invalid day {d!r}")
+            if isinstance(d, int):
+                if not 0 <= d <= 6:
+                    raise ValueError(f"invalid day {d!r} (0 = Monday .. 6 = Sunday)")
+                key = NIGHT_WATCH_DAYS[d]
+            else:
+                key = str(d).strip().lower()[:3]
+                if key not in NIGHT_WATCH_DAYS:
+                    raise ValueError(f"invalid day {d!r}")
+            if key not in out:
+                out.append(key)
+        return sorted(out, key=NIGHT_WATCH_DAYS.index)
+
+    @field_validator("sensitivity")
+    @classmethod
+    def _sensitivity(cls, v: str) -> str:
+        v = str(v).strip().lower()
+        if v not in ("low", "medium", "high"):
+            raise ValueError("sensitivity must be low, medium or high")
+        return v
+
+
 class CameraFeatureConfig(BaseModel):
     """Per-camera analytics switches.
 
@@ -132,6 +199,8 @@ class CameraFeatureConfig(BaseModel):
         description=("Largest person box accepted, as a fraction of the frame area. Raise it for a "
                      "close-mounted camera (e.g. facing a shelf ~2 m away); empty = server default"),
     )
+    # Night watch schedule and options; None = never configured (off).
+    night_watch: Optional[NightWatchConfig] = None
 
 
 class HardwareProfile(BaseModel):

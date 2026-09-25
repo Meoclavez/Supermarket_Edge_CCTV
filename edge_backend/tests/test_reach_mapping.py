@@ -545,7 +545,7 @@ def test_engine_marks_visit_interacted_and_funnel_counts_it(monkeypatch):
     poses += [figure(520)] * 30
     state = {"i": 0}
 
-    def detect(frame, conf_threshold=None, iou_threshold=None):
+    def detect(frame, conf_threshold=None, iou_threshold=None, camera_id=None, **_kw):
         i = state["i"]
         if i >= len(poses):
             return []

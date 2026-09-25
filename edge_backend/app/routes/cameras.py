@@ -573,7 +573,7 @@ async def delete_camera(camera_id: str, db: AsyncSession = Depends(get_db)):
 # Per-camera settings that are not on/off flags. A client that does not know
 # them (an older dashboard or the mobile app sending only the toggles) must
 # not reset them, so a key absent from the request keeps its stored value.
-_NON_FLAG_SETTINGS = ("person_max_frame_fraction",)
+_NON_FLAG_SETTINGS = ("person_max_frame_fraction", "night_watch")
 
 
 def _keep_unsent_settings(target: Dict[str, object], sent: object, stored: object) -> None:
@@ -658,7 +658,8 @@ def get_camera_snapshot(camera_id: str, annotate: bool = True, overlay: bool = F
         h, w = raw.shape[:2]
         max_frac = feature_manager.get_setting(camera_id, "person_max_frame_fraction")
         dets = outside_ignore_regions(
-            person_detector.detect(raw, **({"max_frame_fraction": max_frac} if max_frac is not None else {})),
+            person_detector.detect(raw, camera_id=camera_id,
+                                   **({"max_frame_fraction": max_frac} if max_frac is not None else {})),
             ignore_polygons(camera_id, w, h))
         if frame is raw:
             frame = raw.copy()
