@@ -418,8 +418,10 @@ def test_switch_pose_model_swaps_atomically_and_reports_why(ladder, monkeypatch)
     assert st["model"] == "mid.onnx" and st["model_selection"]["chosen"] == "mid.onnx"
     assert st["model_selection"]["reason"] == "re-fit: test"
     assert any(t["model"] == "mid.onnx" for t in st["model_selection"]["tried"])
-    assert ib.PersonDetector._is_accelerator(d.provider) and d._gate(d.provider) is d._device_lock
-    assert d._gate("cpu") is not d._device_lock
+    # The accelerator gate is the device lock (wrapped so a low-priority user can yield to it).
+    assert ib.PersonDetector._is_accelerator(d.provider) and d._gate(d.provider) is d.device_gate
+    assert d.device_gate.lock is d._device_lock
+    assert d._gate("cpu") is not d.device_gate
 
 
 def test_switch_is_abandoned_when_the_provider_changed(ladder, monkeypatch):

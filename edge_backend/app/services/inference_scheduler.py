@@ -48,6 +48,13 @@ ceiling (fps / N) ahead of the fair share, which the other cameras split
 what is left of the budget, with one in-flight slot above the cap so a busy
 device cannot starve the confirmation.
 
+Shadow trial (services/shadow_trial.py). A developer's second pose model is
+not part of this budget: it runs only on frames this scheduler already
+admitted, paced by its own measured cost to ``SHADOW_POSE_SHARE`` of the
+device, takes the device only when no live run holds or waits for it
+(``DeviceGate.try_low``), and its time is not added to the busy total
+measured here, so rates and re-fits are the same with or without it.
+
 Everything is reported in ``status()`` (``person_detector.status()
 ["load_control"]``) and per camera in ``camera_status()``: rates allocated and
 measured, target and measured utilisation, the model / refiner in use and why.

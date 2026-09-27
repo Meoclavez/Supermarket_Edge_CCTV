@@ -59,14 +59,38 @@ signature, exporter pin, AGPL-3.0 licence note):
   (`POSE_MODEL_GPU`);
 * `yolo26n-pose.onnx` -- small pose model, default on CPU / OpenVINO
   (`POSE_MODEL_CPU`); the other one is the fallback candidate;
-* `yolo26n.onnx` -- optional 80-class COCO object model (bags, phones) used as
-  theft context; loaded on the pose model's provider, then CPU
-  (`OBJECT_MODEL_PATH`, `OBJECT_CLASSES`, disabled if `OBJECT_DETECT_EVERY_N <= 0`);
+* `yolo26n.onnx` -- optional 80-class COCO object model (bags, phones); only
+  use is the "hand into carried bag" concealment cue. **Off by default since
+  2026-09-27** (`OBJECT_DETECT_EVERY_N=0`; `=3` re-enables); status/preflight say
+  "disabled by configuration" (`object_detection.state`);
 * `yolo26m-pose-544x960.onnx`, `yolo26s-pose-544x960.onnx` -- optional larger /
   16:9 higher-resolution pose exports forming the GPU **model ladder**
   (`POSE_MODEL_LADDER_GPU`, most accurate first; `POSE_MODEL_LADDER_CPU` on CPU);
 * `rtmpose-s-256x192.onnx` -- optional **top-down keypoint refiner** (RTMPose-s,
   Apache-2.0, downloaded by `fetch_models.py` from the OpenMMLab release zip).
+* `rtmo-s-body7-640x640-static.onnx` -- optional one-stage RTMO-s (mmpose,
+  Apache-2.0; body7 weights, research-only datasets inside: legal check
+  pending; COCO-only checkpoint has no published ONNX). `fetch_models.py`
+  downloads the OpenMMLab zip and runs `scripts/export_rtmo_static.py` in an
+  isolated uv "tools" venv (onnx + onnx-graphsurgeon): static 1x3x640x640,
+  in-graph NMS replaced by constant TopK(300), host NMS (layout `rtmo` in
+  `decode_output`, BGR 0-255 input via `ModelSpec.input_rgb/input_scale`).
+  Byte-reproducible (sha256 in manifest). Usable as `POSE_MODEL_PATH` or as the
+  shadow-trial model.
+
+**Shadow pose-model trial** (`services/shadow_trial.py`, 2026-09-27):
+`SHADOW_POSE_MODEL` (empty = off), `SHADOW_POSE_SHARE` (0.15), `SHADOW_POSE_CAMERAS`,
+`SHADOW_TRIAL_WINDOW` ("HH:MM-HH:MM"). Runs on frames the live model already
+analysed (`LiveCameraWorker._analyse` -> `offer()`), paced by its own cost,
+device only via `DeviceGate.try_low()` (live waits counted), not in the live
+busy total -> analytics/scheduler unchanged. Aggregates only (by camera,
+lighting, resolution class, live model, box-height bucket; keypoint gate;
+static boxes; device ms) in `STORAGE_DIR/shadow_trial/stats.json`; <=200
+masked disagreement JPEGs (evidence kind `shadow_trial`, sub-cap
+`SHADOW_SAMPLES_MAX_MB`), all deleted `SHADOW_TRIAL_RETAIN_DAYS` after the last
+pair. `GET /api/v1/system/shadow-trial` (+ `/samples/{name}`), card in
+Settings -> System health. Installer prewarm compiles the shadow model when
+set; otherwise the service compiles it in a child (`prewarm_inference.py --only-model`).
 
 **Measured model/resolution choice** (`_fit_to_budget`, after warm-up): the
 detector walks the ladder on the chosen provider and keeps the first model
@@ -486,3 +510,51 @@ than firing on empty data.
 * **`static/js/loss.js` + `css/loss.css`:** resolve with an explicit outcome (`GET /theft/outcomes`), one-click False alarm, "staff sent" with the real delivery report, false-alarm rate per rule, re-resolving legacy incidents.
 * **`static/js/heatmap_history.js`:** Insights heatmap history (floor or per-camera view, Walked / Stopped / Touched shelves, hour strip observed/quiet/camera off, playback, compare with diff legend, hour-of-day profile, Record now, cited HEATMAP_* findings). Store map heatmap has Today / Yesterday / 7 d / 30 d ranges.
 * **Backend behind these:** `services/hourly_traffic.py` (`GET /analytics/footfall/hourly`), `services/recommendations_service.py` + `routes/insights.py` (consolidated list, analysis runs, m0014), `services/camera_roles.py` + `routes/camera_roles.py` (m0012), `services/heatmap_history.py` (m0013). No GET route writes to the database (enforced by `tests/test_ux_backend.py`).
+
+## Live deployment: Ubuntu edge box (updated 2026-09-27)
+
+**Box:** `securitypc-MS-7D90`, Ubuntu 26.04, i5-14400F (no iGPU), RX 9060 XT 16 GB (gfx1200),
+16 GB RAM, Wi-Fi 192.168.20.239, Tailscale 100.78.122.93 (tailnet `tail9fc52a`), TZ
+Australia/Melbourne (store: IGA Pearcedale). SSH from the dev PC: `ssh aus` (user `securitypc`,
+key `~/.ssh/id_ed25519`, needs `SSH_AUTH_SOCK=$XDG_RUNTIME_DIR/ssh-agent.socket ssh-add` after a
+reboot). No passwordless sudo: every deploy is run by the owner.
+
+**Layout:** `/opt/edge-cctv` (git clone of GitHub main, owner `edgecctv`, system user, groups
+video/render), venv `/opt/edge-cctv/.venv` (Python 3.14, onnxruntime 1.29 + MIGraphX plugin,
+ROCm 10 wheels), config `edge_backend/.env` (0640), data `storage/` (0750: DB, secrets/,
+evidence, migraphx_cache/), unit `/etc/systemd/system/edge-cctv.service` (from
+`deploy/edge-cctv.service`: `--host ${HOST} --port ${PORT} --no-server-header`, MemoryHigh 7G /
+MemoryMax 9G, ProtectProc=invisible). Logs: `journalctl -u edge-cctv` (securitypc is in `adm`).
+
+**Deploy (owner runs):**
+- code-only change: `ssh -t aus 'sudo -u edgecctv git -C /opt/edge-cctv pull --ff-only && sudo systemctl restart edge-cctv'`
+- unit/installer/dependency change (check `git diff --stat <live>..HEAD -- deploy/ edge_backend/requirements.txt edge_backend/scripts/bootstrap.py`):
+  `ssh -t aus 'sudo -u edgecctv git -C /opt/edge-cctv pull --ff-only && sudo bash /opt/edge-cctv/deploy/install.sh'`
+  (stops the service, bootstrap + MIGraphX pre-compile of every ladder model, installs the unit,
+  prints the first-run setup code). Opt-in `EDGE_TAILSCALE_SERVE=1` (not used: owner declined).
+
+**Access:** owner only via Tailscale `http://100.78.122.93:8000/dashboard` (ufw: 8000 on
+tailscale0 only; plain HTTP accepted, WireGuard encrypts). Others: Cloudflare Tunnel on a
+configurable hostname (Settings -> Online access; token stored encrypted), not yet set up.
+Tailscale serve/Funnel not used: the owner won't expose or share the personal tailnet.
+
+**Live verification pattern:** owner saves the dashboard password to
+`/tmp/claude-1000/<project>/<session>/scratchpad/.dash_pw` (0600) with `read -rs`; one sign-in,
+`shred -u` right after, read-only checks, sign out. Never fabricate/stub server responses.
+
+**Site facts:** 33 Dahua NVR channels (16x352x288, 9x704x576, 2x1280x720, 4x2560x1440,
+2x3072x2048; 32 on subtype=1), NVR 192.168.20.160. Only cam_b4fbe4dbd6 (NVR ch1 main,
+1280x720) is calibrated. Ch 3/9/13 near-black at night (store manager to check IR).
+
+**State at e3bdc30 (pushed; live box at 5f2dc0f or e3bdc30 depending on last owner deploy):**
+camera On/Off + rotating 4-feed grid with pins (4f52fc6); GPU decode VA-API/NVDEC via ffmpeg
+(capture_backends, 4ffc298); per-camera decoder choice, scaled tile snapshots, gzip/immutable
+caching, CSP, docs off, Online access card (4be2417); night watch (store-local schedules,
+motion-gated inference, NIGHT_INTRUSION alerts) + lighting state (5f2dc0f); evidence-only
+storage with oldest-first cap, DVR recorder removed (da529fc); CPU -47% (OpenCV pool,
+NV12 reader, DECODE_MAX_FPS=5, DECODE_MAX_WIDTH=auto, resolution-independent geometry) (e3bdc30).
+Measured at 5f2dc0f: CPU ~478% (box ~30%), GPU ~57% (budget 0.6), yolo26n-pose ~2.7 fps/camera.
+
+**Pending/owner decisions:** pose model choice without the object model; gaze/attention beam
+plan; public URL (Cloudflare); switch the 16 CIF channels to D1 sub-stream; phone push (FCM)
+not configured; skeleton-rotation report parked until reproduced.

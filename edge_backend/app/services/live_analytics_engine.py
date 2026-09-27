@@ -51,6 +51,7 @@ from app.services.inference_backend import (
     person_threshold,
 )
 from app.services.inference_scheduler import inference_scheduler
+from app.services.shadow_trial import shadow_trial
 from app.services import night_watch as nw
 from app.services.privacy_mask import (
     apply_privacy_masks,
@@ -1128,7 +1129,12 @@ class CameraWorker(threading.Thread):
         detections = outside_ignore_regions(detections, ignore)
         # People by the per-box rule (a dark box needs less confidence), as
         # the detector itself keeps them when no explicit threshold is given.
-        self.rt.detections_last = sum(1 for d in detections if d.confidence >= person_threshold(d))
+        persons = [d for d in detections if d.confidence >= person_threshold(d)]
+        self.rt.detections_last = len(persons)
+        if shadow_trial.active():
+            # Developer pose-model trial: a copy of this frame may be compared
+            # with a second model later; nothing it finds comes back here.
+            shadow_trial.offer(cam, frame, persons, ignore, detect_kw.get("max_frame_fraction"))
 
         self._detect_index += 1
         every_n = settings.OBJECT_DETECT_EVERY_N

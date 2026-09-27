@@ -2,7 +2,11 @@
 """Verify the ONNX models against models/manifest.json and restore any that are missing or damaged.
 
 A model with a ``download`` block (RTMPose, published as ONNX) is fetched
-from its URL and checked against the archive sha256. Any other model that is
+from its URL and checked against the archive sha256. With a ``transform``
+block as well (RTMO: the published graph has in-graph NMS and dynamic shapes),
+the archive is handed to a script of this repository that rewrites it
+(scripts/export_rtmo_static.py), run in a second small isolated venv with only
+the packages the transform lists. Any other model that is
 missing, or whose sha256 does not match, is re-exported from its Ultralytics
 ``.pt`` source in an isolated, throwaway uv virtualenv under a
 cache directory (Python 3.12, CPU-only torch). ultralytics and torch are never
@@ -118,6 +122,48 @@ def export_model(entry: dict, cache: Path, exporter: dict) -> Path:
     return out
 
 
+def ensure_tools_env(cache: Path, transform: dict) -> Path:
+    """Create (once) the isolated venv a model ``transform`` runs in and return its python."""
+    uv = find_uv()
+    if not uv:
+        raise RuntimeError(
+            "uv is required to build the isolated model-tools environment. Install it without sudo with "
+            "`curl -LsSf https://astral.sh/uv/install.sh | sh` (or `pipx install uv`), then re-run."
+        )
+    pyver = str(transform.get("python", "3.12"))
+    venv = cache / f"venv-tools-py{pyver.replace('.', '')}"
+    py = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    marker = venv / ".edge-tools-ready"
+    reqs = [str(r) for r in transform.get("requirements", [])]
+    want = "\n".join(reqs)
+    if marker.exists() and marker.read_text().strip() == want and py.exists():
+        return py
+    say("fix", f"building isolated model-tools env {venv} (Python {pyver}: {', '.join(reqs)})")
+    for cmd in ([uv, "venv", "--clear", "--python", pyver, str(venv)],
+                [uv, "pip", "install", "--python", str(py), *reqs]):
+        res = run(cmd)
+        if res.returncode != 0:
+            raise RuntimeError(f"`{' '.join(cmd)}` failed:\n{(res.stderr or res.stdout)[-1500:]}")
+    marker.write_text(want + "\n")
+    return py
+
+
+def transform_model(entry: dict, archive: Path, out: Path, cache: Path) -> None:
+    """Rewrite a downloaded archive into the shipped model with ``entry["transform"]``."""
+    tr = entry["transform"]
+    script = EDGE_BACKEND_DIR / tr["script"]
+    if not script.is_file():
+        raise RuntimeError(f"transform script {script} not found")
+    py = ensure_tools_env(cache, tr)
+    if out.exists():
+        out.unlink()
+    cmd = [str(py), str(script), "--src", str(archive), "--out", str(out), *[str(a) for a in tr.get("args", [])]]
+    say("fix", f"transforming {archive.name} -> {entry['file']}: {script.name} {' '.join(cmd[4:])}")
+    res = run(cmd)
+    if res.returncode != 0 or not out.exists():
+        raise RuntimeError(f"transform of {archive.name} failed:\n{(res.stderr or res.stdout)[-1500:]}")
+
+
 def download_model(entry: dict, cache: Path) -> Path:
     """Fetch a model that is published as a file (not exported), e.g. RTMPose.
 
@@ -152,6 +198,9 @@ def download_model(entry: dict, cache: Path) -> Path:
     if want and _sha(archive) != want:
         raise RuntimeError(f"{archive.name}: sha256 does not match manifest archive_sha256")
     out = work / entry["file"]
+    if entry.get("transform"):
+        transform_model(entry, archive, out, cache)
+        return out
     member = dl.get("member")
     if member:
         with zipfile.ZipFile(archive) as z, z.open(member) as src, open(out, "wb") as dst:
@@ -242,12 +291,20 @@ def main(argv: list[str] | None = None) -> int:
             failures += 1 if entry.get("required", True) or status != "missing" else 0
             continue
         say("fix", f"{entry['file']}: {label}; restoring from {entry['source']}")
+        required = entry.get("required", True)
         try:
-            if not restore(entry, models_dir, args.cache_dir.expanduser(), exporter):
-                failures += 1
+            ok = restore(entry, models_dir, args.cache_dir.expanduser(), exporter)
+            error = None if ok else "not restored"
         except RuntimeError as exc:
-            say("FAIL", f"{entry['file']}: {exc}")
-            failures += 1
+            ok, error = False, str(exc)
+        if not ok:
+            if required:
+                say("FAIL", f"{entry['file']}: {error}")
+                failures += 1
+            else:
+                # An optional model (object context, trial candidates) must
+                # not fail an install; whatever uses it reports it missing.
+                say("warn", f"{entry['file']} (optional) could not be restored: {error}")
     return 1 if failures else 0
 
 

@@ -13,12 +13,18 @@ zone_alerts           ZONE_ALERT_EVIDENCE_DIR or zone_alerts/ tripwire_engine
 night_watch           NIGHT_WATCH_EVIDENCE_DIR or night_watch night_watch
 alert_snapshots       SNAPSHOTS_DIR                           events / cameras
 alert_clips           CLIPS_DIR                               clip_recorder
+shadow_trial          shadow_trial/                           shadow_trial
 ====================  ======================================  =================
+
+``shadow_trial`` is not evidence: it holds the few review images of a
+developer's pose-model trial (services/shadow_trial.py). It is declared here
+so it counts against the same limits and is aged out by the same rules.
 
 Limits, applied oldest file first across all kinds together:
 
 * ``STORAGE_RETENTION_DAYS``: a file older than this is deleted (0 = no age limit).
-* ``NIGHT_WATCH_EVIDENCE_MAX_MB``: sub-cap for night watch alone.
+* ``NIGHT_WATCH_EVIDENCE_MAX_MB``: sub-cap for night watch alone;
+  ``SHADOW_SAMPLES_MAX_MB`` for the trial's review images.
 * ``EVIDENCE_MAX_GB``: total for all kinds. 0 = automatic, 10 % of the disk
   holding ``STORAGE_DIR``, at least 1 GB and at most 50 GB.
 * ``STORAGE_MAX_DISK_PERCENT``: evidence is also trimmed so that the disk does
@@ -128,7 +134,7 @@ class EvidenceKind:
     name: str
     label: str
     directory: Callable[[], Path]
-    link: str                       # "theft": theft_incidents.id; "event": security_events.id
+    link: str                       # "theft": theft_incidents.id; "event": security_events.id; "none"
     sub_cap_bytes: Callable[[], Optional[int]] = lambda: None
 
 
@@ -138,6 +144,11 @@ def _dir_or(value: str, default: str) -> Path:
 
 def _night_watch_cap() -> Optional[int]:
     mb = float(settings.NIGHT_WATCH_EVIDENCE_MAX_MB or 0)
+    return int(mb * MB) if mb > 0 else None
+
+
+def _shadow_trial_cap() -> Optional[int]:
+    mb = float(getattr(settings, "SHADOW_SAMPLES_MAX_MB", 0) or 0)
     return int(mb * MB) if mb > 0 else None
 
 
@@ -153,6 +164,8 @@ KINDS: Tuple[EvidenceKind, ...] = (
                  lambda: Path(settings.SNAPSHOTS_DIR), "event"),
     EvidenceKind("alert_clips", "Alert and manual clips",
                  lambda: Path(settings.CLIPS_DIR), "event"),
+    EvidenceKind("shadow_trial", "Pose-model trial review images",
+                 lambda: Path(settings.STORAGE_DIR) / "shadow_trial", "none", _shadow_trial_cap),
 )
 KINDS_BY_NAME = {k.name: k for k in KINDS}
 
@@ -302,7 +315,10 @@ class EvidenceStorage:
         for f in deleted:
             stem = f.path.name.split(".", 1)[0]
             clip = f.path.suffix.lower() == ".mp4"
-            if KINDS_BY_NAME[f.kind].link == "theft":
+            link = KINDS_BY_NAME[f.kind].link
+            if link == "none":
+                continue
+            if link == "theft":
                 (theft_clip if clip else theft_img).add(stem)
             else:
                 (ev_clip if clip else ev_img).add(stem)

@@ -676,12 +676,14 @@ Stated plainly so nobody plans around a capability that is not there:
 
 - **No demographics.** No age or gender classifier is included; that panel says
   so rather than showing invented percentages.
-- **No shelf-interaction tracking.** The engine and API exist but nothing
-  produces the hand/pose events, so engagement and friction metrics stay blank
-  and the merchandising rules are suppressed with a stated reason.
-- **No theft detection from video.** The detection algorithms and incident
-  lifecycle exist, but no live pipeline calls them. Incidents are only created
-  by an explicit API call.
+- **No proof of theft.** The live pipeline flags suspicious behaviour
+  (concealment, shelf sweeping, loitering at high-value products, exit without
+  passing checkout) for a person to review. An incident is a prompt to check,
+  never a finding; its outcome is recorded by staff.
+- **No continuous recording.** The store's NAS records video; this device keeps
+  only alert evidence (stills, optional short clips) on its own disk, capped and
+  deleted oldest first, and never writes to the NAS.
+- **No face recognition or identities.** Tracks are anonymous and per camera.
 - **No cross-camera re-identification.** A shopper crossing between cameras is
   currently counted once per camera.
 - **Forecasting needs history.** The hourly forecast is the per-hour mean of

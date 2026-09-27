@@ -184,6 +184,15 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         startup_log.exception(f"Evidence storage limit failed to start: {exc}")
 
+    # 4e. Shadow pose-model trial (developer experiment, SHADOW_POSE_MODEL):
+    # off unless configured; loads on its own thread and never feeds analytics.
+    # Also deletes an old trial's files once SHADOW_TRIAL_RETAIN_DAYS passed.
+    from .services.shadow_trial import shadow_trial
+    try:
+        await asyncio.to_thread(shadow_trial.start)
+    except Exception as exc:
+        startup_log.exception(f"Shadow trial failed to start: {exc}")
+
     # 5. Remote access (online dashboard): runs cloudflared only when enabled,
     # a hostname and a token are configured, and authentication is on.
     from .services.remote_access_service import remote_access_service
@@ -207,6 +216,7 @@ async def lifespan(app: FastAPI):
         await remote_access_service.stop()
         await recommendations_service.stop()
         await evidence_storage.stop()
+        await asyncio.to_thread(shadow_trial.stop)
 
 
 app = FastAPI(

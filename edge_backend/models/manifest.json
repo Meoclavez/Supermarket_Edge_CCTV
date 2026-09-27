@@ -13,7 +13,7 @@
     ],
     "command": "yolo export model=<source> format=onnx imgsz=640 simplify=True"
   },
-  "licence_note": "Ultralytics YOLO26 weights and their exports are licensed AGPL-3.0 (https://ultralytics.com/license). RTMPose (rtmpose-*.onnx) is Apache-2.0 (https://github.com/open-mmlab/mmpose).",
+  "licence_note": "Ultralytics YOLO26 weights and their exports are licensed AGPL-3.0 (https://ultralytics.com/license). RTMPose (rtmpose-*.onnx) is Apache-2.0 (https://github.com/open-mmlab/mmpose). RTMO (rtmo-*.onnx) code and weights are Apache-2.0 (https://github.com/open-mmlab/mmpose/tree/main/projects/rtmo); the body7 checkpoint was trained on a mix that includes datasets published for research use (see the entry's 'weights').",
   "models": [
     {
       "file": "yolo26s-pose.onnx",
@@ -303,6 +303,85 @@
               "batch",
               "MatMulsimcc_x_dim_1",
               512
+            ],
+            "type": "tensor(float)"
+          }
+        ]
+      }
+    },
+    {
+      "file": "rtmo-s-body7-640x640-static.onnx",
+      "sha256": "c12706ac7162db5138f7beb5ae51bbe8f541d1776dc12017843747aaa78fcf05",
+      "size": 39618258,
+      "task": "pose",
+      "required": false,
+      "role": "Candidate person + 17 COCO keypoints model (one-stage RTMO-s, mmpose), for the shadow trial (SHADOW_POSE_MODEL) and as a possible live model. Static [1,3,640,640] graph with the in-graph NMS removed: the host applies the same NMS as for YOLO outputs.",
+      "source": "https://download.openmmlab.com/mmpose/v1/projects/rtmo/onnx_sdk/rtmo-s_8xb32-600e_body7-640x640-dac2bf74_20231211.zip",
+      "download": {
+        "url": "https://download.openmmlab.com/mmpose/v1/projects/rtmo/onnx_sdk/rtmo-s_8xb32-600e_body7-640x640-dac2bf74_20231211.zip",
+        "archive_sha256": "3da7ad88b209f9da8be87ba5c325610639af04de3b5c8a96649b98cd9e2848a2",
+        "member": "end2end.onnx",
+        "member_sha256": "d0703d40d19f3921da51ae725402d5fdae4d2478c7442072d3101bd396f370d8"
+      },
+      "transform": {
+        "script": "scripts/export_rtmo_static.py",
+        "args": [
+          "--topk",
+          "300"
+        ],
+        "python": "3.12",
+        "requirements": [
+          "onnx>=1.17,<1.21",
+          "onnx-graphsurgeon>=0.5.2",
+          "onnxruntime>=1.20",
+          "numpy>=1.26"
+        ],
+        "method": "ONNX graph surgery on the released end2end.onnx: batch fixed to 1; the NonMaxSuppression + TopK(50) index tensor replaced by a constant TopK(k=300) over the 2000 anchor scores; NMS subgraph pruned; shape arithmetic constant-folded. Verified identical (before host NMS) to the original on 8 images: boxes within 0.0002 px, keypoints within 0.0005 px, scores within 2e-6."
+      },
+      "weights": {
+        "checkpoint": "rtmo-s_8xb32-600e_body7-640x640-dac2bf74_20231211.pth",
+        "training_data": "body7 (COCO, AI Challenger, CrowdPose, MPII, sub-JHMDB, Halpe, PoseTrack18)",
+        "note": "Some body7 datasets are published for research use only; commercial use is pending a legal check. A COCO-only checkpoint exists (rtmo-s_8xb32-600e_coco-640x640-8db55a59_20231211.pth, about 1 AP lower) but OpenMMLab publishes no ONNX for it; exporting it needs mmpose + mmdeploy. The file is swappable: SHADOW_POSE_MODEL / POSE_MODEL_PATH name any RTMO export with the same IO."
+      },
+      "preprocess": {
+        "input": "BGR, float 0-255, no mean/std (none in the graph)",
+        "letterbox": "centred, scale=min(640/w,640/h), pad 114, cv2.INTER_LINEAR"
+      },
+      "postprocess": {
+        "host": "score threshold + greedy NMS + box/keypoint letterbox undo, as for the YOLO pose outputs (inference_backend.decode_output layout 'rtmo')",
+        "original_in_graph": "score > 0.15, NMS suppress IoU > 0.65, max 200, keep top 50"
+      },
+      "licence": "Apache-2.0 (OpenMMLab mmpose / RTMO; weights trained on the body7 mix)",
+      "io": {
+        "inputs": [
+          {
+            "name": "input",
+            "shape": [
+              1,
+              3,
+              640,
+              640
+            ],
+            "type": "tensor(float)"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "dets",
+            "shape": [
+              1,
+              300,
+              5
+            ],
+            "type": "tensor(float)"
+          },
+          {
+            "name": "keypoints",
+            "shape": [
+              1,
+              300,
+              17,
+              3
             ],
             "type": "tensor(float)"
           }

@@ -2335,6 +2335,13 @@ html, body {
 .health-grid .telemetry-label { font-size: 9.5px; }
 .health-grid .telemetry-val { font-size: 13px; overflow-wrap: anywhere; }
 .telemetry-val.health-bad { color: var(--rose); }
+.shadow-trial { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border, rgba(127,127,127,0.2)); }
+.shadow-trial .telemetry-label { font-size: 9.5px; }
+.shadow-trial-body { font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
+.shadow-trial-body ul { margin: 4px 0 0; padding-left: 18px; }
+.shadow-trial-body details { margin-top: 6px; }
+.shadow-trial-body .st-samples { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.shadow-trial-body .st-samples img { width: 160px; max-width: 100%; height: auto; border-radius: 4px; display: block; }
 
 @media (max-width: 1100px) {
   .today-grid { display: flex; flex-direction: column; gap: 14px; }

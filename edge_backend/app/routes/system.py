@@ -150,3 +150,27 @@ def get_system_stats():
         uptime_seconds=round(time.time() - START_TIME, 1),
         evidence_storage=_evidence_summary(),
     )
+
+
+@router.get("/shadow-trial")
+def get_shadow_trial():
+    """The shadow pose-model trial (services/shadow_trial.py): state and the
+    measured, paired comparison with the live model. Shadow only: none of it
+    reaches counts or alerts. Empty tallies are null, never zero-filled."""
+    from ..services.shadow_trial import shadow_trial
+
+    return shadow_trial.status()
+
+
+@router.get("/shadow-trial/samples/{filename}")
+def get_shadow_trial_sample(filename: str):
+    """One review image of the trial (a listed sample only; privacy masks burned in)."""
+    from fastapi import HTTPException
+    from fastapi.responses import FileResponse
+
+    from ..services.shadow_trial import shadow_trial
+
+    path = shadow_trial.sample_path(filename)
+    if path is None:
+        raise HTTPException(status_code=404, detail="no such trial sample")
+    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "private, no-store"})

@@ -852,6 +852,18 @@ def check_env() -> tuple[dict, list, list]:
             named.append((key, name.strip(), True))
     for key in ("POSE_MODEL_PATH", "OBJECT_MODEL_PATH"):
         named.append((key, getattr(settings, key, "") or "", False))
+    shadow = (getattr(settings, "SHADOW_POSE_MODEL", "") or "").strip()
+    if shadow:
+        named.append(("SHADOW_POSE_MODEL", shadow, True))
+    # The object model (bag context for the concealment cue) is off unless
+    # OBJECT_DETECT_EVERY_N > 0; say so rather than leave it unexplained.
+    every = int(getattr(settings, "OBJECT_DETECT_EVERY_N", 0) or 0)
+    obj_path = getattr(settings, "OBJECT_MODEL_PATH", "") or ""
+    info["object_model"] = (
+        {"enabled": True, "model": obj_path, "every_n_detection_frames": every} if every > 0 and obj_path
+        else {"enabled": False, "reason": "disabled by configuration ("
+              + ("OBJECT_MODEL_PATH is empty" if every > 0 else "OBJECT_DETECT_EVERY_N=0")
+              + "); the 'hand into a carried bag' concealment cue does not fire"})
     for key, value, under_models in named:
         if not value:
             continue
@@ -860,6 +872,8 @@ def check_env() -> tuple[dict, list, list]:
             info["missing_models"].append({"setting": key, "value": value})
             if key == "POSE_REFINER_MODEL" and str(getattr(settings, "POSE_REFINER", "auto") or "").strip().lower() \
                     in ("off", "0", "false", "no", ""):
+                continue
+            if key == "OBJECT_MODEL_PATH" and every <= 0:
                 continue
             warnings.append(_issue("config", f"{key}={value} names a model file that does not exist ({path})",
                                    f"use one of the files in {MODELS_DIR} (see models/manifest.json)"))

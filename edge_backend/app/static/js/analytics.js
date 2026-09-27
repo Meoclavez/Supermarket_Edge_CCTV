@@ -378,6 +378,7 @@ async function loadSystemHealth() {
         set('telemetryUptimeVal', isNum(stats.uptime_seconds) ? formatDuration(stats.uptime_seconds) : DASH);
         renderEvidenceStorage(stats.evidence_storage);
       }),
+      getJSON('/api/v1/system/shadow-trial', null).then(renderShadowTrial),
     ]);
   } finally {
     systemHealthLoading = false;
@@ -422,6 +423,68 @@ function renderEvidenceStorage(ev) {
   ];
   if (ev.note) parts.push(ev.note);
   node.title = parts.join(' ');
+}
+
+/**
+ * Settings > System health: the shadow pose-model trial (services/shadow_trial.py),
+ * read-only. Hidden when no trial is configured and none has data. Every figure
+ * is a count the server measured; nothing is shown before the first compared frame.
+ */
+let shadowTrialSamplesKey = '';
+function renderShadowTrial(t) {
+  const block = el('shadowTrialBlock');
+  const body = el('shadowTrialBody');
+  if (!block || !body) return;
+  if (!t || (t.state === 'off' && !t.totals)) { block.hidden = true; return; }
+  block.hidden = false;
+  const n = (v) => (isNum(v) ? Number(v).toLocaleString() : DASH);
+  const pct = (v) => (isNum(v) ? `${Math.round(v * 100)} %` : DASH);
+  const ms = (v) => (isNum(v) ? `${v.toFixed(1)} ms` : DASH);
+  const when = (ts) => (isNum(ts) ? formatAgo(new Date(ts * 1000).toISOString()) : DASH);
+  const states = { off: 'Off', loading: 'Loading', compiling: 'Compiling for the GPU', running: 'Running', failed: 'Failed' };
+  let head = `${escapeHtml(states[t.state] || t.state)}: ${escapeHtml(t.model || DASH)}`;
+  if (t.state === 'running') {
+    head += ` on ${escapeHtml(t.provider || DASH)}, up to ${pct(t.share)} of the device`;
+    if (t.window) head += `, ${escapeHtml(t.window)}${t.in_window ? '' : ' (outside the window now)'}`;
+  } else if (t.reason) {
+    head += ` · ${escapeHtml(t.reason)}`;
+  }
+  const tot = t.totals;
+  if (!tot) {
+    body.innerHTML = `<div>${head}</div><div class="ra-hint">No data yet: no frame has been compared.</div>`;
+    shadowTrialSamplesKey = '';
+    return;
+  }
+  const k = tot.keypoints || {};
+  const dev = tot.device_ms || {};
+  const st = tot.static_box_detections || {};
+  const delayed = (t.scheduling || {}).main_delayed_by_shadow;
+  const lines = [
+    `${n(tot.pairs)} frames compared, last ${when(t.last_pair_at)}; live model ${escapeHtml(t.live_model || DASH)}`,
+    `People: live ${n(tot.persons_main)} · trial ${n(tot.persons_shadow)} · found by both ${n(tot.matched)} · only trial ${n(tot.only_shadow)} · only live ${n(tot.only_main)}`,
+    `Skeletons usable (5+ joints at 0.5, same people): live ${pct((k.matched_main || {}).keypoint_gate_pass_rate)} · trial ${pct((k.matched_shadow || {}).keypoint_gate_pass_rate)}`,
+    `Detections on boxes that did not move: live ${n(st.main)} · trial ${n(st.shadow)}`,
+    `Device time per frame: live ${ms(dev.main_mean)} · trial ${ms(dev.shadow_mean)}`,
+    delayed ? `Live frames that waited for the trial: ${n(delayed.count)} (longest ${ms(delayed.max_ms)})` : null,
+  ].filter(Boolean);
+  const samples = t.samples || [];
+  const key = samples.map((x) => x.name).join(',');
+  const open = body.querySelector('details') && body.querySelector('details').open;
+  if (key === shadowTrialSamplesKey && body.querySelector('ul')) {
+    body.querySelector('ul').innerHTML = lines.map((l) => `<li>${l}</li>`).join('');
+    body.firstElementChild.innerHTML = head;
+    return;
+  }
+  shadowTrialSamplesKey = key;
+  const pics = samples.map((x) => {
+    const url = theftAuthUrl(x.url);
+    const label = `${x.camera} · ${new Date(x.at * 1000).toLocaleString()} · only live ${x.only_main}, only trial ${x.only_shadow}`;
+    return `<a href="${escapeHtml(url)}" target="_blank" rel="noopener" title="${escapeHtml(label)}"><img src="${escapeHtml(url)}" alt="${escapeHtml(label)}" loading="lazy"></a>`;
+  }).join('');
+  body.innerHTML = `<div>${head}</div><ul>${lines.map((l) => `<li>${l}</li>`).join('')}</ul>
+    <details${open ? ' open' : ''}><summary>Frames where the models disagree (${samples.length})</summary>
+    ${samples.length ? `<div class="st-samples">${pics}</div>` : '<div class="ra-hint">None saved yet.</div>'}
+    <div class="ra-hint">Full figures by camera, lighting and person size: GET /api/v1/system/shadow-trial.</div></details>`;
 }
 
 /** Store name in the header, from the overview (STORE_NAME on the server). */

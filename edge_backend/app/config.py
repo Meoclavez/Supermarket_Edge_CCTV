@@ -123,15 +123,38 @@ class Settings(BaseSettings):
     # dark person on its side); 0 disables the check.
     POSE_REFINER_MAX_TURN_DEG: float = float(os.getenv("POSE_REFINER_MAX_TURN_DEG", "45"))
     # Optional COCO object model for retail context (bags, bottles, phones).
-    # Empty string disables it.
+    # Its only consumer is the "hand into a carried bag" concealment cue in
+    # pose_analytics; it never finds people. Off by default (it cost about a
+    # quarter of the analysed frame rate): OBJECT_DETECT_EVERY_N > 0 runs it on
+    # every Nth analysed frame. An empty OBJECT_MODEL_PATH also disables it.
     OBJECT_MODEL_PATH: str = os.getenv(
         "OBJECT_MODEL_PATH", str(Path(__file__).resolve().parent.parent / "models" / "yolo26n.onnx")
     )
-    OBJECT_DETECT_EVERY_N: int = int(os.getenv("OBJECT_DETECT_EVERY_N", "3"))
+    OBJECT_DETECT_EVERY_N: int = int(os.getenv("OBJECT_DETECT_EVERY_N", "0"))
     # Class names (as in the model metadata) or COCO ids, comma separated.
     OBJECT_CLASSES: str = os.getenv("OBJECT_CLASSES", "backpack,handbag,suitcase,bottle,cell phone")
     OBJECT_CONF_THRESHOLD: float = float(os.getenv("OBJECT_CONF_THRESHOLD", "0.35"))
     OBJECT_NMS_IOU: float = float(os.getenv("OBJECT_NMS_IOU", "0.50"))
+    # Shadow pose-model trial (services/shadow_trial.py), a developer
+    # experiment: a second pose model runs on frames the live model already
+    # analysed and only aggregate agreement figures are kept. It never feeds
+    # tracking, counts or alerts. SHADOW_POSE_MODEL: file under MODELS_DIR
+    # (empty = off). SHADOW_POSE_SHARE: fraction of wall time the shadow model
+    # may keep the accelerator busy. SHADOW_POSE_CAMERAS: camera ids (empty =
+    # all). SHADOW_TRIAL_WINDOW: local "HH:MM-HH:MM" (may cross midnight;
+    # empty = always). Review samples (disagreements only, privacy masks
+    # burned in) live in STORAGE_DIR/shadow_trial, capped by count and
+    # SHADOW_SAMPLES_MAX_MB inside the evidence limit, and the whole directory
+    # is deleted SHADOW_TRIAL_RETAIN_DAYS after the trial last recorded data.
+    SHADOW_POSE_MODEL: str = os.getenv("SHADOW_POSE_MODEL", "")
+    SHADOW_POSE_SHARE: float = float(os.getenv("SHADOW_POSE_SHARE", "0.15"))
+    SHADOW_POSE_CAMERAS: str = os.getenv("SHADOW_POSE_CAMERAS", "")
+    SHADOW_TRIAL_WINDOW: str = os.getenv("SHADOW_TRIAL_WINDOW", "")
+    SHADOW_SAMPLES_MAX: int = int(os.getenv("SHADOW_SAMPLES_MAX", "200"))
+    SHADOW_SAMPLES_MAX_MB: float = float(os.getenv("SHADOW_SAMPLES_MAX_MB", "40"))
+    SHADOW_SAMPLE_EVERY_SEC: float = float(os.getenv("SHADOW_SAMPLE_EVERY_SEC", "120"))
+    SHADOW_STATIC_MINUTES: float = float(os.getenv("SHADOW_STATIC_MINUTES", "10"))
+    SHADOW_TRIAL_RETAIN_DAYS: float = float(os.getenv("SHADOW_TRIAL_RETAIN_DAYS", "7"))
     # Accelerator selection. INFERENCE_DISABLED_PROVIDERS takes labels such
     # as "tensorrt,rocm" to skip a provider without rebuilding anything.
     INFERENCE_DEVICE_ID: int = int(os.getenv("INFERENCE_DEVICE_ID", "0"))

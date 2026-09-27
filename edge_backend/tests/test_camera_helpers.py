@@ -268,14 +268,19 @@ def test_camera_module_has_no_fallback_fleet():
 
 # ---------------- system telemetry ----------------
 
-def test_system_stats_have_no_constants(client):
+def test_system_stats_have_no_constants(client, monkeypatch):
+    # The CPU figure must come from the measurement, not a literal: a real
+    # reading can legitimately be 5.0, so feed a sentinel through the probe.
+    from app.routes import system
+
+    monkeypatch.setattr(system, "_cpu_percent", lambda: 37.3)
     res = client.get("/api/v1/system/stats")
     assert res.status_code == 200, res.text
     data = res.json()
     # The old constants.
     assert data["gpu_usage_percent"] != 12.5
     assert data["shm_buffer_used_mb"] is None
-    assert data["cpu_usage_percent"] != 5.0 or data["cpu_usage_percent"] is None
+    assert data["cpu_usage_percent"] == 37.3
     # Cameras come from the live engine, not a literal.
     pipeline = live_engine.status()
     assert data["active_cameras"] == pipeline["cameras_online"]
