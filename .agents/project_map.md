@@ -558,3 +558,5 @@ Measured at 5f2dc0f: CPU ~478% (box ~30%), GPU ~57% (budget 0.6), yolo26n-pose ~
 **Pending/owner decisions:** pose model choice without the object model; gaze/attention beam
 plan; public URL (Cloudflare); switch the 16 CIF channels to D1 sub-stream; phone push (FCM)
 not configured; skeleton-rotation report parked until reproduced.
+
+**Client docs:** `docs/client/Edge_AI_CCTV_Features.pdf` (plain-language feature overview for customers, A4, 3 pages; rebuild with `uv run --with reportlab python docs/client/build_features_pdf.py`). Operator reference with configuration paths: `docs/FEATURES.md`.
