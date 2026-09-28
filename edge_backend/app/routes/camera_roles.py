@@ -133,7 +133,19 @@ async def get_store_setup(db: AsyncSession = Depends(get_db)):
     """Roles present, which analytics that enables or blocks, and a setup score."""
     cams = (await db.execute(select(CameraModel).order_by(CameraModel.channel_number.asc()))).scalars().all()
     ctx = await camera_roles.load_context(db)
-    return camera_roles.store_setup(list(cams), ctx)
+    out = camera_roles.store_setup(list(cams), ctx)
+    # Unresolved duplicate cameras (services/duplicate_cameras.py): a setup
+    # warning listed on Today's "Store setup" card, never a failure.
+    try:
+        from app.services.duplicate_cameras import duplicate_guard
+
+        out["duplicates"] = [{"id": g["id"], "message": g["message"], "primary_id": g["primary_id"],
+                              "camera_ids": [c["camera_id"] for c in g["cameras"]],
+                              "excluded_camera_ids": g["excluded_camera_ids"]}
+                             for g in duplicate_guard.report().get("groups") or []]
+    except Exception:  # noqa: BLE001 - the setup card must load regardless
+        out["duplicates"] = []
+    return out
 
 
 @router.get("/api/v1/store/pos-registers")

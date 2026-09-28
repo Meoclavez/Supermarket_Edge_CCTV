@@ -2421,3 +2421,26 @@ html, body {
   .logo-title { font-size: 15px; }
   .studio-badges .badge { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 }
+
+/* ---- Duplicate camera guard (js/duplicates.js) ---- */
+.dup-mount { display: flex; flex-direction: column; gap: 8px; margin: 0 0 10px; }
+.dup-mount[hidden] { display: none; }
+.dup-banner, .dup-conflict {
+  border: 1px solid rgba(var(--amber-rgb), 0.45); background: rgba(var(--amber-rgb), 0.07);
+  border-radius: 8px; padding: 8px 10px; font-size: 12px; display: flex; flex-direction: column; gap: 6px;
+}
+.dup-conflict { margin: 6px 0; }
+.dup-title { font-weight: 700; color: var(--amber); }
+.dup-sub { color: var(--text-soft); line-height: 1.45; }
+.dup-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.dup-list { margin: 0; padding-left: 18px; }
+.dup-impact { border-top: 1px dashed rgba(var(--amber-rgb), 0.4); padding-top: 6px; display: flex; flex-direction: column; gap: 6px; }
+.dup-impact-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; }
+.dup-impact-head { font-weight: 700; margin-bottom: 2px; }
+.dup-impact ul { margin: 0; padding-left: 18px; }
+.dup-recorder { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.cam-dup-tag { font-size: 10px; font-weight: 700; color: var(--amber); }
+.setup-dups { border: 1px solid rgba(var(--amber-rgb), 0.45); background: rgba(var(--amber-rgb), 0.07);
+  border-radius: 8px; padding: 8px 10px; margin: 8px 0; font-size: 12px; }
+.setup-dups-title { font-weight: 700; color: var(--amber); }
+.setup-dups ul { margin: 4px 0 6px; padding-left: 18px; }

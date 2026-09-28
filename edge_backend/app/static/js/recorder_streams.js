@@ -6,6 +6,7 @@
 //   GET  /api/v1/recorders/{id}/substreams         read-only check: size now + plan per channel
 //   POST /api/v1/recorders/{id}/substreams/d1      start the upgrade for the ticked channels
 //   GET  /api/v1/recorders/{id}/substreams/d1      progress / last result
+//   POST /api/v1/recorders/{id}/substreams/bitrate raise the sub-stream bit rate of the ticked channels
 //   POST /api/v1/recorders/{id}/substreams/restore put saved settings back (one channel or all)
 //
 // No prompt()/confirm()/alert(): confirmations are inline rows.
@@ -17,9 +18,10 @@
   let current = null;        // selected recorder id
   let preview = null;        // last GET .../substreams
   let result = null;         // last GET .../substreams/d1
-  let confirming = null;     // null | 'upgrade' | 'restore-all' | 'restore:<ch>'
+  let confirming = null;     // null | 'upgrade' | 'restore-all' | 'bitrate' | 'restore:<ch>'
   let busy = false;
   let pollTimer = null;
+  let rateKbps = 768;        // "Sub-stream bit rate" target
   let message = { text: '', kind: '' };
 
   const $ = (id) => document.getElementById(id);
@@ -58,6 +60,7 @@
     not_found: 'fp-warn', nothing_to_restore: 'fp-info',
     restore_failed: 'fp-error', error: 'fp-error', stopped: 'fp-error', not_attempted: 'fp-info',
     working: 'fp-info', pending: 'fp-info',
+    raised: 'fp-ok', already_rate: 'fp-info', capped: 'fp-warn',
   };
 
   function render() {
@@ -145,14 +148,51 @@
     } else {
       html += '<div class="fp-empty">No channel can be upgraded: each is already D1 or more, or its camera does not offer D1.</div>';
     }
+    return html + renderBitrate(rows);
+  }
+
+  /** "Sub-stream bit rate": channels below the target, raised one at a time (bit rate only). */
+  function renderBitrate(rows) {
+    const below = rows.filter((x) => Number.isFinite(x.bitrate_kbps) && x.bitrate_kbps < rateKbps);
+    const running = !!(result && result.running);
+    let html = `<div class="card-title" style="margin-top:14px;"><span>Sub-stream bit rate</span></div>
+      <div class="dev-hint">A D1 sub-stream at a CIF-era bit rate (512 kbps or less) is blocky; analysis sees
+      people better at 768 kbps or more. Only the bit rate is changed (size, codec, frame rate and GOP stay),
+      channels already at or above the target are left alone, the camera's maximum is respected, and each
+      channel is checked on the live stream and put back on any failure.</div>
+      <div class="fp-field-row"><div class="fp-field"><label for="rsKbps">Target bit rate (kbps)</label>
+      <input id="rsKbps" type="number" min="64" max="16384" step="64" value="${rateKbps}"></div></div>`;
+    if (!below.length) {
+      return html + `<div class="fp-empty">Every channel checked is already at ${rateKbps} kbps or more.</div>`;
+    }
+    html += `<div class="table-scroll"><table class="data-table"><thead><tr><th></th><th>Channel</th><th>Camera</th>
+      <th>Bit rate now</th></tr></thead><tbody>`;
+    below.forEach((x) => {
+      html += `<tr><td><input type="checkbox" data-rs-br="${x.channel}" aria-label="Raise channel ${x.channel}" checked></td>
+        <td>${x.channel}</td><td>${esc((x.cameras || []).join(', '))}</td><td>${x.bitrate_kbps} kbps</td></tr>`;
+    });
+    html += `</tbody></table></div><div class="fp-actions"><button type="button" class="btn btn-sm btn-primary"
+      data-rs="ask-bitrate"${busy || running ? ' disabled' : ''}>Raise to ${rateKbps} kbps</button></div>`;
+    if (confirming === 'bitrate') {
+      const n = selectedRateChannels().length;
+      html += confirmRow(`Raise the sub-stream bit rate of ${n} channel(s) to ${rateKbps} kbps? Each channel's
+        current settings are saved first and put back if the stream does not come back. Each camera's picture
+        pauses for a few seconds.`, 'bitrate', `Yes, raise ${n}`);
+    }
     return html;
+  }
+
+  function selectedRateChannels() {
+    return Array.from(document.querySelectorAll('#settings-recorder-streams input[data-rs-br]'))
+      .filter((b) => b.checked).map((b) => parseInt(b.getAttribute('data-rs-br'), 10));
   }
 
   function renderResult() {
     const run = result && result.run;
     if (!run) return '';
     const saved = new Set((result.saved_channels || []).map(Number));
-    const kind = run.kind === 'restore' ? 'Restore' : 'Upgrade to D1';
+    const kind = run.kind === 'restore' ? 'Restore'
+      : (run.kind === 'bitrate' ? `Sub-stream bit rate (${run.kbps || ''} kbps)` : 'Upgrade to D1');
     const cls = run.state === 'done' ? 'fp-ok' : (run.state === 'running' ? 'fp-info' : 'fp-error');
     let html = `<div class="card-title" style="margin-top:14px;"><span>Last change: ${esc(kind)}</span></div>
       <div class="fp-status ${cls}">${esc(run.message || run.state)}</div>
@@ -267,6 +307,17 @@
       });
       post('substreams/d1', { channels, http_port: httpPort(), try_when_caps_unknown: tryUnknown },
         `Upgrading ${channels.length} channel(s), one at a time…`);
+    } else if (a === 'ask-bitrate') {
+      const keep = selectedRateChannels();
+      if (!keep.length) { say('Tick at least one channel.', 'fp-warn'); render(); return; }
+      confirming = 'bitrate'; render();
+      document.querySelectorAll('#settings-recorder-streams input[data-rs-br]').forEach((b) => {
+        b.checked = keep.includes(parseInt(b.getAttribute('data-rs-br'), 10));
+      });
+    } else if (a === 'do-bitrate') {
+      const channels = selectedRateChannels();
+      post('substreams/bitrate', { channels, kbps: rateKbps, http_port: httpPort() },
+        `Raising the bit rate of ${channels.length} channel(s) to ${rateKbps} kbps, one at a time…`);
     } else if (a === 'ask-restore-all') { confirming = 'restore-all'; render(); }
     else if (a === 'do-restore-all') post('substreams/restore', { all: true, http_port: httpPort() }, 'Restoring…');
     else if (a.startsWith('ask-restore:')) { confirming = `restore:${a.split(':')[1]}`; render(); }
@@ -276,6 +327,13 @@
   }
 
   function onChange(ev) {
+    if (ev.target && ev.target.id === 'rsKbps') {
+      const v = parseInt(ev.target.value, 10);
+      rateKbps = Number.isFinite(v) ? Math.min(16384, Math.max(64, v)) : 768;
+      if (confirming === 'bitrate') confirming = null;
+      render();
+      return;
+    }
     if (ev.target && ev.target.id === 'rsRecorder') {
       current = ev.target.value; preview = null; confirming = null; say('', '');
       loadResult().then(render);

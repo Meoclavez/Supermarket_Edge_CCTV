@@ -74,6 +74,17 @@ STRUCTURE_DEFAULT_COLORS = {
 }
 
 
+def _duplicate_fields(camera_id: str) -> dict:
+    """duplicate_group / duplicate_of for a camera (services/duplicate_cameras.py)."""
+    try:
+        from app.services.duplicate_cameras import duplicate_guard
+
+        f = duplicate_guard.camera_fields(camera_id)
+        return {"duplicate_group": f["duplicate_group"], "duplicate_of": f["duplicate_of"]}
+    except Exception:  # noqa: BLE001 - the layout must load regardless
+        return {"duplicate_group": None, "duplicate_of": None}
+
+
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
@@ -570,6 +581,7 @@ class StoreLayoutService:
                     "resolution": cam.resolution,
                     "fps": cam.fps,
                     "last_seen": cam.last_seen.isoformat() if cam.last_seen else None,
+                    **_duplicate_fields(cam.id),
                 }
             )
         return out

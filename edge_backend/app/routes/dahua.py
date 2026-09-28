@@ -66,6 +66,9 @@ class DahuaBatchAdoptPayload(BaseModel):
     username: Optional[str] = None
     password: Optional[str] = None
     channels: List[ChannelAdoptItem] = Field(..., description="Channels to adopt")
+    # Channels that are already configured (same recorder channel on another
+    # stream, or the camera it connects to) are refused with 409 unless set.
+    allow_duplicate: bool = False
 
 
 @router.get("/credentials")
@@ -154,11 +157,37 @@ async def adopt_dahua_channels(
             port=payload.port,
         )
 
+    from app.services.dahua_probe_service import build_dahua_url
+    from app.services.duplicate_cameras import duplicate_guard
+
+    # Duplicate guard: before anything is stored, every requested channel is
+    # checked against the configured cameras and the earlier channels of this
+    # request. All-or-nothing: a 409 lists each conflicting channel.
+    pending: List[Dict[str, Any]] = []
+    clashes: List[Dict[str, Any]] = []
+    for item in payload.channels:
+        subtype = 0 if item.quality == "main" else 1
+        url = build_dahua_url(host=host, port=payload.port, channel=item.channel, subtype=subtype)
+        found = duplicate_guard.conflicts(url, extra=pending)
+        if found:
+            clashes.append({"channel": item.channel, "existing": found,
+                            "detail": duplicate_guard.conflict_detail(url, found)["message"]})
+        pending.append({"id": f"pending-ch{item.channel}-{len(pending)}", "name": f"channel {item.channel} (this request)",
+                        "rtsp_url": url, "location": f"Dahua NVR {host} Ch {item.channel}"})
+    if clashes and not payload.allow_duplicate:
+        chans = ", ".join(str(c["channel"]) for c in clashes)
+        raise HTTPException(status_code=409, detail={
+            "code": "duplicate_camera",
+            "message": (f"Channel(s) {chans} of {host} are already added as cameras. Use the existing cameras "
+                        "(leave those channels out), or add them anyway only for a genuine second stream; "
+                        "the copies are then excluded from store totals."),
+            "channels": clashes,
+            "hint": "Send allow_duplicate: true to add them anyway.",
+        })
+
     layout = await store_layout_service.get_active_layout(db)
     max_ch = await db.scalar(select(CameraModel.channel_number).order_by(CameraModel.channel_number.desc()).limit(1))
     current_channel_num = max_ch or 0
-
-    from app.services.dahua_probe_service import build_dahua_url
 
     adopted: List[Dict[str, Any]] = []
     stored_creds: List[str] = []
@@ -227,6 +256,7 @@ async def adopt_dahua_channels(
         for done in stored_creds:
             camera_source.delete_credentials(done)
         raise
+    duplicate_guard.invalidate()
 
     # Reconcile supervisor so feeds start immediately
     try:

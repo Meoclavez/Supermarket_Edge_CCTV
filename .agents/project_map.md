@@ -252,6 +252,36 @@ Studio queue areas (`/api/zones/queue`, kind checkout|queue, image space) are
 evaluated by `tripwire_engine` into `queue_visits` and reported by
 `/analytics/queues` with POS register attribution. No role = old behaviour.
 
+### Duplicate camera guard (`services/duplicate_cameras.py`)
+
+`identity_for(url)`: Dahua `/cam/realmonitor?channel=N` and Hikvision
+`/Streaming/Channels/NNN` -> `host:port` + channel (subtype / stream ignored,
+credentials ignored); generic RTSP -> host:port + path with stream selectors
+normalised; plus a `dev:<host>/<input>` alias. Dahua recorders' connected-camera
+list (`getConfig RemoteDevice` + optional `RemoteChannel`, cached in
+`STORAGE_DIR/recorder_devices.json`, read daily from `GET /cameras/duplicates`
+or `POST /cameras/duplicates/refresh`, stop on first 401) maps a channel to the
+camera's own IP, so an NVR channel and a direct-IP copy share a key. Groups ->
+one primary (operator choice > enabled > NVR channel > sub-stream > oldest);
+others excluded from store totals via `retail_metrics_service.duplicate_camera_ids()`
+(footfall/tripwire sets, active shoppers, dwell, zone_metrics, funnel, floor
+heatmap live + `heatmap_history.compute_hour` floor only, forecast, live_tracks,
+live_snapshot persons). A removed duplicate stays excluded (`retired`) so its
+kept history is not recounted. Dismissals / primaries in
+`STORAGE_DIR/duplicate_cameras.json`. 409 `{code: duplicate_camera}` on POST/PUT
+camera, layout adopt, Dahua import unless `allow_duplicate`. APIs:
+`GET /api/v1/cameras/duplicates`, `POST .../duplicates/{refresh,dismiss,undismiss,primary}`,
+`GET /api/v1/cameras/{id}/delete-impact`. UI: `static/js/duplicates.js` banners
+(`#dupBannerCameras`, `#dupBannerMap`), Today setup card, health `setup_warnings`.
+
+### Recorder sub-stream bit rate (`services/recorder_substreams.py` `run_bitrate`)
+
+`POST /api/v1/recorders/{id}/substreams/bitrate {channels | all_below, kbps, allow_lower}`
+(202; progress `GET .../bitrate` = `.../d1`). Writes only `ExtraFormat[0].Video.BitRate`,
+never lowers unless explicit channels + `allow_lower`, clamps to caps `BitRateOptions`,
+same backup file as D1 (Restore brings the old bit rate back), verifies the RTSP
+sub-stream at the same size, restores on failure. UI: Settings -> Recorder sub-streams.
+
 ### One coordinate system
 
 The blueprint used to be defined three times in three incompatible coordinate

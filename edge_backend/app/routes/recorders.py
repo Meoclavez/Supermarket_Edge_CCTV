@@ -9,6 +9,8 @@ routes cannot be pointed at an arbitrary address.
 * GET  /api/v1/recorders/{id}/substreams              read-only: current sub-stream per channel and the plan
 * POST /api/v1/recorders/{id}/substreams/d1           start the upgrade (body: channels or all_cif)
 * GET  /api/v1/recorders/{id}/substreams/d1           progress / last result (+ recent audit entries)
+* POST /api/v1/recorders/{id}/substreams/bitrate      raise the sub-stream bit rate (body: channels or all_below, kbps)
+* GET  /api/v1/recorders/{id}/substreams/bitrate      progress / last result (same as .../d1)
 * POST /api/v1/recorders/{id}/substreams/restore      write saved settings back (body: channels or all)
 * GET  /api/v1/cameras/{id}/stream-selection          chosen stream, size and reason
 * POST /api/v1/cameras/{id}/stream-selection/measure  re-measure the camera's sub-streams (read-only)
@@ -29,6 +31,8 @@ from app.models.db_models import CameraModel
 from app.services.actor import describe_actor
 from app.services.auth_service import auth_service
 from app.services.recorder_substreams import (
+    BITRATE_MAX_KBPS,
+    BITRATE_MIN_KBPS,
     RecorderBusy,
     cameras_by_recorder,
     recorder_credentials,
@@ -62,6 +66,20 @@ class SubstreamUpgradeRequest(BaseModel):
     def _one_of(self):
         if not self.all_cif and not self.channels:
             raise ValueError("send channels or all_cif: true")
+        return self
+
+
+class SubstreamBitrateRequest(BaseModel):
+    channels: Optional[List[int]] = Field(None, description="Channel numbers (1-based) to change")
+    all_below: bool = Field(False, description="Every channel of this recorder's cameras whose sub-stream bit rate is below kbps")
+    kbps: int = Field(768, ge=BITRATE_MIN_KBPS, le=BITRATE_MAX_KBPS, description="Target sub-stream bit rate (kbps)")
+    allow_lower: bool = Field(False, description="With explicit channels only: also lower channels above kbps")
+    http_port: int = Field(80, ge=1, le=65535, description="The recorder's web (HTTP) port")
+
+    @model_validator(mode="after")
+    def _one_of(self):
+        if not self.all_below and not self.channels:
+            raise ValueError("send channels or all_below: true")
         return self
 
 
@@ -162,6 +180,24 @@ async def start_d1_upgrade(recorder_id: str, body: SubstreamUpgradeRequest, requ
     return run
 
 
+@router.post("/{recorder_id}/substreams/bitrate", status_code=202)
+async def start_bitrate_raise(recorder_id: str, body: SubstreamBitrateRequest, request: Request,
+                              db: AsyncSession = Depends(get_db)):
+    """Raise each chosen channel's sub-stream bit rate (only the bit rate), verified, restored on failure."""
+    host, cams = await _recorder_or_404(recorder_id, db)
+    channels = None if body.all_below else _validate_channels(body.channels, cams)
+    user, pw = _creds_or_409(host, cams)
+    actor = await describe_actor(request, db)
+    try:
+        run = recorder_substreams.start("bitrate", host, cams, channels, actor,
+                                        username=user, password=pw, http_port=body.http_port,
+                                        kbps=body.kbps, allow_lower=body.allow_lower and channels is not None)
+    except RecorderBusy as e:
+        raise HTTPException(status_code=409, detail=str(e)) from None
+    return run
+
+
+@router.get("/{recorder_id}/substreams/bitrate")
 @router.get("/{recorder_id}/substreams/d1")
 async def get_d1_result(recorder_id: str, db: AsyncSession = Depends(get_db)):
     host, _ = await _recorder_or_404(recorder_id, db)

@@ -169,6 +169,8 @@
               <span class="dev-tag ${c.has_homography ? 'ok' : 'warn'}">${c.has_homography ? 'calibrated' : 'uncalibrated'}</span>
               ${authFailed ? '<span class="dev-tag err">wrong password</span>' : ''}
               ${off ? '<span class="dev-tag">turned off</span>' : ''}
+              ${c.duplicate_of ? `<span class="dev-tag warn" title="The same physical camera as ${esc(this.cameraName(c.duplicate_of))}: still viewable, left out of store totals so nobody is counted twice">duplicate — excluded from store totals</span>`
+                : (c.duplicate_group ? '<span class="dev-tag" title="Another camera is the same physical camera; this one feeds store totals">counts for its duplicate</span>' : '')}
             </div>
             ${problem}
           </div>
@@ -183,6 +185,24 @@
           </div>
         </div>`;
       }).join('');
+    },
+
+    cameraName(cameraId) {
+      const cam = this.cameras.find((x) => x.camera_id === cameraId);
+      return cam ? cam.name : cameraId;
+    },
+
+    /** Point at an existing camera (after "Use existing camera"): select it on the map and in the list. */
+    showExisting(detail) {
+      const first = (detail && ((detail.existing || [])[0] || ((detail.channels || [])[0] || {}).existing?.[0])) || null;
+      if (!first) return;
+      if (window.blueprintEditor && typeof window.blueprintEditor.selectCamera === 'function') {
+        try { window.blueprintEditor.selectCamera(first.camera_id); } catch (_) { /* editor not ready */ }
+      }
+      this.highlight(first.camera_id);
+      const row = document.querySelector(`[data-cam-row="${first.camera_id}"]`);
+      if (row) row.scrollIntoView({ behavior: 'instant', block: 'nearest' });
+      status(`Kept the existing camera "${first.name}". Nothing was added.`, 'ok');
     },
 
     async reconnect(cameraId) {
@@ -266,6 +286,7 @@
       host.innerHTML = `
         <div class="dev-form">
           <div class="dev-form-title">Add ${esc(device.model_name || device.host || device.device_path)}</div>
+          <div id="adDupConflict" hidden></div>
           <div class="fp-field"><label for="adName">Camera name</label>
             <input id="adName" name="cameraName" type="text" value="${esc(device.model_name || device.host || 'Camera')}"></div>
           <div class="fp-field"><label for="adRole">What does it look at?</label>
@@ -302,8 +323,7 @@
         </div>`;
 
       host.querySelector('#adCancel').addEventListener('click', () => this.renderDevices());
-      host.querySelector('#adSubmit').addEventListener('click', async (ev) => {
-        const btn = ev.currentTarget;
+      const submit = async (btn, allowDuplicate) => {
         btn.disabled = true;
         btn.textContent = 'Connecting…';
         const body = {
@@ -319,13 +339,25 @@
           body.channel = parseInt(document.getElementById('adCh').value, 10) || 1;
           body.quality = document.getElementById('adQual').value;
         }
+        if (allowDuplicate) body.allow_duplicate = true;
         try {
           const res = await fetch(`${API}/devices/adopt`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
           });
-          if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
+          const dup = window.edgeDuplicates ? await window.edgeDuplicates.conflictOf(res) : null;
+          if (dup) {
+            // Same camera already added: inline choice, nothing stored yet.
+            btn.disabled = false;
+            btn.textContent = 'Add camera';
+            window.edgeDuplicates.showConflict(host.querySelector('#adDupConflict'), dup, {
+              use: (d) => { this.renderDevices(); this.showExisting(d); },
+              anyway: () => submit(btn, true),
+            });
+            return;
+          }
+          if (!res.ok) throw new Error(await this._errorText(res));
           const cam = await res.json();
           status(`Added "${cam.name}". Drag it into position on the plan, then calibrate it.`, 'ok');
           if (window.blueprintEditor) await window.blueprintEditor.load();
@@ -337,7 +369,8 @@
           btn.disabled = false;
           btn.textContent = 'Add camera';
         }
-      });
+      };
+      host.querySelector('#adSubmit').addEventListener('click', (ev) => submit(ev.currentTarget, false));
     },
 
     place(cameraId) {
@@ -412,7 +445,7 @@
       el('acClose').addEventListener('click', () => this.toggleAddPanel(false));
       el('acType').addEventListener('change', () => { this.applySourceType(); this.clearPreview(); });
       el('acTest').addEventListener('click', () => this.testAddCamera());
-      el('acSave').addEventListener('click', () => this.saveAddCamera());
+      el('acSave').addEventListener('click', () => this.saveAddCamera(false));
       el('acPassToggle').addEventListener('click', (ev) => {
         const input = el('acPass');
         const show = input.type === 'password';
@@ -427,7 +460,7 @@
       }));
       el('acName').addEventListener('input', () => el('acName').removeAttribute('aria-invalid'));
       panel.addEventListener('keydown', (ev) => {
-        if (ev.key === 'Enter' && ev.target.tagName === 'INPUT') { ev.preventDefault(); this.saveAddCamera(); }
+        if (ev.key === 'Enter' && ev.target.tagName === 'INPUT') { ev.preventDefault(); this.saveAddCamera(false); }
         if (ev.key === 'Escape') this.toggleAddPanel(false);
       });
       this.applySourceType();
@@ -516,6 +549,7 @@
         const data = await res.json();
         const d = data && data.detail;
         if (typeof d === 'string') return d;
+        if (d && typeof d === 'object' && !Array.isArray(d) && d.message) return d.message;
         if (Array.isArray(d) && d.length) {
           return d.map((x) => `${(x.loc || []).slice(-1)[0] || 'field'}: ${x.msg}`).join('; ');
         }
@@ -576,9 +610,11 @@
       }
     },
 
-    async saveAddCamera() {
+    async saveAddCamera(allowDuplicate) {
       const body = this.readAddForm(true);
       if (!body) return;
+      const box = el('acDupConflict');
+      if (box) { box.hidden = true; box.innerHTML = ''; }
       const btn = el('acSave');
       btn.disabled = true;
       btn.textContent = 'Saving…';
@@ -591,11 +627,27 @@
         if (body.role) payload.role = body.role;
         if (body.username) payload.username = body.username;
         if (body.password) payload.password = body.password;
+        if (allowDuplicate === true) payload.allow_duplicate = true;
         const res = await fetch('/api/v1/cameras', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
         });
+        const dup = window.edgeDuplicates ? await window.edgeDuplicates.conflictOf(res) : null;
+        if (dup) {
+          // Same camera already added: inline choice, nothing stored yet.
+          this.addStatus('', 'info');
+          window.edgeDuplicates.showConflict(box, dup, {
+            use: (d) => {
+              ['acName', 'acUrl', 'acUser', 'acPass', 'acLoc', 'acDept'].forEach((id) => { el(id).value = ''; });
+              this.clearPreview();
+              this.toggleAddPanel(false);
+              this.showExisting(d);
+            },
+            anyway: () => this.saveAddCamera(true),
+          });
+          return;
+        }
         if (!res.ok) {
           const msg = await this._errorText(res);
           if (res.status === 422 && /name/i.test(msg) && !/url|stream|path|device|host/i.test(msg)) {
@@ -828,7 +880,9 @@
 
       const adoptBtn = listHost.querySelector('#btnAdoptDahuaBatch');
       if (adoptBtn) {
-        adoptBtn.addEventListener('click', async () => {
+        const adopt = async (allowDuplicate) => {
+          const box = el('dahuaDupConflict');
+          if (box) { box.hidden = true; box.innerHTML = ''; }
           const checked = Array.from(listHost.querySelectorAll('.dahua-ch-cb:checked')).map((cb) => ({
             channel: parseInt(cb.dataset.channel, 10),
             name: `Dahua NVR Ch ${cb.dataset.channel}`,
@@ -851,9 +905,30 @@
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 host, port, username, password, channels: checked,
+                ...(allowDuplicate ? { allow_duplicate: true } : {}),
               }),
             });
-            if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
+            const dup = window.edgeDuplicates ? await window.edgeDuplicates.conflictOf(res) : null;
+            if (dup) {
+              // Channels already added as cameras: nothing was stored. Leave them
+              // out (the existing cameras stay) or add them anyway.
+              adoptBtn.disabled = false;
+              adoptBtn.textContent = 'Adopt Selected';
+              dahuaStatus('Some channels are already added as cameras. Nothing was added yet.', 'warn');
+              window.edgeDuplicates.showConflict(box, dup, {
+                use: (d) => {
+                  const clash = new Set((d.channels || []).map((c) => Number(c.channel)));
+                  listHost.querySelectorAll('.dahua-ch-cb').forEach((cb) => {
+                    if (clash.has(parseInt(cb.dataset.channel, 10))) cb.checked = false;
+                  });
+                  if (listHost.querySelectorAll('.dahua-ch-cb:checked').length) adopt(false);
+                  else dahuaStatus('Nothing to add: every ticked channel is already a camera.', 'ok');
+                },
+                anyway: () => adopt(true),
+              }, { useLabel: 'Leave those channels out' });
+              return;
+            }
+            if (!res.ok) throw new Error(await this._errorText(res));
             const data = await res.json();
             status(`Added ${data.adopted_count} recorder channel(s). Place them on the map to count people per area.`, 'ok');
             if (window.blueprintEditor) await window.blueprintEditor.load();
@@ -864,7 +939,8 @@
             adoptBtn.disabled = false;
             adoptBtn.textContent = 'Adopt Selected';
           }
-        });
+        };
+        adoptBtn.addEventListener('click', () => adopt(false));
       }
     },
   };

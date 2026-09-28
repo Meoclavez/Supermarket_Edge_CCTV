@@ -163,6 +163,8 @@ class AdoptRequest(BaseModel):
     stream_url: Optional[str] = None
     # Optional camera role (services/camera_roles.py); its defaults are applied.
     role: Optional[str] = None
+    # The same physical camera is already configured: add it anyway (409 otherwise).
+    allow_duplicate: bool = False
 
 
 # ------------------------------------------------------------------ layout
@@ -674,6 +676,16 @@ async def adopt_device(
     if not stream_url:
         raise HTTPException(status_code=400, detail="device has no usable stream address")
 
+    # The same physical camera already configured (another stream of the same
+    # recorder channel, or the channel this camera is connected to): 409 with
+    # the existing camera named, before any connection is made.
+    from app.services.duplicate_cameras import duplicate_guard
+
+    clean_url = camera_source.mask_url(stream_url)
+    dup = duplicate_guard.conflicts(clean_url)
+    if dup and not req.allow_duplicate:
+        raise HTTPException(status_code=409, detail=duplicate_guard.conflict_detail(clean_url, dup))
+
     # Check the device really serves this stream before creating a camera
     # that could never work (a printer was once adopted as
     # rtsp://<printer>:80/onvif1). One RTSP handshake, at most one login.
@@ -713,6 +725,7 @@ async def adopt_device(
     except Exception:
         camera_source.delete_credentials(cam_id)
         raise
+    duplicate_guard.invalidate()
 
     # Bring the new camera online immediately rather than waiting for the
     # next reconcile tick, so the operator sees video straight away.
@@ -763,8 +776,14 @@ async def remove_camera(
     for dev in res.scalars().all():
         dev.adopted_camera_id = None
 
+    from app.services.camera_roles import role_cache
+    from app.services.duplicate_cameras import duplicate_guard
+
+    duplicate_guard.forget_camera(camera_id)
     await db.delete(cam)
     await db.commit()
+    role_cache.invalidate()
+    duplicate_guard.invalidate()
     camera_source.delete_credentials(camera_id)
     live_engine.stop_camera(camera_id)
     return {"removed": camera_id}

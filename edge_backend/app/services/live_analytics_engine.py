@@ -291,7 +291,21 @@ class CameraRuntime:
             # Which recorder stream this camera is analysed from, its size and
             # why (Stream quality: auto | sub | main; services/stream_selection.py).
             "stream_selection": _stream_selection_status(self.camera_id),
+            # Duplicate camera guard: set when this camera is the same physical
+            # camera as another one and is excluded from store totals.
+            **_duplicate_status(self.camera_id),
         }
+
+
+def _duplicate_status(camera_id: str) -> dict:
+    """duplicate_group / duplicate_of (services/duplicate_cameras.py); empty values if unavailable."""
+    try:
+        from app.services.duplicate_cameras import duplicate_guard
+
+        f = duplicate_guard.camera_fields(camera_id)
+        return {"duplicate_group": f["duplicate_group"], "duplicate_of": f["duplicate_of"]}
+    except Exception:  # noqa: BLE001 - status must never fail over this
+        return {"duplicate_group": None, "duplicate_of": None}
 
 
 def _stream_selection_status(camera_id: str) -> Optional[dict]:
@@ -1488,7 +1502,11 @@ class LiveAnalyticsEngine:
             "cameras_enabled": len(runtimes) - off,
             "cameras_off": off,
             "cameras_online": online,
-            "live_tracks": sum(r["live_tracks"] for r in runtimes),
+            # Store-wide: a duplicate camera's people are already counted by
+            # its group's primary camera (services/duplicate_cameras.py).
+            "live_tracks": sum(r["live_tracks"] for r in runtimes if not r.get("duplicate_of")),
+            "duplicate_groups": sum(1 for r in runtimes if r.get("duplicate_group") and not r.get("duplicate_of")),
+            "cameras_excluded_from_totals": [r["camera_id"] for r in runtimes if r.get("duplicate_of")],
             "detector": person_detector.status(),
             "tracker": {"method": "bytetrack", "assignment": ASSIGNMENT_METHOD},
             "pose_analytics": {"status": _pose_state["status"], "error": _pose_state["error"]},
@@ -1512,6 +1530,7 @@ class LiveAnalyticsEngine:
         for rt in list(self.runtimes.values()):
             tracks = rt.get_tracks()
             calibrated = rt.calibrated
+            dup = _duplicate_status(rt.camera_id)
             detections.append(
                 {
                     "camera_id": rt.camera_id,
@@ -1519,6 +1538,7 @@ class LiveAnalyticsEngine:
                     "status": rt.status,
                     "calibrated": calibrated,
                     "live_tracks": rt.live_track_count,
+                    **dup,
                     "frame_width": rt.frame_width,
                     "frame_height": rt.frame_height,
                     "boxes": [
@@ -1536,6 +1556,10 @@ class LiveAnalyticsEngine:
                     ],
                 }
             )
+            if dup.get("duplicate_of"):
+                # Same physical camera as its group's primary: its people are
+                # already on the map from there (still in ``detections``).
+                continue
             for t in tracks:
                 if not t["confirmed"]:
                     continue

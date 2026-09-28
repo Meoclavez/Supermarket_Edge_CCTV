@@ -210,6 +210,9 @@
         <span class="grid-rotation-note" id="gridDelayNote" role="status"></span>
       </div>
 
+      <!-- Same camera added twice: one banner per group (js/duplicates.js). -->
+      <div class="dup-mount" id="dupBannerCameras" hidden></div>
+
       <div class="camera-grid camera-grid-quad" id="cameraMatrixGrid"></div>
 
       <!-- Cameras turned off (each with "Turn on") and bulk on/off actions. -->
@@ -366,6 +369,7 @@
                 <button type="button" class="btn btn-sm btn-primary" id="acSave">Save camera</button>
               </div>
               <div id="acStatus" class="fp-status dev-add-status" role="status" aria-live="polite"></div>
+              <div id="acDupConflict" hidden></div>
               <figure id="acPreview" class="dev-preview" hidden>
                 <img id="acPreviewImg" alt="Frame received from the camera during the connection test">
                 <figcaption id="acPreviewCap" class="dev-preview-cap"></figcaption>
@@ -429,10 +433,12 @@
                 <button type="button" class="btn btn-sm" id="btnSaveNvrCreds" onclick="deviceManager.saveNvrCreds()">Save sign-in</button>
               </div>
               <div id="dahuaProbeStatus" class="fp-status" role="status" aria-live="polite"></div>
+              <div id="dahuaDupConflict" hidden></div>
               <div id="dahuaChannelsList" class="nvr-channels"></div>
             </div>
 
             <div id="deviceScanStatus" class="fp-status" role="status" aria-live="polite"></div>
+            <div class="dup-mount" id="dupBannerMap" hidden></div>
             <div id="activeCameraList" class="dev-list"></div>
             <div class="dev-section-title">Found on the network, not added yet</div>
             <div id="discoveredList" class="dev-list">
@@ -929,6 +935,7 @@
 
   <!-- Scripts -->
   <script src="/static/js/floorplan.js?v=2.3.0" defer></script>
+  <script src="/static/js/duplicates.js?v=2.3.0" defer></script>
   <script src="/static/js/devices.js?v=2.3.0" defer></script>
   <script src="/static/js/calibration.js?v=2.3.0" defer></script>
   <script src="/static/js/analytics.js?v=2.3.0" defer></script>

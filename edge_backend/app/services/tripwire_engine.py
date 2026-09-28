@@ -1030,7 +1030,9 @@ async def tripwire_footfall(db, start: datetime, end: datetime, bucket: str = "h
         r["camera_role"] = door_cams.get(r.get("camera_id")) or excluded_cams.get(r.get("camera_id"))
         if r.get("camera_id") in excluded_cams:
             r["counts_footfall"] = False
-            r["excluded_reason"] = "stockroom camera: never customer footfall"
+            r["excluded_reason"] = ("duplicate camera: the same camera as another one, excluded from store totals"
+                                    if excluded_cams.get(r.get("camera_id")) == "duplicate"
+                                    else "stockroom camera: never customer footfall")
     counted = [r for r in lines if r["observed"] and r["counts_footfall"]]
     if any(r.get("camera_id") in door_cams for r in counted):
         counted = [r for r in counted if r.get("camera_id") in door_cams]
@@ -1057,8 +1059,16 @@ async def _footfall_camera_sets(db) -> tuple[dict, dict]:
     from app.services.camera_roles import NON_FOOTFALL_ROLES, PRIMARY_FOOTFALL_ROLES, camera_roles_map
 
     roles = await camera_roles_map(db)
-    return ({c: r for c, r in roles.items() if r in PRIMARY_FOOTFALL_ROLES},
-            {c: r for c, r in roles.items() if r in NON_FOOTFALL_ROLES})
+    door = {c: r for c, r in roles.items() if r in PRIMARY_FOOTFALL_ROLES}
+    excluded = {c: r for c, r in roles.items() if r in NON_FOOTFALL_ROLES}
+    # Duplicate cameras (services/duplicate_cameras.py): the same physical
+    # camera as another one; only the group's primary counts store footfall.
+    from app.services.retail_metrics_service import duplicate_camera_ids
+
+    for c in duplicate_camera_ids():
+        door.pop(c, None)
+        excluded[c] = "duplicate"
+    return door, excluded
 
 
 async def tripwire_entries(db, start: datetime, end: datetime) -> Optional[int]:

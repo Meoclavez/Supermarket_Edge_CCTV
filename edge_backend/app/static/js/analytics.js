@@ -583,7 +583,7 @@ async function loadCamerasMatrix() {
   // Rebuild every tile only when a camera's card text changed. Anything else
   // (a camera turned off or on, a new status) moves tiles in place, so the
   // tiles that stay keep their picture and nothing is fetched twice.
-  const signature = allCamerasList.map((c) => `${c.id}|${c.name}|${c.department}|${c.location}|${c.role || ''}`).join(';');
+  const signature = allCamerasList.map((c) => `${c.id}|${c.name}|${c.department}|${c.location}|${c.role || ''}|${c.duplicate_of || ''}`).join(';');
   if (signature !== lastCameraSignature) {
     lastCameraSignature = signature;
     renderCameraGrid();
@@ -805,6 +805,7 @@ function buildCameraCard(cam, slot) {
       <div class="camera-card-titles">
         <div class="camera-title">${escapeHtml(cam.name)}</div>
         <div class="cam-meta-text">${[cam.department && cam.department !== 'GENERAL' ? cam.department : '', cam.location || ''].filter(Boolean).map(escapeHtml).join(' · ')}</div>
+        ${cam.duplicate_of ? `<div class="cam-dup-tag" title="The same physical camera as another one: still viewable, left out of store totals so nobody is counted twice. Resolve it in the banner above.">Duplicate — excluded from store totals</div>` : ''}
       </div>
       <div class="camera-card-tools">
         <button type="button" class="cam-pin-btn" data-pin-for="${id}" aria-pressed="false" onclick="toggleCameraPin(${slot}, '${id}')"></button>

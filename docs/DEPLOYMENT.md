@@ -266,6 +266,17 @@ stream costs several times the CPU.
 Nothing is invented here. If the list is empty, no camera replied; check power,
 cabling and that the cameras are on this VLAN.
 
+**Connect cameras as NVR channels.** Where the store has a recorder, add each
+camera once, as its recorder channel (**Dahua recorder** → scan → adopt, on the
+sub-stream): one login, one place to manage streams. Do not also add the same
+camera by its own IP address or by typing the channel's main-stream URL. The
+dashboard refuses such a second copy with the existing camera named ("Add
+anyway" only for a genuine second stream, which is then left out of store
+totals), and warns about copies already configured ("Same camera added twice"
+in Cameras and Store map), so nobody is counted twice. Save the recorder's
+sign-in so the device can read the recorder's connected-camera list (once a
+day) and recognise a camera added by its own IP as the same as its channel.
+
 ### 5.3 Place and aim each camera
 Drag its marker on the plan, or type exact values in the side panel (X, Y,
 bearing, field of view, mount height). This is saved immediately and survives

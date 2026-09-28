@@ -352,6 +352,12 @@ class CameraFeed(BaseModel):
     role: Optional[str] = Field(None, description="Camera role id, e.g. entrance, checkout, aisle")
     # Checkout-lane cameras: the POS register_id this lane rings sales on.
     pos_register_id: Optional[str] = Field(None, max_length=64)
+    # Duplicate camera guard (services/duplicate_cameras.py), read-only: the
+    # group this camera shares a physical camera with, and the primary it
+    # duplicates when it is excluded from store totals (None when it is the
+    # primary or has no duplicate).
+    duplicate_group: Optional[str] = None
+    duplicate_of: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 

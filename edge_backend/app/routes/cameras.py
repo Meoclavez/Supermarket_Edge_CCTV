@@ -35,6 +35,7 @@ from ..services.auth_service import auth_service
 from ..services import camera_roles, camera_source
 from ..services.camera_discovery import camera_discovery_service
 from ..services.clip_recorder import clip_recorder_service
+from ..services.duplicate_cameras import delete_impact, duplicate_guard
 from ..services.feature_manager import feature_manager
 from ..services.inference_backend import person_detector
 from ..services.live_analytics_engine import _draw_skeleton, fit_width, live_engine, render_overlay
@@ -83,6 +84,8 @@ def _model_to_feed(c: CameraModel) -> CameraFeed:
         last_seen=c.last_seen,
         role=c.role if c.role in camera_roles.ROLE_PRESETS else None,
         pos_register_id=c.pos_register_id,
+        duplicate_group=(dup := duplicate_guard.camera_fields(c.id))["duplicate_group"],
+        duplicate_of=dup["duplicate_of"],
     )
 
 
@@ -186,6 +189,124 @@ async def list_cameras(
     return CameraListResponse(cameras=feeds, total=len(feeds))
 
 
+# ---------------- Duplicate camera guard ----------------
+#
+# One physical camera configured twice (the same recorder channel on two
+# streams, or a recorder channel and the camera's own address) is analysed
+# twice and counted twice. services/duplicate_cameras.py finds such groups;
+# one primary per group feeds store totals and the others are excluded until
+# the operator resolves them here. A setup warning, never a failure.
+
+async def _cams_by_recorder(db: AsyncSession) -> dict:
+    from ..services.recorder_substreams import cameras_by_recorder
+
+    res = await db.execute(select(CameraModel))
+    return cameras_by_recorder({"id": c.id, "name": c.name, "rtsp_url": c.rtsp_url or ""}
+                               for c in res.scalars().all())
+
+
+@router.get("/duplicates")
+async def list_duplicate_cameras(db: AsyncSession = Depends(get_db)):
+    """Duplicate groups, which camera of each feeds store totals, and the recorder device lists used.
+
+    Also starts, in the background, the daily read of each Dahua recorder's
+    connected-camera list (never read, or read over 24 h ago; one login).
+    """
+    duplicate_guard.invalidate()
+    report = duplicate_guard.report()
+    try:
+        started = duplicate_guard.schedule_stale_refresh(await _cams_by_recorder(db))
+    except Exception as exc:  # noqa: BLE001 - the report stands without it
+        logger.debug("recorder device list refresh not started: %s", exc)
+        started = []
+    report["refresh_started"] = started
+    return report
+
+
+class RecorderDevicesRefreshRequest(BaseModel):
+    host: Optional[str] = Field(None, max_length=128, description="One recorder; omitted = every recorder in use")
+    http_port: int = Field(80, ge=1, le=65535)
+
+
+@router.post("/duplicates/refresh")
+async def refresh_recorder_device_lists(body: RecorderDevicesRefreshRequest = Body(default_factory=RecorderDevicesRefreshRequest),
+                                        db: AsyncSession = Depends(get_db)):
+    """Read the connected-camera list of the recorder(s) now (one login each; a rejected one is not retried)."""
+    groups = await _cams_by_recorder(db)
+    if body.host is not None:
+        host = body.host.strip()
+        if host not in groups:
+            raise HTTPException(status_code=404, detail="No camera uses this recorder (id = recorder address).")
+        hosts = [host]
+    else:
+        hosts = sorted(groups)
+    results = []
+    for host in hosts:
+        results.append(await duplicate_guard.refresh_recorder(host, groups[host], http_port=body.http_port))
+    public = [{k: r.get(k) for k in ("host", "ok", "error", "read_at", "devices", "source", "auth_failed")}
+              | {"channels_mapped": len(r.get("channels") or {})} for r in results]
+    return {"recorders": public, **duplicate_guard.report()}
+
+
+class DuplicatePairRequest(BaseModel):
+    camera_ids: list[str] = Field(..., min_length=2, max_length=20)
+
+
+class DuplicatePrimaryRequest(BaseModel):
+    camera_id: str
+
+
+async def _existing_ids_or_404(ids: list[str], db: AsyncSession) -> list[str]:
+    ids = list(dict.fromkeys(str(i) for i in ids))
+    res = await db.execute(select(CameraModel.id).where(CameraModel.id.in_(ids)))
+    found = {r[0] for r in res.all()}
+    missing = [i for i in ids if i not in found]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"Unknown camera(s): {', '.join(missing[:20])}")
+    return ids
+
+
+@router.post("/duplicates/dismiss")
+async def dismiss_duplicate(body: DuplicatePairRequest, db: AsyncSession = Depends(get_db)):
+    """"They're different cameras": never group these cameras again (stored); all count in store totals."""
+    ids = await _existing_ids_or_404(body.camera_ids, db)
+    if len(ids) < 2:
+        raise HTTPException(status_code=422, detail="Name at least two different cameras.")
+    duplicate_guard.dismiss(ids)
+    logger.info("Cameras marked as different (not duplicates): %s", ", ".join(ids))
+    return duplicate_guard.report()
+
+
+@router.post("/duplicates/undismiss")
+async def undismiss_duplicate(body: DuplicatePairRequest, db: AsyncSession = Depends(get_db)):
+    """Undo "They're different cameras" for these cameras."""
+    duplicate_guard.undismiss(await _existing_ids_or_404(body.camera_ids, db))
+    return duplicate_guard.report()
+
+
+@router.post("/duplicates/primary")
+async def set_duplicate_primary(body: DuplicatePrimaryRequest, db: AsyncSession = Depends(get_db)):
+    """Make this camera the one of its duplicate group that feeds store totals."""
+    await _get_camera_or_404(body.camera_id, db)
+    duplicate_guard.invalidate()
+    report = duplicate_guard.report()
+    group = next((g for g in report["groups"] if any(c["camera_id"] == body.camera_id for c in g["cameras"])), None)
+    if group is None:
+        raise HTTPException(status_code=409, detail="This camera is not in a duplicate group.")
+    duplicate_guard.set_primary(body.camera_id, [c["camera_id"] for c in group["cameras"]])
+    logger.info("Duplicate group %s: %s now feeds store totals", group["id"], body.camera_id)
+    return duplicate_guard.report()
+
+
+def _refuse_duplicate(url: str, *, exclude_id: Optional[str] = None, allow: bool = False,
+                      extra: tuple = ()) -> list[dict]:
+    """409 when ``url`` is a camera already configured, unless ``allow``. Returns the matches."""
+    found = duplicate_guard.conflicts(url, exclude_id=exclude_id, extra=extra)
+    if found and not allow:
+        raise HTTPException(status_code=409, detail=duplicate_guard.conflict_detail(url, found))
+    return found
+
+
 _CAMERA_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 _DEPARTMENT_RE = re.compile(r"^[A-Z0-9 _&/-]{1,40}$")
 
@@ -204,6 +325,15 @@ class CameraCreateRequest(CameraFeed):
     source_type: Optional[str] = None
     username: Optional[str] = None
     password: Optional[str] = None
+    # The same physical camera is already configured: add it anyway (e.g. a
+    # main-stream close-up). The copy is excluded from store totals.
+    allow_duplicate: bool = False
+
+
+class CameraUpdateRequest(CameraFeed):
+    """Body of ``PUT /api/v1/cameras/{id}``: a CameraFeed, plus the duplicate override."""
+
+    allow_duplicate: bool = False
 
 
 class TestConnectionRequest(BaseModel):
@@ -289,6 +419,7 @@ async def create_camera(cam_in: CameraCreateRequest, db: AsyncSession = Depends(
     res = await db.execute(select(CameraModel).where(CameraModel.id == cam_id))
     if res.scalar_one_or_none():
         raise HTTPException(status_code=400, detail=f"Camera ID '{cam_id}' already exists")
+    dup = _refuse_duplicate(src.url, allow=cam_in.allow_duplicate)
 
     payload = _writable_payload(cam_in)
     payload.update(name=name, department=department, location=location, rtsp_url=src.url)
@@ -333,6 +464,10 @@ async def create_camera(cam_in: CameraCreateRequest, db: AsyncSession = Depends(
         raise
     await db.refresh(new_cam)
     camera_roles.role_cache.invalidate()
+    duplicate_guard.invalidate()
+    if dup:
+        logger.warning("Camera %s added although it is the same camera as %s (confirmed by the operator)",
+                       cam_id, ", ".join(d["camera_id"] for d in dup))
     if new_cam.features:
         feature_manager.set_camera_features(cam_id, CameraFeatureConfig.model_validate(new_cam.features))
     logger.info("Camera %s added (%s %s)", cam_id, src.source_type, camera_source.mask_url(src.url))
@@ -399,6 +534,7 @@ async def _set_enabled(camera_ids: list[str], enabled: bool, db: AsyncSession) -
         cam.is_ai_enabled = enabled
     if changed:
         await db.commit()
+        duplicate_guard.invalidate()
         logger.info("Turned %s %d camera(s): %s", "on" if enabled else "off", len(changed),
                     ", ".join(c.id for c in changed[:20]))
         await _reconcile_now()
@@ -428,7 +564,7 @@ async def get_camera(camera_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.put("/{camera_id}", response_model=CameraFeed)
-async def update_camera(camera_id: str, cam_in: CameraFeed, db: AsyncSession = Depends(get_db)):
+async def update_camera(camera_id: str, cam_in: CameraUpdateRequest, db: AsyncSession = Depends(get_db)):
     """Upsert a camera from a full CameraFeed body (PUT semantics)."""
     res = await db.execute(select(CameraModel).where(CameraModel.id == camera_id))
     cam = res.scalar_one_or_none()
@@ -450,6 +586,8 @@ async def update_camera(camera_id: str, cam_in: CameraFeed, db: AsyncSession = D
 
     if "rtsp_url" in payload and (cam is None or payload["rtsp_url"] != cam.rtsp_url):
         source_changed = True
+        if payload["rtsp_url"]:
+            _refuse_duplicate(str(payload["rtsp_url"]), exclude_id=camera_id, allow=cam_in.allow_duplicate)
     old_quality = (cam.features or {}).get("stream_quality") if cam is not None and isinstance(cam.features, dict) else None
     if cam is not None and "features" in payload:
         _keep_unsent_settings(payload["features"], cam_in.features, cam.features)
@@ -474,6 +612,7 @@ async def update_camera(camera_id: str, cam_in: CameraFeed, db: AsyncSession = D
     await db.commit()
     await db.refresh(cam)
     camera_roles.role_cache.invalidate()
+    duplicate_guard.invalidate()
     if "features" in payload:
         feature_manager.set_camera_features(camera_id, CameraFeatureConfig.model_validate(payload["features"]))
     new_quality = (payload.get("features") or {}).get("stream_quality") if "features" in payload else old_quality
@@ -559,12 +698,27 @@ async def update_camera_position(
     }
 
 
+@router.get("/{camera_id}/delete-impact")
+async def get_camera_delete_impact(camera_id: str, db: AsyncSession = Depends(get_db)):
+    """Read-only: what removing this camera deletes and what it keeps, with counts."""
+    await _get_camera_or_404(camera_id, db)
+    out = await delete_impact(db, camera_id)
+    dup_of = duplicate_guard.camera_fields(camera_id)["duplicate_of"]
+    out["duplicate_of"] = dup_of
+    if dup_of:
+        out["note"] += (" This camera is a duplicate: its kept history stays excluded from store totals, "
+                        "so nothing is counted twice.")
+    return out
+
+
 @router.delete("/{camera_id}")
 async def delete_camera(camera_id: str, db: AsyncSession = Depends(get_db)):
     cam = await _get_camera_or_404(camera_id, db)
+    duplicate_guard.forget_camera(camera_id)
     await db.delete(cam)
     await db.commit()
     camera_roles.role_cache.invalidate()
+    duplicate_guard.invalidate()
     camera_source.delete_credentials(camera_id)
     try:
         live_engine.stop_camera(camera_id)

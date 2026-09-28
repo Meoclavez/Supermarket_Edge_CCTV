@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
 
-from sqlalchemy import Float, and_, case, func, or_, select
+from sqlalchemy import Float, and_, case, func, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -91,6 +91,29 @@ HEATMAP_KINDS = ("presence", "dwell", "interaction")
 # not credited as dwell: the person was not observed in between.
 HEATMAP_DWELL_MAX_GAP_SEC = 5.0
 PRESENCE_WEIGHTINGS = ("samples", "tracks")
+
+
+def duplicate_camera_ids() -> list[str]:
+    """Cameras excluded from store-wide totals as duplicates of another camera.
+
+    services/duplicate_cameras.py: when one physical camera is configured more
+    than once, only its group's primary camera feeds store totals (footfall,
+    in store now, dwell, zones, funnel, floor heatmaps, forecast). Per-camera
+    views still show every camera's own data.
+    """
+    try:
+        from app.services.duplicate_cameras import excluded_camera_ids
+
+        return excluded_camera_ids()
+    except Exception as e:  # noqa: BLE001 - no exclusions rather than no totals
+        logger.debug(f"duplicate camera exclusion unavailable: {e}")
+        return []
+
+
+def _not_duplicate(column):
+    """SQL condition: the row's camera is not an excluded duplicate."""
+    ids = duplicate_camera_ids()
+    return column.notin_(ids) if ids else true()
 
 
 async def staff_only_camera_ids(db: AsyncSession) -> list[str]:
@@ -303,10 +326,10 @@ class RetailMetricsService:
 
     @staticmethod
     async def _non_footfall_cameras(db: AsyncSession) -> list[str]:
-        """Camera ids whose role never counts customer footfall (stockroom)."""
+        """Camera ids that never count store footfall: stockroom role, and duplicate cameras."""
         from app.services.camera_roles import non_footfall_camera_ids
 
-        return await non_footfall_camera_ids(db)
+        return sorted(set(await non_footfall_camera_ids(db)) | set(duplicate_camera_ids()))
 
     @staticmethod
     async def _tripwire_entries(db: AsyncSession, start: datetime, end: datetime) -> Optional[int]:
@@ -337,7 +360,7 @@ class RetailMetricsService:
         """People currently inside a zone, from visits with no exit time yet."""
         count = await db.scalar(
             select(func.count(func.distinct(ZoneVisitModel.track_id))).where(
-                ZoneVisitModel.exited_at.is_(None)
+                and_(ZoneVisitModel.exited_at.is_(None), _not_duplicate(ZoneVisitModel.camera_id))
             )
         )
         return int(count or 0)
@@ -354,6 +377,7 @@ class RetailMetricsService:
                     ZoneVisitModel.exited_at.isnot(None),
                     ZoneVisitModel.dwell_seconds > 0,
                     _visit_is_real(),
+                    _not_duplicate(ZoneVisitModel.camera_id),
                 )
             )
         )
@@ -415,7 +439,7 @@ class RetailMetricsService:
                 )
                 .where(
                     and_(ZoneVisitModel.entered_at >= start, ZoneVisitModel.entered_at < end,
-                         _visit_is_real())
+                         _visit_is_real(), _not_duplicate(ZoneVisitModel.camera_id))
                 )
                 .group_by(ZoneVisitModel.zone_id)
             )
@@ -425,7 +449,7 @@ class RetailMetricsService:
         occ_rows = (
             await db.execute(
                 select(ZoneVisitModel.zone_id, func.count(func.distinct(ZoneVisitModel.track_id)))
-                .where(ZoneVisitModel.exited_at.is_(None))
+                .where(and_(ZoneVisitModel.exited_at.is_(None), _not_duplicate(ZoneVisitModel.camera_id)))
                 .group_by(ZoneVisitModel.zone_id)
             )
         ).all()
@@ -473,6 +497,7 @@ class RetailMetricsService:
                     ZoneVisitModel.entered_at < end,
                     ZoneVisitModel.dwell_seconds > 0,
                     _visit_is_real(),
+                    _not_duplicate(ZoneVisitModel.camera_id),
                 )
             )
         )
@@ -483,6 +508,7 @@ class RetailMetricsService:
                     ZoneVisitModel.entered_at < end,
                     ZoneVisitModel.interacted.is_(True),
                     _visit_is_real(),
+                    _not_duplicate(ZoneVisitModel.camera_id),
                 )
             )
         )
@@ -564,7 +590,9 @@ class RetailMetricsService:
         if presence_weighting not in PRESENCE_WEIGHTINGS:
             raise ValueError(f"unknown presence weighting '{presence_weighting}'")
         # Customer heatmaps: staff-only cameras (stockroom role) never contribute.
-        staff_cams = await staff_only_camera_ids(db)
+        # Duplicate cameras (same physical camera as another) are left out too:
+        # this is a floor-space merge across cameras.
+        staff_cams = sorted(set(await staff_only_camera_ids(db)) | set(duplicate_camera_ids()))
 
         if kind == "interaction":
             rows = (
@@ -808,7 +836,8 @@ class RetailMetricsService:
 
     async def _visit_times(self, db: AsyncSession, since: Optional[datetime] = None) -> list[tuple]:
         """(track_id, entered_at) of real visits, entered_at as naive UTC."""
-        q = select(ZoneVisitModel.track_id, ZoneVisitModel.entered_at).where(_visit_is_real())
+        q = select(ZoneVisitModel.track_id, ZoneVisitModel.entered_at).where(
+            and_(_visit_is_real(), _not_duplicate(ZoneVisitModel.camera_id)))
         if since is not None:
             q = q.where(ZoneVisitModel.entered_at >= since)
         return (await db.execute(q)).all()
@@ -852,7 +881,7 @@ class RetailMetricsService:
         # Store-local days with at least one real visit (UTC hours folded to local dates).
         utc_hours = (await db.execute(
             select(func.distinct(func.strftime("%Y-%m-%d %H:00", ZoneVisitModel.entered_at)))
-            .where(_visit_is_real())
+            .where(and_(_visit_is_real(), _not_duplicate(ZoneVisitModel.camera_id)))
         )).scalars().all()
         days = len({to_local(datetime.strptime(h, "%Y-%m-%d %H:%M")).date() for h in utc_hours if h})
 

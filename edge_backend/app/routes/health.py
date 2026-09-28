@@ -155,6 +155,28 @@ def _evidence_storage() -> tuple[dict, dict]:
     return block, entry
 
 
+def _setup_warnings() -> list:
+    """Configuration problems that are not failures (never change ``status``).
+
+    Duplicate cameras: one physical camera configured more than once. Only
+    each group's primary feeds store totals until the operator resolves it.
+    """
+    try:
+        from app.services.duplicate_cameras import duplicate_guard
+
+        rep = duplicate_guard.report()
+    except Exception as exc:  # noqa: BLE001
+        return [{"code": "duplicate_cameras_unchecked", "message": f"duplicate camera check failed: {exc}"}]
+    # Health answers without a session: ids and counts only, no camera names or addresses.
+    return [{
+        "code": "duplicate_cameras", "severity": "warning",
+        "message": (f"The same camera is configured {len(g['cameras'])} times; only one counts in store "
+                    "totals. Resolve it on the dashboard (Cameras)."),
+        "camera_ids": [c["camera_id"] for c in g["cameras"]], "primary_id": g["primary_id"],
+        "excluded_from_totals": g["excluded_camera_ids"],
+    } for g in rep.get("groups") or []]
+
+
 def _overall(services: dict) -> str:
     """healthy/degraded/unhealthy from observed entries only."""
     db = services.get("database") or {}
@@ -238,6 +260,8 @@ async def health_check():
             "size_mb": log_size_mb,
         },
         "services": services,
+        # Setup warnings (e.g. the same camera added twice): reported, never a failure.
+        "setup_warnings": _setup_warnings(),
         "telemetry": {
             "total_cameras": cam_count,
             # Turned off by the operator: neither working nor failed.

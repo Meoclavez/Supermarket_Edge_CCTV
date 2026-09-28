@@ -265,6 +265,17 @@
     return { text: 'Setup is complete for every camera role in use.', label: null, run: null };
   }
 
+  /** Unresolved duplicate cameras (the same camera added twice): a setup warning, not a failure. */
+  function duplicatesHtml(groups) {
+    if (!Array.isArray(groups) || !groups.length) return '';
+    return `<div class="setup-dups" role="status">
+      <div class="setup-dups-title"><span aria-hidden="true">⚠</span> ${groups.length === 1 ? 'A camera is' : `${groups.length} cameras are`}
+        added twice. Store totals count each only once until it is resolved.</div>
+      <ul>${groups.map((g) => `<li>${escapeHtml(g.message)}</li>`).join('')}</ul>
+      <button type="button" class="btn btn-sm" id="todayResolveDuplicates">Resolve in Cameras</button>
+    </div>`;
+  }
+
   async function renderSetup(setup) {
     const host = el('todaySetup');
     const badge = el('todaySetupScore');
@@ -291,10 +302,13 @@
         <div class="setup-next-text"><b>Next step:</b> ${escapeHtml(step.text)}</div>
         ${step.label ? `<button type="button" class="btn btn-sm btn-primary" id="todayNextStep">${escapeHtml(step.label)}</button>` : ''}
       </div>
+      ${duplicatesHtml(setup.duplicates)}
       ${window.edgeRoles ? window.edgeRoles.storeCamerasHtml(setup) : ''}
       <ul class="setup-list">${rows}</ul>`;
     const btn = el('todayNextStep');
     if (btn && step.run) btn.addEventListener('click', () => step.run());
+    const dup = el('todayResolveDuplicates');
+    if (dup) dup.addEventListener('click', () => switchTab('cameras'));
   }
 
   // ----------------------------------------------------------------- load

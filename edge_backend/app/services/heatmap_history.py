@@ -285,6 +285,13 @@ async def compute_hour(db: AsyncSession, start: datetime, end: datetime) -> dict
     staff = set(await staff_only_camera_ids(db))
     track_rows = [r for r in track_rows if r[0] not in staff]
     inter_rows = [r for r in inter_rows if r[0] not in staff]
+    # Duplicate cameras (the same physical camera as another) stay out of the
+    # floor merge only; their own image-space snapshots are still recorded.
+    from app.services.retail_metrics_service import duplicate_camera_ids
+
+    dups = set(duplicate_camera_ids())
+    floor_tracks = [r for r in track_rows if r[0] not in dups]
+    floor_inter = [r for r in inter_rows if r[0] not in dups]
 
     out: dict = {}
     layout = await _active_layout(db)
@@ -292,10 +299,10 @@ async def compute_hour(db: AsyncSession, start: datetime, end: datetime) -> dict
         wm, hm = float(layout.width_m), float(layout.height_m)
         gw, gh = floor_grid_dims(wm, hm)
         for kind in ("presence", "dwell"):
-            grid, n = bin_heatmap_paths(paths(track_rows), kind, wm, hm, gw, gh, window=(t0, t1),
+            grid, n = bin_heatmap_paths(paths(floor_tracks), kind, wm, hm, gw, gh, window=(t0, t1),
                                         presence_weighting="tracks")
             out[("floor", None, kind)] = dict(grid=grid, samples=n, grid_w=gw, grid_h=gh, width_m=wm, height_m=hm)
-        grid, n = bin_heatmap_points(((r[1], r[2]) for r in inter_rows), wm, hm, gw, gh)
+        grid, n = bin_heatmap_points(((r[1], r[2]) for r in floor_inter), wm, hm, gw, gh)
         out[("floor", None, "interaction")] = dict(grid=grid, samples=n, grid_w=gw, grid_h=gh,
                                                     width_m=wm, height_m=hm)
 

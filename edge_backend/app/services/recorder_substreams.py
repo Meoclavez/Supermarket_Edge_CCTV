@@ -21,6 +21,17 @@ the new stream instead of whatever it fell back to while the recorder switched.
 A rejected login stops the whole run at once, without retries (Dahua locks
 the account after about five failed logins). Every write is appended to
 ``STORAGE_DIR/recorder_audit.jsonl`` (who, when, channel, before/after).
+
+**Sub-stream bit rate** (:meth:`RecorderSubstreams.run_bitrate`) follows the
+same steps with ``ExtraFormat[0].Video.BitRate`` only: size, codec, FPS and
+GOP are never written. It only raises (a channel already at or above the
+target is left alone) unless the operator names channels explicitly *and*
+asks to lower (``allow_lower``). The target is clamped to the camera's
+``BitRateOptions`` maximum when the caps can be read; when they cannot, the
+change is still made and a refusal or a value that does not stick is caught.
+Success needs the RTSP sub-stream to deliver video at the same size as before.
+The channel's complete sub-stream settings are saved to the same backup file
+first, so "Restore previous stream settings" puts the old bit rate back.
 """
 
 from __future__ import annotations
@@ -59,6 +70,12 @@ STOPPED = "stopped"
 NOT_ATTEMPTED = "not_attempted"
 RESTORE_OK = "restore_ok"
 NOTHING_TO_RESTORE = "nothing_to_restore"
+RAISED = "raised"
+ALREADY_RATE = "already_rate"
+CAPPED = "capped"
+
+BITRATE_MIN_KBPS = 64
+BITRATE_MAX_KBPS = 16384
 
 
 def _now_iso() -> str:
@@ -249,14 +266,21 @@ class RecorderSubstreams:
             logger.warning(f"Could not save the sub-stream run for {host}: {e}")
 
     def start(self, kind: str, host: str, cams: list[dict], channels: Optional[list[int]], actor: str,
-              *, username: str, password: str, http_port: int = 80, try_unknown: bool = False) -> dict:
-        """Start an upgrade or restore in the background. Raises RecorderBusy."""
+              *, username: str, password: str, http_port: int = 80, try_unknown: bool = False,
+              kbps: int = 768, allow_lower: bool = False) -> dict:
+        """Start an upgrade, bit-rate change or restore in the background. Raises RecorderBusy."""
         if self.is_running(host):
             raise RecorderBusy(f"a sub-stream change on {host} is already running")
         self._try_unknown[host] = bool(try_unknown) and kind == "upgrade"
-        coro = (self.run_upgrade if kind == "upgrade" else self.run_restore)(
-            host, cams, channels, actor, username=username, password=password, http_port=http_port)
+        if kind == "bitrate":
+            coro = self.run_bitrate(host, cams, channels, actor, username=username, password=password,
+                                    http_port=http_port, kbps=kbps, allow_lower=allow_lower)
+        else:
+            coro = (self.run_upgrade if kind == "upgrade" else self.run_restore)(
+                host, cams, channels, actor, username=username, password=password, http_port=http_port)
         run = self._new_run(kind, host, cams, channels, actor)
+        if kind == "bitrate":
+            run["kbps"] = int(kbps)
         self._publish(host, run)
         self._tasks[host] = asyncio.get_running_loop().create_task(coro, name=f"recorder-{kind}-{host}")
         return run
@@ -317,7 +341,9 @@ class RecorderSubstreams:
         auth = f"{quote(username, safe='')}:{quote(password, safe='')}@" if username else ""
         return f"rtsp://{auth}{host}:{port}/cam/realmonitor?channel={ch}&subtype=1"
 
-    async def _verify_stream(self, target: str, want: tuple[int, int]) -> tuple[bool, str]:
+    async def _verify_stream(self, target: str, want: Optional[tuple[int, int]],
+                             want_text: str = "D1") -> tuple[bool, str]:
+        """The RTSP sub-stream delivers video (of size ``want`` when given) within bounded retries."""
         if self.verify_initial_wait_s:
             await asyncio.sleep(self.verify_initial_wait_s)
         last = "no picture"
@@ -330,9 +356,9 @@ class RecorderSubstreams:
                 res = {"success": False, "error": type(exc).__name__}
             if res.get("success") and res.get("width") and res.get("height"):
                 got = (int(res["width"]), int(res["height"]))
-                if got == tuple(want):
+                if want is None or got == tuple(want):
                     return True, dc.size_label(got)
-                last = f"stream is {dc.size_label(got)}, not D1"
+                last = f"stream is {dc.size_label(got)}, not {want_text}"
             else:
                 last = f"sub-stream did not come up ({res.get('error_code') or res.get('error') or 'no picture'})"
         return False, last
@@ -570,6 +596,182 @@ class RecorderSubstreams:
             entry["after"] = rdetail
             return RESTORED, f"restored after failure ({failure})", True, None
         entry["after"] = dc.size_label(now) if now else "unknown"
+        return (RESTORE_FAILED, f"restore failed after failure ({failure}): {rdetail}. The channel is left as the "
+                                f"recorder has it now; check it on the recorder or press Restore.", True, None)
+
+    # -- bit rate ----------------------------------------------------------------
+    async def run_bitrate(self, host: str, cams: list[dict], channels: Optional[list[int]], actor: str, *,
+                          username: str, password: str, http_port: int = 80, kbps: int = 768,
+                          allow_lower: bool = False) -> dict:
+        """Raise the sub-stream bit rate of ``channels`` (None = every camera channel below ``kbps``)."""
+        run = self._runs.get(host) if self.is_running(host) else None
+        if run is None or run.get("kind") != "bitrate" or run.get("state") != "running":
+            run = self._new_run("bitrate", host, cams, channels, actor)
+        kbps = int(kbps)
+        run["kbps"] = kbps
+        wanted = sorted({c["channel"] for c in cams} if channels is None else set(int(c) for c in channels))
+        run["channels"] = [self._channel_entry(ch, cams) for ch in wanted]
+        run["message"] = "Reading the recorder's stream settings"
+        self._publish(host, run)
+        client = self.client_factory(host, username, password, port=http_port)
+        try:
+            await self._bitrate_all(run, client, host, cams, channels is None, kbps,
+                                    bool(allow_lower) and channels is not None, actor,
+                                    username=username, password=password)
+        except Exception as exc:  # noqa: BLE001 - a run must end with a state
+            logger.exception(f"Sub-stream bit-rate change on {host} failed")
+            run["state"] = "failed"
+            run["message"] = f"Stopped by an internal error ({type(exc).__name__}); channels not reached keep their settings"
+            for e in run["channels"]:
+                if e["outcome"] in ("pending", "working"):
+                    e.update(outcome=NOT_ATTEMPTED, text="not attempted")
+        finally:
+            client.close()
+            run["finished_at"] = _now_iso()
+            self._publish(host, run)
+        return run
+
+    async def _bitrate_all(self, run: dict, client: dc.DahuaHttpClient, host: str, cams: list[dict],
+                           only_below: bool, kbps: int, allow_lower: bool, actor: str, *,
+                           username: str, password: str) -> None:
+        try:
+            enc = await self._call(client.get_config, "Encode")
+            standard = await self._standard(client, enc)
+        except dc.DahuaAuthError as e:
+            self._stop_auth(run, str(e))
+            return
+        except dc.DahuaHttpError as e:
+            run.update(state="failed", message=f"Could not read the recorder's stream settings: {e}. Nothing changed.")
+            for entry in run["channels"]:
+                entry.update(outcome=NOT_ATTEMPTED, text="not attempted: nothing changed")
+            return
+        if only_below:
+            # "all below": only channels whose sub-stream bit rate is under the target.
+            run["channels"] = [e for e in run["channels"]
+                               if (_int(dc.channel_substream(enc, e["channel"]).get("Video.BitRate")) or 0) < kbps]
+        cache: dict = {}
+        http_errors = 0
+        for i, entry in enumerate(run["channels"]):
+            if i and self.channel_delay_s:
+                await asyncio.sleep(self.channel_delay_s)
+            ch = entry["channel"]
+            run["message"] = f"Channel {ch} ({i + 1} of {len(run['channels'])})"
+            entry.update(outcome="working", text="Working")
+            self._publish(host, run)
+            on_ch = [c for c in cams if c["channel"] == ch]
+            rtsp_port = next((c["rtsp_port"] for c in on_ch), 554)
+            try:
+                code, text, changed, verified = await self._bitrate_channel(
+                    client, host, ch, enc, standard, kbps, allow_lower, cache, actor, entry,
+                    self._rtsp_target(host, rtsp_port, ch, username, password))
+                http_errors = 0
+            except dc.DahuaAuthError as e:
+                entry.update(outcome=STOPPED, text=f"stopped: {e}")
+                self._stop_auth(run, str(e))
+                return
+            except dc.DahuaHttpError as e:
+                http_errors += 1
+                code, text, changed, verified = ERROR, f"kept current settings: the recorder did not answer ({e})", False, None
+            entry.update(outcome=code, text=text)
+            if changed:
+                try:
+                    await self.on_channel_changed(on_ch, verified)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"Could not restart the workers of channel {ch}: {exc}")
+            self._publish(host, run)
+            if http_errors >= 2:
+                run.update(state="failed", message="Stopped: the recorder stopped answering. Channels not reached keep their settings.")
+                for e in run["channels"]:
+                    if e["outcome"] == "pending":
+                        e.update(outcome=NOT_ATTEMPTED, text="not attempted")
+                return
+        raised = sum(1 for e in run["channels"] if e["outcome"] in (RAISED,))
+        run.update(state="done", message=(f"Done: {raised} of {len(run['channels'])} channel(s) set to a higher bit rate"
+                                          if run["channels"] else f"No channel below {kbps} kbps"))
+
+    async def _bitrate_cap(self, client: dc.DahuaHttpClient, ch: int, cache: dict) -> Optional[int]:
+        """The channel's sub-stream bit-rate maximum from its caps, or None when unreadable."""
+        try:
+            cap = dc.caps_max_bitrate(await self._call(client.get_encode_caps, ch), ch)
+        except dc.DahuaAuthError:
+            raise
+        except dc.DahuaHttpError:
+            cap = None
+        if cap:
+            return cap
+        if "encode_caps" not in cache:
+            try:
+                cache["encode_caps"] = await self._call(client.get_config, "EncodeCaps")
+            except dc.DahuaAuthError:
+                raise
+            except dc.DahuaHttpError:
+                cache["encode_caps"] = {}
+        return dc.caps_max_bitrate(cache["encode_caps"], ch)
+
+    async def _bitrate_channel(self, client, host, ch, enc, standard, kbps, allow_lower, cache, actor, entry,
+                               rtsp_target) -> tuple[str, str, bool, Optional[tuple[int, int]]]:
+        """(outcome, text, recorder config changed?, verified size or None)."""
+        sub = dc.channel_substream(enc, ch)
+        if not sub:
+            return NOT_FOUND, "kept current: the recorder has no sub-stream settings for this channel", False, None
+        cur = _int(sub.get("Video.BitRate"))
+        size = dc.substream_size(sub, standard)
+        entry["before"] = f"{cur} kbps" if cur is not None else "unknown"
+        if cur is not None and cur >= kbps and not (allow_lower and cur != kbps):
+            entry["after"] = entry["before"]
+            return ALREADY_RATE, f"already ≥ {kbps} kbps ({cur} kbps)", False, None
+        target, cap_note = kbps, ""
+        cap = await self._bitrate_cap(client, ch, cache)
+        if cap and target > cap:
+            target, cap_note = cap, f"capped at {cap} kbps by the camera"
+        if cur is not None and (target == cur or (target < cur and not allow_lower)):
+            entry["after"] = entry["before"]
+            return CAPPED, f"kept {cur} kbps: {cap_note or 'no change needed'}", False, None
+
+        key = "Video.BitRate"
+        assign = {dc.encode_prefix(ch) + key: str(target)}
+        before, after = {key: sub.get(key)}, {key: str(target)}
+        self._save_backup(host, ch, sub, actor)
+        ok, reason = await self._call(client.set_config, assign)
+        self._audit(host, ch, actor, "set_substream_bitrate", before, after, "accepted" if ok else f"refused: {reason}")
+        kept = f"kept {cur} kbps" if cur is not None else "kept current"
+        if not ok:
+            return REFUSED, f"{kept}: NVR refused ({reason})", False, None
+
+        failure = None
+        verified: Optional[tuple[int, int]] = None
+        try:
+            enc2 = await self._call(client.get_config, "Encode")
+            sub2 = dc.channel_substream(enc2, ch)
+            now = _int(sub2.get(key))
+            if now != target:
+                failure = f"value did not stick: the recorder reports {now if now is not None else 'no'} kbps"
+            elif size and dc.substream_size(sub2, standard) != size:
+                failure = f"the recorder changed the size to {dc.size_label(dc.substream_size(sub2, standard))}"
+        except dc.DahuaHttpError as e:
+            failure = f"could not re-read the settings ({e})"
+        if failure is None:
+            good, detail = await self._verify_stream(rtsp_target, size, dc.size_label(size))
+            if good:
+                verified = size
+            else:
+                failure = detail
+        if failure is None:
+            entry["after"] = f"{target} kbps"
+            note = f"; {cap_note}" if cap_note else ""
+            verb = "lowered" if cur is not None and target < cur else "raised"
+            return RAISED, f"{verb} {cur if cur is not None else '?'}→{target} kbps (stream verified{note})", True, verified
+
+        try:
+            restored, rdetail, _ = await self._restore(client, ch, sub, standard)
+        except dc.DahuaHttpError as e:
+            restored, rdetail = False, f"the recorder did not answer ({e})"
+        self._audit(host, ch, actor, "restore_after_failure", after, before,
+                    "restored" if restored else f"restore failed: {rdetail}")
+        if restored:
+            entry["after"] = entry["before"]
+            return RESTORED, f"restored after failure ({failure})", True, None
+        entry["after"] = "unknown"
         return (RESTORE_FAILED, f"restore failed after failure ({failure}): {rdetail}. The channel is left as the "
                                 f"recorder has it now; check it on the recorder or press Restore.", True, None)
 
