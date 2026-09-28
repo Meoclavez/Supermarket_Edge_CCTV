@@ -38,11 +38,17 @@ class FakeDahua:
     """channels: {ch: dict(w, h, bitrate, codec, caps=[...], sub2=(w, h) | None, key=('wh'|'res'|'both'))}."""
 
     def __init__(self, channels: dict, *, standard: str = "PAL", caps_mode: str = "encode_cgi",
-                 close_every_response: bool = False):
+                 close_every_response: bool = False, close_after_challenge: bool = False,
+                 nonce_per_connection: bool = True):
         self.channels = {int(k): dict(v) for k, v in channels.items()}
         self.standard = standard
         self.caps_mode = caps_mode                # encode_cgi | encodecaps | none
         self.close_every_response = close_every_response
+        # The real Pearcedale NVR's HTTP server ends the connection after its
+        # 401 challenge; its nonce then has to be valid on the next one.
+        self.close_after_challenge = close_after_challenge
+        self.nonce_per_connection = nonce_per_connection
+        self.shared_nonce = uuid.uuid4().hex
         self.refuse_set = False
         self.no_stick: set[int] = set()
         self.refuse_restore = False
@@ -58,7 +64,8 @@ class FakeDahua:
 
             def setup(self):
                 super().setup()
-                self.nonce = uuid.uuid4().hex          # bound to this TCP connection
+                # Bound to this TCP connection, or one nonce for every connection.
+                self.nonce = uuid.uuid4().hex if fake.nonce_per_connection else fake.shared_nonce
                 with fake._lock:
                     fake.connections += 1
 
@@ -72,7 +79,7 @@ class FakeDahua:
                 self.send_header("Content-Length", str(len(data)))
                 for k, v in (extra or {}).items():
                     self.send_header(k, v)
-                if fake.close_every_response and code != 401:
+                if (fake.close_every_response and code != 401) or (fake.close_after_challenge and code == 401):
                     # Ends the connection after each answered request (never
                     # after a challenge, whose nonce lives on this connection).
                     self.send_header("Connection", "close")
@@ -434,6 +441,16 @@ def test_digest_nonce_is_bound_to_the_connection(tmp_path, make_fake):
         assert fake.auth_failures == 0
         if not close:
             assert fake.connections == 1
+
+
+def test_recorder_that_closes_after_its_challenge(tmp_path, make_fake):
+    """The Pearcedale NVR closes the connection after every 401; its nonce is
+    answered on the next connection, with no failed login."""
+    fake = make_fake({1: CIF_D1, 2: CIF_D1}, close_after_challenge=True, nonce_per_connection=False)
+    svc = _service(tmp_path, fake)
+    run = _run(svc, fake, None)
+    assert {e["outcome"] for e in run["channels"]} == {SWITCHED}
+    assert fake.auth_failures == 0
 
 
 def test_preview_is_read_only(tmp_path, make_fake):

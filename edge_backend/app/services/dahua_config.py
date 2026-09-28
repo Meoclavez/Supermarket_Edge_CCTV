@@ -3,15 +3,17 @@
 Used by the "Upgrade CIF sub-streams to D1" action (services/recorder_substreams.py).
 Only the sub-stream (``ExtraFormat[0]``, RTSP ``subtype=1``) is ever written.
 
-Transport: Dahua's CGI API over plain HTTP with Digest authentication. Like
-Dahua's RTSP server, the HTTP server's Digest nonce is tied to the TCP
-connection, so this client keeps one persistent connection, answers the
-challenge on that same connection and reuses the nonce (``nc`` counting up)
-for every later request. After a reconnect it asks for a fresh challenge
-first; it never replays a nonce on another connection. An authenticated
-request that is refused with ``401`` (not a ``stale`` nonce) raises
-:class:`DahuaAuthError` at once, without a retry: Dahua locks the account
-after about five failed logins.
+Transport: Dahua's CGI API over plain HTTP with Digest authentication. The
+client keeps one persistent connection and reuses the nonce (``nc`` counting
+up) for every later request. Unlike Dahua's RTSP server, the recorder's HTTP
+server closes the connection after its ``401`` challenge (seen on the
+Pearcedale NVR), so the challenge is kept and answered on a new connection,
+as a browser does. When a recorder closes after an answered request instead,
+the next connection asks for a fresh challenge first, so a nonce that is bound
+to its connection is never replayed. An
+authenticated request that is refused with ``401`` (not a ``stale`` nonce)
+raises :class:`DahuaAuthError` at once, without a retry: Dahua locks the
+account after about five failed logins.
 
 Endpoints used (firmware varies; each is optional except ``Encode``):
 
@@ -111,9 +113,16 @@ class DahuaHttpClient:
     def _connect(self) -> http.client.HTTPConnection:
         if self._conn is None:
             self._conn = http.client.HTTPConnection(self.host, self.port, timeout=self.timeout)
-            self._challenge = None      # a new connection needs its own nonce
-            self._nc = 0
         return self._conn
+
+    def _drop(self) -> None:
+        """Close the socket but keep the challenge: the next request answers it."""
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self._conn = None
 
     def close(self) -> None:
         if self._conn is not None:
@@ -159,8 +168,14 @@ class DahuaHttpClient:
         for k, v in resp.getheaders():
             hdrs.setdefault(k.lower(), []).append(v)
         if resp.will_close:
-            # The server ends this connection: its nonce dies with it.
-            self.close()
+            if resp.status == 401:
+                # Closed right after its challenge (the Pearcedale NVR does):
+                # the only way to answer it is on the next connection.
+                self._drop()
+            else:
+                # A nonce may be tied to this connection: fetch a fresh one on
+                # the next, so a replay never counts as a failed login.
+                self.close()
         return resp.status, hdrs, body[:MAX_BODY_BYTES].decode("utf-8", "replace")
 
     def get(self, path: str) -> tuple[int, str]:
@@ -190,17 +205,12 @@ class DahuaHttpClient:
             if not had_challenge:
                 if not self.username:
                     raise DahuaAuthError(f"recorder {self.host} needs a username and password")
-                if self._conn is None:
-                    raise DahuaHttpError(f"recorder {self.host} closed the connection after its login "
-                                         "challenge; its Digest nonce cannot be answered")
                 self._challenge = (scheme, params)
                 self._nc = 0
                 continue
             if scheme == "digest" and str(params.get("stale", "")).lower() == "true" and not stale_retry_used:
                 # Our nonce expired; the password was not judged wrong.
                 stale_retry_used = True
-                if self._conn is None:
-                    raise DahuaHttpError(f"recorder {self.host} closed the connection with a stale nonce")
                 self._challenge = (scheme, params)
                 self._nc = 0
                 continue
