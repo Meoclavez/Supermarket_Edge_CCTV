@@ -1,6 +1,6 @@
 # Edge AI CCTV: Dashboard Feature Reference
 
-Last updated: 2026-09-27 · Describes build `e3bdc30` (main), plus the pose-model trial shown under System health
+Last updated: 2026-09-28 · Describes main after the switch to the RTMO-s pose model (object model removed)
 
 The Edge AI CCTV dashboard runs on the in-store edge device. It shows live cameras, counts shoppers,
 maps them onto a store plan, and flags suspicious behaviour for staff to review. It also produces
@@ -60,6 +60,7 @@ else is site-wide. "Installer-level" means the setting is in `edge_backend/.env`
 | "Camera purpose" | Eight presets, e.g. "Entrance / exit door", "Checkout / cashier", "High-value area"; sets default features and a checklist. | Tile → "Settings" → "Camera purpose" → "Use this purpose" (per camera) |
 | "AI features on this camera" | Turns "People counting & dwell", "Shelf interaction" and "Theft detection" on or off. | Tile → "Settings" (per camera) |
 | "Largest person size" | Rejects oversized false boxes; raise it for cameras mounted close to shoppers. | Tile → "Settings" (per camera); default is installer-level |
+| "Stream quality" | Which recorder stream a Dahua channel is analysed from. "Auto" (default) picks the smallest sub-stream of at least D1 (704x576) among sub-stream 1 and 2, measured once per camera (read-only); if none reaches D1 it keeps the current sub-stream and says "D1 not available". It never picks the main stream by itself. "Sub-stream" / "Main stream" force one. The chosen stream, its size and the reason show in the dialog and on the tile's picture-size badge. | Tile → "Settings" → "Stream quality", "Check sub-streams again" (per camera); automatic measuring is installer-level (`STREAM_AUTO_SELECT`) |
 | "Till / register for this lane" | Links a checkout camera to its POS register so its sales match its shoppers. | Tile → "Settings" (Checkout purpose) → "Link register" |
 | "Department label" | Groups a camera's alerts in reports. | Tile → "Settings" (per camera) |
 | "Remove camera" | Removes the camera and stops its pipeline, after an inline confirmation. | Tile → "Settings" → "Remove camera" |
@@ -97,7 +98,7 @@ Opened from Cameras → tile → "Camera setup". All shapes are drawn on the cam
 | Feature | What it's for | Where / how to configure |
 |---|---|---|
 | "Review queue" | Suspicious behaviour for staff to check, with an evidence image. It is not a finding of theft. | Loss prevention; filter chips |
-| Checks (rules) | "Possible concealment", "Possible shelf sweeping", "Loitering at high-value products", "Exit without passing checkout". | Per camera: "Theft detection" feature and camera purpose |
+| Checks (rules) | "Possible concealment" (a hand goes from a shelf to the pocket / waistband area and stays), "Possible shelf sweeping", "Loitering at high-value products", "Exit without passing checkout". | Per camera: "Theft detection" feature and camera purpose |
 | Incident actions | Records who handled it and what really happened. | "I'm checking", "Mark: staff sent", "Record outcome", "False alarm", "Watch camera now" |
 | Figures | "Waiting for review", "Flagged today", "Value in confirmed incidents", "False-alarm rate". | Automatic, from recorded outcomes |
 | "False alarms by rule" | Shows which checks are often wrong and need tuning. | Automatic |
@@ -134,23 +135,24 @@ Opened from Cameras → tile → "Camera setup". All shapes are drawn on the cam
 | Feature | What it's for | Where / how to configure |
 |---|---|---|
 | "Cameras & recorders" | Shortcut to camera management on the Store map. | Settings → "Cameras & recorders" |
+| "Recorder sub-streams" | Upgrades a Dahua recorder's CIF (352x288) sub-streams to D1 (704x480 on NTSC) so analysis sees far shoppers. "Check sub-streams" reads each channel (read-only) and lists what would change; ticked channels are switched one at a time after an inline confirmation. Each channel's settings are saved first; the change is kept only if the recorder accepts it and the camera really sends D1, otherwise they are put back. Per channel it reports "switched to D1", "already D1 or higher", "kept CIF: D1 not supported by this camera", "kept CIF: NVR refused (…)" or "restored after failure (…)". A rejected recorder sign-in stops at once (no retries). Every change is logged (who, when, before/after). | Settings → "Recorder sub-streams" → "Check sub-streams" → "Upgrade CIF sub-streams to D1"; "Restore" per channel or "Restore previous stream settings" |
 | Device | Shows the device ID and sets the device name. | Settings → "Device" → "Rename" |
 | "Sales data (point of sale)" | Shows whether till data is arriving and how to connect the tills. | Settings → "Sales data" → "How to connect your tills" |
 | "System health" | Video decoding, detection engine and speed, processor, memory, uptime, evidence storage use. | Settings → "System health" (read-only) |
-| "Pose model trial (shadow only)" | Compares a second pose model with the live one; never changes counts or alerts. | Settings → "System health"; trial is installer-level |
+| Person detection model | RTMO-s (Apache-2.0) finds each person and 17 body points in one pass. Needs camera streams of D1 (704x576) or larger; on CIF (352x288) it misses far and partly hidden people. | Automatic; model and speed shown in Settings → "System health" |
+| "Pose model trial (shadow only)" | Compares a candidate pose model with the live one; never changes counts or alerts. Off unless the installer sets one. | Settings → "System health"; trial is installer-level |
 | "Appearance" | Colour theme for this browser. | Settings → "Appearance" |
 
 ## Access and security
 
 | Feature | What it's for | Where / how to configure |
 |---|---|---|
-| "Online access" | Publishes the dashboard over HTTPS on your own domain. | Settings → "Online access" → "Enable remote access", "Provider", "Public hostname", "Tunnel token" |
+| "Online access" | Publishes the dashboard at https://your own address through your own server (VPS reverse tunnel); live status Stopped / Connecting / Connected since / Error. | Settings → "Online access" → "Enable online access", "Public address", "Tunnel server", "Store ID", "Store token" and optional "Server key" (write-only), "Proxies in front of your server"; VPS side: `deploy/vps/README.md` |
 | Access check | Confirms the public address really reaches this device. | Settings → "Online access" → "Verify now" |
-| Private staff access | Shows read-only Tailscale status, with steps for private HTTPS. | Settings → "Online access" |
 | "Pair a phone" | Pairs the mobile app with a one-time code and QR. | Settings → "Phones" → "Pair a phone" |
 | "Push notifications" | Firebase key for phone pushes; test sends and delivery log. | Settings → "Push notifications" → "Upload", "Send test alert" |
 | "Paired phones" | Controls which alerts each phone receives, or removes a phone. | "Alert settings" (types, "Minimum severity", cameras, "Quiet hours"), "Rename", "Revoke" |
-| Public-mode hardening | Blocks first-run setup and API docs remotely; adds strict security headers. | Automatic (docs/DEPLOYMENT.md §7a) |
+| Public-mode hardening | Blocks first-run setup and API docs remotely; counts failed sign-ins per visitor; adds strict security headers. | Automatic (docs/DEPLOYMENT.md §7a) |
 
 ## Available through the API only
 
@@ -168,7 +170,6 @@ These features have no dashboard screen. They are listed so they are not rebuilt
 
 | Feature | Purpose | Status | How it will be configured |
 |---|---|---|---|
-| Object model off; RTMO-s pose model | Faster analysis. RTMO-s (Apache-2.0) found far people ~2.5× better in lab tests. | One-night shadow trial in progress; full switch if the trial is good | Automatic; trial visible in Settings → "System health" |
 | False-detection checks | Rejects detections with too few visible joints (keypoint-count gate) and fixed objects mistaken for people. | Planned | Automatic, with installer-level thresholds |
 | Focus crops (ROI) | Finds distant people on high-resolution cameras by analysing chosen regions at full detail. | Planned | Drawn per camera in the dashboard |
 | Staff areas and uniform recognition | Separates staff from shoppers: staff / not staff / undetermined. Runs one week in shadow mode before alerts. IR at night falls back to schedule rules. | Planned | Draw staff-only areas; teach a uniform by clicking a staff member on a live tile |
@@ -176,8 +177,7 @@ These features have no dashboard screen. They are listed so they are not rebuilt
 | Outdoor features | Perimeter lines and areas for night watch, loitering, dock activity log, camera tamper alerts, vehicle dwell (exterior only), left objects (experimental). | Planned | Drawn and switched on per camera in the dashboard |
 | Shopper attention ("eye-sight beam") | Phase 0: full camera calibration. Phase 1: aisle-side / 1 m shelf-bay attention from the skeleton, attention heatmap and looked→reached funnel. | Planned | Calibration and shelf bays in the dashboard |
 | Shopper attention, later phases | Head-pose model and planogram. Product-level attention is not expected from CCTV. | Planned | In the dashboard |
-| Public URL through own VPS | Reverse tunnel to the owner's VPS with HTTPS on a configurable domain. Replaces the Cloudflare plan for now; Cloudflare Tunnel stays supported. | Planned | Settings → "Online access" |
-| Licence inventory | Third-party notices for every bundled component before commercial sale. | Planned | Not a setting |
+| Licence inventory | Third-party notices for every bundled component before commercial sale. | Started: models and key libraries in `THIRD_PARTY_NOTICES.md`; body7 training-data legal check pending | Not a setting |
 
 ## Installer-level settings
 
@@ -189,7 +189,7 @@ Set once in `edge_backend/.env`; restart the service to apply. The full list wit
 | `STORE_NAME`, `SITE_TIMEZONE` | Store name in the header; store time zone for "today", schedules and alerts. | Host's time zone |
 | `DECODE_BACKEND`, `DECODE_DEVICE` | GPU video decoding (NVDEC, VA-API) with software fallback. | `auto` |
 | `DECODE_MAX_FPS`, `DECODE_MAX_WIDTH` | Decoded frame rate and width per camera; lowers CPU use. | `5`, `auto` |
-| `PERSON_CONF_THRESHOLD` (`_DARK`) | Detection confidence; lower in dark boxes. Tune against real footage. | `0.50` (`0.35`) |
+| `PERSON_CONF_THRESHOLD` (`_DARK`) | Detection confidence; lower in dark boxes. Tune against real footage. | `0.50` (`0.45`) |
 | `PERSON_MAX_FRAME_FRACTION` | Default largest person size (overridable per camera). | `0.35` |
 | `POSE_BUDGET_UTILISATION` | Share of the accelerator the live analysis plans to use. | `0.6` |
 | `STORAGE_DIR` | Evidence and database location; must stay on the device's own disk. | `<project>/storage` |

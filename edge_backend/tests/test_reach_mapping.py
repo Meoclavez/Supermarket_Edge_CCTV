@@ -162,7 +162,7 @@ class Clock:
         """Feed one skeleton per frame; returns the interactions reported live."""
         got = []
         for kps in poses:
-            res = pose_analytics.observe(cam, self.t, FRAME, [track_ns(tid, kps, floor)], [])
+            res = pose_analytics.observe(cam, self.t, FRAME, [track_ns(tid, kps, floor)])
             got.extend(res.interactions)
             self.t += DT
         # Let the re-entry window pass with the hand at rest, then gap.

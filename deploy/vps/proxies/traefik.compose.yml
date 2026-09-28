@@ -1,0 +1,25 @@
+# Traefik (v3): routes for the shared frps, as labels. Use with the main file:
+#   docker compose --env-file frps.env -p edge-frps \
+#     -f docker-compose.yml -f proxies/traefik.compose.yml up -d
+# One router serves every store name matching PUBLIC_HOST_REGEX; the store
+# check decides which box may use which name.
+services:
+  frps:
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=${PROXY_NETWORK}
+      # Tunnel: only frp's WebSocket path on the tunnel host.
+      - traefik.http.routers.edge-frps-tunnel.rule=Host(`${TUNNEL_HOST}`) && Path(`/~!frp`)
+      - traefik.http.routers.edge-frps-tunnel.entrypoints=${TRAEFIK_ENTRYPOINT}
+      - traefik.http.routers.edge-frps-tunnel.tls.certresolver=${TRAEFIK_CERTRESOLVER}
+      - traefik.http.routers.edge-frps-tunnel.service=edge-frps-tunnel
+      - traefik.http.services.edge-frps-tunnel.loadbalancer.server.port=7000
+      # Store dashboards.
+      - traefik.http.routers.edge-frps-web.rule=HostRegexp(`${PUBLIC_HOST_REGEX}`)
+      - traefik.http.routers.edge-frps-web.entrypoints=${TRAEFIK_ENTRYPOINT}
+      - traefik.http.routers.edge-frps-web.tls.certresolver=${TRAEFIK_CERTRESOLVER}
+      - traefik.http.routers.edge-frps-web.service=edge-frps-web
+      - traefik.http.routers.edge-frps-web.middlewares=edge-frps-ratelimit
+      - traefik.http.services.edge-frps-web.loadbalancer.server.port=8080
+      - traefik.http.middlewares.edge-frps-ratelimit.ratelimit.average=30
+      - traefik.http.middlewares.edge-frps-ratelimit.ratelimit.burst=120

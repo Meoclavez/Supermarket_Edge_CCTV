@@ -146,7 +146,7 @@ def test_live_status_on_cpu_with_gpu_present_is_flagged():
     result = {"ok": True, "errors": [], "warnings": [],
               "checks": {"accelerators": _accel(nvidia_driver=True), "onnxruntime": {"gpu_mismatch": False}}}
     pf.add_live_status(result, {"available": True, "backend": "onnxruntime", "provider": "CPUExecutionProvider",
-                                "execution_provider": "CPUExecutionProvider", "model": "yolo26n-pose.onnx",
+                                "execution_provider": "CPUExecutionProvider", "model": "rtmo-s-body7-640x640-static.onnx",
                                 "error": None})
     assert _checks(result["warnings"]) == ["gpu"]
     assert result["checks"]["inference"]["provider"] == "CPUExecutionProvider"
@@ -220,35 +220,44 @@ def test_manifest_accepts_recorded_local_export(tmp_path):
 def test_shipped_manifest_matches_shipped_models():
     manifest = json.loads(pf.MANIFEST_PATH.read_text())
     names = {m["file"] for m in manifest["models"]}
-    assert {"yolo26s-pose.onnx", "yolo26n-pose.onnx", "yolo26n.onnx"} <= names
+    assert names == {"rtmo-s-body7-640x640-static.onnx", "rtmpose-s-256x192.onnx"}
     required = {m["file"] for m in manifest["models"] if m.get("required", True)}
-    assert required == {"yolo26s-pose.onnx", "yolo26n-pose.onnx"}
+    assert required == {"rtmo-s-body7-640x640-static.onnx"}
+    assert "exporter" not in manifest                     # no Ultralytics export path
     for m in manifest["models"]:
         assert len(m["sha256"]) == 64 and m.get("io")
-        if m["file"].startswith("yolo26"):
-            assert m["licence"] == "AGPL-3.0" and m["source"].endswith(".pt")
-        else:  # published ONNX (RTMPose): downloaded, not exported
-            assert m["licence"].startswith("Apache-2.0") and m["download"]["archive_sha256"]
+        # Every shipped model is downloaded from its publisher; none is AGPL.
+        assert m["licence"].startswith("Apache-2.0") and "AGPL" not in m["licence"]
+        assert m["download"]["url"].startswith("https://") and len(m["download"]["archive_sha256"]) == 64
+        assert "yolo" not in m["file"].lower() and "ultralytics" not in json.dumps(m).lower()
+    rtmo = next(m for m in manifest["models"] if m["file"].startswith("rtmo-"))
+    assert rtmo["transform"]["script"] == "scripts/export_rtmo_static.py"
+    assert [o["shape"] for o in rtmo["io"]["outputs"]] == [[1, 300, 5], [1, 300, 17, 3]]
     results = pf.verify_models()
-    # Required models must verify; optional ladder/refiner models may be absent.
+    # Required models must verify; the optional refiner may be absent.
     assert all(r["status"] in ("ok", "local_export") or (not r["required"] and r["status"] == "missing")
                for r in results), results
 
 
 def test_io_signature_comparison():
-    sig = {"inputs": [{"name": "images", "shape": [1, 3, 640, 640], "type": "tensor(float)"}],
-           "outputs": [{"name": "output0", "shape": [1, 56, 8400], "type": "tensor(float)"}]}
+    sig = {"inputs": [{"name": "input", "shape": [1, 3, 640, 640], "type": "tensor(float)"}],
+           "outputs": [{"name": "dets", "shape": [1, 300, 5], "type": "tensor(float)"},
+                       {"name": "keypoints", "shape": [1, 300, 17, 3], "type": "tensor(float)"}]}
     other = json.loads(json.dumps(sig))
     assert pf.io_signature_matches(sig, other)
-    other["outputs"][0]["shape"] = [1, 84, 8400]
+    other["outputs"][0]["shape"] = [1, 100, 5]
     assert not pf.io_signature_matches(sig, other)
     assert not pf.io_signature_matches(None, sig)
 
 
-def test_real_model_io_signature_matches_manifest():
+@pytest.mark.parametrize("index", [0, 1])
+def test_real_model_io_signature_matches_manifest(index):
     pytest.importorskip("onnxruntime")
-    entry = json.loads(pf.MANIFEST_PATH.read_text())["models"][1]
-    sig = pf.read_io_signature(pf.MODELS_DIR / entry["file"])
+    entry = json.loads(pf.MANIFEST_PATH.read_text())["models"][index]
+    path = pf.MODELS_DIR / entry["file"]
+    if not path.exists():
+        pytest.skip(f"{entry['file']} not present (scripts/fetch_models.py)")
+    sig = pf.read_io_signature(path)
     assert pf.io_signature_matches(sig, entry["io"])
 
 

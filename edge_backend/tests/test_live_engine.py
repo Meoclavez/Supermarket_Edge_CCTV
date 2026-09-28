@@ -69,11 +69,11 @@ class FakePoseAnalytics:
         self.interactions: list = []
         self.raise_with: Exception | None = None
 
-    def observe(self, camera_id, ts, frame_bgr, tracks, objects):
+    def observe(self, camera_id, ts, frame_bgr, tracks):
         if self.raise_with is not None:
             raise self.raise_with
         self.calls.append({"camera_id": camera_id, "ts": ts, "shape": frame_bgr.shape,
-                           "tracks": list(tracks), "objects": list(objects)})
+                           "tracks": list(tracks)})
         out, self.interactions = self.interactions, []
         return _Result(out)
 
@@ -252,7 +252,7 @@ def test_pose_analytics_sees_only_confirmed_tracks_with_keypoints(worker, stub_d
     assert last["camera_id"] == CAM and last["shape"] == frame.shape
     (track,) = last["tracks"]
     assert track.confirmed and track.keypoints.shape == (17, 3)
-    assert isinstance(last["objects"], list)
+    assert set(last) == {"camera_id", "ts", "shape", "tracks"}         # no object-model context
 
 
 def test_interaction_marks_the_open_zone_visit(worker, stub_detector, fake_pose, monkeypatch):
@@ -481,7 +481,7 @@ def test_pose_analytics_receives_the_masked_frame(worker, stub_detector, masks, 
     seen = {}
 
     class Grab(FakePoseAnalytics):
-        def observe(self, camera_id, ts, frame_bgr, tracks, objects):
+        def observe(self, camera_id, ts, frame_bgr, tracks):
             seen["frame"] = frame_bgr.copy()
             return _Result()
 

@@ -40,7 +40,6 @@ def test_sigterm_with_open_streams_exits_within_seconds(tmp_path):
         DATABASE_PATH=str(tmp_path / "db.sqlite"),
         SQLITE_DB_PATH=str(tmp_path / "db.sqlite"),
         MODELS_DIR=str(empty_models),       # no model: fast start, detector honestly unavailable
-        OBJECT_MODEL_PATH="",
         INTERNAL_SERVICE_KEY=key,
         PYTHONPATH=str(EDGE),
     )

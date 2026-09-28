@@ -15,7 +15,7 @@ class ServerEntry {
   /// The last URL that answered with this [deviceId].
   String? lastGoodUrl;
 
-  /// The server's remote https URL (Cloudflare tunnel / direct), if enabled.
+  /// The server's remote https URL (through the owner's VPS tunnel), if enabled.
   String? remoteUrl;
 
   /// Id of this phone's paired-device record on the server, if known.

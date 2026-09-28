@@ -32,8 +32,8 @@ push_router = APIRouter(
 
 
 def _ip(request: Request) -> str:
-    # The real phone address behind cloudflared / tailscale serve (both reach
-    # uvicorn from 127.0.0.1): one wrong code must not lock out every phone.
+    # The real phone address behind the VPS tunnel (frpc reaches uvicorn from
+    # 127.0.0.1): one wrong code must not lock out every phone.
     from app.services.public_exposure import client_ip
 
     return client_ip(request)

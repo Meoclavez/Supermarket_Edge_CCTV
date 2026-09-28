@@ -16,9 +16,11 @@ no analytics leave the premises.
 | Disk | 256 GB SSD | Theft evidence (stills, optional short clips) goes to `STORAGE_DIR` on this SSD. Continuous recording is the store NAS's job; this software never writes to the NAS |
 | Network | Wired gigabit | Cameras and the server on the same VLAN |
 
-**No hardware is selected at build time.** On startup the system probes for a
-Hailo NPU, then TensorRT, CUDA, MIGraphX (AMD), OpenVINO, and finally CPU, and
-uses the first that really takes the model. Moving the install to a machine
+**No hardware is selected at build time.** On startup the system probes
+TensorRT, CUDA, MIGraphX (AMD), OpenVINO, and finally CPU, and uses the first
+that really takes the model. A Hailo NPU is detected and reported, but no
+compatible model ships for it (there is no RTMO HEF), so the next backend
+runs the model. Moving the install to a machine
 with a GPU needs no code change — re-run `deploy/install.sh` (or
 `run.sh --check-only`), which installs the matching onnxruntime build.
 
@@ -49,7 +51,7 @@ Optional environment, passed through `sudo`:
 |---|---|---|
 | `EDGE_REPO_URL` | the GitHub repo above | where to clone from |
 | `EDGE_ORT` | `auto` | onnxruntime build (`bootstrap.py --ort`) |
-| `EDGE_MODELS_FROM` | unset | a directory of `*.onnx` files to copy into `edge_backend/models/` instead of exporting them on this machine |
+| `EDGE_MODELS_FROM` | unset | a directory of `*.onnx` files to copy into `edge_backend/models/` instead of downloading them on this machine (files `models/manifest.json` does not list are deleted afterwards) |
 
 ```bash
 sudo EDGE_MODELS_FROM=/home/me/models bash Supermarket_Edge_CCTV/deploy/install.sh
@@ -69,7 +71,8 @@ time; a few seconds on later runs), so the service starts on the GPU straight
 away. Every rung of the pose ladder is compiled, not only the one start-up
 picks, because the run-time scheduler (section 6) may step to any of them as
 cameras come and go; a rung it needs that is still cold is compiled in a
-separate process while the current model keeps serving.
+separate process while the current model keeps serving. The shipped ladder
+has one rung, RTMO-s (compile about 110 s, peak about 2 GB).
 
 If the cache is cold at service start (a new model, a changed camera count
 that selects another model), the service starts on the CPU, compiles in a
@@ -78,13 +81,42 @@ separate process, and switches to the GPU when done; `/api/v1/health` shows
 then. `MIGRAPHX_COMPILE_MODE=foreground` blocks start-up instead. A compile
 peaks at about 2.5 GB, within the unit's `MemoryMax=8G`.
 
-Measured on an RX 9060 XT (fp32, same detections as the CPU within 0.002):
-YOLO26m-pose 960x544 14 ms/frame vs about 315 ms on 6 CPU threads.
+Measured on an RX 9060 XT (fp32): RTMO-s 640x640 about 11 ms per frame
+(12.3 ms median standalone, 10.9 ms in the live trial), boxes within 1e-4 px
+and keypoints within 6e-4 px of the CPU result.
 `--ort cpu` (or `EDGE_ORT=cpu`) keeps the small CPU-only build.
 
 When inference does run on the CPU, ONNX Runtime is limited to
 `INFERENCE_CPU_THREADS` threads in total (default: half the CPUs) so it cannot
 starve video decoding and recording.
+
+### Models and licences
+
+`edge_backend/models/manifest.json` lists every model the product may use,
+each pinned by sha256 and with its licence:
+
+| File | Role | Licence |
+|---|---|---|
+| `rtmo-s-body7-640x640-static.onnx` | the person model (box + 17 keypoints, one pass), required | Apache-2.0 (OpenMMLab mmpose / RTMO) |
+| `rtmpose-s-256x192.onnx` | optional top-down keypoint refiner (`POSE_REFINER`) | Apache-2.0 (OpenMMLab mmpose / RTMPose) |
+
+`scripts/fetch_models.py` (run by `bootstrap.py`, so by `run.sh` and
+`install.sh`) downloads a missing model from OpenMMLab, rebuilds RTMO as a
+static 640x640 graph with host NMS (`scripts/export_rtmo_static.py`, in an
+isolated venv; byte-identical to the manifest hash), and **deletes every
+`*.onnx` in `edge_backend/models/` that the manifest does not list**, logging
+each file, so models of earlier releases do not linger (`--keep-unlisted`
+keeps them; `--verify-only` only lists them). The service's preflight ignores
+unlisted files but warns when a setting (`POSE_MODEL_*`, `SHADOW_POSE_MODEL`)
+names a model that is not in the manifest. No AGPL-3.0 (e.g. Ultralytics
+YOLO) or non-commercial model may be added. Both checkpoints were trained on
+OpenMMLab's body7 dataset mix, part of which is published for research use
+only; that is pending a legal check. Attribution: `THIRD_PARTY_NOTICES.md`.
+
+Camera streams: RTMO-s needs about D1 (704x576) or more. In the live trial it
+found 25-33 % more real shoppers than the previous model on D1 and larger
+streams but only about 60 % of them on CIF (352x288) sub-streams, so set the
+NVR's analytics sub-streams to D1 or better.
 
 ### By hand
 
@@ -165,8 +197,8 @@ start. Find it in any of:
   `edgecctv`): `sudo cat /opt/edge-cctv/storage/setup_code.txt`.
 
 The code is single use and the file is removed once the account exists.
-Setup is refused through the public remote-access hostname (section 7a), so
-do this on the store network or over Tailscale.
+Setup is refused through the public online-access address (section 7a), so
+do this on the store network (or over a private VPN into it).
 
 To get a code again:
 
@@ -185,40 +217,16 @@ To get a code again:
   `manage_operator.py reset-password --username <name>` changes one password
   instead, and `list` shows the accounts.
 
-### Viewing the dashboard over Tailscale
+### Viewing the dashboard from off-site
 
-**Recommended: private HTTPS with `tailscale serve`.** The owner and staff
-open `https://<machine>.<tailnet>.ts.net/dashboard` from any device signed in
-to the tailnet. Tailscale provides a real certificate and HTTP/2 (many files
-over one connection, which matters on a slow store uplink), and nothing is
-published outside the tailnet. Section 7a has the steps; in short:
-
-1. Tailscale admin console → **DNS** (https://login.tailscale.com/admin/dns):
-   turn on **MagicDNS** and **HTTPS Certificates**.
-2. On the server: `sudo EDGE_TAILSCALE_SERVE=1 bash deploy/install.sh`
-   (or by hand: `sudo tailscale serve --bg --https=443 http://127.0.0.1:8000`).
-3. **Settings → Online access** shows the address and whether it is published.
-
-**Plain HTTP on the tailnet address** keeps working as before:
-`http://<tailscale-ip>:8000/dashboard` (`tailscale ip -4` prints the address).
-Two firewall rules allow it without exposing the dashboard anywhere else;
-`deploy/install.sh` adds them when `ufw` is active and `HOST` is not
-`127.0.0.1`:
-
-```bash
-sudo ufw allow in on tailscale0 to any port 8000 proto tcp   # dashboard, tailnet only
-sudo ufw allow 41641/udp                                      # Tailscale direct connections
-```
-
-Without UDP 41641 open, peers still connect but through a Tailscale DERP relay,
-which is slower and adds latency to live video. `tailscale ping <peer>` shows
-which you have: `via DERP(...)` is relayed, `via <ip>:<port>` is direct.
-
-Tailnet requests count as local, not remote, whether they use the `.ts.net`
-HTTPS name or the `100.x` address: they get the same access as the store LAN,
-including first-run setup, so only add devices you trust to the tailnet. (A
-request through **Tailscale Funnel**, which is public, is treated as remote.)
-See "Trusted proxies" in section 7a.
+- **Public, for anyone you give an account:** `https://cctv.<your-domain>`
+  through your own VPS (section 7a).
+- **Private VPN:** a VPN such as Tailscale reaches the plain address,
+  `http://<vpn-ip>:8000/dashboard`, encrypted by the VPN itself.
+  `deploy/install.sh` keeps port 8000 open on `tailscale0` only (plus UDP
+  41641 for direct peer connections) when `ufw` is active and `HOST` is not
+  `127.0.0.1`. VPN requests count as local (like the store LAN, first-run
+  setup included), so only admit devices you trust.
 
 A fresh install is empty: no zones, no rooms or walls, no cameras and no
 metrics. The dashboard shows a data-state banner and the **Blueprint** tab
@@ -324,16 +332,24 @@ The defaults are conservative. After a day of real footage, check
   person. The geometry gates (`PERSON_MIN_ASPECT_RATIO`,
   `PERSON_MAX_FRAME_FRACTION`) reject boxes that cannot be an upright person;
   `implausible_boxes_rejected` in the status shows how often they fire.
-- **Real shoppers missed** → lower `PERSON_CONF_THRESHOLD`, and check the
-  camera is not so high that people appear wider than tall.
+- Defaults for RTMO-s (measured on COCO persons degraded to 704x576):
+  `PERSON_CONF_THRESHOLD=0.50`, `PERSON_CONF_THRESHOLD_DARK=0.45` (precision
+  0.96 lit / 0.95 at -3 EV), `TRACK_LOW_CONF_THRESHOLD=0.40` (boxes that may
+  only extend an existing track), keypoint visibility gate 0.5. A `.env` that
+  still sets the earlier model's `PERSON_CONF_THRESHOLD_DARK=0.35` or
+  `TRACK_LOW_CONF_THRESHOLD=0.25` lets more false boxes through with RTMO.
+- **Real shoppers missed** → lower `PERSON_CONF_THRESHOLD`, check the
+  camera is not so high that people appear wider than tall, and that its
+  analytics stream is at least D1 (704x576): on CIF (352x288) the model
+  misses far and partly hidden people.
 - **CPU saturated** → raise `ANALYTICS_DETECT_EVERY_N_FRAMES`, or fit a GPU.
 
 ### Many cameras: the inference budget
 
 Detection does not run on every Nth frame of every camera any more: one
 accelerator cannot do that for dozens of streams (33 cameras x 5 frames/s x
-14 ms for YOLO26m-pose kept an RX 9060 XT 97 % busy, and detections went
-stale). The service measures what each analysed frame really costs on the
+14 ms for a 960x544 pose model kept an RX 9060 XT 97 % busy, and detections
+went stale). The service measures what each analysed frame really costs on the
 device and plans for `POSE_BUDGET_UTILISATION` (default 0.6) of that capacity,
 split fairly between the cameras that are analysing:
 
@@ -351,11 +367,18 @@ split fairly between the cameras that are analysing:
 A frame that is not analysed is still shown live and recorded. When the
 cameras change, or the device stays over the target, the model is re-fitted
 down (or back up) the ladder: the `auto` keypoint refiner is dropped first,
-then `yolo26m-pose-544x960` → `yolo26s-pose-544x960` → `yolo26s-pose` → ….
-For 33 cameras with the defaults that means about 2 frames/s per camera on
-the smaller 960x544 model instead of 1.2/s on the medium one; set
-`ANALYTICS_TARGET_DETECT_FPS` equal to `ANALYTICS_MIN_DETECT_FPS` to prefer
-the larger model. `detector.load_control` in
+then the next model on `POSE_MODEL_LADDER_GPU` / `_CPU`. Only RTMO-s ships, so
+the ladder has one rung; a larger model with the same output layout (for
+example an RTMO-m static export, Apache-2.0) can be listed there, most
+accurate first, once it is in `models/manifest.json`.
+
+Projection for the store box (RX 9060 XT, 32 cameras, defaults): RTMO-s costs
+about 10.9 ms of device time per analysed frame, so the budget is
+0.6 x 1000 / 10.9 ≈ 55 analysed frames/s, about **1.7 frames/s per camera**
+(1.5/s if the device cost is the 12.3 ms measured standalone). That is below
+the 2.0/s target (the keypoint refiner is off by default: it did not improve
+RTMO's keypoints); the 1.0/s floor is met with room to spare (32 x 1.0 x 10.9 ms = 35 % of the device). The measured cost, not
+these figures, drives the scheduler. `detector.load_control` in
 `GET /api/v1/layout/pipeline/status` shows the target and measured
 utilisation, the measured ms per frame, the rate each camera is allocated and
 really gets (`cameras[].analysis_rate`), the ladder with its predicted load,
@@ -414,120 +437,99 @@ that now performs the same full reset; it no longer keeps cameras or zones.
 
 ---
 
-## 7a. Online access: private (Tailscale) and public (your domain)
+## 7a. Online access through your own server (VPS)
 
-Two routes, which can run side by side. Both are configured and monitored in
-**Settings → Online access**; nothing moves to the cloud: footage, detection
-and the database stay on this machine.
+The dashboard is published at `https://cctv.<your-domain>` through a server
+you already run (a VPS with Docker and a reverse proxy). Nothing moves to the
+cloud: footage, detection and the database stay on this machine; the VPS only
+relays connections.
 
-| Route | Address | Who can reach it | TLS |
-|---|---|---|---|
-| Private: `tailscale serve` | `https://<machine>.<tailnet>.ts.net` | devices signed in to the owner's tailnet | Tailscale certificate, HTTP/2 |
-| Public: Cloudflare Tunnel | `https://cctv.<your-domain>` | anyone on the internet (put Cloudflare Access in front) | Cloudflare certificate, HTTP/2 / HTTP/3 |
+```
+browser --HTTPS--> VPS reverse proxy --> frps (Docker) ==tunnel==> frpc (this machine) --> 127.0.0.1:8000
+```
 
-Both proxies run on this machine and connect to the app over loopback
-(`http://127.0.0.1:8000`), so once they are in place the app itself can stop
-listening on the network (`HOST=127.0.0.1`, below).
+- **frpc** (frp, Apache-2.0) runs on this machine as a child of the service
+  (`app/services/remote_access_service.py`: started, supervised, restarted
+  with backoff, status read from its log). It dials **out** to the VPS, so
+  the store needs no port forwarding and works behind carrier-grade NAT.
+- **frps** runs on the VPS as one Docker container shared by all stores, on
+  the reverse proxy's network, with no published ports (`deploy/vps/`). Each
+  box logs in with its **store ID** and **store token**; a server plugin (the
+  store check) verifies them and allows each store only its own hostname(s).
+- The tunnel itself goes over **WebSocket + TLS through the VPS's existing
+  reverse proxy on 443**, on a hostname of its own (`wss://tunnel.<your-domain>`),
+  so no new port is opened on the VPS. `tcp://<vps>:7000` (frp's own TLS on a
+  published port) is the fallback for proxies that cannot pass WebSockets.
+- The VPS proxy terminates HTTPS for `cctv.<your-domain>` with its own
+  certificates (Let's Encrypt) and hands requests to frps, which routes them
+  by name down this store's tunnel.
 
-### Private HTTPS for the owner and staff (tailscale serve)
+It is online **only** while enabled in **Settings → Online access**; disable
+it there and the address stops working within seconds.
 
-1. Tailscale admin console → **DNS** (https://login.tailscale.com/admin/dns):
-   turn on **MagicDNS** and **HTTPS Certificates** (once per tailnet).
-2. On the server:
+**VPS side:** `deploy/vps/README.md` (compose file, `frps.toml`, snippets for
+Traefik, nginx, Caddy and Nginx Proxy Manager, security checklist, adding a
+store). Store names are one level deep, `<store>-cctv.<domain>`, so a CDN's
+free certificate covers them.
+
+**Edge box side:**
+
+1. Fetch frpc (pinned frp version, SHA-256 checked against the value pinned in
+   `bootstrap.py` and the release's checksum list, x86_64/arm64/armv7):
 
    ```bash
-   sudo EDGE_TAILSCALE_SERVE=1 bash deploy/install.sh
+   sudo EDGE_TUNNEL=1 bash /opt/edge-cctv/deploy/install.sh
    ```
 
-   The installer checks that the tailnet has HTTPS certificates (and says what
-   to turn on if not), then runs, only if not already configured,
-   `tailscale serve --bg --https=443 http://127.0.0.1:<PORT>`. The setting is
-   kept by tailscaled across reboots. To do it by hand:
-   `sudo tailscale serve --bg --https=443 http://127.0.0.1:8000`;
-   `tailscale serve status` shows it, `sudo tailscale serve --https=443 off`
-   removes it.
-3. **Settings → Online access** shows *Published on your tailnet* and the
-   `https://<machine>.<tailnet>.ts.net/dashboard` link (read from
-   `tailscale status --json`; the page says so when Tailscale is missing,
-   stopped, or HTTPS certificates are off).
-4. Staff install Tailscale on their phone/PC and are invited to the tailnet;
-   they sign in to the dashboard with their operator account as usual.
-
-Do **not** enable Tailscale Funnel for this port: that publishes it on the
-internet. If it is on, the page warns and the app treats those requests as
-remote (the public rules below apply).
-
-### Public dashboard on your domain (Cloudflare Tunnel)
-
-The app runs the tunnel itself (`cloudflared tunnel run`, supervised and
-restarted with backoff by `app/services/remote_access_service.py`). The
-tunnel is an *outbound* connection from the store to Cloudflare, so no router
-port forwarding or public IP is needed, it works behind carrier-grade NAT
-(4G/5G routers, NBN CGNAT), and Cloudflare issues and renews the certificate.
-It is online **only** while enabled in **Settings → Online access**; disable
-it there and the public address stops working within seconds.
-
-The tunnel token is stored encrypted under `storage/secrets/named/`, passed
-to cloudflared in an environment variable (never on its command line), never
-logged and never returned by the API: the dashboard only shows
-"configured / not configured". `cloudflared` is found on `PATH`, else in
-`<repo>/bin/`; `./run.sh --with-tunnel` downloads the official release into
-`bin/` and checks its published SHA-256 (also done automatically on start when
-remote access is enabled). No sudo is used.
-
-Nothing assumes a fixed domain: the hostname is a setting in the dashboard and
-can change at any time (test domain now, the customer's domain at handover).
-Changing it clears the *Verified* badge, the old name stops being treated as
-this device's public name (CORS, remote rules), and a new token restarts
-cloudflared with it.
-
-#### Go live (step by step)
-
-`<your-domain>` below is a placeholder: the owner's test domain now, the
-customer's domain at handover.
-
-1. Put the domain on Cloudflare (free plan is enough): **Add a domain**, then
-   change the nameservers at your registrar to the two Cloudflare shows. Wait
-   until the domain shows **Active**.
-2. **Zero Trust** (one.dash.cloudflare.com) → **Networks → Tunnels → Create a
-   tunnel** → **Cloudflared**. Name it after the store.
-3. On *Install and run connector*, copy the command for any OS — **do not run
-   it**. Paste the whole command (or just the long value starting `eyJ`) into
-   **Settings → Online access → Tunnel token** on the dashboard.
-4. **Public hostname**: subdomain `cctv`, domain `<your-domain>`, **Service
-   type** `HTTP`, **URL** `127.0.0.1:8000`. Save. (Use `127.0.0.1`, not
-   `localhost`: with `HOST=127.0.0.1` the app listens on IPv4 only.)
-5. In the dashboard enter `cctv.<your-domain>`, tick **Enable remote access**,
-   press **Save**. The status goes *Connecting… → Connected*.
-6. Press **Verify now**. The app fetches
+   (`./run.sh --with-tunnel` does the same for a manual install; once online
+   access is enabled, every later bootstrap keeps frpc in place by itself.)
+2. **Settings → Online access**: **Public address** `<store>-cctv.<your-domain>`,
+   **Tunnel server** `wss://tunnel.<your-domain>`, **Store ID** and **Store
+   token** (issued for this store; e.g. `pearcedale-cctv.ikorex.com.au`,
+   `wss://tunnel.ikorex.com.au`, `pearcedale`), **Server key** only if the server sets
+   frp's shared token, **Proxies in front of your server** = *One* if a CDN
+   proxy (e.g. Cloudflare's orange cloud) sits in front of the VPS, tick
+   **Enable online access**, **Save**. The status goes *Connecting… →
+   Connected since …*.
+3. Press **Verify now**. The app fetches
    `https://cctv.<your-domain>/api/v1/device/identity` and checks that the
-   device id is *this* machine's, so a hostname routed to another store's box
-   (or a stale tunnel) is caught. The badge shows *Verified* with the time.
-7. **Strongly recommended — Cloudflare Access (e-mail one-time PIN):**
-   Zero Trust → **Access → Applications → Add an application → Self-hosted**.
-   Application domain `cctv.<your-domain>`, session duration e.g. 24 h.
-   Policy *Allow* → *Include* → **Emails** → the owner's and staff addresses
-   (or *Emails ending in* `@<customer-domain>`). Under **Authentication**
-   enable **One-time PIN**. Cloudflare then challenges every visitor before
-   the dashboard's own sign-in, so the app's login page is not exposed to the
-   whole internet. The phone app cannot answer the e-mail challenge: if it
-   must connect through the public hostname, add a second application for
-   the paths `cctv.<your-domain>/api/*` and `cctv.<your-domain>/stream` with a
-   **Bypass** policy (those still require the app's token), or keep the
-   phone on Tailscale instead.
-8. Open `https://cctv.<your-domain>/dashboard` from a phone on mobile data:
-   Cloudflare's PIN page, then the dashboard sign-in.
+   device id is *this* machine's, so an address routed to another store's box
+   is caught. The badge shows *Verified* with the time. It is checked again
+   a few seconds after every (re)connection, and every 10 minutes while the
+   Settings page is open.
+4. From a phone on mobile data, open `https://cctv.<your-domain>/dashboard`.
 
-**Direct provider** (sites with a public IP and port forwarding): choose
-*Direct* in Settings; the panel shows a Caddy site block for the hostname
-(`reverse_proxy 127.0.0.1:8000`, `flush_interval -1` for the MJPEG streams).
-Run Caddy yourself, forward TCP 80/443 to this machine, then *Verify now*.
-The app does not run Caddy.
+What the status says when it is not connected (`error_kind` in
+`GET /api/v1/remote-access`): the store login was refused (check Store ID and
+token), the address is not allowed for this store, another connection already
+serves the address, the shared server key does not match, the store check is
+not answering, the certificate could not be verified, the server is not
+reachable, it answered but not as a tunnel (WebSocket handshake refused: proxy
+route for the tunnel host missing), the connection was lost (reconnecting), or
+the tunnel program (frpc) is not installed.
+
+**Secrets and files.** The store token and the optional server key are
+stored encrypted under `storage/secrets/named/` and are write-only in the
+dashboard. frpc gets them in environment variables that its generated config
+(`storage/tunnel/frpc.toml`, directory `0700`, file `0600`: `user = <store
+id>`, `metadatas.token`, one `http` proxy for the public address to
+`127.0.0.1:<PORT>`, heartbeat 30 s / timeout 90 s) references as templates, so
+they are never on a command line, in a file, in the logs or in an API
+response. frpc's environment holds nothing else of the service's.
+The tunnel server's certificate is always verified (system CA bundle;
+`EDGE_TUNNEL_CA_FILE` for a private CA). Binary lookup: `FRPC_PATH`, `PATH`,
+`<repo>/bin/frpc`. The systemd unit needs no change for it (`bin/` is only
+read, the config is under `storage/`, connections are outbound).
+
+Nothing assumes a fixed domain: the address, tunnel server, store ID and
+secrets are settings and can change at any time (test domain now, the
+customer's at handover). Any change restarts frpc; changing the address
+clears *Verified* and moves the CORS origin and remote rules to the new name.
 
 ### Close the plain-HTTP port (HOST=127.0.0.1)
 
-Once the dashboard is reached through `tailscale serve` and/or cloudflared,
-nothing needs the unencrypted `http://<ip>:8000` any more:
+frpc connects to the app over loopback, so if nothing on the network needs
+the unencrypted `http://<ip>:8000`:
 
 ```bash
 sudoedit /opt/edge-cctv/edge_backend/.env        # set HOST=127.0.0.1 (add the line if missing)
@@ -535,58 +537,63 @@ sudo bash /opt/edge-cctv/deploy/install.sh     # re-applies the unit, removes th
 ss -ltnp | grep :8000                           # expect 127.0.0.1:8000 only
 ```
 
-The systemd unit passes `--host ${HOST} --port ${PORT}` from `.env`
-(default `0.0.0.0:8000`). If store PCs must keep using the LAN address, leave
-`HOST=0.0.0.0` and limit the port to the LAN instead, e.g.
+This also ends access over a VPN IP address. To keep store PCs or a VPN on
+the plain address, leave `HOST=0.0.0.0` and limit the port instead, e.g.
 `sudo ufw allow from 192.168.1.0/24 to any port 8000 proto tcp` (your
-subnet), with no rule for any other interface. First-run setup then needs the
-LAN or the tailnet HTTPS address; it is never allowed through the public
-hostname.
+subnet). Online access needs `HOST` to be `0.0.0.0` or `127.0.0.1` (frpc
+forwards to `127.0.0.1`; the status says so otherwise).
 
 ### Trusted proxies: who is believed about the client
 
+frps appends the VPS proxy's own address to `X-Forwarded-For` after the
+visitor's (which the VPS proxy appended), and overwrites `X-Forwarded-Proto`
+with `http`; `X-Real-IP` passes through unchanged. Each proxy in front of the
+VPS (the *Proxies in front of your server* setting, e.g. a CDN) moves the
+visitor one entry further left. So:
+
 | Arrives as | Classified | Client address (lockouts, rate limits, audit) | HTTPS (HSTS) |
 |---|---|---|---|
-| Peer 127.0.0.1/::1, `Host` `*.ts.net` (`tailscale serve`) | private (like the LAN) | `X-Forwarded-For` (set by tailscaled, never appended) | `X-Forwarded-Proto: https` |
-| … plus `Tailscale-Funnel-Request` (Funnel) | **remote** | `X-Forwarded-For` | as above |
-| Peer loopback with `CF-Connecting-IP` / `CF-Ray` (cloudflared) | **remote** | `CF-Connecting-IP` | `X-Forwarded-Proto` / `CF-Visitor` |
-| `Host` = the configured public hostname (any peer) | **remote** | as per the row that applies | |
-| Any other peer (store LAN, `100.x` tailnet address) | private | the TCP peer; forwarding headers ignored | only if the connection itself was TLS |
+| Peer 127.0.0.1/::1 with `Host` = the configured public address (the tunnel) | **remote** | 2nd entry from the right of `X-Forwarded-For`, 3rd with one proxy in front (never `X-Real-IP`) | yes |
+| `Host` = the public address from any other peer | **remote** | the TCP peer | only if the connection was TLS |
+| Peer loopback, other `Host`, with `X-Forwarded-For` (another local proxy) | private | right-most `X-Forwarded-For` | `X-Forwarded-Proto: https` |
+| Any other peer (store LAN, VPN address) | private | the TCP peer; forwarding headers ignored | only if the connection was TLS |
 
-tailscaled deletes client-sent `Tailscale-User-*` / `Tailscale-Funnel-Request`
-and replaces `X-Forwarded-*`; other client headers pass through, so a
-`.ts.net` request carrying `CF-*` headers is still treated as Tailscale.
-uvicorn's own proxy-header handling (on by default, trusting only
-127.0.0.1/::1) may already have rewritten the peer and scheme;
-`app/services/public_exposure.py` gives the same answers either way. Being
-classified remote only adds restrictions, so a direct client forging
-Cloudflare or Funnel headers gains nothing.
+The launchers (unit, `entrypoint.sh`, `run.sh`) start uvicorn with
+`--no-proxy-headers` so the app sees the real peer; with uvicorn's own
+rewriting on, visitors would all appear as the VPS proxy (still remote, just
+less precise lockouts; the log warns once). Being classified remote only adds
+restrictions, so a LAN client sending the public `Host` gains nothing. The VPS
+proxy must connect straight to frps and set `X-Forwarded-For` (nginx, Traefik,
+Caddy and NPM do by default), and the proxies-in-front setting must not be
+higher than the real count, or a visitor could choose the address used for
+lockouts. (A hop that replaces the header instead of appending is safe: the
+left-most entry, written by a trusted hop, is then used.)
 
 ### What is hardened when the dashboard is public
 
 - First-run setup (`/api/v1/setup/*`, which creates the owner account from the
   one-time code) is refused for remote requests. Create the operator account
-  on the store network or the tailnet first.
+  on the store network first.
 - `/docs`, `/redoc` and `/openapi.json` exist only with `DEBUG=true`, and even
-  then never through the public hostname. The dashboard and phone app do not
-  use them.
-- Remote access cannot be enabled, and remote requests are refused, while
-  `AUTH_DISABLED=true`.
+  then never through the public address.
+- Online access cannot be enabled, frpc is not started, and remote requests
+  are refused, while `AUTH_DISABLED=true`.
+- Failed sign-ins and bad tokens are counted per visitor address (above), so
+  one visitor cannot lock out the others.
 - Security headers on every response: a Content-Security-Policy that allows
   scripts only from this origin plus the pages' own inline blocks by SHA-256
   (no CDN: Chart.js is served from `static/vendor/`), `frame-ancestors
   'self'`, `object-src 'none'`, `X-Content-Type-Options: nosniff`,
   `Referrer-Policy: same-origin`, and HSTS only when the request really came
-  over HTTPS (Cloudflare or `tailscale serve`), never on plain HTTP. Inline
-  `onclick=` handlers are still allowed (`script-src-attr`); moving them to
-  `addEventListener` would allow removing that too.
-- No `server: uvicorn` banner (`--no-server-header` in the unit,
-  `entrypoint.sh` and `run.sh`).
-- The session cookie is `SameSite=Lax` and `Secure` when the page is HTTPS.
-- CORS is limited to this device's own origins (the public hostname,
+  over HTTPS (the tunnel), never on plain HTTP. Inline `onclick=` handlers are
+  still allowed (`script-src-attr`).
+- No `server: uvicorn` banner (`--no-server-header`).
+- The session cookie is `SameSite=Strict` and `Secure` when the page is HTTPS.
+- CORS is limited to this device's own origins (the public address,
   `EDGE_BASE_URL`, explicit `ALLOWED_CORS_ORIGINS` entries; `*` is ignored).
-- API responses carry `Cache-Control: no-store`, so neither the browser nor
-  Cloudflare keeps store data.
+- API responses carry `Cache-Control: no-store`.
+- On the VPS: rate limits, optional basic-auth/SSO in front, no published frps
+  ports, token per store (`deploy/vps/README.md`, security checklist).
 
 ### Speed over a slow uplink
 
@@ -603,37 +610,28 @@ short (`app/services/web_delivery.py`):
   hash, so nothing stale is ever used.
 - Scripts are deferred, so the page renders before Chart.js and the modules
   arrive.
-- HTTP/2 through `tailscale serve` or Cloudflare multiplexes all files over
-  one connection; plain `http://<ip>:8000` is HTTP/1.1 (six connections).
+- The VPS proxy speaks HTTP/2 to browsers; frp multiplexes the requests over
+  the one tunnel connection.
 
 ### Handover to a customer
 
 When the box moves from the installer's test domain to the customer's own:
 
-1. In the **customer's** Cloudflare account (their domain on Cloudflare,
-   step 1 above): create a **new tunnel** and a public hostname
-   `cctv.<customer-domain>` → `HTTP` `127.0.0.1:8000`. Do not reuse the
-   test tunnel.
-2. **Settings → Online access**: enter `cctv.<customer-domain>`, paste the
-   customer tunnel token (**Replace**), keep *Enable* ticked, **Save**. The
-   old token is overwritten and cloudflared restarts with the new one; the
-   *Verified* badge resets.
-3. Wait for *Connected*, press **Verify now**, confirm *Verified*.
-4. Customer Cloudflare account: **Access** application for
-   `cctv.<customer-domain>` with an e-mail one-time-PIN policy listing the
-   store's staff e-mails (step 7 above).
-5. In the **test** Cloudflare account: delete the test tunnel and its public
-   hostname / DNS record, so the old name no longer reaches this box.
-6. Dashboard: **change the operator password** (and remove installer
+1. On the VPS that will serve the customer (theirs or the installer's): add
+   the store as in `deploy/vps/README.md` ("Add a store") with a **new store
+   token** and the customer's name, e.g. `store1-cctv.<customer-domain>`.
+2. **Settings → Online access**: enter the new public address, tunnel server
+   and store ID, **Replace token** with the new one, keep *Enable* ticked,
+   **Save**. frpc restarts with them; the *Verified* badge resets.
+3. Wait for *Connected since …*, press **Verify now**, confirm *Verified*.
+4. Revoke the old store ID/token in the test VPS's store check.
+5. Dashboard: **change the operator password** (and remove installer
    accounts); the customer sets their own.
-7. **Rotate phone pairing**: revoke every paired phone under **Settings →
+6. **Rotate phone pairing**: revoke every paired phone under **Settings →
    Paired phones** and pair the customer's phones afresh with new codes.
-8. Tailscale: move the box to the customer's tailnet (`sudo tailscale
-   logout`, `sudo tailscale up` with their account, enable MagicDNS + HTTPS
-   Certificates there, then `sudo EDGE_TAILSCALE_SERVE=1 bash
-   deploy/install.sh`), or remove the installer's devices from the tailnet.
-9. From a phone on mobile data: open `https://cctv.<customer-domain>/dashboard`
-   (PIN, then sign-in), and check the old test URL no longer loads.
+7. Remove the installer's VPN access to the box, if any.
+8. From a phone on mobile data: open `https://cctv.<customer-domain>/dashboard`,
+   and check the old test URL no longer loads.
 
 ### Why there is no TURN server (coturn) by default
 

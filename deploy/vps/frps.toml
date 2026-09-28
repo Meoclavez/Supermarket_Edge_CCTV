@@ -1,0 +1,39 @@
+# frps (fatedier/frp v0.71.0, Apache-2.0) for Edge AI CCTV online access.
+# ONE shared frps serves every store (multi-tenant). No secret in this file.
+# See README.md.
+
+bindAddr = "0.0.0.0"
+# Tunnel control from each store's frpc: WebSocket on path /~!frp through the
+# reverse proxy (wss://<tunnel host>).
+bindPort = 7000
+# Dashboard requests from the reverse proxy, routed by Host to the right store.
+vhostHTTPPort = 8080
+# Neither port is published: only the reverse proxy reaches them, over the
+# Docker network.
+
+# frp's shared token is optional (FRP_AUTH_TOKEN in frps.env; empty = none).
+# Each store's identity is checked by the store-check plugin below instead:
+# frpc sends user = <store id> and metadatas.token = <store token>.
+auth.method = "token"
+auth.token = "{{ .Envs.FRP_AUTH_TOKEN }}"
+
+# REQUIRED before a second store connects: the store check. On Login it must
+# verify user + metas.token, on NewProxy that the store asks only for its own
+# hostname(s) (http, customDomains). Without it, any box that can log in could
+# claim any hostname. Set addr/path to where your plugin listens.
+# [[httpPlugins]]
+# name = "store-check"
+# addr = "store-check:9000"
+# path = "/handler"
+# ops = ["Login", "NewProxy"]
+
+# HTTP virtual hosts only. frp would otherwise let a logged-in client open
+# TCP/UDP ports on this server; port 1 is the only one "allowed", and the
+# container (non-root, no capabilities) cannot bind it.
+allowPorts = [ { single = 1 } ]
+
+log.to = "console"
+log.level = "info"
+log.disablePrintColor = true
+
+# No webServer section: the frps dashboard/admin API stays off.

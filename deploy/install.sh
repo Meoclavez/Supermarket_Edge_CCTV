@@ -13,19 +13,21 @@
 #                     NVIDIA -> gpu; AMD GPU with ROCm (/dev/kfd) -> migraphx,
 #                     which also pre-compiles the models for the GPU; else gpu,
 #                     whose CPU provider runs without a GPU; cpu, openvino)
-#   EDGE_MODELS_FROM  directory of pre-exported *.onnx models to copy into
+#   EDGE_MODELS_FROM  directory of prepared *.onnx models to copy into
 #                     edge_backend/models/ first; unset means bootstrap.py
-#                     verifies/exports them itself (scripts/fetch_models.py)
-#   EDGE_TAILSCALE_SERVE=1
-#                     publish the dashboard on the tailnet with HTTPS:
-#                     tailscale serve --bg --https=443 http://127.0.0.1:<PORT>
-#                     (needs MagicDNS + HTTPS Certificates enabled for the
-#                     tailnet; the installer checks and says what to turn on)
+#                     verifies/downloads them itself (scripts/fetch_models.py,
+#                     which also deletes *.onnx files manifest.json does not list)
+#   EDGE_TUNNEL=1     fetch frpc (frp, pinned version, checksum-verified) for
+#                     online access through your own VPS. Not needed when online
+#                     access is already enabled in Settings: bootstrap then
+#                     fetches it anyway. The address, tunnel server, store ID
+#                     and store token are entered in Settings -> Online access
+#                     (deploy/vps/README.md).
 #
 # HOST/PORT come from edge_backend/.env (defaults 0.0.0.0 / 8000). With
 # HOST=127.0.0.1 the plain-HTTP port is closed to the network: the dashboard is
-# then reached only through tailscale serve / cloudflared, and the installer
-# removes the old "port 8000 on tailscale0" firewall rule.
+# then reached only on this machine and through the VPS tunnel (frpc connects
+# over loopback), and the installer removes the "port 8000 on tailscale0" rule.
 #
 # The install path is fixed: deploy/edge-cctv.service hard-codes /opt/edge-cctv.
 set -euo pipefail
@@ -72,7 +74,7 @@ if [ -n "$MODELS_FROM" ]; then
   install -o "$SVC_USER" -g "$SVC_USER" -m 0644 "${staged[@]}" "$DEST/edge_backend/models/"
   echo "copied ${#staged[@]} model(s) from $MODELS_FROM"
 else
-  echo "EDGE_MODELS_FROM not set: bootstrap verifies and exports the models (step 4)"
+  echo "EDGE_MODELS_FROM not set: bootstrap verifies and downloads the models (step 4)"
 fi
 
 step "4/9 venv + dependencies (onnxruntime flavour: ${EDGE_ORT:-auto})"
@@ -91,7 +93,9 @@ trap 'if [ "$was_active" = true ] && ! systemctl is-active --quiet edge-cctv; th
 # bootstrap exits 1 when a GPU is present but inference runs on the CPU, which is
 # expected until the matching GPU build is installed. The gate is the service's
 # own read-only preflight (its ExecStartPre), which treats that case as a warning.
-if ! as_svc python3 edge_backend/scripts/bootstrap.py --check-only --ort "${EDGE_ORT:-auto}"; then
+TUNNEL_ARGS=()
+[ "${EDGE_TUNNEL:-0}" = 1 ] && TUNNEL_ARGS=(--with-tunnel)
+if ! as_svc python3 edge_backend/scripts/bootstrap.py --check-only --ort "${EDGE_ORT:-auto}" "${TUNNEL_ARGS[@]}"; then
   echo "bootstrap reported NOT READY; running the service preflight as $SVC_USER to decide:"
   (cd "$DEST/edge_backend" && as_svc "$DEST/.venv/bin/python" -m app.services.preflight) \
     || { echo "preflight failed: stopping before the service is installed" >&2; exit 1; }
@@ -132,7 +136,7 @@ step "8/9 firewall"
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then
   if [ "$LOOPBACK_ONLY" = true ]; then
     # HOST=127.0.0.1: nothing on the network may reach the plain-HTTP port;
-    # tailscale serve / cloudflared connect to it over loopback.
+    # the VPS tunnel (frpc) connects to it over loopback.
     ufw delete allow in on tailscale0 to any port "$PORT" proto tcp >/dev/null 2>&1 \
       && echo "removed the tailscale0 port $PORT rule (HOST=127.0.0.1)" || true
   elif ip link show tailscale0 >/dev/null 2>&1; then
@@ -148,52 +152,12 @@ else
   echo "ufw not installed or not active: no firewall rules changed"
 fi
 
-step "9/9 private HTTPS on the tailnet (tailscale serve)"
-TS_URL=""
-if [ "${EDGE_TAILSCALE_SERVE:-0}" != 1 ]; then
-  echo "skipped (set EDGE_TAILSCALE_SERVE=1 to publish https://<machine>.<tailnet>.ts.net)"
-elif ! command -v tailscale >/dev/null 2>&1; then
-  echo "tailscale is not installed: see https://tailscale.com/download/linux, then re-run with EDGE_TAILSCALE_SERVE=1"
+step "9/9 online access through your VPS (frpc)"
+if [ -x "$DEST/bin/frpc" ]; then
+  echo "frpc $("$DEST/bin/frpc" --version 2>/dev/null || echo '?') installed in $DEST/bin"
+  echo "Set the public address, tunnel server, store ID and store token in Settings -> Online access."
 else
-  ts_json="$(tailscale status --json 2>/dev/null || true)"
-  ts_info="$(printf '%s' "$ts_json" | python3 -c '
-import json, sys
-try:
-    d = json.load(sys.stdin)
-except ValueError:
-    print("error -"); sys.exit()
-name = ((d.get("Self") or {}).get("DNSName") or "").rstrip(".").lower()
-certs = [c.rstrip(".").lower() for c in (d.get("CertDomains") or [])]
-state = d.get("BackendState") or "unknown"
-print(state, name or "-", "yes" if name and name in certs else "no")' 2>/dev/null || echo "error - no")"
-  read -r ts_state ts_name ts_https <<EOF_TS
-$ts_info
-EOF_TS
-  if [ "$ts_state" != Running ] || [ "$ts_name" = - ]; then
-    echo "tailscale is not connected (state: $ts_state) or MagicDNS is off: run 'sudo tailscale up',"
-    echo "turn on MagicDNS in https://login.tailscale.com/admin/dns, then re-run with EDGE_TAILSCALE_SERVE=1"
-  elif [ "$ts_https" != yes ]; then
-    echo "HTTPS certificates are not enabled for this tailnet. In the Tailscale admin console:"
-    echo "  https://login.tailscale.com/admin/dns -> turn on MagicDNS and 'HTTPS Certificates'"
-    echo "then re-run: sudo EDGE_TAILSCALE_SERVE=1 bash deploy/install.sh"
-  else
-    target="http://127.0.0.1:$PORT"
-    if tailscale serve status --json 2>/dev/null | grep -q "\"$target\""; then
-      echo "already published: https://$ts_name -> $target"
-      TS_URL="https://$ts_name/dashboard"
-    # timeout: serve waits for approval in the browser when the tailnet has
-    # not enabled HTTPS/Serve, instead of failing.
-    elif timeout 60 tailscale serve --bg --https=443 "$target"; then
-      TS_URL="https://$ts_name/dashboard"
-      # tailscaled answers :443 itself; allow it anyway on hosts where ufw filters it.
-      if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then
-        ufw allow in on tailscale0 to any port 443 proto tcp comment 'edge-cctv https via tailscale serve' >/dev/null
-      fi
-    else
-      echo "tailscale serve failed. Check that MagicDNS and HTTPS Certificates are on"
-      echo "(https://login.tailscale.com/admin/dns) and run by hand: sudo tailscale serve --bg --https=443 $target"
-    fi
-  fi
+  echo "not installed (re-run with EDGE_TUNNEL=1 to fetch it; see deploy/vps/README.md)"
 fi
 
 step "waiting for the service to answer"
@@ -254,7 +218,6 @@ fi
 
 echo
 echo "Dashboard:"
-[ -n "$TS_URL" ] && echo "  $TS_URL   (tailnet devices, HTTPS)"
 if [ "$LOOPBACK_ONLY" = true ]; then
   echo "  http://127.0.0.1:$PORT/dashboard   (this machine only: HOST=127.0.0.1)"
 else

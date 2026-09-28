@@ -12,7 +12,7 @@ Run it on the edge box with the service's venv (a cold MIGraphX cache is
 compiled first, which takes minutes per model)::
 
     /opt/edge-cctv/.venv/bin/python edge_backend/scripts/pose_parity_check.py
-    ... --models yolo26n-pose.onnx,yolo26m-pose-544x960.onnx --image some_frame.jpg
+    ... --models rtmo-s-body7-640x640-static.onnx --image some_frame.jpg
     ... --refiner          # the RTMPose top-down refiner on both providers too
 
 For every model and frame size it prints the people found by each provider,
@@ -96,14 +96,13 @@ def main() -> int:
 
     settings.POSE_REFINER = "on" if args.refiner else "off"
     settings.LOW_LIGHT_ENHANCE = "off"
-    settings.OBJECT_DETECT_EVERY_N = 0
     img = cv2.imread(args.image)
     if img is None:
         print(f"cannot read {args.image}")
         return 1
     sizes = [tuple(int(v) for v in s.split("x")) for s in args.sizes.split(",") if s]
 
-    probe = PersonDetector(object_model_path="")
+    probe = PersonDetector()
     probe.initialise()
     if not probe.available:
         print(f"no backend: {probe.last_error}")
@@ -119,12 +118,12 @@ def main() -> int:
     thr = float(settings.KEYPOINT_VISIBILITY_THRESHOLD)
     for name in names:
         path = Path(settings.MODELS_DIR) / name
-        dev = PersonDetector(model_path=path, object_model_path="")
+        dev = PersonDetector(model_path=path)
         dev.initialise()
         disabled = settings.INFERENCE_DISABLED_PROVIDERS
         settings.INFERENCE_DISABLED_PROVIDERS = CPU_ONLY
         try:
-            cpu = PersonDetector(model_path=path, object_model_path="")
+            cpu = PersonDetector(model_path=path)
             cpu.initialise()
         finally:
             settings.INFERENCE_DISABLED_PROVIDERS = disabled

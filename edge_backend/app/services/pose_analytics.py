@@ -2,7 +2,7 @@
 
 The live engine calls ``pose_analytics.observe()`` once per analysed frame per
 camera with the confirmed tracks (each carrying 17 COCO keypoints from the
-YOLO26 pose model) and any context objects (bags). This module keeps a small,
+RTMO pose model). This module keeps a small,
 bounded state per (camera, track) and turns it into:
 
 * **Shelf interactions** -- a hand inside a product-zone polygon for at least
@@ -89,15 +89,6 @@ SKELETON_EDGES = (
 HANDS = (("left", L_WRIST), ("right", R_WRIST))
 # wrist index -> (shoulder, elbow) of the same arm
 ARM = {L_WRIST: (L_SHOULDER, L_ELBOW), R_WRIST: (R_SHOULDER, R_ELBOW)}
-
-
-def _parse_ids(raw: str) -> set[int]:
-    out: set[int] = set()
-    for part in str(raw or "").split(","):
-        part = part.strip()
-        if part.isdigit():
-            out.add(int(part))
-    return out
 
 
 def _parse_names(raw: str) -> set[str]:
@@ -509,19 +500,19 @@ class PoseAnalytics:
     # ------------------------------------------------------------- observe
 
     def observe(self, camera_id: str, ts: float, frame_bgr: Optional[np.ndarray],
-                tracks: list, objects: Optional[list] = None) -> ObserveResult:
+                tracks: list) -> ObserveResult:
         result = ObserveResult()
         cam = self._camera(camera_id)
         with cam.lock:
             try:
-                self._observe_locked(cam, float(ts), frame_bgr, tracks or [], objects or [], result)
+                self._observe_locked(cam, float(ts), frame_bgr, tracks or [], result)
             except Exception as e:  # never break the capture loop
                 logger.exception(f"pose_analytics.observe failed for {camera_id}: {e}")
         self.stats["frames"] += 1
         return result
 
     def _observe_locked(self, cam: CameraState, ts: float, frame: Optional[np.ndarray],
-                        tracks: list, objects: list, result: ObserveResult) -> None:
+                        tracks: list, result: ObserveResult) -> None:
         cam.interactions_on = self._flag(cam.camera_id, "shelf_interaction")
         cam.theft_on = self._flag(cam.camera_id, "theft_detection")
         self._refresh_role(cam)
@@ -536,16 +527,6 @@ class PoseAnalytics:
             cam.frame_size = (int(frame.shape[1]), int(frame.shape[0]))
         self._refresh_product_zones(cam)
         floor_zones = self._floor_zones()
-
-        bag_ids = _parse_ids(settings.THEFT_BAG_CLASS_IDS)
-        bags = []
-        for o in objects:
-            cid = getattr(o, "class_id", None)
-            if cid in bag_ids:
-                try:
-                    bags.append(tuple(float(v) for v in o.bbox))
-                except Exception:
-                    pass
 
         seen: set = set()
         for t in tracks:
@@ -594,7 +575,7 @@ class PoseAnalytics:
             st.keypoints_ts = ts
             st.skeletons.append((ts, kps.copy()))
             self._update_head(st, kps, ts)
-            self._update_hands(cam, st, kps, bags, floor, ts, frame, result)
+            self._update_hands(cam, st, kps, floor, ts, frame, result)
             self._update_presence(cam, st, ts, frame, result)
 
         # One physical hand given to two overlapping people is one reach.
@@ -772,14 +753,13 @@ class PoseAnalytics:
             return None
         return math.hypot(cx - ref[1], cy - ref[2]) / (ts - ref[0]) / max(body["torso"], 1.0)
 
-    def _update_hands(self, cam: CameraState, st: TrackState, kps: np.ndarray, bags: list,
+    def _update_hands(self, cam: CameraState, st: TrackState, kps: np.ndarray,
                       floor: Optional[Tuple[float, float]], ts: float,
                       frame: Optional[np.ndarray], result: ObserveResult) -> None:
         vis_thr = settings.INTERACTION_MIN_KEYPOINT_VIS
         body = self._body(kps, vis_thr)
         rest = self._rest_box(body) if body else None
         conceal = self._conceal_box(body) if body else None
-        person_box = st.bbox
         speed = self._body_speed(st, body, ts)
         # Walking past: a hand swinging over a shelf zone is not a reach.
         passing = speed is not None and speed > settings.INTERACTION_MAX_BODY_SPEED
@@ -803,16 +783,11 @@ class PoseAnalytics:
                 hand.hit_xy, hand.hit_zone, hand.hit_ts = (hit[2], hit[3]), zone.id, ts
                 hand.hit_wrist = (wx, wy)
 
-            # Is the wrist at the waistband/pocket band or inside a bag the
-            # person is carrying? (Only matters after a reach, but cheap.)
+            # Is the wrist at the waistband/pocket band? (Only matters after
+            # a reach, but cheap.)
             target = None
-            if wv >= settings.THEFT_CONCEAL_MIN_WRIST_VIS:
-                if conceal and _box_contains(conceal, wx, wy):
-                    target = "pocket_band"
-                for b in bags:
-                    if _box_contains(b, wx, wy) and _boxes_intersect(b, person_box):
-                        target = "bag"
-                        break
+            if wv >= settings.THEFT_CONCEAL_MIN_WRIST_VIS and conceal and _box_contains(conceal, wx, wy):
+                target = "pocket_band"
 
             # ---- concealment evidence for a hand that recently left a shelf
             if hand.post_reach is not None:

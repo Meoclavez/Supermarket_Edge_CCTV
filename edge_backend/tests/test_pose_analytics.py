@@ -75,7 +75,7 @@ class Driver:
 
     def step(self, wrist, n=1, floor=None, head_side=0):
         for _ in range(n):
-            res = pose_analytics.observe(self.cam, self.t, FRAME, [track(self.tid, skeleton(wrist, head_side=head_side), floor)], [])
+            res = pose_analytics.observe(self.cam, self.t, FRAME, [track(self.tid, skeleton(wrist, head_side=head_side), floor)])
             self.interactions.extend(res.interactions)
             self.incidents.extend(res.incidents)
             self.t += DT
@@ -197,7 +197,7 @@ def test_low_visibility_wrist_does_not_count(zone):
     zone("cam_pa_vis")
     d = Driver("cam_pa_vis", "trk_vis")
     for _ in range(6):
-        pose_analytics.observe("cam_pa_vis", d.t, FRAME, [track("trk_vis", skeleton(IN_SHELF, vis=0.2))], [])
+        pose_analytics.observe("cam_pa_vis", d.t, FRAME, [track("trk_vis", skeleton(IN_SHELF, vis=0.2))])
         d.t += DT
     assert pose_analytics._cameras["cam_pa_vis"].tracks["trk_vis"].interaction_count == 0
 

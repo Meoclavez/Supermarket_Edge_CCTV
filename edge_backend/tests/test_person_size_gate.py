@@ -29,7 +29,7 @@ CAM = "cam_close_shelf_01"
 
 
 def _detector():
-    return PersonDetector(model_path="/nonexistent/model.onnx", object_model_path="")
+    return PersonDetector(model_path="/nonexistent/model.onnx")
 
 
 def _close_person(head=True, hips=True, vis=0.9):

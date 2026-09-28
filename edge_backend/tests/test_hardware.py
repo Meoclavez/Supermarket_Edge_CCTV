@@ -50,5 +50,6 @@ def test_status_is_read_without_loading_a_model():
     assert s["initialised"] is False and d.session is None
     assert s["backend"] == "not_initialised" and s["available"] is False
     for key in ("backend", "provider", "device", "model", "model_path", "input_size", "warmup_ms",
-                "avg_infer_ms", "available", "error", "keypoints_supported", "object_model"):
+                "avg_infer_ms", "available", "error", "keypoints_supported"):
         assert key in s
+    assert "object_model" not in s and "object_detection" not in s

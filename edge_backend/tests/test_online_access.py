@@ -1,22 +1,15 @@
-"""Online access: trusted proxies (tailscale serve, cloudflared), HSTS, the
-public hostname changing at handover, and the read-only Tailscale status.
+"""Requests arriving through the VPS tunnel: who the client is, whether the
+request is remote, HTTPS/HSTS, refusals, CORS and the public address changing.
 
-Header sets below are what the proxies really send: tailscale serve (ipn/
-ipnlocal/serve.go: X-Forwarded-Host/-Proto/-For, Tailscale-User-*, Host kept,
-client copies of those removed) and cloudflared (CF-Connecting-IP, CF-Ray,
-CF-Visitor, X-Forwarded-For appended, X-Forwarded-Proto). Each is tested both
-raw (loopback peer, as the app sees it without uvicorn's proxy-header
-handling) and as uvicorn's ProxyHeadersMiddleware rewrites it (peer and scheme
-taken from X-Forwarded-For/-Proto), because production runs with the latter.
+Header sets below are what the chain really delivers (measured with frp 0.71
+and Caddy 2.11): the VPS proxy appends the visitor to X-Forwarded-For (a
+spoofed value the visitor sent stays on the left, or is dropped), frps
+appends the VPS proxy's own address and overwrites X-Forwarded-Proto with
+"http", X-Real-IP is passed through unchanged (so it is never believed), and
+frpc connects to uvicorn from 127.0.0.1 with Host = the public address.
 """
 
 from __future__ import annotations
-
-import base64
-import json
-import subprocess
-import time
-from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -24,33 +17,27 @@ from starlette.requests import Request
 
 from app.config import settings
 from app.main import app
-from app.services import public_exposure, remote_access_service as ra_mod
-from app.services.auth_service import general_rate_limiter, intrusion_detector
-from app.services.remote_access_service import RemoteAccessService, remote_access_service
+from app.services import public_exposure
+from app.services.auth_service import auth_service, general_rate_limiter, intrusion_detector
+from app.services.remote_access_service import remote_access_service
 
-TS_HOST = "store-box.tail1234.ts.net"
 PUBLIC = "cctv.test-owner.com.au"
 CUSTOMER = "cctv.customer-store.com.au"
-FAKE_CF = Path(__file__).resolve().parent / "fixtures" / "fake_cloudflared.sh"
+VISITOR = "203.0.113.50"
+VPS_PROXY = "172.18.0.4"  # the reverse proxy container on the VPS's docker network
 
-
-def _token(secret: str) -> str:
-    return base64.b64encode(json.dumps(
-        {"a": "acct0000000000000000000000000000", "t": "11111111-2222-3333-4444-555555555555",
-         "s": base64.b64encode(secret.encode()).decode()}).encode()).decode()
+# nginx / Nginx Proxy Manager ($proxy_add_x_forwarded_for keeps what the visitor sent)
+TUNNEL_NGINX = {"X-Forwarded-For": f"6.6.6.6, {VISITOR}, {VPS_PROXY}", "X-Forwarded-Proto": "http",
+                "X-Forwarded-Host": PUBLIC, "X-Real-IP": "7.7.7.7"}
+# Traefik / Caddy (untrusted incoming X-Forwarded-For replaced)
+TUNNEL_TRAEFIK = {"X-Forwarded-For": f"{VISITOR}, {VPS_PROXY}", "X-Forwarded-Proto": "http",
+                  "X-Forwarded-Host": PUBLIC}
 
 
 def _req(peer, headers=None, host="edge.lan:8000", scheme="http", path="/"):
     hdrs = [(b"host", host.encode())] + [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()]
     return Request({"type": "http", "method": "GET", "path": path, "headers": hdrs, "client": (peer, 5555),
                     "scheme": scheme, "query_string": b"", "server": ("x", 80)})
-
-
-TAILSCALE_SERVE = {"X-Forwarded-For": "100.101.102.103", "X-Forwarded-Proto": "https",
-                   "X-Forwarded-Host": TS_HOST, "Tailscale-User-Login": "owner@example.com",
-                   "Tailscale-User-Name": "Owner", "Tailscale-Headers-Info": "https://tailscale.com/s/serve-headers"}
-CLOUDFLARE = {"CF-Connecting-IP": "203.0.113.50", "CF-Ray": "8a1b2c3d4e5f-SYD", "CF-Visitor": '{"scheme":"https"}',
-              "X-Forwarded-For": "203.0.113.50", "X-Forwarded-Proto": "https"}
 
 
 @pytest.fixture(autouse=True)
@@ -60,311 +47,200 @@ def _clean(monkeypatch):
     intrusion_detector.failed_attempts.clear()
     general_rate_limiter.history.clear()
     yield
+    intrusion_detector.failed_attempts.clear()
 
 
 # --------------------------------------------------------------------------- #
-# Classification: client IP, remote vs private, HTTPS
+# Classification
 # --------------------------------------------------------------------------- #
 
-def test_tailscale_serve_is_private_https_with_tailnet_client_ip():
-    raw = _req("127.0.0.1", TAILSCALE_SERVE, host=TS_HOST)
-    assert public_exposure.proxy_kind(raw) == "tailscale"
-    assert public_exposure.client_ip(raw) == "100.101.102.103"
-    assert public_exposure.came_via_https_proxy(raw)
-    assert not public_exposure.is_remote_request(raw)
-    # Tagged devices get no Tailscale-User-* headers: the .ts.net host decides.
-    tagged = _req("127.0.0.1", {"X-Forwarded-For": "100.64.0.9", "X-Forwarded-Proto": "https"}, host=TS_HOST)
-    assert public_exposure.client_ip(tagged) == "100.64.0.9" and not public_exposure.is_remote_request(tagged)
-    # As uvicorn hands it to the app in production (peer/scheme rewritten).
-    rewritten = _req("100.101.102.103", TAILSCALE_SERVE, host=TS_HOST, scheme="https")
-    assert public_exposure.client_ip(rewritten) == "100.101.102.103"
-    assert public_exposure.came_via_https_proxy(rewritten)
-    assert not public_exposure.is_remote_request(rewritten)
+@pytest.mark.parametrize("headers", [TUNNEL_NGINX, TUNNEL_TRAEFIK])
+def test_tunnel_request_is_remote_https_with_visitor_ip(headers):
+    for host in (PUBLIC, f"{PUBLIC}:443", PUBLIC.upper(), f"{PUBLIC}."):
+        r = _req("127.0.0.1", headers, host=host)
+        assert public_exposure.proxy_kind(r) == "tunnel", host
+        assert public_exposure.client_ip(r) == VISITOR, host
+        assert public_exposure.is_remote_request(r), host
+        # frps says X-Forwarded-Proto: http, but the browser's connection was HTTPS.
+        assert public_exposure.came_via_https_proxy(r), host
 
 
-def test_tailnet_user_cannot_spoof_cloudflare_headers_through_serve():
-    """tailscaled passes unknown client headers through: CF-* on a .ts.net host is ignored."""
-    forged = _req("127.0.0.1", {**TAILSCALE_SERVE, "CF-Connecting-IP": "198.51.100.1"}, host=TS_HOST)
-    assert public_exposure.proxy_kind(forged) == "tailscale"
-    assert public_exposure.client_ip(forged) == "100.101.102.103"
+def test_tunnel_client_ip_edge_cases():
+    cip = public_exposure.client_ip
+    # VPS proxy added nothing: frps's entry (the proxy) is all we know; never a visitor-chosen value.
+    assert cip(_req("127.0.0.1", {"X-Forwarded-For": VPS_PROXY}, host=PUBLIC)) == VPS_PROXY
+    assert cip(_req("::1", {"X-Forwarded-For": f"2001:db8::7, {VPS_PROXY}"}, host=PUBLIC)) == "2001:db8::7"
+    # Garbage in the visitor's position falls back to the proxy, not further left.
+    assert cip(_req("127.0.0.1", {"X-Forwarded-For": f"1.2.3.4, not-an-ip, {VPS_PROXY}"}, host=PUBLIC)) == VPS_PROXY
+    assert cip(_req("127.0.0.1", {}, host=PUBLIC)) == "127.0.0.1"
+    # X-Real-IP is passed through frps unchanged: never believed.
+    assert cip(_req("127.0.0.1", {"X-Real-IP": "7.7.7.7", "X-Forwarded-For": f"{VISITOR}, {VPS_PROXY}"},
+                    host=PUBLIC)) == VISITOR
 
 
-def test_tailscale_funnel_is_public():
-    funnel = _req("127.0.0.1", {"X-Forwarded-For": "198.51.100.7", "X-Forwarded-Proto": "https",
-                                "Tailscale-Funnel-Request": "?1"}, host=TS_HOST)
-    assert public_exposure.proxy_kind(funnel) == "tailscale_funnel"
-    assert public_exposure.is_remote_request(funnel)
-    assert public_exposure.client_ip(funnel) == "198.51.100.7"
-    rewritten = _req("198.51.100.7", {"Tailscale-Funnel-Request": "?1"}, host=TS_HOST, scheme="https")
-    assert public_exposure.is_remote_request(rewritten)
+@pytest.mark.parametrize("xff,expected", [
+    # nginx / NPM not trusting the CDN: CDN appended the visitor, nginx the CDN edge.
+    (f"6.6.6.6, {VISITOR}, 198.51.100.200, {VPS_PROXY}", VISITOR),
+    # nginx with real_ip from the CDN ($remote_addr = visitor) appends the visitor again.
+    (f"6.6.6.6, {VISITOR}, {VISITOR}, {VPS_PROXY}", VISITOR),
+    # Traefik/Caddy not trusting the CDN replace the header: only the CDN edge is known, never a forged value.
+    (f"198.51.100.200, {VPS_PROXY}", "198.51.100.200"),
+])
+def test_cdn_in_front_of_the_vps(monkeypatch, xff, expected):
+    monkeypatch.setitem(remote_access_service._settings, "extra_proxies", 1)
+    assert public_exposure.client_ip(_req("127.0.0.1", {"X-Forwarded-For": xff}, host=PUBLIC)) == expected
 
 
-def test_cloudflare_is_remote_https_with_visitor_ip():
-    raw = _req("127.0.0.1", CLOUDFLARE, host=PUBLIC)
-    assert public_exposure.proxy_kind(raw) == "cloudflare"
-    assert public_exposure.client_ip(raw) == "203.0.113.50"
-    assert public_exposure.came_via_https_proxy(raw) and public_exposure.is_remote_request(raw)
-    # CF-Visitor alone proves HTTPS for a Cloudflare request.
-    visitor_only = _req("127.0.0.1", {"CF-Connecting-IP": "203.0.113.50", "CF-Visitor": '{"scheme":"https"}'},
-                        host=PUBLIC)
-    assert public_exposure.came_via_https_proxy(visitor_only)
-    rewritten = _req("203.0.113.50", CLOUDFLARE, host=PUBLIC, scheme="https")
-    assert public_exposure.client_ip(rewritten) == "203.0.113.50"
-    assert public_exposure.is_remote_request(rewritten) and public_exposure.came_via_https_proxy(rewritten)
-    # A Cloudflare route for a name that is not (or no longer) configured is still remote.
-    other = _req("203.0.113.50", CLOUDFLARE, host="old-name.example.com", scheme="https")
-    assert public_exposure.is_remote_request(other)
+def test_extra_proxies_out_of_range_is_ignored(monkeypatch):
+    monkeypatch.setitem(remote_access_service._settings, "extra_proxies", 7)
+    assert remote_access_service.forwarding_hops() == 1
+    assert public_exposure.client_ip(_req("127.0.0.1", TUNNEL_NGINX, host=PUBLIC)) == VISITOR
 
 
-def test_direct_clients_cannot_claim_https_or_another_address():
-    lan = _req("192.168.1.40", {"X-Forwarded-Proto": "https", "X-Forwarded-For": "8.8.8.8",
-                                "Tailscale-User-Login": "x@y"}, host="192.168.1.20:8000")
-    assert public_exposure.client_ip(lan) == "192.168.1.40"
-    assert not public_exposure.came_via_https_proxy(lan)
-    assert not public_exposure.is_remote_request(lan)
-    # Plain http over the tailnet IP (today's live setup): private, no HSTS.
-    tailnet_http = _req("100.101.102.103", host="100.78.122.93:8000")
-    assert not public_exposure.came_via_https_proxy(tailnet_http)
-    assert not public_exposure.is_remote_request(tailnet_http)
+def test_spoofed_forwarding_headers_from_the_network_are_ignored():
+    """A LAN/tailnet client connecting directly cannot choose its address or claim HTTPS."""
+    for host in ("192.168.1.20:8000", PUBLIC):
+        lan = _req("192.168.1.40", {"X-Forwarded-For": f"8.8.8.8, {VISITOR}", "X-Forwarded-Proto": "https",
+                                    "X-Real-IP": "9.9.9.9"}, host=host)
+        assert public_exposure.client_ip(lan) == "192.168.1.40"
+        assert public_exposure.proxy_kind(lan) is None
+        assert not public_exposure.came_via_https_proxy(lan)
+    # Naming the public address from the LAN only adds restrictions.
+    assert public_exposure.is_remote_request(_req("192.168.1.40", host=PUBLIC))
+    assert not public_exposure.is_remote_request(_req("192.168.1.40", host="192.168.1.20:8000"))
 
 
-def test_hsts_only_when_the_request_really_was_https():
-    via_serve = TestClient(app, client=("127.0.0.1", 40000), base_url=f"http://{TS_HOST}")
-    r = via_serve.get("/dashboard", headers=TAILSCALE_SERVE)
+def test_private_tailscale_ip_and_lan_stay_private_without_hsts():
+    """The owner's access today: plain http://<tailscale ip>:8000."""
+    tailnet = _req("100.101.102.103", host="100.78.122.93:8000")
+    assert not public_exposure.is_remote_request(tailnet)
+    assert not public_exposure.came_via_https_proxy(tailnet)
+    assert public_exposure.client_ip(tailnet) == "100.101.102.103"
+    lan = TestClient(app, client=("192.168.1.40", 40000), base_url="http://192.168.1.20:8000")
+    r = lan.get("/dashboard", headers={"X-Forwarded-Proto": "https"})
+    assert r.status_code == 200 and "strict-transport-security" not in r.headers
+
+
+def test_another_local_proxy_is_handled_generically():
+    local = _req("127.0.0.1", {"X-Forwarded-For": "10.9.9.9, 192.168.1.77", "X-Forwarded-Proto": "https"},
+                 host="edge.lan")
+    assert public_exposure.proxy_kind(local) == "proxy"
+    assert public_exposure.client_ip(local) == "192.168.1.77"
+    assert public_exposure.came_via_https_proxy(local)
+    assert not public_exposure.is_remote_request(local)
+
+
+def test_funnel_header_is_treated_as_public():
+    assert public_exposure.is_remote_request(_req("127.0.0.1", {"Tailscale-Funnel-Request": "?1"},
+                                                  host="box.tail1234.ts.net"))
+
+
+def test_rewritten_peer_is_safe_and_warned_once(caplog, monkeypatch):
+    """uvicorn with proxy headers on hands over the VPS proxy as peer: still remote, never the forged value."""
+    monkeypatch.setattr(public_exposure, "_warned_rewritten_peer", False)
+    caplog.set_level("WARNING", logger="edge.security")
+    r = _req(VPS_PROXY, TUNNEL_NGINX, host=PUBLIC)
+    assert public_exposure.client_ip(r) == VPS_PROXY
+    assert public_exposure.is_remote_request(r)
+    public_exposure.client_ip(r)
+    assert caplog.text.count("--no-proxy-headers") == 1
+
+
+# --------------------------------------------------------------------------- #
+# Through the app
+# --------------------------------------------------------------------------- #
+
+def _via_tunnel(host=PUBLIC):
+    return TestClient(app, client=("127.0.0.1", 40000), base_url=f"http://{host}", raise_server_exceptions=False)
+
+
+def test_first_run_setup_and_docs_refused_through_the_tunnel():
+    body = {"username": "x", "password": "y" * 12, "setup_code": "AAAA-BBBB"}
+    tunnel = _via_tunnel()
+    for path in ("/api/v1/setup/admin", "/api/v1/setup/camera-scan", "/api/v1/setup/complete"):
+        r = tunnel.post(path, json=body, headers=TUNNEL_NGINX)
+        assert r.status_code == 403 and "store network" in r.json()["detail"], path
+    assert tunnel.get("/docs", headers=TUNNEL_NGINX).status_code == 403
+    assert tunnel.get("/openapi.json", headers=TUNNEL_NGINX).status_code == 403
+    assert tunnel.get("/api/v1/setup/status", headers=TUNNEL_NGINX).status_code == 200
+    # The same request on the LAN address is not refused by the remote guard.
+    lan = TestClient(app, client=("192.168.1.40", 40000), raise_server_exceptions=False)
+    assert "store network" not in lan.post("/api/v1/setup/admin", json=body).text
+
+
+def test_remote_requests_refused_while_auth_disabled(monkeypatch):
+    monkeypatch.setattr(settings, "AUTH_DISABLED", True)
+    r = _via_tunnel().get("/api/v1/health", headers=TUNNEL_TRAEFIK)
+    assert r.status_code == 403 and "AUTH_DISABLED" in r.json()["detail"]
+
+
+def test_security_headers_and_hsts_through_the_tunnel():
+    r = _via_tunnel().get("/dashboard", headers=TUNNEL_TRAEFIK)
+    assert r.status_code == 200
     assert r.headers["strict-transport-security"].startswith("max-age=")
     assert "includesubdomains" not in r.headers["strict-transport-security"].lower()
-    # Same proxy, plain http (no X-Forwarded-Proto): no HSTS.
-    plain = via_serve.get("/dashboard", headers={"X-Forwarded-For": "100.101.102.103"})
-    assert "strict-transport-security" not in plain.headers
-    lan = TestClient(app, client=("192.168.1.40", 40000), base_url="http://192.168.1.20:8000")
-    assert "strict-transport-security" not in lan.get("/dashboard", headers={"X-Forwarded-Proto": "https"}).headers
-    via_cf = TestClient(app, client=("127.0.0.1", 40000), base_url=f"http://{PUBLIC}")
-    assert via_cf.get("/dashboard", headers=CLOUDFLARE).headers["strict-transport-security"]
+    assert r.headers["x-content-type-options"] == "nosniff"
+    assert "frame-ancestors 'self'" in r.headers["content-security-policy"]
+    assert r.headers["x-frame-options"] == "SAMEORIGIN"
 
 
-def test_first_run_setup_allowed_on_tailnet_refused_via_cloudflare_and_funnel():
-    body = {"username": "x", "password": "y" * 12, "setup_code": "AAAA-BBBB"}
-    serve = TestClient(app, client=("127.0.0.1", 40000), base_url=f"http://{TS_HOST}", raise_server_exceptions=False)
-    r = serve.post("/api/v1/setup/admin", json=body, headers=TAILSCALE_SERVE)
-    assert "store network" not in r.text  # not refused by the remote guard
-    cf = TestClient(app, client=("127.0.0.1", 40000), base_url=f"http://{PUBLIC}")
-    r = cf.post("/api/v1/setup/admin", json=body, headers=CLOUDFLARE)
-    assert r.status_code == 403 and "store network" in r.json()["detail"]
-    r = serve.post("/api/v1/setup/admin", json=body,
-                   headers={"X-Forwarded-For": "198.51.100.7", "Tailscale-Funnel-Request": "?1"})
-    assert r.status_code == 403
+def test_lockout_is_keyed_on_the_visitor_not_the_tunnel():
+    """Two visitors behind the tunnel (both peer 127.0.0.1) are counted separately."""
+    for _ in range(intrusion_detector.max_attempts):
+        with pytest.raises(Exception):
+            auth_service.verify_api_access(
+                _req("127.0.0.1", {**TUNNEL_NGINX, "Authorization": "Bearer bad"}, host=PUBLIC),
+                api_key=None, bearer=None, token=None)
+    assert intrusion_detector.key(VISITOR, "token") in intrusion_detector.failed_attempts
+    for forged in ("6.6.6.6", "7.7.7.7", "127.0.0.1", VPS_PROXY):
+        assert not any(k.startswith(forged) for k in intrusion_detector.failed_attempts), forged
+
+
+def test_sign_in_through_the_tunnel_charges_the_visitor():
+    tunnel = _via_tunnel()
+    r = tunnel.post("/api/v1/auth/login", json={"username": "nobody", "password": "wrong-password-123"},
+                    headers=TUNNEL_TRAEFIK)
+    assert r.status_code in (400, 401, 403, 429)
+    keys = list(intrusion_detector.failed_attempts)
+    assert keys and all(k.startswith(VISITOR) for k in keys), keys
+
+
+def test_mjpeg_token_in_query_works_through_the_tunnel():
+    tok = auth_service.issue_session_tokens("op-test", "owner")["access_token"]
+    req = Request({"type": "http", "method": "GET", "path": "/stream", "scheme": "http", "server": ("x", 80),
+                   "headers": [(b"host", PUBLIC.encode()), (b"x-forwarded-for", f"{VISITOR}, {VPS_PROXY}".encode()),
+                               (b"x-forwarded-proto", b"http")],
+                   "client": ("127.0.0.1", 40000), "query_string": f"camera_id=c1&token={tok}".encode()})
+    assert public_exposure.is_remote_request(req)
+    assert auth_service.verify_api_access(req, api_key=None, bearer=None, token=None) is True
+    stream_tok = auth_service.generate_stream_token("c1")
+    assert auth_service.verify_stream_access("c1", req, token=stream_tok, bearer=None)["camera_id"] == "c1"
 
 
 def test_pairing_lockout_uses_the_real_phone_address():
     from app.routes.pairing import _ip
 
-    assert _ip(_req("127.0.0.1", CLOUDFLARE, host=PUBLIC)) == "203.0.113.50"
-    assert _ip(_req("127.0.0.1", TAILSCALE_SERVE, host=TS_HOST)) == "100.101.102.103"
-    assert _ip(_req("192.168.1.9", {"CF-Connecting-IP": "1.1.1.1"})) == "192.168.1.9"
+    assert _ip(_req("127.0.0.1", TUNNEL_NGINX, host=PUBLIC)) == VISITOR
+    assert _ip(_req("192.168.1.9", {"X-Forwarded-For": "1.1.1.1"})) == "192.168.1.9"
 
 
-# --------------------------------------------------------------------------- #
-# Handover: the public hostname changes; the tunnel token changes
-# --------------------------------------------------------------------------- #
-
-@pytest.fixture
-def ra(monkeypatch, tmp_path):
-    """The real remote-access service on the test database, cloudflared faked."""
-    import sqlite3
-
-    from sqlalchemy import create_engine
-
-    from app.models.db_models import Base
-    from app.services import secret_store
-
-    engine = create_engine(f"sqlite:///{Path(settings.DATABASE_PATH).resolve()}")
-    Base.metadata.create_all(engine)
-    engine.dispose()
-
-    def clear():
-        with sqlite3.connect(str(settings.DATABASE_PATH), timeout=10) as conn:
-            conn.execute("DELETE FROM system_setup WHERE key = ?", (ra_mod.SETTINGS_KEY,))
-        secret_store.delete_named_secret(settings.STORAGE_DIR, ra_mod.TOKEN_SECRET_NAME)
-
-    clear()
-    remote_access_service.reload_settings()
-    monkeypatch.setenv("FAKE_CF_DIR", str(tmp_path / "cf"))
-    monkeypatch.setattr(remote_access_service, "binary_finder", lambda: str(FAKE_CF))
-    monkeypatch.setattr(remote_access_service, "tailscale_reader", lambda: {"installed": False, "state": "not_installed"})
-    monkeypatch.setattr(remote_access_service, "_tailscale_cache", None)
-    from app.services.auth_service import auth_service
-
-    tokens = auth_service.issue_session_tokens("op-test", "owner")
-    yield TestClient(app), {"Authorization": f"Bearer {tokens['access_token']}"}, tmp_path / "cf"
-    remote_access_service._stop_supervisor()
-    clear()
-    remote_access_service.reload_settings()
+def test_cors_only_own_origins():
+    c = TestClient(app)
+    pre = {"Access-Control-Request-Method": "GET", "Access-Control-Request-Headers": "authorization"}
+    ok = c.options("/api/v1/health", headers={"Origin": f"https://{PUBLIC}", **pre})
+    assert ok.headers.get("access-control-allow-origin") == f"https://{PUBLIC}"
+    bad = c.options("/api/v1/health", headers={"Origin": "https://evil.example", **pre})
+    assert "access-control-allow-origin" not in bad.headers
 
 
-def _wait(pred, timeout=10.0):
-    end = time.monotonic() + timeout
-    while time.monotonic() < end:
-        if pred():
-            return True
-        time.sleep(0.05)
-    return pred()
-
-
-def test_hostname_change_moves_the_public_identity(ra, monkeypatch):
-    client, op, _ = ra
-    assert client.put("/api/v1/remote-access", headers=op, json={"hostname": PUBLIC}).status_code == 200
-    monkeypatch.setattr(ra_mod, "this_device_id", lambda: "dev-A")
-
-    class Fake:
-        def __init__(self, **kw): pass
-        def __enter__(self): return self
-        def __exit__(self, *a): return False
-        def get(self, url, headers=None):
-            class R:
-                status_code = 200
-                def json(self_inner): return {"device_id": "dev-A"}
-            return R()
-
-    monkeypatch.setattr("httpx.Client", Fake)
-    assert client.post("/api/v1/remote-access/verify", headers=op).json()["verified"] is True
-
-    r = client.put("/api/v1/remote-access", headers=op, json={"hostname": f"https://{CUSTOMER}/"})
-    s = r.json()
-    assert s["hostname"] == CUSTOMER and s["verified"] is False and s["verified_at"] is None
-
-    # The old test domain is no longer this device's public name ...
-    old_direct = _req("192.168.1.9", host=PUBLIC)
-    assert not public_exposure.is_remote_request(old_direct)
+def test_public_address_change_moves_everything(monkeypatch):
+    monkeypatch.setitem(remote_access_service._settings, "hostname", CUSTOMER)
+    # The old address is no longer this device's public name ...
+    assert not public_exposure.is_remote_request(_req("192.168.1.9", host=PUBLIC))
     assert public_exposure.is_remote_request(_req("192.168.1.9", host=CUSTOMER))
     assert f"https://{PUBLIC}" not in public_exposure.configured_origins()
-    # ... CORS follows the new name ...
-    pre = {"Access-Control-Request-Method": "GET", "Access-Control-Request-Headers": "authorization"}
-    ok = client.options("/api/v1/health", headers={"Origin": f"https://{CUSTOMER}", **pre})
-    assert ok.headers.get("access-control-allow-origin") == f"https://{CUSTOMER}"
-    old = client.options("/api/v1/health", headers={"Origin": f"https://{PUBLIC}", **pre})
-    assert "access-control-allow-origin" not in old.headers
-    # ... and HSTS / refusals apply on it (served through cloudflared on loopback).
-    via_cf = TestClient(app, client=("127.0.0.1", 40000), base_url=f"http://{CUSTOMER}")
-    r = via_cf.get("/dashboard", headers=CLOUDFLARE)
-    assert r.headers["strict-transport-security"]
-    assert via_cf.post("/api/v1/setup/admin", json={}, headers=CLOUDFLARE).status_code == 403
-    # Nothing about the old name survives a restart either.
-    assert ra_mod.load_settings()["hostname"] == CUSTOMER
-
-
-def test_new_token_restarts_cloudflared_hostname_change_does_not(ra):
-    client, op, cf_dir = ra
-    r = client.put("/api/v1/remote-access", headers=op,
-                   json={"hostname": PUBLIC, "token": _token("owner-test-tunnel-secret"), "enabled": True})
-    assert r.status_code == 200, r.text
-    assert _wait(lambda: client.get("/api/v1/remote-access", headers=op).json()["process"] == "connected")
-    first = remote_access_service._proc
-    assert first is not None and first.poll() is None
-
-    # Routes of a remotely managed tunnel live at Cloudflare: renaming alone keeps the connector.
-    client.put("/api/v1/remote-access", headers=op, json={"hostname": CUSTOMER})
-    assert remote_access_service._proc is first and first.poll() is None
-
-    # The customer's tunnel token replaces the test one: the connector restarts with it.
-    client.put("/api/v1/remote-access", headers=op, json={"token": _token("customer-tunnel-secret-xyz")})
-    assert _wait(lambda: remote_access_service._proc is not None and remote_access_service._proc is not first
-                 and client.get("/api/v1/remote-access", headers=op).json()["process"] == "connected")
-    assert first.poll() is not None
-    assert (cf_dir / "count").read_text().strip() == "2"
-    from app.services import secret_store
-
-    stored = secret_store.get_named_secret(settings.STORAGE_DIR, ra_mod.TOKEN_SECRET_NAME,
-                                           settings.NVR_CREDENTIAL_KEY).decode()
-    assert stored == _token("customer-tunnel-secret-xyz")
-    # Token never on the command line.
-    assert "eyJ" not in (cf_dir / "args.log").read_text()
-
-    # Clearing the test token stops the tunnel.
-    r = client.put("/api/v1/remote-access", headers=op, json={"clear_token": True, "enabled": False})
-    assert r.json()["process"] == "stopped" and r.json()["token_configured"] is False
-
-
-# --------------------------------------------------------------------------- #
-# Tailscale status (read-only)
-# --------------------------------------------------------------------------- #
-
-def _runner(status=None, serve=None, fail=None):
-    calls = []
-
-    def run(binary, *args, **kw):
-        calls.append(args)
-        if fail:
-            raise fail
-        if args[:1] == ("status",):
-            return subprocess.CompletedProcess(args, 0 if status is not None else 1,
-                                               json.dumps(status) if status is not None else "",
-                                               "" if status is not None else "failed to connect to local tailscaled")
-        return subprocess.CompletedProcess(args, 0, json.dumps(serve if serve is not None else {}), "")
-
-    run.calls = calls
-    return run
-
-
-RUNNING = {"BackendState": "Running", "Self": {"DNSName": f"{TS_HOST}."}, "CertDomains": [TS_HOST],
-           "CurrentTailnet": {"Name": "owner@example.com", "MagicDNSEnabled": True}}
-
-
-def test_tailscale_status_states():
-    read = ra_mod.read_tailscale_status
-    none = read(8000, finder=lambda: None)
-    assert none["installed"] is False and none["state"] == "not_installed" and none["url"] is None
-
-    down = read(8000, finder=lambda: "/usr/bin/tailscale", runner=_runner(status=None))
-    assert down["state"] == "unavailable" and "tailscaled" in down["message"]
-
-    denied = read(8000, finder=lambda: "/usr/bin/tailscale", runner=_runner(fail=PermissionError(13, "denied")))
-    assert denied["state"] == "unavailable"
-    slow = read(8000, finder=lambda: "/usr/bin/tailscale",
-                runner=_runner(fail=subprocess.TimeoutExpired("tailscale", 5)))
-    assert slow["state"] == "unavailable"
-
-    no_certs = read(8000, finder=lambda: "/usr/bin/tailscale", runner=_runner({**RUNNING, "CertDomains": None}))
-    assert no_certs["state"] == "running" and no_certs["https_enabled"] is False
-    assert "HTTPS Certificates" in no_certs["message"] and no_certs["url"] is None
-
-    not_served = read(8000, finder=lambda: "/usr/bin/tailscale", runner=_runner(RUNNING, {}))
-    assert not_served["serving"] is False and "tailscale serve --bg --https=443 http://127.0.0.1:8000" in not_served["message"]
-
-    web = {"TCP": {"443": {"HTTPS": True}},
-           "Web": {f"{TS_HOST}:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8000"}}}}}
-    served = read(8000, finder=lambda: "/usr/bin/tailscale", runner=_runner(RUNNING, web))
-    assert served["serving"] is True and served["url"] == f"https://{TS_HOST}/dashboard"
-    assert served["dns_name"] == TS_HOST and served["funnel"] is False
-
-    other_port = read(8001, finder=lambda: "/usr/bin/tailscale", runner=_runner(RUNNING, web))
-    assert other_port["serving"] is False and other_port["url"] is None
-
-    funnel = read(8000, finder=lambda: "/usr/bin/tailscale",
-                  runner=_runner(RUNNING, {**web, "AllowFunnel": {f"{TS_HOST}:443": True}}))
-    assert funnel["funnel"] is True
-
-    stopped = read(8000, finder=lambda: "/usr/bin/tailscale", runner=_runner({**RUNNING, "BackendState": "NeedsLogin"}))
-    assert stopped["state"] == "stopped" and stopped["url"] is None
-
-
-def test_tailscale_status_is_cached_and_in_the_api(ra, monkeypatch):
-    client, op, _ = ra
-    calls = []
-
-    def reader():
-        calls.append(1)
-        return {"installed": True, "state": "running", "dns_name": TS_HOST, "url": f"https://{TS_HOST}/dashboard"}
-
-    monkeypatch.setattr(remote_access_service, "tailscale_reader", reader)
-    for _ in range(3):
-        s = client.get("/api/v1/remote-access", headers=op).json()
-    assert s["tailscale"]["url"] == f"https://{TS_HOST}/dashboard"
-    assert len(calls) == 1
-    assert s["local_origin"].startswith("http://127.0.0.1:")
-
-    def broken():
-        raise RuntimeError("boom")
-
-    svc = RemoteAccessService()
-    svc.tailscale_reader = broken
-    assert svc.tailscale_status()["state"] == "unavailable"
+    assert f"https://{CUSTOMER}" in public_exposure.configured_origins()
+    # ... and the tunnel rules follow the new one.
+    r = _via_tunnel(CUSTOMER).post("/api/v1/setup/admin", json={}, headers=TUNNEL_TRAEFIK)
+    assert r.status_code == 403
+    assert public_exposure.client_ip(_req("127.0.0.1", TUNNEL_NGINX, host=CUSTOMER)) == VISITOR

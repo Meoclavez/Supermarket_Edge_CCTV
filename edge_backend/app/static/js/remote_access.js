@@ -1,14 +1,13 @@
-// Settings: device identity + remote access panels. Owned by the remote-access work.
+// Settings: device identity + online access panels.
 //
 // #settings-device  device id (copy) and store/device name (rename)
 //                   GET/PUT /api/v1/device/identity
-// #settings-remote  online access: private HTTPS on the tailnet (tailscale serve,
-//                   read-only status) and the public dashboard on the operator's
-//                   own domain (Cloudflare Tunnel)
+// #settings-remote  online access: the dashboard at https://<public address>
+//                   through the owner's own server (VPS reverse tunnel)
 //                   GET/PUT /api/v1/remote-access, POST /api/v1/remote-access/verify
 //
-// The tunnel token is write-only: the server only ever says whether one is
-// configured. No prompt()/confirm()/alert(): every confirmation and error is
+// The store token and the optional server key are write-only: the server only
+// ever says whether one is configured. No prompt()/confirm()/alert(): every confirmation and error is
 // inline. Data loads when the Settings tab is opened (window event edge:tab).
 (function () {
   'use strict';
@@ -142,167 +141,127 @@
   // ------------------------------------------------------------------ remote
 
   const PROCESS_LABEL = {
-    stopped: 'Stopped', starting: 'Connecting…', connected: 'Connected', error: 'Error', external: 'External proxy',
+    stopped: 'Stopped', starting: 'Connecting…', connected: 'Connected', error: 'Error',
   };
 
   function statusDotClass(p) {
-    return { connected: 'ra-dot-ok', starting: 'ra-dot-wait', error: 'ra-dot-err', external: 'ra-dot-wait' }[p] || 'ra-dot-off';
+    return { connected: 'ra-dot-ok', starting: 'ra-dot-wait', error: 'ra-dot-err' }[p] || 'ra-dot-off';
   }
 
-  function stepsHtml(port) {
-    const origin = esc(`http://127.0.0.1:${port}`);
-    return `
-      <details class="ra-steps" id="raSteps">
-        <summary>How to connect your domain with Cloudflare (step by step)</summary>
-        <ol>
-          <li>Your domain must use Cloudflare DNS: in the Cloudflare dashboard choose <b>Add a domain</b> and
-              change the nameservers at your registrar to the two Cloudflare shows. Wait until the domain is <b>Active</b>.</li>
-          <li>Open <b>Zero Trust</b> (one.dash.cloudflare.com) → <b>Networks</b> → <b>Tunnels</b> →
-              <b>Create a tunnel</b>. Choose <b>Cloudflared</b>, name it after this store, and save.</li>
-          <li>On the <b>Install and run connector</b> page, copy the command shown for any operating system.
-              Do <b>not</b> run it. Paste it (or just the long value starting with <code>eyJ</code>) into
-              <b>Tunnel token</b> below — this device runs the connector itself.</li>
-          <li>Click <b>Next</b> to <b>Route traffic</b> / <b>Public hostnames</b>: pick a subdomain and your domain
-              (for example <code>cctv</code> . <code>yourstore.com.au</code>), set <b>Service type</b> to
-              <code>HTTP</code> and <b>URL</b> to <code>${origin.replace('http://', '')}</code>, then save.</li>
-          <li>Enter the same hostname below, tick <b>Enable remote access</b> and press <b>Save</b>.
-              The status turns <b>Connected</b> within a few seconds; then press <b>Verify now</b>.</li>
-          <li>Recommended: in Zero Trust → <b>Access</b> → <b>Applications</b>, add a self-hosted application for the
-              hostname so Cloudflare asks for an e-mail one-time PIN before the dashboard sign-in.
-              (Leave <code>/api/*</code> unprotected there if the phone app must connect through it.)</li>
-        </ol>
-        <div class="ra-hint">No router port forwarding is needed: the tunnel is an outbound connection, and
-          Cloudflare provides the HTTPS certificate for your domain. First-run account setup is refused over
-          the internet and only works on the store network.</div>
-      </details>`;
+  function processLabel(s) {
+    const p = (s && s.process) || 'stopped';
+    if (p === 'connected' && s.connected_since) return `Connected since ${fmtTime(s.connected_since)}`;
+    return PROCESS_LABEL[p] || p;
   }
 
-  // Private access for the owner and staff: https://<machine>.<tailnet>.ts.net
-  // through `tailscale serve`. Read-only here: publishing needs root on this
-  // machine (deploy/install.sh with EDGE_TAILSCALE_SERVE=1 does it).
-  const TS_LABEL = {
-    not_installed: 'Tailscale not installed', unavailable: 'Tailscale status unavailable',
-    stopped: 'Tailscale not connected',
-  };
-
-  function tailscaleHtml(ts) {
-    if (!ts) return '';
-    const published = !!ts.url;
-    const label = published ? 'Published on your tailnet'
-      : TS_LABEL[ts.state] || (ts.https_enabled ? 'Not published yet' : 'HTTPS certificates not enabled');
-    const dot = published ? 'ra-dot-ok' : (ts.state === 'running' ? 'ra-dot-wait' : 'ra-dot-off');
-    const steps = ts.installed && !published ? `
-      <details class="ra-steps" id="raTsSteps">
-        <summary>How to turn on private HTTPS for staff (step by step)</summary>
-        <ol>
-          <li>In the Tailscale admin console open <b>DNS</b>
-              (<a class="ra-link" href="${esc(ts.admin_url)}" target="_blank" rel="noopener">${esc(ts.admin_url)}</a>)
-              and turn on <b>MagicDNS</b> and <b>HTTPS Certificates</b>.</li>
-          <li>On this machine run <code>${esc(ts.serve_command)}</code>
-              (or re-run the installer with <code>EDGE_TAILSCALE_SERVE=1</code>).</li>
-          <li>Open <code>https://${esc(ts.dns_name || '<machine>.<tailnet>.ts.net')}/dashboard</code> on any
-              phone or PC signed in to your tailnet. Only devices you added to the tailnet can reach it.</li>
-        </ol>
-      </details>` : '';
-    return `
-      <div class="ra-status-text ra-mt">Private access for you and your staff (Tailscale)</div>
-      <div class="ra-statusbar" id="raTsBar">
-        <span class="ra-dot ${dot}" id="raTsDot"></span>
-        <span class="ra-status-text" id="raTsState" data-state="${esc(ts.state || '')}">${esc(label)}</span>
-        ${published ? `<a class="ra-link" id="raTsUrl" href="${esc(ts.url)}" target="_blank" rel="noopener">${esc(ts.url)}</a>` : ''}
-        <span class="ra-spacer"></span>
-        ${ts.dns_name ? `<code class="ra-code" id="raTsName">${esc(ts.dns_name)}</code>` : ''}
-      </div>
-      <div class="form-status ${published ? '' : 'form-status-error'}" id="raTsMessage">${published ? '' : esc(ts.message || '')}</div>
-      ${ts.funnel ? '<div class="form-status form-status-error" id="raTsFunnel">Tailscale Funnel is on for this machine: the dashboard is also public on the internet through it, and is treated as remote access (first-run setup refused).</div>' : ''}
-      ${steps}
-      <div class="ra-status-text ra-mt">Public access on your own domain (Cloudflare Tunnel)</div>`;
+  function processError(s) {
+    if (!s || !s.last_error) return '';
+    return s.process === 'error' ? `Error: ${s.last_error}` : s.last_error;
   }
 
   function renderRemote(errorText) {
     const host = $('settings-remote');
     if (!host) return;
     const s = state || {};
-    const port = (s.local_origin || '').split(':').pop() || location.port || '8000';
     const proc = s.process || 'stopped';
-    const provider = s.provider || 'cloudflare_tunnel';
-    const isTunnel = provider === 'cloudflare_tunnel';
     const tokenBadge = s.token_configured
-      ? '<span class="badge badge-green" id="raTokenState">configured</span>'
-      : '<span class="badge badge-warning" id="raTokenState">not configured</span>';
+      ? '<span class="badge badge-green" id="raTokenState">saved</span>'
+      : '<span class="badge badge-warning" id="raTokenState">not set</span>';
     const showTokenInput = !s.token_configured || tokenMode === 'replace';
     const verifiedBadge = s.verified
       ? `<span class="badge badge-green" id="raVerified">Verified ${esc(fmtTime(s.verified_at))}</span>`
       : '<span class="badge badge-warning" id="raVerified">Not verified</span>';
 
-    // Verifying is only meaningful once the tunnel is up (P3-1).
-    const canVerify = !!s.hostname && (!isTunnel || proc === 'connected');
-    const verifyTitle = !s.hostname ? 'Enter a hostname first'
-      : (canVerify ? 'Check that the public hostname reaches this device' : 'Start remote access first; verify once it shows Connected');
+    // Verifying is only meaningful once the tunnel is up.
+    const canVerify = !!s.hostname && proc === 'connected';
+    const verifyTitle = !s.hostname ? 'Enter the public address first'
+      : (canVerify ? 'Check that the public address reaches this device' : 'Verify once the status shows Connected');
 
     host.innerHTML = `
       <div class="card-title"><span>Online access</span></div>
-      ${tailscaleHtml(s.tailscale)}
-      <div class="ra-hint">Publish this dashboard at <b>https://</b> on your own domain. It is online only while
-        this is enabled and the hostname is connected. Everything still runs on this machine.</div>
+      <div class="ra-hint">Open this dashboard from anywhere at <b>https://</b> your own address, through your own
+        server. Everything still runs on this machine, and it is online only while this is enabled and connected.</div>
 
       <div class="ra-statusbar" id="raStatusBar">
         <span class="ra-dot ${statusDotClass(proc)}" id="raDot"></span>
-        <span class="ra-status-text" id="raProcess" data-process="${esc(proc)}">${esc(PROCESS_LABEL[proc] || proc)}</span>
+        <span class="ra-status-text" id="raProcess" data-process="${esc(proc)}">${esc(processLabel(s))}</span>
         ${s.enabled && s.public_url ? `<a class="ra-link" id="raPublicUrl" href="${esc(s.public_url)}" target="_blank" rel="noopener">${esc(s.public_url)}</a>` : ''}
         <span class="ra-spacer"></span>
         ${verifiedBadge}
         <button type="button" class="btn btn-sm" id="raVerifyBtn" ${canVerify ? '' : 'disabled'} title="${esc(verifyTitle)}">Verify now</button>
       </div>
-      <div class="form-status form-status-error" id="raProcessError">${esc(s.last_error || '')}</div>
+      <div class="form-status form-status-error" id="raProcessError">${esc(processError(s))}</div>
       <div class="form-status ${s.verified ? '' : 'form-status-error'}" id="raVerifyStatus">${s.verified ? '' : esc(s.verify_error || '')}</div>
-      ${s.auth_disabled ? '<div class="form-status form-status-error">AUTH_DISABLED is on: remote access cannot be enabled until authentication is turned back on.</div>' : ''}
-      ${isTunnel && s.cloudflared_found === false ? '<div class="form-status form-status-error" id="raNoBinary">cloudflared is not installed on this machine. Run <code>./run.sh --with-tunnel</code> once (downloads it into bin/), then Save again.</div>' : ''}
+      ${s.auth_disabled ? '<div class="form-status form-status-error">AUTH_DISABLED is on: online access cannot be enabled until sign-in is turned back on.</div>' : ''}
+      ${s.tunnel_client_found === false ? '<div class="form-status form-status-error" id="raNoBinary">The tunnel program is not installed on this machine yet. Ask your installer to re-run the installer with <code>EDGE_TUNNEL=1</code>.</div>' : ''}
 
       <form id="raForm" autocomplete="off">
         <label class="checkbox-label ra-toggle">
-          <input type="checkbox" id="raEnabled" ${s.enabled ? 'checked' : ''}> Enable remote access
+          <input type="checkbox" id="raEnabled" ${s.enabled ? 'checked' : ''}> Enable online access
         </label>
         <div class="form-grid-2col ra-fields">
           <div class="form-group">
-            <label for="raProvider">Provider</label>
-            <select class="form-select" id="raProvider">
-              <option value="cloudflare_tunnel" ${isTunnel ? 'selected' : ''}>Cloudflare Tunnel (recommended)</option>
-              <option value="direct" ${!isTunnel ? 'selected' : ''}>Direct (own public IP + reverse proxy)</option>
-            </select>
+            <label for="raHostname">Public address</label>
+            <input class="form-input" id="raHostname" value="${esc(s.hostname || '')}" placeholder="e.g. pearcedale-cctv.ikorex.com.au"
+                   spellcheck="false" autocapitalize="off">
+            <div class="ra-hint">The address you will open in the browser.</div>
           </div>
           <div class="form-group">
-            <label for="raHostname">Public hostname</label>
-            <input class="form-input" id="raHostname" value="${esc(s.hostname || '')}" placeholder="cctv.yourstore.com.au"
+            <label for="raServer">Tunnel server</label>
+            <input class="form-input" id="raServer" value="${esc(s.server_url || '')}" placeholder="e.g. wss://tunnel.ikorex.com.au"
                    spellcheck="false" autocapitalize="off">
+            <div class="ra-hint">Where this machine connects to your server.</div>
           </div>
         </div>
 
-        <div class="form-group ra-token" id="raTokenGroup" ${isTunnel ? '' : 'hidden'}>
-          <label for="raToken">Tunnel token ${tokenBadge}</label>
+        <div class="form-grid-2col ra-fields">
+          <div class="form-group">
+            <label for="raStoreId">Store ID</label>
+            <input class="form-input" id="raStoreId" value="${esc(s.store_id || '')}" placeholder="e.g. pearcedale"
+                   spellcheck="false" autocapitalize="off" maxlength="40">
+            <div class="ra-hint">Identifies this store on your server.</div>
+          </div>
+          <div class="form-group ra-token">
+            <label for="raServerKey">Server key <span class="ra-hint">(optional)</span> ${s.server_key_configured
+              ? '<span class="badge badge-green" id="raServerKeyState">saved</span>' : ''}</label>
+            ${s.server_key_configured ? `
+              <div class="ra-inline">
+                <span class="ra-hint">Stored encrypted on this device.</span>
+                <button type="button" class="btn btn-sm" id="raServerKeyRemove">Remove</button>
+              </div>` : `
+              <input class="form-input" id="raServerKey" type="password" autocomplete="new-password" spellcheck="false"
+                     placeholder="Only if your installer gave you one">`}
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="raExtraProxies">Proxies in front of your server</label>
+          <select class="form-select" id="raExtraProxies">
+            ${[[0, 'None: visitors connect to your server directly'], [1, 'One (a CDN in front of your server)'],
+               [2, 'Two']].map(([v, t]) => `<option value="${v}" ${Number(s.extra_proxies || 0) === v ? 'selected' : ''}>${t}</option>`).join('')}
+          </select>
+          <div class="ra-hint">Used to tell visitors apart for sign-in lockouts. Only change it if your installer says so.</div>
+        </div>
+
+        <div class="form-group ra-token" id="raTokenGroup">
+          <label for="raToken">Store token ${tokenBadge}</label>
           ${showTokenInput ? `
             <input class="form-input" id="raToken" type="password" autocomplete="new-password" spellcheck="false"
-                   placeholder="${s.token_configured ? 'Paste the new token' : 'Paste the token or the whole install command'}">
+                   placeholder="${s.token_configured ? 'Enter the new token' : 'Enter the token'}">
             ${tokenMode === 'replace' ? '<button type="button" class="btn btn-sm ra-mt" id="raTokenCancel">Keep current token</button>' : ''}`
           : tokenMode === 'confirm-remove' ? `
             <div class="ra-inline ra-confirm" id="raRemoveConfirm">
-              <span>Remove the stored token? The tunnel stops.</span>
+              <span>Remove the stored store token? Online access stops.</span>
               <button type="button" class="btn btn-danger btn-sm" id="raTokenRemoveYes">Remove token</button>
               <button type="button" class="btn btn-sm" id="raTokenRemoveNo">Cancel</button>
             </div>`
           : `
             <div class="ra-inline">
               <span class="ra-hint">Stored encrypted on this device. It is never shown again.</span>
-              <button type="button" class="btn btn-sm" id="raTokenReplace">Replace</button>
+              <button type="button" class="btn btn-sm" id="raTokenReplace">Replace token</button>
               <button type="button" class="btn btn-danger btn-sm" id="raTokenRemove">Remove</button>
             </div>`}
         </div>
-
-        ${!isTunnel ? `
-          <div class="form-group" id="raCaddy">
-            <label>Caddy site block (run Caddy yourself; forward TCP 80 and 443 to this machine)</label>
-            <pre class="ra-pre" id="raCaddyBlock">${esc(s.caddy_site_block || '')}</pre>
-          </div>` : ''}
 
         <div class="ra-inline ra-mt">
           <button type="submit" class="btn btn-primary btn-sm" id="raSave">Save</button>
@@ -310,7 +269,9 @@
         </div>
         <div class="form-status ${errorText ? 'form-status-error' : ''}" id="raFormStatus">${esc(errorText || '')}</div>
       </form>
-      ${isTunnel ? stepsHtml(port) : ''}`;
+      <div class="ra-hint ra-mt" id="raHelp">Ask your installer for the tunnel server, store ID and store token. After saving, the
+        status turns <b>Connected</b> within a few seconds; then press <b>Verify now</b>. Creating the first
+        operator account only works on the store network, never through this address.</div>`;
 
     bindRemote();
   }
@@ -320,17 +281,6 @@
     if (!form) return;
     form.addEventListener('submit', onSave);
     form.addEventListener('input', () => { dirty = true; });
-    $('raProvider').addEventListener('change', () => {
-      dirty = true;
-      const keep = snapshotForm();
-      state = Object.assign({}, state, { provider: $('raProvider').value,
-        caddy_site_block: state && state.caddy_site_block });
-      renderRemote();
-      restoreForm(keep);
-      if ($('raProvider').value === 'direct' && !state.caddy_site_block) {
-        setStatus('raFormStatus', 'Save to generate the Caddy site block for your hostname.');
-      }
-    });
     const on = (id, fn) => { const el = $(id); if (el) el.addEventListener('click', fn); };
     on('raVerifyBtn', onVerify);
     on('raTokenReplace', () => { const k = snapshotForm(); tokenMode = 'replace'; renderRemote(); restoreForm(k); const t = $('raToken'); if (t) t.focus(); });
@@ -338,25 +288,30 @@
     on('raTokenRemove', () => { const k = snapshotForm(); tokenMode = 'confirm-remove'; renderRemote(); restoreForm(k); });
     on('raTokenRemoveNo', () => { const k = snapshotForm(); tokenMode = 'idle'; renderRemote(); restoreForm(k); });
     on('raTokenRemoveYes', onRemoveToken);
+    on('raServerKeyRemove', onRemoveServerKey);
   }
 
   function snapshotForm() {
     return {
       enabled: $('raEnabled') ? $('raEnabled').checked : undefined,
-      provider: $('raProvider') ? $('raProvider').value : undefined,
       hostname: $('raHostname') ? $('raHostname').value : undefined,
+      server: $('raServer') ? $('raServer').value : undefined,
+      storeId: $('raStoreId') ? $('raStoreId').value : undefined,
+      extra: $('raExtraProxies') ? $('raExtraProxies').value : undefined,
       token: $('raToken') ? $('raToken').value : '',
-      stepsOpen: $('raSteps') ? $('raSteps').open : false,
+      serverKey: $('raServerKey') ? $('raServerKey').value : '',
     };
   }
 
   function restoreForm(k) {
     if (!k) return;
     if ($('raEnabled') && k.enabled !== undefined) $('raEnabled').checked = k.enabled;
-    if ($('raProvider') && k.provider) $('raProvider').value = k.provider;
     if ($('raHostname') && k.hostname !== undefined) $('raHostname').value = k.hostname;
+    if ($('raServer') && k.server !== undefined) $('raServer').value = k.server;
+    if ($('raStoreId') && k.storeId !== undefined) $('raStoreId').value = k.storeId;
+    if ($('raExtraProxies') && k.extra !== undefined) $('raExtraProxies').value = k.extra;
     if ($('raToken') && k.token) $('raToken').value = k.token;
-    if ($('raSteps')) $('raSteps').open = !!k.stepsOpen;
+    if ($('raServerKey') && k.serverKey) $('raServerKey').value = k.serverKey;
   }
 
   async function putRemote(body, statusId, okText) {
@@ -364,7 +319,7 @@
     const res = await fetch('/api/v1/remote-access', {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     });
-    if (!res.ok) throw new Error(await apiError(res, 'Could not save remote access settings'));
+    if (!res.ok) throw new Error(await apiError(res, 'Could not save the online access settings'));
     state = await res.json();
     dirty = false;
     tokenMode = 'idle';
@@ -377,12 +332,16 @@
     ev.preventDefault();
     const btn = $('raSave');
     const f = snapshotForm();
-    const body = { enabled: f.enabled, provider: f.provider, hostname: (f.hostname || '').trim() };
+    const body = {
+      enabled: f.enabled, hostname: (f.hostname || '').trim(), server_url: (f.server || '').trim(),
+      store_id: (f.storeId || '').trim(), extra_proxies: Number(f.extra || 0),
+    };
     if (f.token && f.token.trim()) body.token = f.token.trim();
+    if (f.serverKey && f.serverKey.trim()) body.server_key = f.serverKey.trim();
     btn.disabled = true;
     try {
       await putRemote(body, 'raFormStatus',
-        body.enabled ? 'Saved. Remote access is enabled.' : 'Saved. Remote access is disabled.');
+        body.enabled ? 'Saved. Online access is enabled.' : 'Saved. Online access is disabled.');
       schedulePoll();
     } catch (e) {
       setStatus('raFormStatus', e.message, true);
@@ -394,9 +353,20 @@
     const keep = snapshotForm();
     try {
       await putRemote({ clear_token: true, enabled: false }, 'raFormStatus',
-        'Token removed. Remote access is disabled.');
+        'Token removed. Online access is disabled.');
     } catch (e) {
       tokenMode = 'idle';
+      renderRemote(e.message);
+      restoreForm(keep);
+    }
+  }
+
+  async function onRemoveServerKey() {
+    const keep = snapshotForm();
+    try {
+      await putRemote({ clear_server_key: true }, 'raFormStatus', 'Server key removed.');
+      restoreForm(Object.assign(keep, { serverKey: '' }));
+    } catch (e) {
       renderRemote(e.message);
       restoreForm(keep);
     }
@@ -405,7 +375,7 @@
   async function onVerify() {
     const btn = $('raVerifyBtn');
     btn.disabled = true;
-    setStatus('raVerifyStatus', 'Checking that the public hostname reaches this device…');
+    setStatus('raVerifyStatus', 'Checking that the public address reaches this device…');
     try {
       const res = await fetch('/api/v1/remote-access/verify', { method: 'POST' });
       if (!res.ok) throw new Error(await apiError(res, 'Verification failed'));
@@ -426,31 +396,31 @@
   function applyLiveStatus(s) {
     const prev = state || {};
     state = s;
-    const structural = !prev.provider || prev.provider !== s.provider || prev.token_configured !== s.token_configured
-      || prev.enabled !== s.enabled || prev.hostname !== s.hostname || prev.verified !== s.verified
-      || prev.cloudflared_found !== s.cloudflared_found || prev.caddy_site_block !== s.caddy_site_block
-      || JSON.stringify(prev.tailscale || null) !== JSON.stringify(s.tailscale || null);
+    const structural = prev.token_configured !== s.token_configured || prev.enabled !== s.enabled
+      || prev.hostname !== s.hostname || prev.server_url !== s.server_url || prev.verified !== s.verified
+      || prev.store_id !== s.store_id || prev.server_key_configured !== s.server_key_configured
+      || prev.extra_proxies !== s.extra_proxies
+      || prev.tunnel_client_found !== s.tunnel_client_found || prev.auth_disabled !== s.auth_disabled
+      || (prev.process === 'connected') !== (s.process === 'connected');
     if (structural && !dirty && tokenMode === 'idle') {
-      const keep = { stepsOpen: $('raSteps') ? $('raSteps').open : false };
-      const tsOpen = $('raTsSteps') ? $('raTsSteps').open : false;
       renderRemote();
-      restoreForm(keep);
-      if ($('raTsSteps')) $('raTsSteps').open = tsOpen;
       return;
     }
     const dot = $('raDot');
     if (dot) dot.className = `ra-dot ${statusDotClass(s.process)}`;
     const p = $('raProcess');
-    if (p) { p.textContent = PROCESS_LABEL[s.process] || s.process; p.dataset.process = s.process; }
+    if (p) { p.textContent = processLabel(s); p.dataset.process = s.process; }
     const err = $('raProcessError');
-    if (err) err.textContent = s.last_error || '';
+    if (err) err.textContent = processError(s);
+    const vb = $('raVerifyBtn');
+    if (vb) vb.disabled = !(s.hostname && s.process === 'connected');
   }
 
   async function loadRemote(initial) {
     try {
       const res = await fetch('/api/v1/remote-access', { cache: 'no-store' });
       if (res.status === 401) { stopPoll(); return; }
-      if (!res.ok) throw new Error(await apiError(res, 'Remote access status unavailable'));
+      if (!res.ok) throw new Error(await apiError(res, 'Online access status unavailable'));
       const s = await res.json();
       if (initial || !state) { state = s; renderRemote(); } else { applyLiveStatus(s); }
     } catch (e) {

@@ -193,8 +193,8 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         startup_log.exception(f"Shadow trial failed to start: {exc}")
 
-    # 5. Remote access (online dashboard): runs cloudflared only when enabled,
-    # a hostname and a token are configured, and authentication is on.
+    # 5. Online access (dashboard through the owner's VPS): runs frpc only when
+    # enabled, an address, tunnel server and token are set, and auth is on.
     from .services.remote_access_service import remote_access_service
     try:
         await remote_access_service.start()
@@ -274,6 +274,10 @@ app.include_router(insights_routes.router)
 from .routes import night_watch as night_watch_routes  # noqa: E402
 
 app.include_router(night_watch_routes.router)
+from .routes import recorders as recorders_routes  # noqa: E402
+
+app.include_router(recorders_routes.router)
+app.include_router(recorders_routes.camera_stream_router)
 
 # Mount Static Files
 STATIC_DIR = Path(__file__).resolve().parent / "static"

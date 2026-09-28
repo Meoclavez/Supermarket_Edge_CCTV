@@ -21,7 +21,6 @@ from app.services.inference_backend import (
     Detection,
     PersonDetector,
     _nms,
-    _parse_class_filter,
     build_model_spec,
     decode_output,
 )
@@ -267,7 +266,7 @@ def test_module_import_does_not_load_models():
 
 def test_detector_without_model_reports_unavailable_and_returns_nothing():
     """The no-backend state must produce zero detections, never placeholders."""
-    d = PersonDetector(model_path="/nonexistent/model.onnx", object_model_path="")
+    d = PersonDetector(model_path="/nonexistent/model.onnx")
     assert not d.available
     status = d.initialise()
     assert not d.available
@@ -285,12 +284,42 @@ def test_hailo_is_never_claimed_without_a_runner(monkeypatch, tmp_path):
     fake_dev = tmp_path / "hailo0"
     fake_dev.write_text("")
     monkeypatch.setattr(settings, "HAILO_DEVICE", str(fake_dev))
-    d = PersonDetector(model_path="/nonexistent/model.onnx", object_model_path="")
+    d = PersonDetector(model_path="/nonexistent/model.onnx")
     status = d.initialise()
     assert status["hailo"]["device_present"] is True
     assert status["hailo"]["runner"] is False and status["hailo"]["selected"] is False
+    assert "no compatible model for this accelerator" in status["hailo"]["reason"]
     assert status["backend"] != "hailo"
     assert status["available"] is False
+
+
+def test_fitted_hailo_reports_no_compatible_model_and_the_next_backend_runs(monkeypatch, tmp_path):
+    """Even with a device and a HEF file present, the NPU is listed, never
+    selected: no compatible (non-AGPL) model ships for it, and the pose model
+    runs on the next backend (ONNX Runtime)."""
+    from app.config import settings
+
+    rtmo = MODELS / "rtmo-s-body7-640x640-static.onnx"
+    if not rtmo.exists():
+        pytest.skip("rtmo-s-body7-640x640-static.onnx not present")
+    fake_dev = tmp_path / "hailo0"
+    fake_dev.write_text("")
+    hef = tmp_path / "pose.hef"
+    hef.write_bytes(b"not a real hef")
+    monkeypatch.setattr(settings, "HAILO_DEVICE", str(fake_dev))
+    monkeypatch.setattr(settings, "HAILO_POSE_HEF_PATH", str(hef))
+    monkeypatch.setattr(settings, "INFERENCE_DISABLED_PROVIDERS", "tensorrt,cuda,migraphx,rocm,openvino,directml")
+    monkeypatch.setattr(settings, "POSE_REFINER", "off")
+    d = PersonDetector(model_path=rtmo)
+    status = d.initialise()
+    h = status["hailo"]
+    assert h["device_present"] is True and h["selected"] is False and h["runner"] is False
+    assert "no compatible model for this accelerator" in h["reason"]
+    assert f"HAILO_POSE_HEF_PATH={hef} is not used" in h["reason"]
+    assert "falling back to the next backend" in h["reason"]
+    assert status["available"] is True
+    assert status["backend"] == "onnxruntime" and status["provider"] == "cpu"
+    assert status["model"] == rtmo.name
 
 
 # --------------------------------------------------- output layout decoding
@@ -301,32 +330,25 @@ class _IO:
         self.name, self.shape, self.type = name, shape, type_
 
 
-def test_model_spec_is_decided_from_metadata_and_shape():
-    inp = [_IO("images", [1, 3, 640, 640])]
-    pose = build_model_spec(Path("p.onnx"), {"kpt_shape": "[17, 3]", "names": "{0: 'person'}"},
-                            inp, [_IO("output0", [1, 56, 8400])])
-    assert (pose.task, pose.layout, pose.num_classes, pose.kpt_shape) == ("pose", "cf", 1, (17, 3))
+def _rtmo_outputs(k=300):
+    return [_IO("dets", [1, k, 5]), _IO("keypoints", [1, k, 17, 3])]
 
-    names80 = str({i: f"c{i}" for i in range(80)})
-    det = build_model_spec(Path("d.onnx"), {"names": names80}, inp, [_IO("output0", [1, 84, 8400])])
-    assert (det.task, det.layout, det.num_classes) == ("detect", "cf", 80)
 
-    v5 = build_model_spec(Path("v5.onnx"), {}, inp, [_IO("output0", [1, 25200, 85])])
-    assert (v5.task, v5.layout, v5.num_classes) == ("detect", "v5", 80)
+def test_model_spec_is_decided_from_the_rtmo_output_signature():
+    inp = [_IO("input", [1, 3, 640, 640])]
+    pose = build_model_spec(Path("p.onnx"), {}, inp, _rtmo_outputs())
+    assert (pose.task, pose.layout, pose.num_classes, pose.kpt_shape) == ("pose", "rtmo", 1, (17, 3))
+    assert pose.names == {0: "person"} and pose.input_size == (640, 640)
 
-    half = build_model_spec(Path("h.onnx"), {}, [_IO("images", [1, 3, 640, 640], "tensor(float16)")],
-                            [_IO("output0", [1, 84, 8400])])
+    half = build_model_spec(Path("h.onnx"), {}, [_IO("input", [1, 3, 640, 640], "tensor(float16)")],
+                            _rtmo_outputs())
     assert half.input_dtype == np.float16
 
-    # Anchor-major export of the same pose head.
-    cl = build_model_spec(Path("p.onnx"), {"kpt_shape": "[17, 3]", "names": "{0: 'person'}"},
-                          inp, [_IO("output0", [1, 8400, 56])])
-    assert (cl.task, cl.layout) == ("pose", "cl")
-
-    with pytest.raises(ValueError):
-        # 60 channels cannot be 4 box + 1 class + 17x3 keypoints.
-        build_model_spec(Path("bad.onnx"), {"kpt_shape": "[17, 3]", "names": "{0: 'person'}"},
-                         inp, [_IO("output0", [1, 60, 8400])])
+    # A YOLO pose / detect head is not a supported person model any more.
+    for shape in ([1, 56, 8400], [1, 84, 8400], [1, 8400, 56], [1, 60, 8400]):
+        with pytest.raises(ValueError, match="unsupported model outputs"):
+            build_model_spec(Path("bad.onnx"), {"kpt_shape": "[17, 3]", "names": "{0: 'person'}"},
+                             inp, [_IO("output0", shape)])
 
 
 class _FakeSession:
@@ -336,44 +358,45 @@ class _FakeSession:
     def run(self, _outputs, feeds):
         (blob,) = feeds.values()
         assert blob.shape == (1, 3, 640, 640)
-        return [self.raw]
+        return list(self.raw)
 
 
 def _pose_detector_with_output(raw) -> PersonDetector:
-    d = PersonDetector(model_path="/nonexistent/pose.onnx", object_model_path="")
-    d.spec = build_model_spec(Path("pose.onnx"), {"kpt_shape": "[17, 3]", "names": "{0: 'person'}"},
-                              [_IO("images", [1, 3, 640, 640])], [_IO("output0", list(raw.shape))])
+    """``raw`` = [dets [1,K,5], keypoints [1,K,17,3]] as the RTMO session returns them."""
+    d = PersonDetector(model_path="/nonexistent/pose.onnx")
+    d.spec = build_model_spec(Path("pose.onnx"), {}, [_IO("input", [1, 3, 640, 640])],
+                              [_IO("dets", list(raw[0].shape)), _IO("keypoints", list(raw[1].shape))])
     d.session = _FakeSession(raw)
     d._initialised = True
     return d
 
 
 def test_pose_decoder_maps_boxes_and_keypoints_back_through_the_letterbox():
-    """Synthetic [1,56,N] tensor: one person, a duplicate, and a weak anchor.
+    """Synthetic RTMO outputs: one person, a duplicate, and a weak candidate.
 
     A 1280x720 frame letterboxes to 640x640 with scale 0.5 and 140 px of
     vertical padding, so network (x, y) maps to ((x - 0) / 0.5, (y - 140) / 0.5).
     """
     n = 8
-    raw = np.zeros((1, 56, n), dtype=np.float32)
+    dets = np.zeros((1, n, 5), dtype=np.float32)
+    kpts = np.zeros((1, n, 17, 3), dtype=np.float32)
 
-    def anchor(i, cx, cy, w, h, score, wrist=(300.0, 330.0)):
-        raw[0, 0:4, i] = (cx, cy, w, h)
-        raw[0, 4, i] = score
+    def person(i, cx, cy, w, h, score, wrist=(300.0, 330.0)):
+        dets[0, i] = (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2, score)
         k = np.zeros((17, 3), dtype=np.float32)
         k[:, 0], k[:, 1], k[:, 2] = cx, cy, 0.9
         k[0] = (cx, cy - 100, 0.1)                 # nose: not visible
         k[9] = (wrist[0], wrist[1], 0.95)          # left wrist
-        raw[0, 5:, i] = k.reshape(-1)
+        kpts[0, i] = k
 
-    anchor(0, 320, 320, 100, 240, 0.90)
-    anchor(1, 322, 321, 100, 240, 0.80)            # duplicate: NMS removes it
-    anchor(2, 100, 300, 40, 100, 0.20)             # below threshold
+    person(0, 320, 320, 100, 240, 0.90)
+    person(1, 322, 321, 100, 240, 0.80)            # duplicate: host NMS removes it
+    person(2, 100, 300, 40, 100, 0.20)             # below threshold
 
-    d = _pose_detector_with_output(raw)
-    dets = d.detect(np.zeros((720, 1280, 3), dtype=np.uint8))
-    assert len(dets) == 1
-    det = dets[0]
+    d = _pose_detector_with_output([dets, kpts])
+    found = d.detect(np.zeros((720, 1280, 3), dtype=np.uint8))
+    assert len(found) == 1
+    det = found[0]
     assert (det.x1, det.y1, det.x2, det.y2) == pytest.approx((540, 120, 740, 600))
     assert det.confidence == pytest.approx(0.9)
     assert det.keypoints.shape == (17, 3)
@@ -384,26 +407,15 @@ def test_pose_decoder_maps_boxes_and_keypoints_back_through_the_letterbox():
     assert d.status()["avg_infer_ms"] is not None
 
 
-def test_detect_layout_decoder_keeps_only_people():
-    """v8-style [1, 4+C, N]: a person anchor and a confidently-detected handbag."""
-    raw = np.zeros((1, 84, 4), dtype=np.float32)
-    raw[0, 0:4, 0] = (320, 320, 100, 240)
-    raw[0, 4 + 0, 0] = 0.8                         # person
-    raw[0, 0:4, 1] = (100, 300, 60, 150)
-    raw[0, 4 + 26, 1] = 0.9                        # handbag
-    names80 = str({i: f"c{i}" for i in range(80)})
-    spec = build_model_spec(Path("d.onnx"), {"names": names80}, [_IO("images", [1, 3, 640, 640])],
-                            [_IO("o", [1, 84, 4])])
-    assert spec.layout == "cf"
-    boxes, scores, cls, kpts = decode_output(raw, spec, 0.5, class_ids={0})
-    assert len(boxes) == 1 and cls[0] == 0 and kpts is None
-    boxes, scores, cls, _ = decode_output(raw, spec, 0.5, class_ids={26})
-    assert list(cls) == [26]
-
-
-def test_object_class_filter_accepts_names_and_ids():
-    names = {0: "person", 24: "backpack", 26: "handbag", 67: "cell phone"}
-    assert _parse_class_filter("backpack, 67, not-a-class, person", names) == {24, 67}
+def test_decoder_returns_only_people_above_the_threshold():
+    """Every RTMO candidate is a person (class 0); zero-score padding rows are dropped."""
+    spec = build_model_spec(Path("p.onnx"), {}, [_IO("input", [1, 3, 640, 640])], _rtmo_outputs(4))
+    dets = np.zeros((1, 4, 5), dtype=np.float32)
+    dets[0, 0] = (270, 200, 370, 440, 0.8)
+    dets[0, 1] = (70, 225, 130, 375, 0.3)
+    boxes, scores, cls, kpts = decode_output([dets, np.zeros((1, 4, 17, 3), np.float32)], spec, 0.5)
+    assert len(boxes) == 1 and list(cls) == [0] and kpts.shape == (1, 17, 3)
+    assert scores[0] == pytest.approx(0.8)
 
 
 # ----------------------------------------------------- provider fallback
@@ -444,14 +456,14 @@ class _FakeOrtSession:
 
     def get_modelmeta(self):
         class M:
-            custom_metadata_map = {"kpt_shape": "[17, 3]", "names": "{0: 'person'}"}
+            custom_metadata_map = {}
         return M()
 
     def get_inputs(self):
-        return [_IO("images", [1, 3, 640, 640])]
+        return [_IO("input", [1, 3, 640, 640])]
 
     def get_outputs(self):
-        return [_IO("output0", [1, 56, 8400])]
+        return _rtmo_outputs()
 
 
 @pytest.fixture
@@ -470,7 +482,7 @@ def fake_models(monkeypatch, tmp_path):
 
 def test_tensorrt_fallback_is_recorded_and_cuda_is_used(fake_models):
     ort = _FakeOrt(broken={"TensorrtExecutionProvider"})
-    d = PersonDetector(object_model_path="")
+    d = PersonDetector()
     d.available_providers = ort.get_available_providers()
     d._select(ort)
     assert d.provider == "cuda" and d.execution_provider == "CUDAExecutionProvider"
@@ -484,7 +496,7 @@ def test_tensorrt_fallback_is_recorded_and_cuda_is_used(fake_models):
 
 def test_gpu_failure_falls_back_to_cpu_with_the_small_model(fake_models):
     ort = _FakeOrt(broken={"TensorrtExecutionProvider", "CUDAExecutionProvider"})
-    d = PersonDetector(object_model_path="")
+    d = PersonDetector()
     d.available_providers = ort.get_available_providers()
     d._select(ort)
     assert d.provider == "cpu"
@@ -498,7 +510,7 @@ def test_pose_model_path_pins_the_model(fake_models, monkeypatch):
 
     monkeypatch.setattr(settings, "POSE_MODEL_PATH", str(fake_models / "small-pose.onnx"))
     ort = _FakeOrt(broken={"TensorrtExecutionProvider"})
-    d = PersonDetector(object_model_path="")
+    d = PersonDetector()
     d.available_providers = ort.get_available_providers()
     d._select(ort)
     assert d.provider == "cuda" and d.model_path.name == "small-pose.onnx"
@@ -519,13 +531,13 @@ def live_detector():
 
 
 @pytest.fixture(scope="module")
-def n_pose():
-    path = MODELS / "yolo26n-pose.onnx"
+def rtmo_pose():
+    path = MODELS / "rtmo-s-body7-640x640-static.onnx"
     if not path.exists():
-        pytest.skip("yolo26n-pose.onnx not present")
-    d = PersonDetector(model_path=path, object_model_path="")
+        pytest.skip("rtmo-s-body7-640x640-static.onnx not present")
+    d = PersonDetector(model_path=path)
     if not d.initialise()["available"]:
-        pytest.skip(f"yolo26n-pose could not be loaded: {d.last_error}")
+        pytest.skip(f"rtmo-s could not be loaded: {d.last_error}")
     return d
 
 
@@ -586,9 +598,9 @@ def _assert_plausible_skeleton(det: Detection, frame_shape, margin: float = 0.15
         assert (k[5, 1] + k[6, 1]) / 2 < (k[11, 1] + k[12, 1]) / 2, "shoulders below hips"
 
 
-def test_bus_image_people_have_plausible_skeletons(n_pose):
+def test_bus_image_people_have_plausible_skeletons(rtmo_pose):
     img = _image("bus.jpg")
-    dets = n_pose.detect(img)
+    dets = rtmo_pose.detect(img)
     assert len(dets) >= 3, [d.to_dict() for d in dets]
     for det in dets:
         _assert_plausible_skeleton(det, img.shape)
@@ -596,7 +608,7 @@ def test_bus_image_people_have_plausible_skeletons(n_pose):
     assert max(int((d.keypoints[:, 2] >= 0.5).sum()) for d in dets) >= 14
 
 
-def test_zidane_image_both_people_found_with_relaxed_cctv_gates(n_pose, monkeypatch):
+def test_zidane_image_both_people_found_with_relaxed_cctv_gates(rtmo_pose, monkeypatch):
     """Close-up broadcast framing breaks the ceiling-camera size gate.
 
     With the shipped gates only the standing figure passes (the other fills
@@ -606,25 +618,15 @@ def test_zidane_image_both_people_found_with_relaxed_cctv_gates(n_pose, monkeypa
     from app.config import settings
 
     img = _image("zidane.jpg")
-    shipped = n_pose.detect(img)
+    shipped = rtmo_pose.detect(img)
     assert len(shipped) >= 1
     monkeypatch.setattr(settings, "PERSON_MAX_FRAME_FRACTION", 1.0)
     monkeypatch.setattr(settings, "PERSON_MIN_ASPECT_RATIO", 0.0)
-    dets = n_pose.detect(img)
+    dets = rtmo_pose.detect(img)
     assert len(dets) == 2, [d.to_dict() for d in dets]
     for det in dets:
         _assert_plausible_skeleton(det, img.shape)
         assert det.keypoints[0, 2] >= 0.5, "face should be visible in this image"
-
-
-def test_object_model_reports_only_configured_classes(live_detector):
-    s = live_detector.status()["object_detection"]
-    if not s["available"]:
-        pytest.skip(f"object model unavailable: {s['error']}")
-    objs = live_detector.detect_objects(_image("bus.jpg"))
-    for o in objs:
-        assert o.label in s["classes"]
-        assert o.class_id != 0
 
 
 def test_detector_output_stays_inside_the_frame(live_detector):
@@ -644,7 +646,7 @@ def test_detector_output_stays_inside_the_frame(live_detector):
 
 def _detector():
     # The gates need no model; a bare instance must not load anything.
-    return PersonDetector(model_path="/nonexistent/model.onnx", object_model_path="")
+    return PersonDetector(model_path="/nonexistent/model.onnx")
 
 
 def test_near_square_box_is_rejected_as_person():

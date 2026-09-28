@@ -12,4 +12,9 @@ tests/
 .pytest_cache/
 **/__pycache__/
 *.pyc
-models/*.tmp
+# Only the models listed in models/manifest.json go into the image, so a
+# build host's leftover files (e.g. models of an earlier release) never ship.
+models/*
+!models/manifest.json
+!models/rtmo-s-body7-640x640-static.onnx
+!models/rtmpose-s-256x192.onnx

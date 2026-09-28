@@ -599,9 +599,7 @@ class ShadowTrial:
         got = self._with_device(run)
         if got is None:
             return None
-        outs = got[0]
-        raw = outs if spec.layout == "rtmo" else outs[0]
-        return raw, scale, px, py, timing["ms"]
+        return got[0], scale, px, py, timing["ms"]
 
     def process(self, job: dict) -> float:
         """Run the shadow model on a job's frame and add the pair. Returns device ms."""

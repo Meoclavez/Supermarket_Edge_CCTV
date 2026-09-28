@@ -65,7 +65,7 @@ def storage(tmp_path, monkeypatch):
 
 @pytest.fixture
 def detector():
-    d = PersonDetector(model_path="/nonexistent/model.onnx", object_model_path="")
+    d = PersonDetector(model_path="/nonexistent/model.onnx")
     d.provider = "migraphx"                     # an accelerator: runs go through the device gate
     return d
 
@@ -119,7 +119,7 @@ def test_pair_tallies_count_agreement_by_size_and_keypoints(storage, detector):
     frame = np.full((720, 1280, 3), 120, np.uint8)
     main = [_det(100, 100, 160, 200), _det(600, 300, 615, 330, kp_conf=0.3)]      # 100 px and 30 px tall
     shadow = [_det(102, 101, 161, 202, kp_conf=0.9), _det(900, 200, 1000, 500)]  # match + a 300 px one
-    out = t.add_pair("cam_a", frame, main, shadow, 7.5, {"infer_ms": 9.0, "model": "yolo26m-pose-544x960.onnx"})
+    out = t.add_pair("cam_a", frame, main, shadow, 7.5, {"infer_ms": 9.0, "model": "rtmo-m-640x640.onnx"})
     assert (out["matched"], out["only_main"], out["only_shadow"]) == (1, 1, 1)
     s = t.status()
     tot = s["totals"]
@@ -132,7 +132,7 @@ def test_pair_tallies_count_agreement_by_size_and_keypoints(storage, detector):
     assert kp["main"]["keypoint_gate_pass_rate"] == 0.5
     assert kp["matched_main"]["mean_keypoint_confidence"] == pytest.approx(0.8)
     assert tot["device_ms"] == {"main_mean": 9.0, "shadow_mean": 7.5, "shadow_max": 7.5}
-    assert list(s["by_camera"]) == ["cam_a"] and "yolo26m-pose-544x960.onnx" in s["by_live_model"]
+    assert list(s["by_camera"]) == ["cam_a"] and "rtmo-m-640x640.onnx" in s["by_live_model"]
     assert s["by_resolution"]                     # a class even without a registered size
     # A disagreement leaves one review image, listed and served by name only.
     assert len(s["samples"]) == 1
@@ -424,11 +424,12 @@ def test_endpoint_requires_sign_in_and_reports_the_trial(client):  # noqa: F811 
 MODELS = Path(__file__).resolve().parents[1] / "models"
 
 
-@pytest.mark.skipif(not ((MODELS / "yolo26n-pose.onnx").exists()
-                         and (MODELS / "rtmo-s-body7-640x640-static.onnx").exists()),
-                    reason="yolo26n-pose.onnx / rtmo-s-body7-640x640-static.onnx not present")
+@pytest.mark.skipif(not (MODELS / "rtmo-s-body7-640x640-static.onnx").exists(),
+                    reason="rtmo-s-body7-640x640-static.onnx not present")
 def test_real_trial_end_to_end_on_cpu(storage, monkeypatch):
-    """The real loader and worker threads: live YOLO26n-pose vs shadow RTMO-s on a bundled picture."""
+    """The real loader and worker threads on a bundled picture. RTMO-s is the
+    only shipped pose model, so it is both the live and the shadow model: the
+    two must agree on everyone."""
     import cv2
 
     from app.services.inference_backend import person_threshold
@@ -437,7 +438,7 @@ def test_real_trial_end_to_end_on_cpu(storage, monkeypatch):
     monkeypatch.setattr(settings, "POSE_REFINER", "off")
     monkeypatch.setattr(settings, "SHADOW_POSE_MODEL", "rtmo-s-body7-640x640-static.onnx")
     monkeypatch.setattr(settings, "SHADOW_POSE_SHARE", 0.5)
-    live = PersonDetector(model_path=MODELS / "yolo26n-pose.onnx", object_model_path="")
+    live = PersonDetector(model_path=MODELS / "rtmo-s-body7-640x640-static.onnx")
     assert live.initialise()["available"]
     trial = ShadowTrial(detector=live)
     trial.start()
@@ -457,6 +458,7 @@ def test_real_trial_end_to_end_on_cpu(storage, monkeypatch):
         tot = trial.status()["totals"]
         assert tot["pairs"] == 1 and tot["persons_main"] == len(people)
         assert tot["matched"] >= 3 and tot["persons_shadow"] >= 3        # the four people in bus.jpg
+        assert tot["matched"] == tot["persons_main"]                     # same model: every person agrees
         assert tot["device_ms"]["shadow_mean"] > 0 and tot["device_ms"]["main_mean"] > 0
         assert live.load_metrics()["frames"] == 1                        # the trial ran no live inference
     finally:

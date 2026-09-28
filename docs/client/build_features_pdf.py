@@ -34,6 +34,9 @@ SECTIONS = [
         ("Night-vision awareness", "Knows when a camera is in daylight, low light or infrared night mode."),
     ]),
     ("Understanding your store", [
+        ("Sharper person detection", "Finds shoppers further away and people partly hidden by shelves or other "
+                                     "shoppers. Works best when each camera sends at least standard-definition "
+                                     "video (D1, 704 x 576) to the system."),
         ("Visitor counting", "Counts people entering and leaving through your doors, hour by hour."),
         ("People in store now", "Shows roughly how many shoppers are inside at this moment."),
         ("Busiest hours", "Compares today with yesterday and the same day last week."),
@@ -77,7 +80,6 @@ SECTIONS = [
 ]
 
 COMING_SOON = [
-    ("Sharper person detection", "A new detection model that finds people further away and in darker areas."),
     ("Staff areas", "Mark staff-only areas and teach the system your uniforms, so it can alert when a non-staff person enters."),
     ("Outside cameras", "Front street, loading dock and car park settings: perimeter alerts, loitering, delivery log and tamper alerts."),
     ("Shopper attention", "Shows which shelf areas shoppers look at, and how often looking turns into picking up."),

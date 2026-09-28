@@ -14,8 +14,7 @@
   * Stream Ingestion: Non-blocking threaded RTSP grabber in `video_ingest_service.py` decoding H.264/H.265 sub-streams via VA-API.
 * **HailoRT PCIe Dataflow Acceleration**:
   * PCIe device: `/dev/hailo0`.
-  * Model 1: `yolov8n.hef` (object detection, bounding boxes, class scoring, $<4\text{ms}$ latency).
-  * Model 2: `yolov8n_pose.hef` (17-keypoint human pose estimation, $<8\text{ms}$ latency).
+  * Superseded (2026-09-28): the original plan named YOLOv8 HEFs (AGPL-3.0), which the product must not ship. The person model is RTMO-s (Apache-2.0, ONNX Runtime on TensorRT / CUDA / MIGraphX / OpenVINO / CPU); there is no RTMO HEF, so a Hailo device is reported ("no compatible model for this accelerator") and the next backend runs.
   * Multi-Stream Credit Scheduler: Dynamic token-bucket scheduler throttling camera FPS based on state (`IDLE`: 2 FPS @ 320x320, `MOTION`: 10 FPS @ 640x640, `ALERT_ACTIVE`: 25 FPS @ 640x640).
 
 ---

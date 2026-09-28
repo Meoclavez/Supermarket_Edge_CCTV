@@ -151,7 +151,7 @@ def test_privacy_mask_covers_the_same_region_at_any_size():
 
 
 def test_person_size_gate_is_in_native_pixels():
-    d = PersonDetector(model_path="/nonexistent/model.onnx", object_model_path="")
+    d = PersonDetector(model_path="/nonexistent/model.onnx")
     area = 1920 * 1080
     # 13x22 px at 1920 = 17x29 px at native 2560: kept when scaled, dropped when not.
     box = (100, 100, 113, 122)

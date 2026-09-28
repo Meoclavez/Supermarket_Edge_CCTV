@@ -137,13 +137,13 @@ class _SpySession:
     def run(self, _outputs, feeds):
         (blob,) = feeds.values()
         self.blobs.append(blob.copy())
-        return [np.zeros((1, 56, 8400), np.float32)]
+        return [np.zeros((1, 300, 5), np.float32), np.zeros((1, 300, 17, 3), np.float32)]
 
 
 def _spy_detector():
-    d = PersonDetector(model_path="/nonexistent/pose.onnx", object_model_path="")
-    d.spec = build_model_spec(Path("pose.onnx"), {"kpt_shape": "[17, 3]", "names": "{0: 'person'}"},
-                              [_IO("images", [1, 3, 640, 640])], [_IO("output0", [1, 56, 8400])])
+    d = PersonDetector(model_path="/nonexistent/pose.onnx")
+    d.spec = build_model_spec(Path("pose.onnx"), {}, [_IO("input", [1, 3, 640, 640])],
+                              [_IO("dets", [1, 300, 5]), _IO("keypoints", [1, 300, 17, 3])])
     d.session = _SpySession()
     d._initialised = True
     d.provider = "cpu"
@@ -159,11 +159,11 @@ def test_detector_enhances_only_dark_frames_and_reports_it(monkeypatch):
     day, dark = _scene(), _half_shadow(_scene(seed=5))
 
     d.detect(day, camera_id="cam_day")
-    plain, *_ = letterbox(day, (640, 640))
+    plain, *_ = letterbox(day, (640, 640), rgb=False, scale_to=1.0)
     assert np.array_equal(d.session.blobs[-1], plain)
 
     d.detect(dark, camera_id="cam_shade")
-    plain, *_ = letterbox(dark, (640, 640))
+    plain, *_ = letterbox(dark, (640, 640), rgb=False, scale_to=1.0)
     assert not np.array_equal(d.session.blobs[-1], plain)
     assert d.session.blobs[-1].mean() > plain.mean()
 
@@ -184,7 +184,7 @@ def test_enhancement_is_off_by_default_but_lighting_is_still_measured(monkeypatc
     d = _spy_detector()
     dark = _darken(_scene(), -3.0)
     d.detect(dark, camera_id="cam")
-    plain, *_ = letterbox(dark, (640, 640))
+    plain, *_ = letterbox(dark, (640, 640), rgb=False, scale_to=1.0)
     assert np.array_equal(d.session.blobs[-1], plain)
     cam = d.status()["lighting"]["cameras"]["cam"]
     assert cam["lighting"] == "low_light" and cam["enhancing"] is False and cam["frames_enhanced"] == 0
@@ -196,7 +196,7 @@ def test_enhancement_is_off_by_default_but_lighting_is_still_measured(monkeypatc
 def test_narrow_distant_person_passes_width_floor_but_not_a_sliver(monkeypatch):
     monkeypatch.setattr(settings, "PERSON_MIN_BOX_PIXELS", 24)
     monkeypatch.setattr(settings, "PERSON_MIN_BOX_WIDTH_PIXELS", 16)
-    d = PersonDetector(model_path="/nonexistent/pose.onnx", object_model_path="")
+    d = PersonDetector(model_path="/nonexistent/pose.onnx")
     area = 352.0 * 288.0
     assert d._is_plausible_person(100, 100, 118, 160, area)       # 18 x 60: a person far away
     assert not d._is_plausible_person(100, 100, 110, 160, area)   # 10 x 60: a sliver
@@ -231,13 +231,13 @@ def test_detector_keeps_a_dark_person_a_lit_one_of_equal_score_is_dropped(monkey
     monkeypatch.setattr(settings, "PERSON_CONF_THRESHOLD_DARK", 0.35)
     monkeypatch.setattr(settings, "PERSON_DARK_LUMA", 60.0)
     monkeypatch.setattr(settings, "LOW_LIGHT_ENHANCE", "off")
-    raw = np.zeros((1, 56, 8400), np.float32)
+    dets_raw = np.zeros((1, 300, 5), np.float32)
+    kpts_raw = np.zeros((1, 300, 17, 3), np.float32)
     # 640x640 frame: no letterbox. Person A at x~160 (dark half), B at x~480 (lit half).
     for i, cx in enumerate((160.0, 480.0)):
-        raw[0, 0:4, i] = (cx, 320.0, 60.0, 200.0)
-        raw[0, 4, i] = 0.42
+        dets_raw[0, i] = (cx - 30.0, 220.0, cx + 30.0, 420.0, 0.42)
     d = _spy_detector()
-    d.session.run = lambda _o, feeds: [raw]
+    d.session.run = lambda _o, feeds: [dets_raw, kpts_raw]
     frame = np.full((640, 640, 3), 170, np.uint8)
     frame[:, :320] = 25
     dets = d.detect(frame)

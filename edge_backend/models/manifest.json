@@ -1,38 +1,55 @@
 {
   "schema": 1,
-  "comment": "Model files the edge backend ships with. Verified by app/services/preflight.py at startup and restored by scripts/fetch_models.py. Re-exporting is not byte-identical (the export embeds a timestamp), so fetch_models accepts a re-export whose ONNX IO signature matches 'io' and records its hash in models/.local_exports.json.",
-  "exporter": {
-    "tool": "ultralytics",
-    "requirement": "ultralytics>=8.4,<8.5",
-    "exported_with": "ultralytics 8.4.160",
-    "python": "3.12",
-    "torch_index_url": "https://download.pytorch.org/whl/cpu",
-    "extra_packages": [
-      "onnx",
-      "onnxslim"
-    ],
-    "command": "yolo export model=<source> format=onnx imgsz=640 simplify=True"
-  },
-  "licence_note": "Ultralytics YOLO26 weights and their exports are licensed AGPL-3.0 (https://ultralytics.com/license). RTMPose (rtmpose-*.onnx) is Apache-2.0 (https://github.com/open-mmlab/mmpose). RTMO (rtmo-*.onnx) code and weights are Apache-2.0 (https://github.com/open-mmlab/mmpose/tree/main/projects/rtmo); the body7 checkpoint was trained on a mix that includes datasets published for research use (see the entry's 'weights').",
+  "comment": "Model files the edge backend ships with, and the only ones it may use. Verified by app/services/preflight.py at startup and restored by scripts/fetch_models.py (which also deletes ONNX files in models/ that are not listed here). Each model is downloaded from its upstream publisher; a 'transform' block rebuilds it with a script of this repository. If a rebuild is not byte-identical, fetch_models accepts it when its ONNX IO signature matches 'io' and records its hash in models/.local_exports.json.",
+  "licence_note": "Every model listed here is Apache-2.0 (OpenMMLab mmpose; code and weights): RTMO (rtmo-*.onnx, https://github.com/open-mmlab/mmpose/tree/main/projects/rtmo) and RTMPose (rtmpose-*.onnx, https://github.com/open-mmlab/mmpose/tree/main/projects/rtmpose). Both checkpoints were trained on the body7 mix, which includes datasets published for research use only; whether that affects commercial use of the weights is pending a legal check (see each entry's 'weights'). No AGPL-3.0 or non-commercial model may be added. Attribution: THIRD_PARTY_NOTICES.md at the repository root.",
   "models": [
     {
-      "file": "yolo26s-pose.onnx",
-      "sha256": "472b4368379213c614a485c95ba04e6b4dd7b6a8e4c9861e0e90277620ec854d",
-      "size": 41845149,
+      "file": "rtmo-s-body7-640x640-static.onnx",
+      "sha256": "c12706ac7162db5138f7beb5ae51bbe8f541d1776dc12017843747aaa78fcf05",
+      "size": 39618258,
       "task": "pose",
       "required": true,
-      "role": "Person + 17 COCO keypoints. Default person model when a GPU provider is active.",
-      "source": "yolo26s-pose.pt",
-      "export": {
-        "format": "onnx",
-        "imgsz": 640,
-        "simplify": true
+      "role": "Person + 17 COCO keypoints (one-stage RTMO-s, mmpose): the live person model on every provider (POSE_MODEL_GPU / POSE_MODEL_CPU). Static [1,3,640,640] graph with the in-graph NMS removed: the host applies score threshold + NMS (inference_backend.decode_output, layout 'rtmo').",
+      "source": "https://download.openmmlab.com/mmpose/v1/projects/rtmo/onnx_sdk/rtmo-s_8xb32-600e_body7-640x640-dac2bf74_20231211.zip",
+      "download": {
+        "url": "https://download.openmmlab.com/mmpose/v1/projects/rtmo/onnx_sdk/rtmo-s_8xb32-600e_body7-640x640-dac2bf74_20231211.zip",
+        "archive_sha256": "3da7ad88b209f9da8be87ba5c325610639af04de3b5c8a96649b98cd9e2848a2",
+        "member": "end2end.onnx",
+        "member_sha256": "d0703d40d19f3921da51ae725402d5fdae4d2478c7442072d3101bd396f370d8"
       },
-      "licence": "AGPL-3.0",
+      "transform": {
+        "script": "scripts/export_rtmo_static.py",
+        "args": [
+          "--topk",
+          "300"
+        ],
+        "python": "3.12",
+        "requirements": [
+          "onnx>=1.17,<1.21",
+          "onnx-graphsurgeon>=0.5.2",
+          "onnxruntime>=1.20",
+          "numpy>=1.26"
+        ],
+        "method": "ONNX graph surgery on the released end2end.onnx: batch fixed to 1; the NonMaxSuppression + TopK(50) index tensor replaced by a constant TopK(k=300) over the 2000 anchor scores; NMS subgraph pruned; shape arithmetic constant-folded. Verified identical (before host NMS) to the original on 8 images: boxes within 0.0002 px, keypoints within 0.0005 px, scores within 2e-6."
+      },
+      "weights": {
+        "checkpoint": "rtmo-s_8xb32-600e_body7-640x640-dac2bf74_20231211.pth",
+        "training_data": "body7 (COCO, AI Challenger, CrowdPose, MPII, sub-JHMDB, Halpe, PoseTrack18)",
+        "note": "Some body7 datasets are published for research use only; commercial use is pending a legal check. A COCO-only checkpoint exists (rtmo-s_8xb32-600e_coco-640x640-8db55a59_20231211.pth, about 1 AP lower) but OpenMMLab publishes no ONNX for it; exporting it needs mmpose + mmdeploy. The file is swappable: POSE_MODEL_PATH (or POSE_MODEL_GPU/_CPU) names any RTMO export with the same IO."
+      },
+      "preprocess": {
+        "input": "BGR, float 0-255, no mean/std (none in the graph)",
+        "letterbox": "centred, scale=min(640/w,640/h), pad 114, cv2.INTER_LINEAR"
+      },
+      "postprocess": {
+        "host": "score threshold + greedy NMS + box/keypoint letterbox undo (inference_backend.decode_output / PersonDetector.postprocess, layout 'rtmo')",
+        "original_in_graph": "score > 0.15, NMS suppress IoU > 0.65, max 200, keep top 50"
+      },
+      "licence": "Apache-2.0 (OpenMMLab mmpose / RTMO; weights trained on the body7 mix)",
       "io": {
         "inputs": [
           {
-            "name": "images",
+            "name": "input",
             "shape": [
               1,
               3,
@@ -44,211 +61,21 @@
         ],
         "outputs": [
           {
-            "name": "output0",
+            "name": "dets",
             "shape": [
               1,
-              56,
-              8400
+              300,
+              5
             ],
             "type": "tensor(float)"
-          }
-        ]
-      }
-    },
-    {
-      "file": "yolo26n-pose.onnx",
-      "sha256": "732e1cb7aaef76c349e1f7b095d3451d5a15fd151c18c775b23ee1ce7bda0c38",
-      "size": 12111783,
-      "task": "pose",
-      "required": true,
-      "role": "Person + 17 COCO keypoints, small. Default person model on CPU.",
-      "source": "yolo26n-pose.pt",
-      "export": {
-        "format": "onnx",
-        "imgsz": 640,
-        "simplify": true
-      },
-      "licence": "AGPL-3.0",
-      "io": {
-        "inputs": [
+          },
           {
-            "name": "images",
+            "name": "keypoints",
             "shape": [
               1,
-              3,
-              640,
-              640
-            ],
-            "type": "tensor(float)"
-          }
-        ],
-        "outputs": [
-          {
-            "name": "output0",
-            "shape": [
-              1,
-              56,
-              8400
-            ],
-            "type": "tensor(float)"
-          }
-        ]
-      }
-    },
-    {
-      "file": "yolo26n.onnx",
-      "sha256": "a715b3e3aab1dd434ce1fd3f929fd8f01993dd21cf39fb9a22aaf168546f5c32",
-      "size": 9930308,
-      "task": "detect",
-      "required": false,
-      "role": "80-class COCO objects (bags, trolleys, phones) used as context for theft review.",
-      "source": "yolo26n.pt",
-      "export": {
-        "format": "onnx",
-        "imgsz": 640,
-        "simplify": true
-      },
-      "licence": "AGPL-3.0",
-      "io": {
-        "inputs": [
-          {
-            "name": "images",
-            "shape": [
-              1,
-              3,
-              640,
-              640
-            ],
-            "type": "tensor(float)"
-          }
-        ],
-        "outputs": [
-          {
-            "name": "output0",
-            "shape": [
-              1,
-              84,
-              8400
-            ],
-            "type": "tensor(float)"
-          }
-        ]
-      }
-    },
-    {
-      "file": "yolo26m-pose-544x960.onnx",
-      "sha256": "6bf2fc90b989dc17ffdeb74f5da50a4ddca206f02e85ac77ae5e13a3b3bb7876",
-      "size": 86644792,
-      "task": "pose",
-      "required": false,
-      "role": "Person + 17 keypoints, medium model at a 16:9 544x960 input. Top of the GPU ladder (POSE_MODEL_LADDER_GPU): chosen when its measured latency fits the budget. Best far-shopper wrists.",
-      "source": "yolo26m-pose.pt",
-      "export": {
-        "format": "onnx",
-        "imgsz": "544,960",
-        "simplify": true
-      },
-      "licence": "AGPL-3.0",
-      "io": {
-        "inputs": [
-          {
-            "name": "images",
-            "shape": [
-              1,
-              3,
-              544,
-              960
-            ],
-            "type": "tensor(float)"
-          }
-        ],
-        "outputs": [
-          {
-            "name": "output0",
-            "shape": [
-              1,
-              56,
-              10710
-            ],
-            "type": "tensor(float)"
-          }
-        ]
-      }
-    },
-    {
-      "file": "yolo26s-pose-544x960.onnx",
-      "sha256": "90364cb36050effc2734bb393f25bb76eb3257dfed7fc6d3f93306aa34dff62a",
-      "size": 41919069,
-      "task": "pose",
-      "required": false,
-      "role": "Person + 17 keypoints, small model at a 16:9 544x960 input (same cost class as 640x640 on 16:9 frames, 1.5x the pixels per person). Second on the GPU ladder.",
-      "source": "yolo26s-pose.pt",
-      "export": {
-        "format": "onnx",
-        "imgsz": "544,960",
-        "simplify": true
-      },
-      "licence": "AGPL-3.0",
-      "io": {
-        "inputs": [
-          {
-            "name": "images",
-            "shape": [
-              1,
-              3,
-              544,
-              960
-            ],
-            "type": "tensor(float)"
-          }
-        ],
-        "outputs": [
-          {
-            "name": "output0",
-            "shape": [
-              1,
-              56,
-              10710
-            ],
-            "type": "tensor(float)"
-          }
-        ]
-      }
-    },
-    {
-      "file": "yolo26n-pose-544x960.onnx",
-      "sha256": "8f4065ee0d4f4b8f2ea865dd19c626280aace2209c215e0f6242ddda99a72e60",
-      "size": 12185703,
-      "task": "pose",
-      "required": false,
-      "role": "Person + 17 keypoints, nano model at a 16:9 544x960 input. CPU ladder (POSE_MODEL_LADDER_CPU): ~2x the far-shopper wrist recall of yolo26n-pose at 640 for ~25 % more CPU time.",
-      "source": "yolo26n-pose.pt",
-      "export": {
-        "format": "onnx",
-        "imgsz": "544,960",
-        "simplify": true
-      },
-      "licence": "AGPL-3.0",
-      "io": {
-        "inputs": [
-          {
-            "name": "images",
-            "shape": [
-              1,
-              3,
-              544,
-              960
-            ],
-            "type": "tensor(float)"
-          }
-        ],
-        "outputs": [
-          {
-            "name": "output0",
-            "shape": [
-              1,
-              56,
-              10710
+              300,
+              17,
+              3
             ],
             "type": "tensor(float)"
           }
@@ -261,7 +88,7 @@
       "size": 21890172,
       "task": "pose_topdown",
       "required": false,
-      "role": "Optional top-down keypoint refiner (POSE_REFINER): RTMPose-s SimCC, one 256x192 crop per person; refines wrists/elbows of small or far shoppers. Auto-enabled on accelerators when it fits the latency budget.",
+      "role": "Optional top-down keypoint refiner (POSE_REFINER): RTMPose-s SimCC, one 256x192 crop per person; re-estimates the keypoints of each detected person.",
       "source": "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/rtmpose-s_simcc-body7_pt-body7_420e-256x192-acd4a1ef_20230504.zip",
       "download": {
         "url": "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/rtmpose-s_simcc-body7_pt-body7_420e-256x192-acd4a1ef_20230504.zip",
@@ -307,85 +134,11 @@
             "type": "tensor(float)"
           }
         ]
-      }
-    },
-    {
-      "file": "rtmo-s-body7-640x640-static.onnx",
-      "sha256": "c12706ac7162db5138f7beb5ae51bbe8f541d1776dc12017843747aaa78fcf05",
-      "size": 39618258,
-      "task": "pose",
-      "required": false,
-      "role": "Candidate person + 17 COCO keypoints model (one-stage RTMO-s, mmpose), for the shadow trial (SHADOW_POSE_MODEL) and as a possible live model. Static [1,3,640,640] graph with the in-graph NMS removed: the host applies the same NMS as for YOLO outputs.",
-      "source": "https://download.openmmlab.com/mmpose/v1/projects/rtmo/onnx_sdk/rtmo-s_8xb32-600e_body7-640x640-dac2bf74_20231211.zip",
-      "download": {
-        "url": "https://download.openmmlab.com/mmpose/v1/projects/rtmo/onnx_sdk/rtmo-s_8xb32-600e_body7-640x640-dac2bf74_20231211.zip",
-        "archive_sha256": "3da7ad88b209f9da8be87ba5c325610639af04de3b5c8a96649b98cd9e2848a2",
-        "member": "end2end.onnx",
-        "member_sha256": "d0703d40d19f3921da51ae725402d5fdae4d2478c7442072d3101bd396f370d8"
-      },
-      "transform": {
-        "script": "scripts/export_rtmo_static.py",
-        "args": [
-          "--topk",
-          "300"
-        ],
-        "python": "3.12",
-        "requirements": [
-          "onnx>=1.17,<1.21",
-          "onnx-graphsurgeon>=0.5.2",
-          "onnxruntime>=1.20",
-          "numpy>=1.26"
-        ],
-        "method": "ONNX graph surgery on the released end2end.onnx: batch fixed to 1; the NonMaxSuppression + TopK(50) index tensor replaced by a constant TopK(k=300) over the 2000 anchor scores; NMS subgraph pruned; shape arithmetic constant-folded. Verified identical (before host NMS) to the original on 8 images: boxes within 0.0002 px, keypoints within 0.0005 px, scores within 2e-6."
       },
       "weights": {
-        "checkpoint": "rtmo-s_8xb32-600e_body7-640x640-dac2bf74_20231211.pth",
+        "checkpoint": "rtmpose-s_simcc-body7_pt-body7_420e-256x192-acd4a1ef_20230504.pth",
         "training_data": "body7 (COCO, AI Challenger, CrowdPose, MPII, sub-JHMDB, Halpe, PoseTrack18)",
-        "note": "Some body7 datasets are published for research use only; commercial use is pending a legal check. A COCO-only checkpoint exists (rtmo-s_8xb32-600e_coco-640x640-8db55a59_20231211.pth, about 1 AP lower) but OpenMMLab publishes no ONNX for it; exporting it needs mmpose + mmdeploy. The file is swappable: SHADOW_POSE_MODEL / POSE_MODEL_PATH name any RTMO export with the same IO."
-      },
-      "preprocess": {
-        "input": "BGR, float 0-255, no mean/std (none in the graph)",
-        "letterbox": "centred, scale=min(640/w,640/h), pad 114, cv2.INTER_LINEAR"
-      },
-      "postprocess": {
-        "host": "score threshold + greedy NMS + box/keypoint letterbox undo, as for the YOLO pose outputs (inference_backend.decode_output layout 'rtmo')",
-        "original_in_graph": "score > 0.15, NMS suppress IoU > 0.65, max 200, keep top 50"
-      },
-      "licence": "Apache-2.0 (OpenMMLab mmpose / RTMO; weights trained on the body7 mix)",
-      "io": {
-        "inputs": [
-          {
-            "name": "input",
-            "shape": [
-              1,
-              3,
-              640,
-              640
-            ],
-            "type": "tensor(float)"
-          }
-        ],
-        "outputs": [
-          {
-            "name": "dets",
-            "shape": [
-              1,
-              300,
-              5
-            ],
-            "type": "tensor(float)"
-          },
-          {
-            "name": "keypoints",
-            "shape": [
-              1,
-              300,
-              17,
-              3
-            ],
-            "type": "tensor(float)"
-          }
-        ]
+        "note": "Some body7 datasets are published for research use only; commercial use is pending a legal check."
       }
     }
   ]

@@ -56,14 +56,26 @@ def _camera_source(cam: CameraModel) -> str:
     Cameras added by URL store a credential-free URL; their username and
     password live in the encrypted secret store and are injected here, at
     open time only (app/services/camera_source.py).
+
+    For a Dahua recorder channel the camera's "Stream quality" setting picks
+    the subtype (services/stream_selection.py; cached sizes only, no I/O).
     """
+    url = cam.rtsp_url
+    try:
+        from app.services.stream_selection import stream_selection
+
+        features = cam.features if isinstance(cam.features, dict) else {}
+        url = stream_selection.decide(cam.id, cam.rtsp_url, features.get("stream_quality")).url or cam.rtsp_url
+    except Exception as exc:  # noqa: BLE001 - never block a worker on the choice
+        logger.warning(f"Stream selection for {cam.id} failed ({type(exc).__name__}); using its stored URL")
+        url = cam.rtsp_url
     try:
         from app.services.camera_source import stream_source_for
 
-        return stream_source_for(cam.id, cam.rtsp_url)
+        return stream_source_for(cam.id, url)
     except Exception as exc:  # noqa: BLE001 - never block a worker on the store
         logger.warning(f"Could not load stored credentials for {cam.id}: {type(exc).__name__}")
-        return cam.rtsp_url
+        return url
 
 
 class PipelineSupervisor:
@@ -213,6 +225,20 @@ class PipelineSupervisor:
                     continue
                 logger.info(f"Starting worker for {cam_id} -> {redact_url(source)}")
                 live_engine.start_camera(cam_id, cam.name, source, enabled=True)
+
+        # Cameras on "Stream quality: Auto" whose sub-streams were never
+        # measured: measure them in the background (read-only, one at a time).
+        if self._running:
+            try:
+                from app.services.stream_selection import stream_selection
+
+                stream_selection.schedule(
+                    [(c.id, c.rtsp_url, (c.features or {}).get("stream_quality") if isinstance(c.features, dict) else None)
+                     for c in wanted.values()],
+                    on_change=self.reconcile_cameras,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"stream selection scheduling: {exc}")
 
     async def flush_once(self) -> int:
         """Write buffered facts to the database. Returns rows written."""

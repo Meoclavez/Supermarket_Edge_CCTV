@@ -99,7 +99,7 @@ def test_identity_is_public_stable_and_renamable(client, operator):
 
     with _db() as conn:
         conn.execute("INSERT OR REPLACE INTO system_setup (key, value, updated_at) VALUES ('remote_access', ?, ?)",
-                     (json.dumps({"enabled": True, "provider": "cloudflare_tunnel",
+                     (json.dumps({"enabled": True, "provider": "vps_tunnel",
                                   "hostname": "store12.example.com"}), datetime.utcnow().isoformat()))
     assert client.get("/api/v1/device/identity").json()["remote_url"] == "https://store12.example.com"
 

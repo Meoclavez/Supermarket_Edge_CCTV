@@ -6,8 +6,8 @@ Run with the service's venv, as the service user, from anywhere::
     /opt/edge-cctv/.venv/bin/python edge_backend/scripts/prewarm_inference.py
 
 It calls the same ``PersonDetector.initialise()`` the application lifespan
-calls (same provider chain, pose-model ladder, latency budget, refiner and
-object model), but with ``MIGRAPHX_COMPILE_MODE=foreground`` so a cold AMD
+calls (same provider chain, pose-model ladder, latency budget and keypoint
+refiner), but with ``MIGRAPHX_COMPILE_MODE=foreground`` so a cold AMD
 MIGraphX cache is compiled here, where waiting is expected, instead of at the
 next service start. Programs land in ``MIGRAPHX_CACHE_DIR`` and are recorded
 in its ``edge_warm.json``. On any other provider this is just a load test.
@@ -107,7 +107,7 @@ def only_model(path: Path) -> int:
     import onnxruntime as ort  # noqa: PLC0415
     from app.services.inference_backend import PersonDetector, _PROVIDER_PRIORITY  # noqa: PLC0415
 
-    det = PersonDetector(object_model_path="")
+    det = PersonDetector()
     det._initialised = True
     det.available_providers = list(ort.get_available_providers())
     det._prepare_plugin_eps(ort)
@@ -166,8 +166,6 @@ def main() -> int:
         "refiner": st.get("keypoint_refiner"),
         "ladder": ladder,
         "shadow_model": extra[0] if extra else None,
-        "object_provider": (st.get("object_detection") or {}).get("provider"),
-        "object_model": st.get("object_model"),
         "gpu_compile": st.get("gpu_compile"),
         "migraphx": st.get("migraphx"),
         "cpu_threads": st.get("cpu_threads"),

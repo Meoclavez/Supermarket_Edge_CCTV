@@ -72,26 +72,26 @@ class Settings(BaseSettings):
     BACKUP_KEEP_STARTUP: int = int(os.getenv("BACKUP_KEEP_STARTUP", "7"))
     BACKUP_KEEP_DAILY_DAYS: int = int(os.getenv("BACKUP_KEEP_DAILY_DAYS", "14"))
     BACKUP_COMPRESS: bool = os.getenv("BACKUP_COMPRESS", "true").lower() in ("1", "true", "yes")
-    # Person pose estimation (YOLO26 pose: box + 17 COCO keypoints). Which
+    # Person pose estimation: RTMO-s (one-stage, mmpose, Apache-2.0; box + 17
+    # COCO keypoints, static 640x640 export, see models/manifest.json). Which
     # accelerator runs it is probed at startup (see inference_backend.py);
     # the model is then chosen for that accelerator unless POSE_MODEL_PATH
-    # pins one explicitly.
+    # pins one explicitly. Any model with the RTMO output layout (dets
+    # [1,K,5] + keypoints [1,K,17,3]) can be named here.
     MODELS_DIR: Path = Path(
         os.getenv("MODELS_DIR", str(Path(__file__).resolve().parent.parent / "models"))
     )
     POSE_MODEL_PATH: str = os.getenv("POSE_MODEL_PATH", "")          # empty -> auto
-    POSE_MODEL_GPU: str = os.getenv("POSE_MODEL_GPU", "yolo26s-pose.onnx")   # GPU/NPU EPs
-    POSE_MODEL_CPU: str = os.getenv("POSE_MODEL_CPU", "yolo26n-pose.onnx")   # CPU/OpenVINO
-    # Larger / higher-resolution candidates, most accurate first. At startup
-    # the detector measures each on the chosen provider and keeps the first
-    # whose steady latency fits the budget (POSE_MODEL_GPU/_CPU are the floor).
-    # Missing files are skipped, so a box without them behaves as before.
-    POSE_MODEL_LADDER_GPU: str = os.getenv(
-        "POSE_MODEL_LADDER_GPU", "yolo26m-pose-544x960.onnx,yolo26s-pose-544x960.onnx"
-    )
-    POSE_MODEL_LADDER_CPU: str = os.getenv(
-        "POSE_MODEL_LADDER_CPU", "yolo26s-pose-544x960.onnx,yolo26n-pose-544x960.onnx"
-    )
+    POSE_MODEL_GPU: str = os.getenv("POSE_MODEL_GPU", "rtmo-s-body7-640x640-static.onnx")   # GPU/NPU EPs
+    POSE_MODEL_CPU: str = os.getenv("POSE_MODEL_CPU", "rtmo-s-body7-640x640-static.onnx")   # CPU/OpenVINO
+    # Optional larger / higher-resolution candidates (file names under
+    # MODELS_DIR, comma separated), most accurate first. At startup the
+    # detector measures each on the chosen provider and keeps the first whose
+    # steady latency fits the budget (POSE_MODEL_GPU/_CPU are the floor); the
+    # scheduler steps between them at run time. Empty by default: only RTMO-s
+    # ships. Missing files are skipped.
+    POSE_MODEL_LADDER_GPU: str = os.getenv("POSE_MODEL_LADDER_GPU", "")
+    POSE_MODEL_LADDER_CPU: str = os.getenv("POSE_MODEL_LADDER_CPU", "")
     # Per-frame latency budget for the pose model. 0 = derive it from the
     # number of enabled analytics cameras (POSE_BUDGET_STREAMS overrides the
     # count), the analysed frames per camera per second (RECORDING_FPS /
@@ -103,11 +103,14 @@ class Settings(BaseSettings):
     POSE_BUDGET_STREAMS: int = int(os.getenv("POSE_BUDGET_STREAMS", "0"))
     POSE_BUDGET_UTILISATION: float = float(os.getenv("POSE_BUDGET_UTILISATION", "0.6"))
     # Optional top-down keypoint refiner (RTMPose, Apache-2.0) run on each
-    # person crop after the pose model: much better wrists/elbows on small or
-    # far shoppers. "auto" = only on an accelerator and only when a batch of
-    # POSE_REFINER_BUDGET_PERSONS crops fits in half the latency budget;
-    # "on" / "off" force it. Visibility = max(pose vis, score x SCORE_SCALE).
-    POSE_REFINER: str = os.getenv("POSE_REFINER", "auto")
+    # person crop after the pose model. "auto" = only on an accelerator and
+    # only when a batch of POSE_REFINER_BUDGET_PERSONS crops fits in half the
+    # latency budget; "on" / "off" force it. Visibility = max(pose vis, score
+    # x SCORE_SCALE). Off by default: on RTMO keypoints it does not help
+    # (COCO persons at 704x576, mean OKS 0.872 -> 0.853, persons < 100 px
+    # 0.812 -> 0.758, dark -3 EV 0.854 -> 0.826) and it lowers keypoint
+    # precision at the 0.5 visibility gate (0.879 -> 0.804).
+    POSE_REFINER: str = os.getenv("POSE_REFINER", "off")
     POSE_REFINER_MODEL: str = os.getenv("POSE_REFINER_MODEL", "rtmpose-s-256x192.onnx")
     POSE_REFINER_MAX_PERSONS: int = int(os.getenv("POSE_REFINER_MAX_PERSONS", "8"))
     # Crops per refiner run (fixed batch: shape changes are slow on CUDA).
@@ -122,19 +125,6 @@ class Settings(BaseSettings):
     # from the pose model's is discarded (the refiner turned a blurred or
     # dark person on its side); 0 disables the check.
     POSE_REFINER_MAX_TURN_DEG: float = float(os.getenv("POSE_REFINER_MAX_TURN_DEG", "45"))
-    # Optional COCO object model for retail context (bags, bottles, phones).
-    # Its only consumer is the "hand into a carried bag" concealment cue in
-    # pose_analytics; it never finds people. Off by default (it cost about a
-    # quarter of the analysed frame rate): OBJECT_DETECT_EVERY_N > 0 runs it on
-    # every Nth analysed frame. An empty OBJECT_MODEL_PATH also disables it.
-    OBJECT_MODEL_PATH: str = os.getenv(
-        "OBJECT_MODEL_PATH", str(Path(__file__).resolve().parent.parent / "models" / "yolo26n.onnx")
-    )
-    OBJECT_DETECT_EVERY_N: int = int(os.getenv("OBJECT_DETECT_EVERY_N", "0"))
-    # Class names (as in the model metadata) or COCO ids, comma separated.
-    OBJECT_CLASSES: str = os.getenv("OBJECT_CLASSES", "backpack,handbag,suitcase,bottle,cell phone")
-    OBJECT_CONF_THRESHOLD: float = float(os.getenv("OBJECT_CONF_THRESHOLD", "0.35"))
-    OBJECT_NMS_IOU: float = float(os.getenv("OBJECT_NMS_IOU", "0.50"))
     # Shadow pose-model trial (services/shadow_trial.py), a developer
     # experiment: a second pose model runs on frames the live model already
     # analysed and only aggregate agreement figures are kept. It never feeds
@@ -178,11 +168,12 @@ class Settings(BaseSettings):
     # Let the thread that waits for the GPU sleep instead of spinning on a CPU
     # core for the whole inference (HIP blocking sync): session.run cost 5.8
     # ms of CPU per 5.9 ms run spinning, 2.8 ms blocking, same speed (RX 9060
-    # XT, yolo26n-pose) - about 25 % of a core at 90 analysed frames/s.
+    # XT, a 640x640 pose model) - about 25 % of a core at 90 analysed frames/s.
     MIGRAPHX_BLOCKING_SYNC: bool = os.getenv("MIGRAPHX_BLOCKING_SYNC", "1").lower() in ("1", "true", "yes")
     # ONNX Runtime threads for sessions on the CPU provider, shared by the pose
-    # and object models (0 = half the CPUs this process may run on), so CPU
-    # inference cannot starve camera decoding and recording. Idle worker
+    # model, the keypoint refiner and a shadow-trial model (0 = half the CPUs
+    # this process may run on), so CPU inference cannot starve camera
+    # decoding and recording. Idle worker
     # threads do not spin unless INFERENCE_CPU_SPINNING is on.
     INFERENCE_CPU_THREADS: int = int(os.getenv("INFERENCE_CPU_THREADS", "0"))
     INFERENCE_CPU_SPINNING: bool = os.getenv("INFERENCE_CPU_SPINNING", "0").lower() in ("1", "true", "yes")
@@ -191,9 +182,11 @@ class Settings(BaseSettings):
     # 0-255) needs only PERSON_CONF_THRESHOLD_DARK: the model's confidence
     # falls with the light, and a box-local rule lifts recall in shade and at
     # night without lowering the bar in the lit parts of the same frame.
-    # Measured (COCO persons, 352x288): shade recall 0.34 -> 0.40, lit-region
-    # precision unchanged. Set equal to PERSON_CONF_THRESHOLD to disable.
-    PERSON_CONF_THRESHOLD_DARK: float = float(os.getenv("PERSON_CONF_THRESHOLD_DARK", "0.35"))
+    # RTMO-s, COCO persons at 704x576 (-3 EV + noise for dark): 0.50 / 0.45
+    # gives precision/recall 0.961/0.459 lit and 0.952/0.436 dark; a 0.35 dark
+    # threshold dropped dark precision to 0.914. Set equal to
+    # PERSON_CONF_THRESHOLD to disable.
+    PERSON_CONF_THRESHOLD_DARK: float = float(os.getenv("PERSON_CONF_THRESHOLD_DARK", "0.45"))
     PERSON_DARK_LUMA: float = float(os.getenv("PERSON_DARK_LUMA", "60"))
     PERSON_NMS_IOU: float = float(os.getenv("PERSON_NMS_IOU", "0.45"))
     # A keypoint counts as seen when its visibility score reaches this.
@@ -261,8 +254,11 @@ class Settings(BaseSettings):
     # boxes down to TRACK_LOW_CONF_THRESHOLD; those low-confidence boxes can
     # only extend an existing track (occlusion recovery), never start one.
     # New tracks need TRACK_NEW_TRACK_THRESHOLD, which defaults to the person
-    # threshold so the "no false shoppers" property is unchanged.
-    TRACK_LOW_CONF_THRESHOLD: float = float(os.getenv("TRACK_LOW_CONF_THRESHOLD", "0.25"))
+    # threshold so the "no false shoppers" property is unchanged. RTMO-s
+    # scores low boxes differently from the earlier model: its precision at
+    # 0.40 (0.94 on 704x576 COCO persons) is what that model had at 0.25
+    # (RTMO at 0.25: 0.84), so 0.40 keeps the extension boxes as clean.
+    TRACK_LOW_CONF_THRESHOLD: float = float(os.getenv("TRACK_LOW_CONF_THRESHOLD", "0.40"))
     TRACK_NEW_TRACK_THRESHOLD: float = float(
         os.getenv("TRACK_NEW_TRACK_THRESHOLD", os.getenv("PERSON_CONF_THRESHOLD", "0.50"))
     )
@@ -314,8 +310,11 @@ class Settings(BaseSettings):
     # Hardware Devices
     VAAPI_DEVICE: str = os.getenv("VAAPI_DEVICE", "/dev/dri/renderD128")
     HAILO_DEVICE: str = os.getenv("HAILO_DEVICE", "/dev/hailo0")
-    HAILO_YOLO_HEF_PATH: str = os.getenv("HAILO_YOLO_HEF_PATH", "./models_hef/yolov8n.hef")
-    HAILO_POSE_HEF_PATH: str = os.getenv("HAILO_POSE_HEF_PATH", "./models_hef/yolov8n_pose.hef")
+    # A compiled HEF of the pose model for a Hailo NPU. None ships: there is no
+    # RTMO HEF, and YOLO pose HEFs are AGPL-3.0 derivatives, which the product
+    # must not contain. A fitted Hailo device is reported ("no compatible
+    # model for this accelerator") and the next backend is used.
+    HAILO_POSE_HEF_PATH: str = os.getenv("HAILO_POSE_HEF_PATH", "")
     
     # Security, JWT & Service Secrets.
     # No secret has a default in code. Each one resolves from the process
@@ -437,7 +436,7 @@ class Settings(BaseSettings):
     INTERACTION_DEDUPE_MAX_ARM_TORSOS: float = float(os.getenv("INTERACTION_DEDUPE_MAX_ARM_TORSOS", "2.2"))
 
     # Concealment: after a reach ends, the wrist must enter the lower-torso /
-    # pocket region (or a detected bag) within THEFT_CONCEAL_WINDOW_SEC, stay
+    # pocket region within THEFT_CONCEAL_WINDOW_SEC, stay
     # there THEFT_CONCEAL_MIN_HOLD_FRAMES frames, and not return to a shelf
     # within THEFT_CONCEAL_NO_RETURN_SEC.
     THEFT_CONCEAL_WINDOW_SEC: float = float(os.getenv("THEFT_CONCEAL_WINDOW_SEC", "4.0"))
@@ -451,8 +450,6 @@ class Settings(BaseSettings):
     # Visibility accepted for a wrist inside the concealment band: a hand at a
     # waistband is often partly occluded, so this is lower than the general gate.
     THEFT_CONCEAL_MIN_WRIST_VIS: float = float(os.getenv("THEFT_CONCEAL_MIN_WRIST_VIS", "0.25"))
-    # COCO object classes treated as bags (backpack, handbag, suitcase).
-    THEFT_BAG_CLASS_IDS: str = os.getenv("THEFT_BAG_CLASS_IDS", "24,26,28")
     # Shelf sweeping: this many reaches into one zone inside the window.
     THEFT_SWEEP_WINDOW_SEC: float = float(os.getenv("THEFT_SWEEP_WINDOW_SEC", "10.0"))
     THEFT_SWEEP_MIN_REACHES: int = int(os.getenv("THEFT_SWEEP_MIN_REACHES", "4"))
@@ -584,12 +581,11 @@ class Settings(BaseSettings):
     # GPU-decoded frames wider than this are scaled down on the GPU, before
     # they are downloaded, keeping the aspect ratio (0 = native size); a
     # camera's own ``decode_max_width`` setting overrides it. "auto" = 1920
-    # while the pose model takes a wide input (the 544x960 ladder exports:
-    # it sees at most 960 px anyway; same people found at 1920 as at native
-    # on 2560x1440 and 3072x2048 test streams), and native size while a
-    # 640x640 model runs (the store box's fallback rung): that model lost
-    # 10-50 % of far people (< 150 px tall) on any GPU-scaled stream in the
-    # same test. A running camera follows a model change within seconds.
+    # while the pose model takes a wide input (a 544x960 export sees at most
+    # 960 px anyway; same people found at 1920 as at native on 2560x1440 and
+    # 3072x2048 test streams), and native size while a 640x640 model runs
+    # (RTMO-s, the default): a 640x640 model lost 10-50 % of far people
+    # (< 150 px tall) on any GPU-scaled stream in the same test. A running camera follows a model change within seconds.
     # At 1920 a 2560x1440 camera costs 24.5 -> 8 % of a core and a 3072x2048
     # one 39 -> 10 % (ffmpeg + reader, store box, 10 fps). Calibrations and
     # masks keep working (pixel geometry is scaled, services/frame_geometry.py).
@@ -613,6 +609,17 @@ class Settings(BaseSettings):
     # threads: 8 test cameras cost 188 % of a core with OpenCV's default (one
     # thread per CPU) and 97 % with 1. 0 = OpenCV's default.
     OPENCV_THREADS: int = int(os.getenv("OPENCV_THREADS", "1"))
+
+    # ---------------- Stream quality per camera (services/stream_selection.py) ----------------
+    # A camera on "Stream quality: Auto" (the default) is analysed from the
+    # smallest Dahua sub-stream (subtype 1 or 2) of at least D1 (704x576); if
+    # none reaches D1 it keeps its current sub-stream, never the main stream.
+    # The sub-streams' sizes are measured once per camera (one frame each,
+    # read-only, one camera at a time), starting this many seconds after
+    # start-up. STREAM_AUTO_SELECT=0 stops the automatic measuring (cameras
+    # then stay on their configured stream unless re-measured from Settings).
+    STREAM_AUTO_SELECT: bool = os.getenv("STREAM_AUTO_SELECT", "1").strip().lower() in ("1", "true", "yes", "on")
+    STREAM_AUTO_SELECT_DELAY_S: float = float(os.getenv("STREAM_AUTO_SELECT_DELAY_S", "90"))
 
     # ---------------- Footfall track quality (services/retail_metrics_service.py) ----------------
     # Occlusion and detector flicker split one person into many ~1 s tracks.

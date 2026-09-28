@@ -1214,8 +1214,49 @@ function setResolutionBadge(id, c) {
   const badge = document.querySelector(`[data-res-for="${CSS.escape(id)}"]`);
   if (!badge) return;
   const measured = c && c.has_frame && isNum(c.frame_width) && isNum(c.frame_height);
-  badge.textContent = measured ? `${c.frame_width}x${c.frame_height}` : DASH;
-  badge.title = measured ? 'Picture size the camera is sending' : 'Picture size: not measured, no picture received';
+  // Which recorder stream this is (Stream quality: Auto / Sub-stream / Main stream).
+  const sel = c && c.stream_selection && c.stream_selection.applies ? c.stream_selection : null;
+  const tag = sel ? ({ 0: 'Main', 1: 'Sub', 2: 'Sub 2' }[sel.subtype] || '') : '';
+  badge.textContent = measured ? `${tag ? `${tag} ` : ''}${c.frame_width}x${c.frame_height}` : DASH;
+  badge.title = (measured ? 'Picture size the camera is sending' : 'Picture size: not measured, no picture received')
+    + (sel ? `\n${sel.label}. ${sel.reason}` : '');
+}
+
+/** Camera Settings: the stream this camera is analysed from, and why. */
+function describeStreamSelection(sel) {
+  if (!sel) return 'Stream choice not known yet.';
+  if (!sel.applies) return sel.reason || 'Stream as configured.';
+  return `Now: ${sel.label}. ${sel.reason || ''}${sel.measuring ? ' (measuring…)' : ''}`;
+}
+
+async function loadCameraStreamStatus(cameraId) {
+  const node = el('configStreamStatus');
+  const btn = el('btnMeasureStreams');
+  if (!node) return;
+  node.textContent = 'Checking which stream is used…';
+  const sel = await getJSON(`/api/v1/cameras/${encodeURIComponent(cameraId)}/stream-selection`, null);
+  if (el('configCameraId') && el('configCameraId').value !== cameraId) return;   // dialog moved on
+  node.textContent = sel ? describeStreamSelection(sel) : 'Could not read the stream choice.';
+  if (btn) btn.hidden = !(sel && sel.applies);
+}
+
+async function measureCameraStreams() {
+  const camId = el('configCameraId') ? el('configCameraId').value : '';
+  const node = el('configStreamStatus');
+  const btn = el('btnMeasureStreams');
+  if (!camId || !node) return;
+  if (btn) btn.disabled = true;
+  node.textContent = 'Opening each sub-stream once to read its size…';
+  try {
+    const res = await fetch(`/api/v1/cameras/${encodeURIComponent(camId)}/stream-selection/measure`, { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    node.textContent = res.ok ? describeStreamSelection(data)
+      : `Could not check the sub-streams: ${(data && data.detail) || `HTTP ${res.status}`}`;
+  } catch (e) {
+    node.textContent = `Could not check the sub-streams: ${e.message}`;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 /*
@@ -1925,6 +1966,8 @@ async function openCameraConfigModal(cameraId) {
   // Stored as a fraction (0.05-1), edited as a percentage; empty = server default.
   safeSet('configPersonMaxFrac', isNum(feats.person_max_frame_fraction)
     ? Math.round(feats.person_max_frame_fraction * 1000) / 10 : '');
+  safeSet('configStreamQuality', ['auto', 'sub', 'main'].includes(feats.stream_quality) ? feats.stream_quality : 'auto');
+  loadCameraStreamStatus(cam.id);
 
   const bounds = layoutSnapshot ? ` Store is ${layoutSnapshot.width_m} × ${layoutSnapshot.height_m} m.` : '';
   const live = ((pipelineSnapshot && pipelineSnapshot.cameras) || []).find((c) => c.camera_id === cameraId);
@@ -1997,6 +2040,7 @@ async function handleCameraConfigSubmit(event) {
     shelf_interaction: el('featShelfInteraction').checked,
     theft_detection: el('featTheftDetection').checked,
     person_max_frame_fraction: personMaxFrac,
+    stream_quality: el('configStreamQuality') ? el('configStreamQuality').value : 'auto',
   };
 
   // PUT replaces the whole row, so every field the API knows is sent back

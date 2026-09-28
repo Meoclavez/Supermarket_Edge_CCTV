@@ -3,7 +3,8 @@
 What the measurements say. On COCO persons degraded to the site's conditions
 (352x288 and 704x576; -2/-3/-5 EV with sensor noise and JPEG; half-frame
 shade, vignette, spotlight pools; IR-like grayscale with near-field glare),
-every enhancement tried LOWERED yolo26n-pose recall at the same threshold:
+every enhancement tried LOWERED the pose model's recall at the same threshold
+(measured with the earlier nano 640x640 model):
 CLAHE (clip 2 and 3), global gamma and a local-mean adaptive gamma, e.g. -3 EV
 0.36 -> 0.26, shade (dark region) 0.41 -> 0.33, IR 0.40 -> 0.34, -5 EV
 0.25 -> 0.09. Brightening amplifies sensor noise and JPEG blocking that the

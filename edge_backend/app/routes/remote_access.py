@@ -1,4 +1,4 @@
-"""Remote access (online dashboard) settings and status.
+"""Online access (dashboard through the owner's VPS) settings and status.
 
 GET  /api/v1/remote-access          status + settings (the token is never returned)
 PUT  /api/v1/remote-access          configure / enable / disable (operator session)
@@ -28,11 +28,19 @@ router = APIRouter(
 
 class RemoteAccessUpdate(BaseModel):
     enabled: Optional[bool] = None
-    provider: Optional[str] = Field(default=None, description="cloudflare_tunnel | direct")
-    hostname: Optional[str] = None
-    # Write-only. Omit or send "" to keep the stored token.
-    token: Optional[str] = Field(default=None, max_length=4096)
+    provider: Optional[str] = Field(default=None, description="vps_tunnel (the only provider)")
+    hostname: Optional[str] = Field(default=None, max_length=253, description="public address, e.g. cctv.example.com")
+    server_url: Optional[str] = Field(default=None, max_length=300,
+                                      description="tunnel server, wss://tunnel.example.com or tcp://vps.example.com:7000")
+    store_id: Optional[str] = Field(default=None, max_length=64, description="store ID issued with the tunnel")
+    # Write-only secrets. Omit or send "" to keep the stored value.
+    token: Optional[str] = Field(default=None, max_length=4096, description="store token")
     clear_token: bool = False
+    server_key: Optional[str] = Field(default=None, max_length=4096,
+                                      description="optional shared server key (frp auth.token)")
+    clear_server_key: bool = False
+    extra_proxies: Optional[int] = Field(default=None, ge=0, le=2,
+                                         description="proxies in front of the VPS's reverse proxy (e.g. a CDN): 0-2")
 
 
 def _require_operator(request: Request) -> None:
@@ -58,8 +66,13 @@ async def put_remote_access(body: RemoteAccessUpdate, request: Request):
             enabled=body.enabled,
             provider=body.provider,
             hostname=body.hostname,
+            server_url=body.server_url,
+            store_id=body.store_id,
             token=body.token or None,
             clear_token=body.clear_token,
+            server_key=body.server_key or None,
+            clear_server_key=body.clear_server_key,
+            extra_proxies=body.extra_proxies,
         )
     except RemoteAccessError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

@@ -210,7 +210,7 @@ def test_probe_that_fell_back_is_not_a_gpu():
 
 def test_live_status_while_compiling_says_so():
     status = {"provider": "cpu", "execution_provider": "CPUExecutionProvider", "backend": "onnxruntime",
-              "gpu_compile": {"state": "compiling", "models": ["yolo26m-pose-544x960.onnx"]}}
+              "gpu_compile": {"state": "compiling", "models": ["rtmo-m-640x640.onnx"]}}
     issue = pf.evaluate_live_status(status, _accel(kfd=True, gfx=["gfx1200"]))[0]
     assert "compiled" in issue["message"] and "runs on CPUExecutionProvider" in issue["message"]
 
@@ -233,17 +233,18 @@ class _Session:
 
     def get_modelmeta(self):
         class M:
-            custom_metadata_map = {"kpt_shape": "[17, 3]", "names": "{0: 'person'}"}
+            custom_metadata_map = {}
         return M()
 
     def get_inputs(self):
-        return [_IO("images", [1, 3, 64, 64])]
+        return [_IO("input", [1, 3, 64, 64])]
 
     def get_outputs(self):
-        return [_IO("output0", [1, 56, 84])]
+        # RTMO layout: dets [1,K,5] + keypoints [1,K,17,3]
+        return [_IO("dets", [1, 4, 5]), _IO("keypoints", [1, 4, 17, 3])]
 
     def run(self, _names, feed):
-        return [np.zeros((1, 56, 84), np.float32)]
+        return [np.zeros((1, 4, 5), np.float32), np.zeros((1, 4, 17, 3), np.float32)]
 
 
 class _SessionOptions:
@@ -314,7 +315,7 @@ def amd_box(monkeypatch, tmp_path):
                        "POSE_MODEL_CPU": "small-pose.onnx", "POSE_MODEL_PATH": "",
                        "POSE_MODEL_LADDER_GPU": "", "POSE_MODEL_LADDER_CPU": "",
                        "INFERENCE_DISABLED_PROVIDERS": "", "POSE_REFINER": "off",
-                       "OBJECT_DETECT_EVERY_N": 0, "POSE_LATENCY_BUDGET_MS": 1000.0,
+                       "POSE_LATENCY_BUDGET_MS": 1000.0,
                        "INFERENCE_CPU_THREADS": 6, "INFERENCE_CPU_SPINNING": False,
                        "MIGRAPHX_COMPILE_MODE": "background", "MIGRAPHX_CACHE_DIR": tmp_path}.items():
         monkeypatch.setattr(settings, key, value)
@@ -335,7 +336,7 @@ def amd_box(monkeypatch, tmp_path):
 
 def _init(monkeypatch, ort) -> PersonDetector:
     monkeypatch.setitem(sys.modules, "onnxruntime", ort)
-    d = PersonDetector(object_model_path="")
+    d = PersonDetector()
     d.initialise()
     return d
 
@@ -386,14 +387,14 @@ def test_cpu_sessions_are_capped_and_do_not_spin(amd_box, monkeypatch):
     assert so.intra_op_num_threads == 4 and so.inter_op_num_threads == 1   # 6 - 6 // 3
     assert so.config["session.intra_op.allow_spinning"] == "0"
     assert d.status()["cpu_threads"]["budget"] == 6
-    assert ib.cpu_threads_for("object") == 2
+    assert ib.cpu_threads_for("refiner") == 2
 
 
 def test_thread_budget_defaults_to_half_the_usable_cpus(monkeypatch):
     monkeypatch.setattr(settings, "INFERENCE_CPU_THREADS", 0)
     monkeypatch.setattr(ib.os, "sched_getaffinity", lambda _pid: set(range(16)))
     assert ib.cpu_thread_budget() == 8
-    assert ib.cpu_threads_for("pose") + ib.cpu_threads_for("object") <= 8
+    assert ib.cpu_threads_for("pose") + ib.cpu_threads_for("refiner") <= 8
 
 
 def test_cold_cache_serves_on_cpu_then_swaps_to_the_gpu(amd_box, monkeypatch):
@@ -448,7 +449,7 @@ def test_cuda_path_is_untouched_by_the_plugin_code(monkeypatch, tmp_path):
             captured["providers"], captured["so"] = providers, sess_options
             return _Session([p[0] if isinstance(p, tuple) else p for p in providers], sess_options)
 
-    d = PersonDetector(object_model_path="")
+    d = PersonDetector()
     sess, reason = d._create_session(Ort(), tmp_path / "big-pose.onnx", "CUDAExecutionProvider")
     assert reason is None
     assert captured["providers"][0][0] == "CUDAExecutionProvider"
@@ -485,18 +486,19 @@ def test_compile_in_child_runs_the_prewarm_script_and_parses_its_verdict(monkeyp
     import subprocess
 
     monkeypatch.setattr(settings, "MIGRAPHX_CACHE_DIR", tmp_path)
+    monkeypatch.delenv("OBJECT_MODEL_PATH", raising=False)
     monkeypatch.setattr(subprocess, "Popen", _FakePopen)
     ok_summary = {"provider": "migraphx", "gpu_compile": {"compiled": ["a.onnx"]}}
     _FakePopen.lines = ["x WARNING Compiling a.onnx for the AMD GPU (MIGraphX...)\n",
                         "[WARN] [/app/AMDMIGraphX/src/x.cpp:1] chatter\n",
                         "@@PREWARM@@" + json.dumps(ok_summary) + "\n"]
     _FakePopen.rc = 0
-    d = PersonDetector(model_path=tmp_path / "p.onnx", object_model_path="")
+    d = PersonDetector(model_path=tmp_path / "p.onnx")
     assert d._compile_in_child() == (True, None)
     assert d.gpu_compile["compiled"] == ["a.onnx"] and "current" not in d.gpu_compile
     assert _FakePopen.last_env["MIGRAPHX_CACHE_DIR"] == str(tmp_path)
     assert _FakePopen.last_env["POSE_MODEL_PATH"] == str(tmp_path / "p.onnx")
-    assert _FakePopen.last_env["OBJECT_MODEL_PATH"] == ""
+    assert "OBJECT_MODEL_PATH" not in _FakePopen.last_env          # no object model any more
 
     bad = {"provider": "cpu", "provider_attempts": [{"provider": "migraphx", "ok": False, "reason": "HIP failure"}]}
     _FakePopen.lines = ["@@PREWARM@@" + json.dumps(bad) + "\n"]

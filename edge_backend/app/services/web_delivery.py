@@ -1,7 +1,7 @@
 """Fast, cache-friendly delivery of the dashboard over a slow uplink.
 
 The edge box usually sits on store Wi-Fi behind a home-grade uplink, and the
-dashboard is opened over Tailscale or a Cloudflare Tunnel from far away
+dashboard is opened over a VPN or the VPS tunnel from far away
 (measured: ~360 ms RTT, ~55 KB/s per request). Three things make a load cheap
 there, and all three live in this module:
 

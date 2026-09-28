@@ -1,7 +1,7 @@
 """Pydantic schemas for the supermarket edge system: camera feeds, loss-prevention alerts, zones, DVR and telemetry."""
 
 from enum import Enum
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Literal, Optional, Dict, Any, Tuple
 from datetime import datetime
 from pydantic import BaseModel, Field, ConfigDict, AliasChoices, field_validator, model_validator
 
@@ -207,6 +207,14 @@ class CameraFeatureConfig(BaseModel):
                      "empty = server default (DECODE_MAX_WIDTH: 1920 with a wide-input pose model, else native). "
                      "A running camera reopens its stream within seconds of a change"),
     )
+    # Which stream of a Dahua recorder channel is analysed (services/stream_selection.py).
+    # None = "auto": the smallest sub-stream of at least D1, never the main stream.
+    stream_quality: Optional[Literal["auto", "sub", "main"]] = Field(
+        None,
+        description=("Stream analysed for a Dahua recorder channel: auto (smallest sub-stream of at least "
+                     "704x576, else the current sub-stream; never the main stream automatically), "
+                     "sub (subtype=1) or main (subtype=0); empty = auto"),
+    )
     # Night watch schedule and options; None = never configured (off).
     night_watch: Optional[NightWatchConfig] = None
 
@@ -358,7 +366,7 @@ class CameraCreate(BaseModel):
     fps: int = 25
     resolution: str = "1920x1080"
     is_ai_enabled: bool = True
-    ai_models: List[str] = Field(default_factory=lambda: ["yolov5n"])
+    ai_models: List[str] = Field(default_factory=lambda: ["person_detection"])
     channel_number: int = 1
     department: str = "GENERAL"
     # Metres on the blueprint; None = not placed yet.

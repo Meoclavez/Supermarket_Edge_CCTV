@@ -92,7 +92,7 @@ def test_simcc_outputs_are_matched_by_name_not_position():
 
 def test_simcc_outputs_fall_back_to_their_lengths():
     """Unnamed heads: the x head has input_w x split bins, the y head input_h x split."""
-    a, b = _Out("output0", ["batch", 17, 384]), _Out("output1", ["batch", 17, 512])
+    a, b = _Out("head0", ["batch", 17, 384]), _Out("head1", ["batch", 17, 512])
     assert simcc_output_order([a, b], (256, 192)) == (0, 1)
     assert simcc_output_order([b, a], (256, 192)) == (1, 0)
     with pytest.raises(ValueError):
@@ -149,7 +149,7 @@ def _detector(name: str, refiner: bool) -> PersonDetector:
     old = settings.POSE_REFINER
     settings.POSE_REFINER = "on" if refiner else "off"
     try:
-        d = PersonDetector(model_path=path, object_model_path="")
+        d = PersonDetector(model_path=path)
         st = d.initialise()
     finally:
         settings.POSE_REFINER = old
@@ -170,9 +170,8 @@ def bus():
 
 
 @pytest.mark.parametrize("model,refiner", [
-    ("yolo26n-pose.onnx", False),              # 640x640 network
-    ("yolo26n-pose-544x960.onnx", False),      # 960x544 network: 352x288 is pillarboxed
-    ("yolo26n-pose-544x960.onnx", True),       # + RTMPose top-down refiner
+    ("rtmo-s-body7-640x640-static.onnx", False),   # 640x640 network: letterboxed and pillarboxed frames
+    ("rtmo-s-body7-640x640-static.onnx", True),    # + RTMPose top-down refiner
 ])
 def test_skeletons_upright_on_every_site_frame_shape(bus, model, refiner):
     d = _detector(model, refiner)
@@ -185,9 +184,14 @@ def test_skeletons_upright_on_every_site_frame_shape(bus, model, refiner):
             assert not _sane_upright(det), f"{model} refiner={refiner} {w}x{h}: {_sane_upright(det)}"
 
 
-def test_refiner_with_heads_in_the_other_order_gives_the_same_skeleton(bus):
-    """An export with simcc_y first must not transpose every refined skeleton."""
-    d = _detector("yolo26n-pose-544x960.onnx", True)
+def test_refiner_with_heads_in_the_other_order_gives_the_same_skeleton(bus, monkeypatch):
+    """An export with simcc_y first must not transpose every refined skeleton.
+
+    Runs on the CPU: GPU runs are not bit-exact between calls (on CUDA with
+    RTMO-s the noise moved a SimCC argmax by a bin now and then), and this
+    compares two runs of the same frame."""
+    monkeypatch.setattr(settings, "INFERENCE_DISABLED_PROVIDERS", "tensorrt,cuda,migraphx,rocm,openvino,directml")
+    d = _detector("rtmo-s-body7-640x640-static.onnx", True)
     frame = _fit(bus, 704, 576)
     ref = d.detect(frame, conf_threshold=0.4)
 
@@ -248,8 +252,8 @@ def test_refined_skeleton_turned_on_its_side_is_discarded(monkeypatch):
     from app.services import inference_backend as ib
     from app.services.inference_backend import Detection
 
-    d = PersonDetector(model_path="/nonexistent/pose.onnx", object_model_path="")
-    yolo = _upright()
+    d = PersonDetector(model_path="/nonexistent/pose.onnx")
+    pose = _upright()
 
     class _Ref:
         def get_inputs(self):
@@ -263,17 +267,17 @@ def test_refined_skeleton_turned_on_its_side_is_discarded(monkeypatch):
     d.provider = "cpu"
     frame = np.zeros((288, 352, 3), np.uint8)
 
-    turned = yolo.copy()
-    turned[:, 0], turned[:, 1] = yolo[:, 1], yolo[:, 0]
+    turned = pose.copy()
+    turned[:, 0], turned[:, 1] = pose[:, 1], pose[:, 0]
     monkeypatch.setattr(ib, "refiner_decode", lambda *a, **k: turned[None].copy())
-    det = Detection(80, 40, 120, 200, 0.9, keypoints=yolo.copy())
+    det = Detection(80, 40, 120, 200, 0.9, keypoints=pose.copy())
     d._refine(frame, [det])
-    assert np.array_equal(det.keypoints, yolo)            # the pose model's skeleton stands
+    assert np.array_equal(det.keypoints, pose)            # the pose model's skeleton stands
     assert d.status()["keypoint_refiner"]["skeletons_kept_from_pose_model"] == 1
 
-    adjusted = yolo.copy()
+    adjusted = pose.copy()
     adjusted[9, :2] += (6, -4)                            # a refined wrist
     monkeypatch.setattr(ib, "refiner_decode", lambda *a, **k: adjusted[None].copy())
-    det = Detection(80, 40, 120, 200, 0.9, keypoints=yolo.copy())
+    det = Detection(80, 40, 120, 200, 0.9, keypoints=pose.copy())
     d._refine(frame, [det])
     assert np.allclose(det.keypoints[9, :2], adjusted[9, :2])

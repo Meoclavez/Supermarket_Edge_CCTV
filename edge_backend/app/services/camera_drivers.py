@@ -260,6 +260,7 @@ def alternate_stream_url(url: str) -> Optional[str]:
     """If a Dahua or Hikvision stream fails, return its alternate stream quality.
 
     For Dahua:
+      subtype=2 (third stream) -> subtype=1 (substream)
       subtype=1 (substream) -> subtype=0 (mainstream)
       subtype=0 (mainstream) -> subtype=1 (substream)
     For Hikvision:
@@ -268,6 +269,9 @@ def alternate_stream_url(url: str) -> Optional[str]:
     if not url:
         return None
     if "/cam/realmonitor" in url:
+        if re.search(r"[?&]subtype=2(?!\d)", url):
+            # Third stream (chosen by Stream quality: Auto) -> the usual sub-stream.
+            return re.sub(r"([?&]subtype=)2(?!\d)", r"\g<1>1", url, count=1)
         if "subtype=1" in url:
             return url.replace("subtype=1", "subtype=0")
         elif "subtype=0" in url:

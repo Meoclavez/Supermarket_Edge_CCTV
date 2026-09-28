@@ -1,5 +1,7 @@
 # Supermarket Edge AI CCTV System — Hardware Sizing & Procurement Guide (30+ Cameras)
 
+> **Model note (2026-09-28):** this planning document predates the build. Its YOLO model names and sizes were early assumptions. The shipped product runs only Apache-2.0 models (RTMO-s person/pose model, optional RTMPose-s refiner; see `edge_backend/models/manifest.json` and `THIRD_PARTY_NOTICES.md`); no YOLO / AGPL-3.0 component ships.
+
 > **Document Version:** 1.0.0  
 > **Target Scale:** 30–36 Concurrent CCTV Camera Feeds  
 > **Workload Profile:** 24/7 Edge Video Ingest, Multi-Model TensorRT AI Inference, 2D Store Tracking, and Automated Daily Analytics Synthesis  

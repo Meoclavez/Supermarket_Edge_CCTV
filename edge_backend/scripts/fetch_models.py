@@ -1,28 +1,30 @@
 #!/usr/bin/env python3
 """Verify the ONNX models against models/manifest.json and restore any that are missing or damaged.
 
-A model with a ``download`` block (RTMPose, published as ONNX) is fetched
-from its URL and checked against the archive sha256. With a ``transform``
-block as well (RTMO: the published graph has in-graph NMS and dynamic shapes),
-the archive is handed to a script of this repository that rewrites it
-(scripts/export_rtmo_static.py), run in a second small isolated venv with only
-the packages the transform lists. Any other model that is
-missing, or whose sha256 does not match, is re-exported from its Ultralytics
-``.pt`` source in an isolated, throwaway uv virtualenv under a
-cache directory (Python 3.12, CPU-only torch). ultralytics and torch are never
-installed into the application venv.
+Every model is published by its upstream project (OpenMMLab) and fetched from
+the ``download`` URL in its manifest entry, checked against the archive
+sha256. With a ``transform`` block as well (RTMO: the published graph has
+in-graph NMS and dynamic shapes), the archive is handed to a script of this
+repository that rewrites it (scripts/export_rtmo_static.py), run in a small
+isolated uv venv under a cache directory with only the packages the transform
+lists; nothing is installed into the application venv.
 
-Re-exporting is NOT byte-identical: the export embeds a timestamp (and a
-different ultralytics/onnx build can reorder the graph). So after a re-export,
-a hash mismatch is accepted when the model's ONNX IO signature (input/output
-names, shapes, dtypes) equals the one recorded in the manifest; a warning is
-printed and the accepted hash is recorded in models/.local_exports.json so the
-next verification treats it as good instead of re-exporting on every start.
+A transform is expected to reproduce the manifest's sha256 exactly. If a
+different onnx build makes it differ, the result is accepted only when its
+ONNX IO signature (input/output names, shapes, dtypes) equals the one recorded
+in the manifest; a warning is printed and the accepted hash is recorded in
+models/.local_exports.json so the next verification treats it as good.
+
+ONNX files in the models directory that the manifest does not list (for
+example models of an earlier release) are deleted, each one logged, so the
+installed product holds only the reviewed models (``--keep-unlisted`` keeps
+them; ``--verify-only`` only lists them). Nothing outside the models
+directory is touched.
 
 Usage:
-    python scripts/fetch_models.py                 # verify, export what is needed
+    python scripts/fetch_models.py                 # verify, restore what is needed, prune unlisted
     python scripts/fetch_models.py --verify-only   # verify only, exit 1 on problems
-    python scripts/fetch_models.py --force yolo26n.onnx
+    python scripts/fetch_models.py --force rtmo-s-body7-640x640-static.onnx
 
 Run it with the app venv's python so the IO signature check can use onnxruntime.
 """
@@ -71,57 +73,6 @@ def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, text=True, capture_output=True, **kw)
 
 
-def ensure_export_env(cache: Path, exporter: dict) -> Path:
-    """Create (once) the isolated export venv and return its python."""
-    uv = find_uv()
-    if not uv:
-        raise RuntimeError(
-            "uv is required to build the isolated export environment. Install it without sudo with "
-            "`curl -LsSf https://astral.sh/uv/install.sh | sh` (or `pipx install uv`), then re-run."
-        )
-    pyver = str(exporter.get("python", "3.12"))
-    venv = cache / f"venv-py{pyver.replace('.', '')}"
-    py = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    marker = venv / ".edge-export-ready"
-    requirement = exporter.get("requirement", "ultralytics>=8.4,<8.5")
-    if marker.exists() and marker.read_text().strip() == requirement and py.exists():
-        return py
-
-    say("fix", f"building isolated export env {venv} (Python {pyver}, CPU torch, {requirement})")
-    steps = [
-        [uv, "venv", "--clear", "--python", pyver, str(venv)],
-        [uv, "pip", "install", "--python", str(py), "--index-url",
-         exporter.get("torch_index_url", "https://download.pytorch.org/whl/cpu"), "torch", "torchvision"],
-        [uv, "pip", "install", "--python", str(py), requirement, *exporter.get("extra_packages", ["onnx", "onnxslim"])],
-    ]
-    for cmd in steps:
-        res = run(cmd)
-        if res.returncode != 0:
-            raise RuntimeError(f"`{' '.join(cmd)}` failed:\n{(res.stderr or res.stdout)[-1500:]}")
-    marker.write_text(requirement + "\n")
-    return py
-
-
-def export_model(entry: dict, cache: Path, exporter: dict) -> Path:
-    py = ensure_export_env(cache, exporter)
-    work = cache / "work"
-    work.mkdir(parents=True, exist_ok=True)
-    source = entry["source"]
-    out = work / (Path(source).stem + ".onnx")
-    if out.exists():
-        out.unlink()
-    args = [f"model={source}"] + [
-        f"{k}={v if not isinstance(v, bool) else str(v)}" for k, v in entry.get("export", {}).items()
-    ]
-    cli = py.parent / ("yolo.exe" if os.name == "nt" else "yolo")
-    env = dict(os.environ, YOLO_CONFIG_DIR=str(cache / "ultralytics-config"))
-    say("fix", f"exporting {entry['file']}: yolo export {' '.join(args)}")
-    res = subprocess.run([str(cli), "export", *args], cwd=work, env=env, text=True, capture_output=True)
-    if res.returncode != 0 or not out.exists():
-        raise RuntimeError(f"export of {source} failed:\n{(res.stderr or res.stdout)[-1500:]}")
-    return out
-
-
 def ensure_tools_env(cache: Path, transform: dict) -> Path:
     """Create (once) the isolated venv a model ``transform`` runs in and return its python."""
     uv = find_uv()
@@ -165,11 +116,12 @@ def transform_model(entry: dict, archive: Path, out: Path, cache: Path) -> None:
 
 
 def download_model(entry: dict, cache: Path) -> Path:
-    """Fetch a model that is published as a file (not exported), e.g. RTMPose.
+    """Fetch a model that is published as a file, e.g. RTMPose, or as an
+    archive that ``transform`` rewrites (RTMO).
 
     ``entry["download"]`` = {"url", "archive_sha256", "member"}: the archive is
     downloaded once into the cache, its sha256 checked, and ``member`` (the
-    ONNX file inside the zip) extracted. No export environment is needed.
+    ONNX file inside the zip) extracted.
     """
     import hashlib
     import urllib.request
@@ -229,8 +181,10 @@ def record_local_export(models_dir: Path, entry: dict, digest: str, size: int) -
     path.write_text(json.dumps(data, indent=2) + "\n")
 
 
-def restore(entry: dict, models_dir: Path, cache: Path, exporter: dict) -> bool:
-    exported = download_model(entry, cache) if entry.get("download") else export_model(entry, cache, exporter)
+def restore(entry: dict, models_dir: Path, cache: Path) -> bool:
+    if not entry.get("download"):
+        raise RuntimeError(f"{entry['file']} has no download source in manifest.json")
+    exported = download_model(entry, cache)
     digest = pf.sha256_file(exported)
     size = exported.stat().st_size
     if digest == entry["sha256"]:
@@ -238,7 +192,7 @@ def restore(entry: dict, models_dir: Path, cache: Path, exporter: dict) -> bool:
     elif pf.io_signature_matches(pf.read_io_signature(exported), entry.get("io")):
         verdict = "io"
     else:
-        say("FAIL", f"{entry['file']}: re-export has a different IO signature than manifest.json; "
+        say("FAIL", f"{entry['file']}: rebuilt model has a different IO signature than manifest.json; "
                     "not installed (the app's decoder expects the manifest layout)")
         return False
 
@@ -249,13 +203,53 @@ def restore(entry: dict, models_dir: Path, cache: Path, exporter: dict) -> bool:
         say("FAIL", f"{entry['file']}: installed file hash {installed[:12]} != exported {digest[:12]} (disk problem?)")
         return False
     if verdict == "exact":
-        say("ok", f"{entry['file']}: re-exported, sha256 matches manifest")
+        say("ok", f"{entry['file']}: restored, sha256 matches manifest")
     else:
         record_local_export(models_dir, entry, digest, size)
-        say("warn", f"{entry['file']}: re-exported; sha256 {digest[:12]}... differs from manifest "
-                    f"{entry['sha256'][:12]}... (exports embed a timestamp) but the ONNX IO signature matches. "
+        say("warn", f"{entry['file']}: restored; sha256 {digest[:12]}... differs from manifest "
+                    f"{entry['sha256'][:12]}... (different onnx build?) but the ONNX IO signature matches. "
                     f"Accepted and recorded in {models_dir / pf.LOCAL_EXPORTS_NAME}")
     return True
+
+
+def unlisted_models(manifest: dict, models_dir: Path) -> list[Path]:
+    """ONNX files directly inside ``models_dir`` that the manifest does not list."""
+    listed = {e["file"] for e in manifest.get("models", [])}
+    return sorted(p for p in models_dir.glob("*.onnx")
+                  if p.name not in listed and (p.is_file() or p.is_symlink()))
+
+
+def prune_unlisted(manifest: dict, models_dir: Path, dry_run: bool = False) -> list[str]:
+    """Delete (or with ``dry_run`` only report) the unlisted ONNX files, and
+    drop their stale records from models/.local_exports.json."""
+    removed: list[str] = []
+    for path in unlisted_models(manifest, models_dir):
+        if dry_run:
+            say("warn", f"{path.name}: not listed in manifest.json (would be deleted)")
+            continue
+        try:
+            path.unlink()
+        except OSError as exc:
+            say("warn", f"{path.name}: not listed in manifest.json; could not delete it ({exc})")
+            continue
+        removed.append(path.name)
+        say("fix", f"deleted {path} (not listed in manifest.json)")
+    local_path = models_dir / pf.LOCAL_EXPORTS_NAME
+    local = pf.load_local_exports(models_dir)
+    listed = {e["file"] for e in manifest.get("models", [])}
+    stale = [k for k in local if k not in listed]
+    if stale and not dry_run:
+        for k in stale:
+            local.pop(k, None)
+        try:
+            if local:
+                local_path.write_text(json.dumps(local, indent=2) + "\n")
+            else:
+                local_path.unlink()
+            say("fix", f"removed stale {pf.LOCAL_EXPORTS_NAME} record(s): {', '.join(stale)}")
+        except OSError as exc:
+            say("warn", f"could not update {local_path}: {exc}")
+    return removed
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -263,17 +257,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     ap.add_argument("--models-dir", type=Path, default=None, help="default: the manifest's directory")
     ap.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE,
-                    help=f"export venv + work dir (default {DEFAULT_CACHE}; env EDGE_MODEL_EXPORT_CACHE)")
+                    help=f"downloads + tools venv (default {DEFAULT_CACHE}; env EDGE_MODEL_EXPORT_CACHE)")
     ap.add_argument("--verify-only", action="store_true")
-    ap.add_argument("--force", nargs="*", default=[], metavar="FILE", help="re-export these even if they verify")
+    ap.add_argument("--force", nargs="*", default=[], metavar="FILE", help="restore these even if they verify")
+    ap.add_argument("--keep-unlisted", action="store_true",
+                    help="do not delete ONNX files in the models directory that manifest.json does not list")
     ap.add_argument("--quiet", action="store_true", help="only print problems and fixes")
     args = ap.parse_args(argv)
 
     manifest = pf.load_manifest(args.manifest)
     models_dir = args.models_dir or args.manifest.parent
     models_dir.mkdir(parents=True, exist_ok=True)
+    if not args.keep_unlisted:
+        prune_unlisted(manifest, models_dir, dry_run=args.verify_only)
     local = pf.load_local_exports(models_dir)
-    exporter = manifest.get("exporter", {})
 
     failures = 0
     for entry in manifest.get("models", []):
@@ -290,10 +287,10 @@ def main(argv: list[str] | None = None) -> int:
             say("FAIL" if entry.get("required", True) else "warn", f"{entry['file']}: {label}")
             failures += 1 if entry.get("required", True) or status != "missing" else 0
             continue
-        say("fix", f"{entry['file']}: {label}; restoring from {entry['source']}")
+        say("fix", f"{entry['file']}: {label}; restoring from {(entry.get('download') or {}).get('url') or entry.get('source')}")
         required = entry.get("required", True)
         try:
-            ok = restore(entry, models_dir, args.cache_dir.expanduser(), exporter)
+            ok = restore(entry, models_dir, args.cache_dir.expanduser())
             error = None if ok else "not restored"
         except RuntimeError as exc:
             ok, error = False, str(exc)
@@ -302,8 +299,8 @@ def main(argv: list[str] | None = None) -> int:
                 say("FAIL", f"{entry['file']}: {error}")
                 failures += 1
             else:
-                # An optional model (object context, trial candidates) must
-                # not fail an install; whatever uses it reports it missing.
+                # An optional model (the keypoint refiner) must not fail an
+                # install; whatever uses it reports it missing.
                 say("warn", f"{entry['file']} (optional) could not be restored: {error}")
     return 1 if failures else 0
 

@@ -14,16 +14,18 @@ second run on a healthy machine changes nothing:
                    the GPU target read from /sys/class/kfd at run time, plus the
                    unversioned libmigraphx_*.so symlinks wheels cannot ship),
                    openvino, cpu
-  6. models        scripts/fetch_models.py (verify; export missing ones in an isolated venv)
+  6. models        scripts/fetch_models.py (verify; download/rebuild missing ones, the
+                   rebuild in an isolated venv; delete ONNX files manifest.json
+                   does not list)
   6a. pre-warm     migraphx only: scripts/prewarm_inference.py loads the models the
                    service will load and compiles them for the GPU into the cache
                    (1-3 min per model the first time; seconds once cached)
   7. verify        create a real ORT session on a model, check get_providers()[0]
   8. preflight     app.services.preflight (read-only checks)
-  8a. tunnel       only with --with-tunnel or when remote access is enabled in
-                   Settings: fetch cloudflared for this OS/arch from the official
-                   GitHub release into <repo>/bin/, verified against the
-                   published SHA-256 (skipped when cloudflared is on PATH)
+  8a. tunnel       only with --with-tunnel, EDGE_TUNNEL=1 or when online access is
+                   enabled in Settings: fetch frpc (frp, pinned version) for this
+                   OS/arch from the official GitHub release into <repo>/bin/,
+                   verified against the pinned SHA-256 and the release's list
   9. start         exec uvicorn (skipped with --check-only)
 
 It never uses sudo and never touches system packages. When the fix is at the
@@ -523,8 +525,8 @@ def prewarm_gpu(py: Path) -> dict:
     if rc == 0 and summary.get("provider") == "migraphx":
         R.ok(f"GPU pre-warm: {summary.get('model')} {summary.get('input_size')} on {summary.get('device')} "
              f"({summary.get('warmup_steady_ms')} ms/frame), refiner "
-             f"{'on' if (summary.get('refiner') or {}).get('enabled') else 'off'}, objects on "
-             f"{summary.get('object_provider')}; compiled {gc.get('compiled') or 'nothing new (cache warm)'} "
+             f"{'on' if (summary.get('refiner') or {}).get('enabled') else 'off'}; "
+             f"compiled {gc.get('compiled') or 'nothing new (cache warm)'} "
              f"in {secs:.0f} s; cache {(summary.get('migraphx') or {}).get('cache_dir')}")
     else:
         R.fail(f"GPU pre-warm ended on {summary.get('provider') or 'nothing'} (exit {rc}): "
@@ -583,15 +585,30 @@ def run_preflight(py: Path) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# Remote access: cloudflared binary (optional)
+# Online access: frpc binary (optional)
 # --------------------------------------------------------------------------- #
 
-CLOUDFLARED_RELEASE_API = "https://api.github.com/repos/cloudflare/cloudflared/releases/latest"
+# frp (fatedier/frp, Apache-2.0). Pinned: the tunnel server on the VPS runs
+# the same version (deploy/vps/docker-compose.yml). To upgrade, change the
+# version here and there, and replace the hashes below with the ones from the
+# release's frp_sha256_checksums.txt.
+FRP_VERSION = "0.71.0"
+FRP_RELEASE_URL = f"https://github.com/fatedier/frp/releases/download/v{FRP_VERSION}"
+FRP_SHA256 = {
+    f"frp_{FRP_VERSION}_linux_amd64.tar.gz": "84f27e39f11169f7adcef8e8b70c9329de17747b1f14dad9fb95eef5682ea716",
+    f"frp_{FRP_VERSION}_linux_arm64.tar.gz": "f33c293c275d8fc68c654b6fba8f10b2551d6463d09a9fc9cffb7227eae82266",
+    f"frp_{FRP_VERSION}_linux_arm_hf.tar.gz": "eab1ecb45b00e2f9cf2ebc458fde570ceecb50689c4c5c728677f44825bf3d88",
+    f"frp_{FRP_VERSION}_linux_arm.tar.gz": "f40a984f83e8d34a9241b0be4a9d5fbcfe513a4a5c022b84a02637ff6d36833b",
+    f"frp_{FRP_VERSION}_darwin_amd64.tar.gz": "1b1b4e2f1836e21e8733f1dddaacd4ed9ae67d7dbee39046b9d7b7eda6253637",
+    f"frp_{FRP_VERSION}_darwin_arm64.tar.gz": "45be02b186860d375ed49a8941ae9569628a54bf14e67fc36b29c98c99dabcc6",
+    f"frp_{FRP_VERSION}_windows_amd64.zip": "9e5062e3e5cf07e67144a3a4acf175ef6a2486f3605dd6cf288bae34ab39819f",
+    f"frp_{FRP_VERSION}_windows_arm64.zip": "b56a5c2a1a2a55d11bc27aeef6edabd39f3d194360ea66660cc27281b502cb1c",
+}
 BIN_DIR = REPO_DIR / "bin"
 
 
 def remote_access_enabled() -> bool:
-    """Read Settings -> Remote access from the app database (read-only)."""
+    """Read Settings -> Online access from the app database (read-only)."""
     import sqlite3
 
     candidates = [os.environ.get("DATABASE_PATH"), str(REPO_DIR / "storage" / "cctv_core.db"), "/app/cctv_core.db"]
@@ -615,110 +632,114 @@ def remote_access_enabled() -> bool:
     return False
 
 
-def cloudflared_asset_name() -> str | None:
-    system = platform.system().lower()
-    machine = platform.machine().lower()
+def frp_asset_name(system: str | None = None, machine: str | None = None) -> str | None:
+    system = (system or platform.system()).lower()
+    machine = (machine or platform.machine()).lower()
     arch = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64",
-            "armv7l": "armhf", "armv6l": "arm", "i386": "386", "i686": "386", "x86": "386"}.get(machine)
-    if not arch:
+            "armv7l": "arm_hf", "armv6l": "arm"}.get(machine)
+    if not arch or system not in ("linux", "darwin", "windows"):
         return None
-    if system == "linux":
-        return f"cloudflared-linux-{arch}"
-    if system == "darwin" and arch in ("amd64", "arm64"):
-        return f"cloudflared-darwin-{arch}.tgz"
-    if system == "windows" and arch in ("amd64", "386"):
-        return f"cloudflared-windows-{arch}.exe"
-    return None
+    ext = "zip" if system == "windows" else "tar.gz"
+    name = f"frp_{FRP_VERSION}_{system}_{arch}.{ext}"
+    return name if name in FRP_SHA256 else None
 
 
 def _http_get(url: str, timeout: float = 60.0) -> bytes:
     import urllib.request
 
-    req = urllib.request.Request(url, headers={"User-Agent": "edge-cctv-bootstrap",
-                                               "Accept": "application/vnd.github+json"})
+    req = urllib.request.Request(url, headers={"User-Agent": "edge-cctv-bootstrap"})
     with urllib.request.urlopen(req, timeout=timeout) as res:  # noqa: S310 (https only)
         return res.read()
 
 
-def published_sha256(release: dict, asset_name: str) -> tuple[str | None, str | None]:
-    """(checksum listed in the release notes, digest GitHub reports for the asset)."""
-    listed = None
-    m = re.search(rf"^\s*{re.escape(asset_name)}:\s*([0-9a-f]{{64}})\s*$", release.get("body") or "", re.M)
-    if m:
-        listed = m.group(1)
-    api = None
-    for asset in release.get("assets") or []:
-        if asset.get("name") == asset_name and str(asset.get("digest") or "").startswith("sha256:"):
-            api = asset["digest"].split(":", 1)[1]
-    return listed, api
+def checksum_from_list(text: str, asset_name: str) -> str | None:
+    """SHA-256 for ``asset_name`` from a ``sha256sum``-style list."""
+    m = re.search(rf"^([0-9a-f]{{64}})\s+\*?{re.escape(asset_name)}\s*$", text or "", re.M)
+    return m.group(1) if m else None
 
 
-def ensure_cloudflared(requested: bool) -> None:
+def extract_frpc(data: bytes, asset: str) -> bytes | None:
+    """The frpc executable from a release archive (frps and the rest are not needed here)."""
+    import io
+
+    wanted = "frpc.exe" if asset.endswith(".zip") else "frpc"
+    if asset.endswith(".zip"):
+        import zipfile
+
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            name = next((n for n in zf.namelist() if Path(n).name == wanted), None)
+            return zf.read(name) if name else None
+    import tarfile
+
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+        member = next((m for m in tar.getmembers() if m.isfile() and Path(m.name).name == wanted), None)
+        return tar.extractfile(member).read() if member else None  # type: ignore[union-attr]
+
+
+def _frpc_version(exe: Path) -> str | None:
+    res = sh([str(exe), "--version"])
+    out = res.stdout.strip().splitlines()
+    return out[0].strip() if res.returncode == 0 and out else None
+
+
+def ensure_frpc(requested: bool) -> None:
+    """Fetch frpc into <repo>/bin when online access is (or is about to be) used."""
     import hashlib
 
-    wanted = requested or remote_access_enabled()
-    on_path = shutil.which("cloudflared")
-    exe = BIN_DIR / ("cloudflared.exe" if IS_WINDOWS else "cloudflared")
+    wanted = requested or os.environ.get("EDGE_TUNNEL") == "1" or remote_access_enabled()
+    exe = BIN_DIR / ("frpc.exe" if IS_WINDOWS else "frpc")
+    stale = BIN_DIR / "cloudflared"
+    if stale.is_file():  # fetched by earlier versions for Cloudflare Tunnel, no longer used
+        try:
+            stale.unlink()
+            R.fix(f"removed {stale} (Cloudflare Tunnel is no longer used)")
+        except OSError:
+            pass
+    have = _frpc_version(exe) if exe.is_file() else None
     if not wanted:
-        if exe.is_file() or on_path:
-            R.ok(f"cloudflared present ({on_path or exe})")
+        if have:
+            R.ok(f"frpc {have} present ({exe})")
         return
-    if on_path:
-        R.ok(f"cloudflared on PATH: {on_path}")
+    if have == FRP_VERSION:
+        R.ok(f"frpc {have} ({exe})")
         return
-    if exe.is_file():
-        res = sh([str(exe), "--version"])
-        if res.returncode == 0:
-            R.ok(f"cloudflared: {res.stdout.strip().splitlines()[0] if res.stdout.strip() else exe}")
-            return
-        R.warn(f"{exe} does not run; downloading it again")
-    asset = cloudflared_asset_name()
+    asset = frp_asset_name()
     if not asset:
-        R.warn(f"No cloudflared build for {platform.system()} {platform.machine()}; remote access "
-               "cannot use a Cloudflare tunnel on this machine",
-               "see https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/")
+        R.warn(f"No frpc build for {platform.system()} {platform.machine()} in frp {FRP_VERSION}; online "
+               "access cannot run on this machine", "see https://github.com/fatedier/frp/releases")
         return
     try:
-        release = json.loads(_http_get(CLOUDFLARED_RELEASE_API, timeout=20))
-        listed, api_digest = published_sha256(release, asset)
-        url = next((a["browser_download_url"] for a in release.get("assets") or [] if a.get("name") == asset), None)
-        if not url or not url.startswith("https://github.com/cloudflare/cloudflared/releases/download/"):
-            R.warn(f"cloudflared release {release.get('tag_name')} has no asset {asset}")
-            return
-        R.info(f"downloading {asset} ({release.get('tag_name')})")
-        data = _http_get(url, timeout=300)
+        R.info(f"downloading {asset} (frp {FRP_VERSION}{', replacing ' + have if have else ''})")
+        data = _http_get(f"{FRP_RELEASE_URL}/{asset}", timeout=300)
+        try:
+            published = checksum_from_list(_http_get(f"{FRP_RELEASE_URL}/frp_sha256_checksums.txt", timeout=30)
+                                           .decode("utf-8", "replace"), asset)
+        except Exception:
+            published = None
     except Exception as exc:  # offline, rate-limited, ...
-        R.warn(f"cloudflared download failed: {exc}", f"{REPO_DIR / 'run.sh'} --with-tunnel --check-only")
+        R.warn(f"frpc download failed: {exc}", f"{REPO_DIR / 'run.sh'} --with-tunnel --check-only")
         return
     digest = hashlib.sha256(data).hexdigest()
-    expected = [d for d in (listed, api_digest) if d]
-    if not expected:
-        R.warn(f"no published checksum for {asset}; installed unverified (sha256 {digest})")
-    elif any(d != digest for d in expected):
-        R.fail(f"cloudflared checksum mismatch for {asset}: got {digest}, published {expected[0]}. Not installed.")
+    pinned = FRP_SHA256[asset]
+    if digest != pinned or (published and published != pinned):
+        R.fail(f"frp checksum mismatch for {asset}: got {digest}, pinned {pinned}"
+               + (f", published {published}" if published and published != pinned else "") + ". Not installed.")
+        return
+    binary = extract_frpc(data, asset)
+    if not binary:
+        R.fail(f"{asset} does not contain frpc")
         return
     BIN_DIR.mkdir(parents=True, exist_ok=True)
-    if asset.endswith(".tgz"):
-        import io
-        import tarfile
-
-        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
-            member = next((m for m in tar.getmembers() if m.isfile() and Path(m.name).name == "cloudflared"), None)
-            if member is None:
-                R.fail(f"{asset} does not contain a cloudflared binary")
-                return
-            data = tar.extractfile(member).read()  # type: ignore[union-attr]
     tmp = exe.with_suffix(".download")
-    tmp.write_bytes(data)
+    tmp.write_bytes(binary)
     os.chmod(tmp, 0o755)
     os.replace(tmp, exe)
-    res = sh([str(exe), "--version"])
-    if res.returncode != 0:
-        R.fail(f"downloaded cloudflared does not run: {tail(res)}")
+    version = _frpc_version(exe)
+    if version != FRP_VERSION:
+        R.fail(f"downloaded frpc does not run as expected (version {version!r})")
         return
-    R.fix(f"cloudflared installed: {exe} ({res.stdout.strip().splitlines()[0] if res.stdout.strip() else 'ok'}"
-          f"; sha256 verified against {'release notes + GitHub digest' if len(expected) == 2 else 'published checksum'})"
-          if expected else f"cloudflared installed: {exe}")
+    R.fix(f"frpc {version} installed: {exe} (sha256 matches the pinned hash"
+          + (" and the release's checksum file)" if published else "; checksum file unreachable)"))
 
 
 # --------------------------------------------------------------------------- #
@@ -756,8 +777,8 @@ def main() -> None:
                          "them in the background on its first start, running on the CPU meanwhile)")
     ap.add_argument("--force", action="store_true", help="start uvicorn even if checks report errors")
     ap.add_argument("--with-tunnel", action="store_true",
-                    help="fetch cloudflared into <repo>/bin for remote access (done automatically when "
-                         "remote access is enabled in Settings)")
+                    help="fetch frpc into <repo>/bin for online access through your VPS (also with "
+                         "EDGE_TUNNEL=1, and automatically when online access is enabled in Settings)")
     args = ap.parse_args(argv)
 
     venv = Path(args.venv).expanduser().absolute()
@@ -787,7 +808,7 @@ def main() -> None:
         mgx_cache = str(Path(cache_dir).parent) if cache_dir else None
     probe = verify_session(py, accel, mgx_cache)
     run_preflight(py)
-    ensure_cloudflared(args.with_tunnel)
+    ensure_frpc(args.with_tunnel)
 
     if args.check_only:
         finish(exit_code=1 if R.errors else 0, provider=probe.get("provider"))
@@ -804,8 +825,13 @@ def main() -> None:
     # No "server: uvicorn" banner on every response.
     banner = [] if "--server-header" in passthrough or "--no-server-header" in passthrough \
         else ["--no-server-header"]
+    # The app decides which forwarding headers to believe (services/public_exposure.py):
+    # uvicorn's own rewriting would replace a tunnel request's loopback peer with
+    # the VPS proxy's address, and every remote visitor would share it.
+    proxy = [] if "--proxy-headers" in passthrough or "--no-proxy-headers" in passthrough \
+        else ["--no-proxy-headers"]
     cmd = [str(py), "-m", "uvicorn", "app.main:app", "--host", str(args.host), "--port", str(args.port),
-           *graceful, *banner, *passthrough]
+           *graceful, *banner, *proxy, *passthrough]
     print(f"== exec {' '.join(cmd)}  (cwd {EDGE_BACKEND_DIR})", flush=True)
     os.chdir(EDGE_BACKEND_DIR)
     if IS_WINDOWS:

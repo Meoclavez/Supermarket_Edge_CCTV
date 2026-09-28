@@ -1,46 +1,51 @@
 """Hardening for when the dashboard is reachable from outside the store.
 
-Two routes reach the dashboard from outside, both through a proxy on this
-machine that connects to uvicorn over loopback:
+The public route is the owner's own VPS (``remote_access_service``, provider
+``vps_tunnel``)::
 
-``tailscale serve`` (private: the owner's and staff's tailnet)
-    ``https://<machine>.<tailnet>.ts.net`` with a real certificate. Tailscale
-    keeps the ``Host`` header (the ``.ts.net`` name), replaces
-    ``X-Forwarded-For`` with the caller's tailnet address, sets
-    ``X-Forwarded-Proto: https`` and ``X-Forwarded-Host``, and adds
-    ``Tailscale-User-Login``/``-Name``/``-Profile-Pic`` for a user's device
-    (not for tagged devices). Client-supplied copies of all of these are
-    removed first. A Funnel request (public internet) additionally carries
-    ``Tailscale-Funnel-Request: ?1``.
-``cloudflared`` (public: the owner's domain)
-    ``Host`` is the public hostname; Cloudflare adds ``CF-Connecting-IP``,
-    ``CF-Ray``, ``CF-Visitor`` and appends to ``X-Forwarded-For``.
+    browser --https--> VPS reverse proxy --http--> frps ==tunnel==> frpc --> uvicorn (127.0.0.1)
+
+frpc connects to uvicorn over loopback, so every tunnel request has a
+loopback peer and ``Host`` equal to the configured public address (frps routes
+by ``Host``, so no other name can arrive through it). On the way, the VPS
+proxy appends the visitor's address to ``X-Forwarded-For`` (nginx, Traefik,
+Caddy and Nginx Proxy Manager all do by default), and frps appends the VPS
+proxy's own address after it and overwrites ``X-Forwarded-Proto`` with
+``http`` (frp ``pkg/util/vhost/http.go``: ``SetXForwarded``). Hence:
+
+* the visitor is the SECOND entry from the right of ``X-Forwarded-For``
+  (:func:`client_ip`), or one further left per proxy configured in front of
+  the VPS (e.g. a CDN, Settings -> Online access); entries further left came
+  from the visitor and are ignored, as is ``X-Real-IP``, which frps passes
+  through unchanged;
+* the browser's connection was HTTPS (the VPS proxy terminates TLS), whatever
+  ``X-Forwarded-Proto`` says (:func:`came_via_https_proxy`).
 
 **Which proxy headers are believed.** Only those arriving from a loopback
-peer. uvicorn's own ProxyHeadersMiddleware (on by default, trusting
-127.0.0.1/::1) usually has already replaced ``scope["client"]`` and
-``scope["scheme"]`` from ``X-Forwarded-For``/``-Proto`` before the app runs;
-this module gives the same answers whether or not that happened, so it is
-correct under the systemd unit, ``run.sh`` and the tests alike. A client on
-the LAN or tailnet that connects directly and sends these headers is ignored,
-so nobody can spoof an address to dodge the lockout (:func:`client_ip`).
+peer. The launchers run uvicorn with ``--no-proxy-headers`` so the app sees the
+real peer: with uvicorn's own rewriting on, a tunnel request's peer would
+become the VPS proxy's address (the right-most entry) and every visitor would
+share it. That degraded case is still safe (the request stays remote, the
+address just is not the visitor's), and it is logged once. A client on the
+LAN or tailnet that connects directly and sends forwarding headers is
+ignored, so nobody can pick an address to dodge the lockout. Another proxy on
+this machine (for example a local Caddy) is handled generically: its
+right-most ``X-Forwarded-For`` entry is the client.
 
 **Remote (public) vs. private.** :func:`is_remote_request` is true for
-requests that name the configured public hostname, carry Cloudflare headers,
-or come through Tailscale Funnel. Tailnet requests through ``tailscale serve``
-are private, like the store LAN: only devices the owner admitted to the
-tailnet can make them. For remote requests, first-run setup (which creates
-the owner account from a one-time code) and the API docs are refused, and
-nothing is served while ``AUTH_DISABLED`` is on. Being classified remote only
-ever adds restrictions, so a direct client forging Cloudflare or Funnel
-headers gains nothing.
+requests that name the configured public address (from any peer: a direct
+client naming it only subjects itself to the stricter rules). The store LAN
+and the owner's private Tailscale address (plain ``http://<100.x>:8000``)
+are private. For remote requests, first-run setup (which creates the owner
+account from a one-time code) and the API docs are refused, and nothing is
+served while ``AUTH_DISABLED`` is on.
 
 **Headers.** A Content-Security-Policy that allows scripts only from this
 origin plus the pages' own inline blocks by hash (see :func:`content_security_policy`),
 ``frame-ancestors 'self'``, ``nosniff``, ``Referrer-Policy: same-origin``
 (stream URLs may carry ``?token=``), and HSTS only on a response to a request
-that actually arrived over HTTPS (Cloudflare or ``tailscale serve``), never on
-the plain-HTTP LAN or tailnet address.
+that actually arrived over HTTPS (the tunnel, or a local HTTPS proxy), never
+on the plain-HTTP LAN or tailnet address.
 
 CORS is limited to this device's own origins: the public ``https://<hostname>``,
 ``EDGE_BASE_URL`` and any explicit (non-``*``) entries in
@@ -104,70 +109,62 @@ def _peer(request_or_scope) -> Optional[str]:
     return client.host if hasattr(client, "host") else client[0]
 
 
-TAILNET_SUFFIX = ".ts.net"
-TAILSCALE_IDENTITY_HEADERS = ("tailscale-user-login", "tailscale-user-name", "tailscale-headers-info")
-
 # proxy_kind() results
-TAILSCALE, TAILSCALE_FUNNEL, CLOUDFLARE, LOCAL_PROXY = "tailscale", "tailscale_funnel", "cloudflare", "proxy"
+TUNNEL, LOCAL_PROXY = "tunnel", "proxy"
 
-
-def _right_most_ip(xff: str) -> Optional[str]:
-    # One trusted hop (the proxy on this machine) appended or set the address
-    # it saw, so the right-most valid entry is the client.
-    for part in reversed((xff or "").split(",")):
-        ip = _valid_ip(part)
-        if ip:
-            return ip
-    return None
+_warned_rewritten_peer = False
 
 
 def _host_only(host_header: str) -> str:
     host = (host_header or "").strip().lower()
     if host.startswith("["):
         return host.split("]", 1)[0] + "]"
-    return host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+    host = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+    return host.rstrip(".")
 
 
-def is_tailnet_host(host_header: str) -> bool:
-    """``<machine>.<tailnet>.ts.net``: the only names ``tailscale serve`` answers for with HTTPS."""
-    return _host_only(host_header).rstrip(".").endswith(TAILNET_SUFFIX)
+def _xff_entries(xff: str) -> list[str]:
+    return [part.strip() for part in (xff or "").split(",") if part.strip()]
 
 
-def proxy_kind(request) -> Optional[str]:
-    """Which proxy on this machine delivered the request (None: not via a loopback proxy).
-
-    ``tailscale`` is checked first: tailscaled passes other client headers
-    through unchanged, so a tailnet user could add ``CF-Connecting-IP``; for a
-    ``.ts.net`` host those are ignored.
-    """
-    if not _is_loopback(_peer(request)):
-        return None
-    h = request.headers
-    if h.get("tailscale-funnel-request"):
-        return TAILSCALE_FUNNEL
-    if is_tailnet_host(h.get("host", "")) or any(h.get(n) for n in TAILSCALE_IDENTITY_HEADERS):
-        return TAILSCALE
-    if h.get("cf-connecting-ip") or h.get("cf-ray"):
-        return CLOUDFLARE
-    if h.get("x-forwarded-for") or h.get("x-forwarded-proto"):
-        return LOCAL_PROXY
+def _right_most_ip(xff: str) -> Optional[str]:
+    # One trusted hop (the proxy on this machine) appended or set the address
+    # it saw, so the right-most valid entry is the client.
+    for part in reversed(_xff_entries(xff)):
+        ip = _valid_ip(part)
+        if ip:
+            return ip
     return None
 
 
-def client_ip(request: Request) -> str:
-    """The real client address, for lockouts, rate limits and audit logs."""
-    peer = _peer(request)
-    kind = proxy_kind(request)
-    if kind is not None:
-        headers = request.headers
-        if kind == CLOUDFLARE:
-            cf = _valid_ip(_header(headers, "cf-connecting-ip"))
-            if cf:
-                return cf
-        ip = _right_most_ip(_header(headers, "x-forwarded-for"))
-        if ip:
-            return ip
-    return peer or "unknown"
+def _tunnel_client_ip(xff: str, hops: int = 1) -> Optional[str]:
+    """Visitor address of a tunnel request.
+
+    ``hops`` is the number of trusted proxies before frps: the VPS's reverse
+    proxy, plus any configured in front of it (Settings -> Online access,
+    e.g. a CDN). Right-most entry: the VPS proxy, appended by frps. Each hop
+    before it appended the address it saw, so the visitor is ``hops + 1``
+    from the right (2nd with no CDN, 3rd with one). Entries further left were
+    sent by the visitor and are never used. When there are fewer entries, a
+    hop replaced the header instead of appending (e.g. a proxy that does not
+    trust the one in front of it); the left-most entry is then the earliest
+    address a trusted hop wrote. An entry that is not an IP falls back to the
+    VPS proxy's.
+    """
+    entries = _xff_entries(xff)
+    if not entries:
+        return None
+    idx = max(0, len(entries) - 1 - max(1, hops))
+    return _valid_ip(entries[idx]) or _valid_ip(entries[-1])
+
+
+def _forwarding_hops() -> int:
+    try:
+        from app.services.remote_access_service import remote_access_service
+
+        return remote_access_service.forwarding_hops()
+    except Exception:
+        return 1
 
 
 def _remote_hostname() -> str:
@@ -179,24 +176,63 @@ def _remote_hostname() -> str:
         return ""
 
 
+def _names_public_host(request) -> bool:
+    hostname = _remote_hostname()
+    return bool(hostname) and _host_only(request.headers.get("host", "")) == hostname
+
+
+def proxy_kind(request) -> Optional[str]:
+    """Which proxy on this machine delivered the request (None: not via a loopback proxy)."""
+    if not _is_loopback(_peer(request)):
+        return None
+    if _names_public_host(request):
+        return TUNNEL
+    h = request.headers
+    if h.get("x-forwarded-for") or h.get("x-forwarded-proto"):
+        return LOCAL_PROXY
+    return None
+
+
+def _note_rewritten_peer(request) -> None:
+    """Warn once when uvicorn already replaced the loopback peer of a tunnel request."""
+    global _warned_rewritten_peer
+    if _warned_rewritten_peer:
+        return
+    peer = _peer(request)
+    entries = _xff_entries(request.headers.get("x-forwarded-for") or "")
+    if peer and entries and _valid_ip(entries[-1]) == _valid_ip(peer) and _names_public_host(request):
+        _warned_rewritten_peer = True
+        logger.warning("A request through the tunnel arrived with uvicorn's proxy-header rewriting on: remote "
+                       "visitors all appear as the VPS proxy's address. Start uvicorn with --no-proxy-headers "
+                       "(deploy/edge-cctv.service and run.sh do).")
+
+
+def client_ip(request: Request) -> str:
+    """The real client address, for lockouts, rate limits and audit logs."""
+    peer = _peer(request)
+    kind = proxy_kind(request)
+    if kind is not None:
+        xff = _header(request.headers, "x-forwarded-for")
+        ip = _tunnel_client_ip(xff, _forwarding_hops()) if kind == TUNNEL else _right_most_ip(xff)
+        if ip:
+            return ip
+    elif peer and request.headers.get("x-forwarded-for"):
+        _note_rewritten_peer(request)
+    return peer or "unknown"
+
+
 def is_remote_request(request: Request) -> bool:
     """True when this request came in from the public internet.
 
-    That is: it names the configured public hostname, or carries Cloudflare
-    or Tailscale Funnel headers (from any peer: uvicorn may already have
-    replaced the loopback peer with the visitor's address, and a direct client
-    forging them only subjects itself to the stricter rules). Tailnet requests
-    through ``tailscale serve`` are private and return False.
+    That is: it names the configured public address. Checked for any peer:
+    a direct client naming it only subjects itself to the stricter rules.
+    ``Tailscale-Funnel-Request`` (Tailscale's public share, not used here) is
+    treated as public too, so turning Funnel on by accident never opens
+    first-run setup to the internet.
     """
-    h = request.headers
-    hostname = _remote_hostname()
-    if hostname and _host_only(h.get("host", "")) == hostname:
+    if _names_public_host(request):
         return True
-    if h.get("tailscale-funnel-request"):
-        return True
-    if is_tailnet_host(h.get("host", "")):
-        return False
-    return bool(h.get("cf-connecting-ip") or h.get("cf-ray"))
+    return bool(request.headers.get("tailscale-funnel-request"))
 
 
 def came_via_https_proxy(request: Request) -> bool:
@@ -204,16 +240,18 @@ def came_via_https_proxy(request: Request) -> bool:
 
     A direct connection (or one whose scheme uvicorn already took from a
     trusted proxy's X-Forwarded-Proto) is judged by its scheme; forwarding
-    headers are believed only from a loopback peer.
+    headers are believed only from a loopback peer. Tunnel requests always
+    were HTTPS: the VPS proxy terminates TLS, and frps then overwrites
+    X-Forwarded-Proto with "http".
     """
     if request.url.scheme in ("https", "wss"):
         return True
     if not _is_loopback(_peer(request)):
         return False
-    proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
-    if proto == "https":
+    if proxy_kind(request) == TUNNEL:
         return True
-    return proxy_kind(request) == CLOUDFLARE and '"https"' in (request.headers.get("cf-visitor") or "")
+    proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+    return proto == "https"
 
 
 # --------------------------------------------------------------------------- #
@@ -286,8 +324,8 @@ class PublicExposureMiddleware:
             (b"referrer-policy", b"same-origin"),
             (b"permissions-policy", b"camera=(), microphone=(), geolocation=()"),
         ]
-        # Only when this request really came over HTTPS (Cloudflare or
-        # tailscale serve): HSTS on the plain-HTTP LAN/tailnet address would
+        # Only when this request really came over HTTPS (the VPS tunnel or a
+        # local HTTPS proxy): HSTS on the plain-HTTP LAN/tailnet address would
         # be ignored at best and, for a hostname, lock browsers out of it.
         if came_via_https_proxy(request):
             headers.append((b"strict-transport-security", HSTS_VALUE.encode()))

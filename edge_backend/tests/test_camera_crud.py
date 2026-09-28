@@ -50,7 +50,7 @@ def test_camera_crud_lifecycle(client, auth_headers):
         "fps": 30,
         "resolution": "1920x1080",
         "is_ai_enabled": True,
-        "ai_models": ["yolov5n", "rover_tracker"],
+        "ai_models": ["person_detection", "rover_tracker"],
         "floor_x": 420.5,
         "floor_y": 380.0,
         "floor_z": 2.8,

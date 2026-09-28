@@ -693,6 +693,7 @@
     <section id="tab-settings" class="tab-view">
       <div class="settings-jump" aria-label="Settings sections">
         <button type="button" class="btn btn-sm" onclick="openDeviceManager()">Cameras &amp; recorders</button>
+        <a class="btn btn-sm" href="#settings-recorder-streams" onclick="return jumpTo('settings-recorder-streams')">Recorder sub-streams</a>
         <a class="btn btn-sm" href="#settings-pairing" onclick="return jumpTo('settings-pairing')">Phones</a>
         <a class="btn btn-sm" href="#settings-remote" onclick="return jumpTo('settings-remote')">Online access</a>
         <a class="btn btn-sm" href="#settings-pos" onclick="return jumpTo('settings-pos')">Sales data</a>
@@ -704,6 +705,8 @@
       <div class="glass-card" id="settings-pairing"></div>
       <div class="glass-card" id="settings-push"></div>
       <div class="glass-card" id="settings-devices"></div>
+      <!-- Recorder sub-streams: CIF -> D1 upgrade with restore (recorder_streams.js). -->
+      <div class="glass-card" id="settings-recorder-streams"></div>
 
       <!-- Appearance: the same light / dark / system choice as the header switch
            (on phones the header switch is hidden to make room). -->
@@ -834,6 +837,19 @@
           </div>
         </div>
 
+        <!-- Stream quality (Dahua recorder channels; services/stream_selection.py). -->
+        <div class="form-group" style="margin-top: 8px;">
+          <label for="configStreamQuality">Stream quality (analysis)</label>
+          <select class="form-input" id="configStreamQuality" name="streamQuality" aria-describedby="configStreamStatus">
+            <option value="auto">Auto: smallest sub-stream of at least D1 (recommended)</option>
+            <option value="sub">Sub-stream</option>
+            <option value="main">Main stream (high decode cost)</option>
+          </select>
+          <div class="dept-hint" id="configStreamStatus"></div>
+          <button type="button" class="btn btn-xs" id="btnMeasureStreams" onclick="measureCameraStreams()" style="margin-top: 4px;"
+            title="Open each sub-stream once to read its size (read-only), then apply Auto's choice">Check sub-streams again</button>
+        </div>
+
         <div class="form-section-title">Placement on the blueprint (metres, origin top-left)</div>
         <div class="form-grid-2col">
           <div class="form-group">
@@ -926,6 +942,7 @@
   <script src="/static/js/remote_access.js?v=2.3.0" defer></script>
   <script src="/static/js/pairing.js?v=2.3.0" defer></script>
   <script src="/static/js/night_watch.js?v=2.3.0" defer></script>
+  <script src="/static/js/recorder_streams.js?v=2.3.0" defer></script>
   <script src="/static/js/theme.js?v=2.3.0" defer></script>
 </body>
 </html>

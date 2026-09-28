@@ -1,13 +1,15 @@
-"""Person pose estimation and retail-object detection with runtime hardware
-auto-detection.
+"""Person pose estimation (RTMO: box + 17 COCO keypoints per person) with
+runtime hardware auto-detection.
 
 The deployment machine is not the development machine, so nothing here may be
 chosen at build time. ``initialise_inference()`` (called once from the
 application lifespan) walks a priority chain and keeps the first accelerator
 that *really* takes the model:
 
-    1. HailoRT NPU      reported honestly: this build has no HEF runner, so a
-                        fitted Hailo device is listed but never selected
+    1. HailoRT NPU      reported honestly: no compatible model ships for it
+                        (there is no RTMO HEF) and this build has no HEF
+                        runner, so a fitted Hailo device is listed, never
+                        selected, and the next backend is used
     2. TensorRT  EP     (NVIDIA; fp16, engine cache under storage/)
     3. CUDA      EP     (NVIDIA)
     4. MIGraphX  EP     (AMD; ONNX Runtime plugin EP, see amd_migraphx.py.
@@ -100,13 +102,9 @@ SKELETON_EDGES = (
     (0, 1), (0, 2), (1, 3), (2, 4),                   # face
 )
 
-# COCO names, used only when a model carries no ``names`` metadata.
-_COCO_FALLBACK_NAMES = {
-    0: "person", 24: "backpack", 26: "handbag", 28: "suitcase", 39: "bottle", 67: "cell phone",
-}
-
-# (execution provider, label, is_accelerator). Accelerators get the larger
-# pose model by default; CPU-class providers get the small one.
+# (execution provider, label, is_accelerator). Accelerators and CPU-class
+# providers each have their own model setting (POSE_MODEL_GPU / _CPU) and
+# ladder (POSE_MODEL_LADDER_GPU / _CPU).
 _PROVIDER_PRIORITY: tuple[tuple[str, str, bool], ...] = (
     ("TensorrtExecutionProvider", "tensorrt", True),
     ("CUDAExecutionProvider", "cuda", True),
@@ -178,24 +176,6 @@ class Detection:
         return out
 
 
-@dataclass
-class ObjectDetection:
-    """A non-person COCO object (bag, bottle, phone) in original frame pixels."""
-
-    bbox: tuple[float, float, float, float]
-    class_id: int
-    label: str
-    confidence: float
-
-    def to_dict(self) -> dict:
-        return {
-            "bbox": [round(float(v), 1) for v in self.bbox],
-            "class_id": self.class_id,
-            "label": self.label,
-            "confidence": round(self.confidence, 3),
-        }
-
-
 def person_threshold(det: "Detection", base: Optional[float] = None) -> float:
     """The confidence a detection needs to count as a person.
 
@@ -203,11 +183,10 @@ def person_threshold(det: "Detection", base: Optional[float] = None) -> float:
     whose own pixels are dark (mean luminance below ``PERSON_DARK_LUMA``):
     there ``PERSON_CONF_THRESHOLD_DARK`` applies, if lower. The detector's
     confidence for the same person falls as the picture darkens, so a single
-    threshold loses most people in shade and at night. Measured on COCO
-    persons (352x288, yolo26n-pose), 0.35 for dark boxes / 0.50 elsewhere:
-    shade-region recall 0.34 -> 0.40 with lit-region precision unchanged
-    (0.940 -> 0.938); a uniformly dark (-3 EV) scene 0.30 -> 0.36 recall at
-    precision 0.947 -> 0.924; normal scenes unchanged.
+    threshold loses people in shade and at night. Measured for RTMO-s on
+    COCO persons at 704x576 (dark: -3 EV + sensor noise), 0.50 / 0.45 (dark
+    boxes): precision/recall 0.961/0.459 lit, 0.952/0.436 dark; a 0.35 dark
+    threshold raised dark recall to 0.477 but dropped precision to 0.914.
     """
     base = float(settings.PERSON_CONF_THRESHOLD if base is None else base)
     if det.dark:
@@ -241,9 +220,8 @@ class ModelSpec:
     """What a loaded ONNX model is, decided from its metadata and output shape."""
 
     path: Path
-    task: str                         # "pose" | "detect"
-    # "cf" [1,C,N] | "cl" [1,N,C] | "v5" [1,N,5+C] | "e2e" [1,K,6(+kpts)]
-    # | "rtmo" two outputs: dets [1,K,5] (x1,y1,x2,y2,score) + keypoints [1,K,17,3]
+    task: str                         # "pose"
+    # "rtmo": two outputs, dets [1,K,5] (x1,y1,x2,y2,score) + keypoints [1,K,17,3]
     layout: str
     num_classes: int
     names: dict[int, str]
@@ -251,10 +229,10 @@ class ModelSpec:
     input_name: str
     input_size: tuple[int, int]       # (w, h)
     input_dtype: Any = np.float32
-    # Input convention: Ultralytics exports take RGB scaled to [0, 1]; the
-    # mmpose RTMO export takes BGR 0-255 (normalisation is inside the graph).
-    input_rgb: bool = True
-    input_scale: float = 1.0 / 255.0
+    # Input convention: the mmpose RTMO export takes BGR 0-255 (its
+    # normalisation is inside the graph).
+    input_rgb: bool = False
+    input_scale: float = 1.0
     # "rtmo": indices of the (dets, keypoints) outputs.
     output_order: tuple[int, int] = (0, 1)
 
@@ -302,12 +280,11 @@ def _parse_literal(value: Optional[str]) -> Any:
 
 
 def build_model_spec(path: Path, meta: dict[str, str], inputs, outputs) -> ModelSpec:
-    """Decide task and output layout from ONNX metadata first, shape second.
+    """Describe a loaded pose model from its IO signature (and metadata).
 
-    Ultralytics exports carry ``kpt_shape`` and ``names`` in the custom
-    metadata map; those are authoritative. The channel count is only used to
-    pick between layouts, and to recognise legacy YOLOv5/v8 detect exports
-    that carry no metadata.
+    Only the RTMO layout is supported: two static outputs, boxes+score
+    [1, K, 5] and keypoints [1, K, J, 3] (``_rtmo_outputs``), with NMS on the
+    host. Anything else is rejected with a reason rather than guessed at.
     """
     inp = inputs[0]
     shape = inp.shape
@@ -324,66 +301,15 @@ def build_model_spec(path: Path, meta: dict[str, str], inputs, outputs) -> Model
         names = {i: str(v) for i, v in enumerate(names_raw)}
     kpt = _parse_literal(meta.get("kpt_shape"))
     kpt_shape = (int(kpt[0]), int(kpt[1])) if isinstance(kpt, (list, tuple)) and len(kpt) == 2 else None
-    end2end = str(meta.get("end2end", "")).lower() == "true"
 
     rtmo = _rtmo_outputs(meta, outputs)
-    if rtmo is not None:
-        # Bottom-up RTMO (mmpose): boxes and keypoints come from two outputs,
-        # NMS runs on the host like for the YOLO layouts.
-        kpt_shape = kpt_shape or (17, 3)
-        return ModelSpec(path, "pose", "rtmo", 1, names or {0: "person"}, kpt_shape, inp.name, input_size,
-                         dtype, input_rgb=False, input_scale=1.0, output_order=rtmo)
-
-    out_shape = outputs[0].shape
-    if len(out_shape) != 3 or not all(isinstance(d, int) for d in out_shape[1:]):
-        raise ValueError(f"unsupported output shape {out_shape}; expected a static [1, C, N] tensor")
-    d1, d2 = int(out_shape[1]), int(out_shape[2])
-    kpt_len = kpt_shape[0] * kpt_shape[1] if kpt_shape else 0
-
-    if end2end:
-        # [1, max_det, 6 + kpts]: x1, y1, x2, y2, score, class, (kpts...)
-        if d2 != 6 + kpt_len:
-            raise ValueError(f"end2end output width {d2} does not match kpt_shape {kpt_shape}")
-        nc = max(len(names), 1)
-        task = "pose" if kpt_shape else "detect"
-        return ModelSpec(path, task, "e2e", nc, names, kpt_shape, inp.name, input_size, dtype)
-
-    if names:
-        # Metadata says exactly how many channels an anchor has.
-        c_exp = 4 + len(names) + kpt_len
-        task = "pose" if kpt_shape else "detect"
-        if d1 == c_exp:
-            layout = "cf"                  # [1, C, N]: YOLOv8 / YOLO11 / YOLO26
-        elif d2 == c_exp:
-            layout = "cl"                  # [1, N, C]: same, anchor-major
-        elif not kpt_shape and d2 == 5 + len(names):
-            layout = "v5"                  # [1, N, 5+C]: objectness column
-        else:
-            raise ValueError(
-                f"output {out_shape} is inconsistent with metadata: {len(names)} class name(s)"
-                + (f", kpt_shape {kpt_shape}" if kpt_shape else "")
-                + f" -> expected {c_exp} channels"
-            )
-        return ModelSpec(path, task, layout, len(names), names, kpt_shape, inp.name, input_size, dtype)
-
-    # No class names: fall back to the shape, which is unambiguous for real
-    # exports (thousands of anchors vs tens of channels).
-    channels, layout = (d1, "cf") if d1 < d2 else (d2, "cl")
-    if kpt_shape:
-        nc = channels - 4 - kpt_len
-        if nc < 1:
-            raise ValueError(f"output {out_shape} cannot hold kpt_shape {kpt_shape}")
-        return ModelSpec(path, "pose", layout, nc, {0: "person"}, kpt_shape, inp.name, input_size, dtype)
-    if layout == "cf":
-        if channels == 4 + 1 + 17 * 3:
-            # A pose export stripped of metadata: 1 class + 17x3 keypoints.
-            return ModelSpec(path, "pose", "cf", 1, {0: "person"}, (17, 3), inp.name, input_size, dtype)
-        return ModelSpec(path, "detect", "cf", channels - 4, {}, None, inp.name, input_size, dtype)
-    # [1, N, 5 + C] without metadata: legacy YOLOv5 detect export.
-    nc = d2 - 5
-    if nc < 1:
-        raise ValueError(f"unsupported output shape {out_shape}")
-    return ModelSpec(path, "detect", "v5", nc, {}, None, inp.name, input_size, dtype)
+    if rtmo is None:
+        shapes = [list(getattr(o, "shape", [])) for o in outputs]
+        raise ValueError(f"unsupported model outputs {shapes}: expected the RTMO layout, dets [1,K,5] "
+                         "and keypoints [1,K,J,3] (see models/manifest.json)")
+    kpt_shape = kpt_shape or (17, 3)
+    return ModelSpec(path, "pose", "rtmo", 1, names or {0: "person"}, kpt_shape, inp.name, input_size,
+                     dtype, input_rgb=False, input_scale=1.0, output_order=rtmo)
 
 
 def _rtmo_outputs(meta: dict[str, str], outputs) -> Optional[tuple[int, int]]:
@@ -462,66 +388,31 @@ def _to_blob(canvas: np.ndarray, dtype=np.float32, rgb: bool = True, scale_to: f
 
 
 def decode_output(
-    raw: np.ndarray,
+    raw,
     spec: ModelSpec,
     conf_threshold: float,
-    class_ids: Optional[set[int]] = None,
     max_candidates: int = 1000,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]:
-    """Raw network output -> candidate (boxes_xyxy, scores, class_ids, keypoints).
+    """Raw RTMO outputs (the list of both) -> candidate (boxes_xyxy, scores,
+    class_ids, keypoints) at or above ``conf_threshold``.
 
     Everything stays in network (letterbox) space; NMS and the mapping back to
-    frame pixels happen afterwards. ``class_ids`` restricts which classes are
-    returned (the person path passes {0}). For the "rtmo" layout ``raw`` is
-    the list of both outputs.
+    frame pixels happen afterwards. Every candidate is a person (class 0).
     """
-    k = spec.kpt_shape
-    kpt_len = k[0] * k[1] if k else 0
-    empty = (np.zeros((0, 4), np.float32), np.zeros(0, np.float32), np.zeros(0, np.int64),
-             np.zeros((0, k[0], k[1]), np.float32) if k else None)
+    k = spec.kpt_shape or (17, 3)
+    di, ki = spec.output_order
+    dets = np.asarray(raw[di], dtype=np.float32).reshape(-1, 5)
+    boxes = dets[:, :4]
+    scores = dets[:, 4]
+    kpts = np.asarray(raw[ki], dtype=np.float32).reshape(len(dets), -1)
 
-    if spec.layout == "rtmo":
-        di, ki = spec.output_order
-        dets = np.asarray(raw[di], dtype=np.float32).reshape(-1, 5)
-        boxes = dets[:, :4]
-        scores = dets[:, 4]
-        cls = np.zeros(len(dets), np.int64)
-        kpts = np.asarray(raw[ki], dtype=np.float32).reshape(len(dets), -1)
-    elif spec.layout == "e2e":
-        pred = np.asarray(raw)
-        pred = (pred[0] if pred.ndim == 3 else pred).astype(np.float32, copy=False)
-        boxes = pred[:, :4]
-        scores = pred[:, 4]
-        cls = pred[:, 5].astype(np.int64)
-        kpts = pred[:, 6: 6 + kpt_len] if k else None
-    else:
-        pred = np.asarray(raw)
-        pred = (pred[0] if pred.ndim == 3 else pred).astype(np.float32, copy=False)
-        if spec.layout in ("cf", "cl"):
-            if spec.layout == "cf":
-                pred = pred.T                     # [N, C]
-            boxes_xywh = pred[:, :4]
-            class_scores = pred[:, 4: 4 + spec.num_classes]
-            kpts = pred[:, 4 + spec.num_classes: 4 + spec.num_classes + kpt_len] if k else None
-        else:                                     # v5
-            boxes_xywh = pred[:, :4]
-            class_scores = pred[:, 5: 5 + spec.num_classes] * pred[:, 4:5]
-            kpts = None
-        cls = class_scores.argmax(axis=1)
-        scores = class_scores[np.arange(len(cls)), cls]
-        cx, cy, bw, bh = boxes_xywh.T
-        boxes = np.stack([cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2], axis=1)
-
-    mask = scores >= conf_threshold
-    if class_ids is not None:
-        mask &= np.isin(cls, list(class_ids))
-    if not np.any(mask):
-        return empty
-    idx = np.nonzero(mask)[0]
+    idx = np.nonzero(scores >= conf_threshold)[0]
+    if len(idx) == 0:
+        return (np.zeros((0, 4), np.float32), np.zeros(0, np.float32), np.zeros(0, np.int64),
+                np.zeros((0, k[0], k[1]), np.float32))
     if len(idx) > max_candidates:
         idx = idx[np.argsort(scores[idx])[::-1][:max_candidates]]
-    kp = kpts[idx].reshape(len(idx), k[0], k[1]) if (k and kpts is not None) else None
-    return boxes[idx], scores[idx], cls[idx], kp
+    return boxes[idx], scores[idx], np.zeros(len(idx), np.int64), kpts[idx].reshape(len(idx), k[0], k[1])
 
 
 def unletterbox(
@@ -545,29 +436,6 @@ def unletterbox(
         if k.shape[-1] == 2:  # (x, y) only: visibility is unknown, not 1
             k = np.concatenate([k, np.full(k.shape[:-1] + (1,), np.nan, np.float32)], axis=-1)
     return b, k
-
-
-def _class_aware_nms(boxes, scores, cls, iou_threshold) -> list[int]:
-    if len(boxes) == 0:
-        return []
-    offset = cls.astype(np.float32)[:, None] * 8192.0
-    return _nms(boxes + offset, scores, iou_threshold)
-
-
-def _parse_class_filter(spec: str, names: dict[int, str]) -> set[int]:
-    wanted: set[int] = set()
-    by_name = {v.lower(): k for k, v in names.items()}
-    for token in (t.strip() for t in (spec or "").split(",")):
-        if not token:
-            continue
-        if token.isdigit():
-            wanted.add(int(token))
-        elif token.lower() in by_name:
-            wanted.add(by_name[token.lower()])
-        else:
-            logger.warning(f"Object class '{token}' is not in the object model's class list; ignored")
-    wanted.discard(PERSON_CLASS_ID)  # people come from the pose model
-    return wanted
 
 
 def _short(msg: str, limit: int = 420) -> str:
@@ -609,10 +477,10 @@ def cpu_thread_budget() -> int:
 
 
 def cpu_threads_for(role: str) -> int:
-    """Share of the budget per session. Pose and object inference can run at
-    the same time (separate locks), so their shares add up to the budget. A
-    shadow-trial model (off by default, like the object model) takes the
-    object model's share."""
+    """Share of the budget per session. The pose model takes two thirds; any
+    other session (the keypoint refiner, a shadow-trial model, off by
+    default) takes the remaining third, so runs side by side stay within the
+    budget."""
     budget = cpu_thread_budget()
     if role == "pose":
         return max(1, budget - budget // 3)
@@ -786,21 +654,14 @@ class DeviceGate:
 
 
 class PersonDetector:
-    """YOLO pose (or plain detect) person model plus an optional object model.
+    """The person pose model (RTMO) plus an optional top-down keypoint refiner.
 
     Construction is free; ``initialise()`` does the probing and loading.
     """
 
-    def __init__(
-        self,
-        model_path: Optional[Path | str] = None,
-        object_model_path: Optional[Path | str] = None,
-    ):
+    def __init__(self, model_path: Optional[Path | str] = None):
         forced = model_path or (settings.POSE_MODEL_PATH or None)
         self._forced_model: Optional[Path] = Path(forced) if forced else None
-        if object_model_path is None:
-            object_model_path = settings.OBJECT_MODEL_PATH
-        self._object_model_path: Optional[Path] = Path(object_model_path) if object_model_path else None
 
         self.session = None
         self.spec: Optional[ModelSpec] = None
@@ -826,14 +687,6 @@ class PersonDetector:
         # How the pose model was chosen (budget, candidates measured).
         self.selection: dict = {}
 
-        self.object_session = None
-        self.object_spec: Optional[ModelSpec] = None
-        self.object_class_ids: set[int] = set()
-        self.object_provider: Optional[str] = None
-        self.object_error: Optional[str] = None
-        self.object_warmup_ms: Optional[float] = None
-        self._object_label: Optional[str] = None
-
         # Optional top-down keypoint refiner (RTMPose, Apache-2.0).
         self.refiner_session = None
         self.refiner_path: Optional[Path] = None
@@ -851,11 +704,9 @@ class PersonDetector:
         # One lock per session; only session.run() is held under it so
         # pre/post-processing of other cameras proceeds in parallel.
         self._run_lock = threading.Lock()
-        self._obj_run_lock = threading.Lock()
         self._stats_lock = threading.Lock()
         self._infer_ms: deque[float] = deque(maxlen=120)
         self._total_ms: deque[float] = deque(maxlen=120)
-        self._obj_infer_ms: deque[float] = deque(maxlen=120)
         self._frames = 0
         self._rejected = 0
         # One run at a time on an accelerator (MIGraphX/CUDA serialise anyway;
@@ -872,7 +723,13 @@ class PersonDetector:
     # ------------------------------------------------------------- probing
 
     def _probe_hailo(self) -> dict:
-        """Report the NPU as it is. There is no HEF runner in this build."""
+        """Report the NPU as it is: listed, never selected.
+
+        No compatible model ships for a Hailo NPU (there is no RTMO HEF, and
+        YOLO pose HEFs are AGPL-3.0 derivatives, which the product must not
+        contain) and this build has no HailoRT runner, so the next backend is
+        used.
+        """
         present = os.path.exists(settings.HAILO_DEVICE)
         info: dict = {"device": settings.HAILO_DEVICE, "device_present": present,
                       "hailo_platform": False, "hef": None, "runner": False, "selected": False}
@@ -884,13 +741,15 @@ class PersonDetector:
             info["hailo_platform"] = True
         except ImportError:
             pass
-        hef = Path(getattr(settings, "HAILO_POSE_HEF_PATH", "") or "models_hef/yolo26_pose.hef")
-        info["hef"] = str(hef) if hef.exists() else None
+        configured = (getattr(settings, "HAILO_POSE_HEF_PATH", "") or "").strip()
+        hef = Path(configured) if configured else None
+        info["hef"] = str(hef) if hef is not None and hef.exists() else None
         info["reason"] = (
-            "Hailo device present but this build has no HailoRT pose runner"
-            + ("" if info["hef"] else f" and no compiled HEF at {hef}")
+            "Hailo device present, but there is no compatible model for this accelerator "
+            "(no RTMO HEF ships) and this build has no HailoRT pose runner"
+            + (f"; HAILO_POSE_HEF_PATH={configured} is not used" if configured else "")
             + ("" if info["hailo_platform"] else "; hailo_platform not importable")
-            + "; falling through to ONNX Runtime"
+            + "; falling back to the next backend (ONNX Runtime)"
         )
         logger.info(info["reason"])
         return info
@@ -1181,11 +1040,6 @@ class PersonDetector:
                 self.last_error = reason
                 logger.error(reason)
                 continue
-            if spec.task == "detect" and spec.names and spec.names.get(PERSON_CLASS_ID, "person") != "person":
-                reason = f"model {path.name} has no person class"
-                self.provider_attempts.append({"provider": label, "ok": False, "reason": reason})
-                self.last_error = reason
-                continue
             self.load_ms = round((time.perf_counter() - started) * 1000.0, 1)
             self.provider_attempts.append({"provider": label, "ok": True, "model": path.name})
             self.session, self.spec, self.model_path = sess, spec, path
@@ -1354,46 +1208,6 @@ class PersonDetector:
             self._refine_ms.append((time.perf_counter() - started) * 1000.0)
         return run_ms
 
-    def _load_object_model(self, ort) -> None:
-        path = self._object_model_path
-        if path is None:
-            self.object_error = "disabled by configuration (OBJECT_MODEL_PATH is empty)"
-            return
-        if not path.exists():
-            self.object_error = f"model file not found: {path}"
-            logger.info(f"Object detection disabled: {self.object_error}")
-            return
-        # Same provider as the pose model, then CPU as the honest fallback.
-        eps = [self.execution_provider] if self.execution_provider else []
-        if "CPUExecutionProvider" not in eps:
-            eps.append("CPUExecutionProvider")
-        reasons = []
-        for ep in eps:
-            sess, reason = self._create_session(ort, path, ep, role="object")
-            if sess is None:
-                reasons.append(f"{ep}: {reason}")
-                continue
-            try:
-                spec = build_model_spec(path, sess.get_modelmeta().custom_metadata_map or {},
-                                        sess.get_inputs(), sess.get_outputs())
-                if spec.task != "detect":
-                    raise ValueError(f"expected a detect model, got {spec.task}")
-                if not spec.names:
-                    spec.names = {i: _COCO_FALLBACK_NAMES.get(i, str(i)) for i in range(spec.num_classes)}
-            except Exception as e:
-                self.object_error = f"model {path.name} not usable: {e}"
-                logger.error(self.object_error)
-                return
-            self.object_session, self.object_spec = sess, spec
-            self.object_provider = ep.replace("ExecutionProvider", "").lower()
-            self._object_label = next((label for e, label, _ in _PROVIDER_PRIORITY if e == ep), self.object_provider)
-            self.object_class_ids = _parse_class_filter(settings.OBJECT_CLASSES, spec.names)
-            self.object_warmup_ms, _ = self._warm_up(sess, spec, self._obj_run_lock)
-            self._mark_compiled(path, ep=ep)
-            self.object_error = None
-            return
-        self.object_error = "; ".join(reasons) or "no provider"
-
     def initialise(self) -> dict:
         """Probe, load and warm up. Idempotent and thread-safe."""
         with self._init_lock:
@@ -1487,8 +1301,6 @@ class PersonDetector:
             ref = ref if ref.is_absolute() else Path(settings.MODELS_DIR) / ref
             if ref.exists():
                 needed.append((ref, f"b{max(1, int(settings.POSE_REFINER_BUDGET_PERSONS))}"))
-        if settings.OBJECT_DETECT_EVERY_N > 0 and self._object_model_path and self._object_model_path.exists():
-            needed.append((self._object_model_path, "default"))
         cache = amd.cache_dir()
         return [p.name for p, tag in needed if not amd.is_warm(cache, p, tag)]
 
@@ -1496,8 +1308,7 @@ class PersonDetector:
     _ADOPT_FIELDS = (
         "session", "spec", "model_path", "provider", "execution_provider", "backend", "device_name",
         "last_error", "warmup_ms", "warmup_steady_ms", "load_ms", "selection",
-        "object_session", "object_spec", "object_class_ids", "object_provider", "object_error",
-        "object_warmup_ms", "_object_label", "refiner_session", "refiner_path", "refiner_input_hw",
+        "refiner_session", "refiner_path", "refiner_input_hw",
         "refiner_out_order", "refiner_enabled",
         "refiner_reason", "refiner_batch_ms",
     )
@@ -1509,7 +1320,7 @@ class PersonDetector:
         Without ``pose_model`` it compiles what the start-up selection loads
         (``--no-ladder``: the other ladder rungs are compiled on demand, or by
         scripts/bootstrap.py at install). With it, just that pose model (the
-        scheduler's next rung), plus the refiner and object model from cache.
+        scheduler's next rung), plus the refiner from cache.
 
         Creating an ONNX Runtime session holds the GIL for the whole MIGraphX
         compile (measured: the process stood still for 142 s), so compiling
@@ -1523,8 +1334,7 @@ class PersonDetector:
 
         script = Path(__file__).resolve().parents[2] / "scripts" / "prewarm_inference.py"
         env = dict(os.environ, MIGRAPHX_CACHE_DIR=str(settings.MIGRAPHX_CACHE_DIR),
-                   POSE_MODEL_PATH=str(pose_model or self._forced_model or ""),
-                   OBJECT_MODEL_PATH=str(self._object_model_path or ""))
+                   POSE_MODEL_PATH=str(pose_model or self._forced_model or ""))
         summary: dict = {}
         tail: deque[str] = deque(maxlen=5)
         try:
@@ -1571,7 +1381,7 @@ class PersonDetector:
                                                "reason": f"background compile failed: {error}"})
             logger.error(f"AMD GPU background compile failed after {seconds} s, staying on {self.provider}: {error}")
             return
-        staging = PersonDetector(model_path=self._forced_model, object_model_path=self._object_model_path or "")
+        staging = PersonDetector(model_path=self._forced_model)
         staging._initialised = True
         staging.hailo, staging.migraphx = self.hailo, self.migraphx
         staging.available_providers = list(self.available_providers)
@@ -1602,19 +1412,19 @@ class PersonDetector:
 
     def _adopt(self, other: "PersonDetector") -> None:
         """Swap in another detector's loaded sessions atomically w.r.t. inference."""
-        with self._run_lock, self._obj_run_lock, self._refiner_lock, self._stats_lock:
+        with self._run_lock, self._refiner_lock, self._stats_lock:
             for name in self._ADOPT_FIELDS:
                 setattr(self, name, getattr(other, name))
             self.provider_attempts = self.provider_attempts + [
                 {**a, "note": "background compile"} for a in other.provider_attempts]
             self.cpu_threads = {**self.cpu_threads, **other.cpu_threads}
             # Timings measured on the previous provider no longer describe this one.
-            for q in (self._infer_ms, self._total_ms, self._obj_infer_ms, self._refine_ms):
+            for q in (self._infer_ms, self._total_ms, self._refine_ms):
                 q.clear()
             self._pose_ewma = self._refiner_frame_ewma = None
 
     def _finish_loading(self, ort) -> None:
-        """Warm up the chosen session, then load the optional object model."""
+        """Warm up the chosen session, load the refiner and fit the model to the budget."""
         try:
             self.warmup_ms, self.warmup_steady_ms = self._warm_up(self.session, self.spec, self._run_lock)
         except Exception as e:
@@ -1643,20 +1453,9 @@ class PersonDetector:
             self.refiner_reason = (f"auto: off while the pose model is below the top of the ladder "
                                    f"({self.model_path.name}, not {ladder[0].name})")
 
-        if settings.OBJECT_DETECT_EVERY_N > 0:
-            try:
-                self._load_object_model(ort)
-            except Exception as e:
-                self.object_error = str(e)
-                logger.error(f"Object model failed to load: {e}")
-        else:
-            self.object_error = "disabled by configuration (OBJECT_DETECT_EVERY_N=0)"
-
         logger.info(
             f"Person {self.spec.task} model ready: {self.model_path.name} on {self.device_name} "
             f"({self.provider}), warm-up {self.warmup_ms} ms, steady {self.warmup_steady_ms} ms"
-            + (f"; objects: {self.object_spec.path.name} on {self.object_provider}"
-               if self.object_session is not None else f"; objects: {self.object_error}")
         )
 
     # ------------------------------------------------------------ inference
@@ -1672,14 +1471,6 @@ class PersonDetector:
     @property
     def keypoints_supported(self) -> bool:
         return self.spec is not None and self.spec.kpt_shape is not None
-
-    @property
-    def objects_available(self) -> bool:
-        return self.object_session is not None
-
-    def object_enabled(self) -> bool:
-        """The configuration asks for the object model (it may still fail to load)."""
-        return settings.OBJECT_DETECT_EVERY_N > 0 and self._object_model_path is not None
 
     # Kept for callers of the previous API.
     @property
@@ -1739,9 +1530,8 @@ class PersonDetector:
             t = time.perf_counter()
             outs = session.run(None, {spec.input_name: blob})
             infer_ms = (time.perf_counter() - t) * 1000.0
-        raw = outs if spec.layout == "rtmo" else outs[0]
         self._account(infer_ms, provider)
-        return raw, scale, px, py, infer_ms
+        return outs, scale, px, py, infer_ms
 
     @staticmethod
     def _lighting_enhancer(frame: np.ndarray, camera_id: Optional[str]):
@@ -1772,12 +1562,12 @@ class PersonDetector:
 
     def _gate(self, provider: Optional[str]):
         """The device lock for a run on an accelerator; nothing on the CPU,
-        where pose and object sessions run side by side on their thread shares."""
+        where sessions run side by side on their thread shares."""
         return self.device_gate if self._is_accelerator(provider) else contextlib.nullcontext()
 
     def _account(self, ms: float, provider: Optional[str]) -> None:
         """Add a run to the device-busy total when it ran where the pose model
-        runs (an object model that fell back to the CPU is not GPU load)."""
+        runs (a session that fell back to the CPU is not GPU load)."""
         if provider == self.provider:
             with self._stats_lock:
                 self._busy_ms += ms
@@ -1866,16 +1656,16 @@ class PersonDetector:
                     camera_id: Optional[str] = None) -> tuple[list[Detection], int]:
         """Raw person-model output -> (plausible people in frame pixels, boxes rejected).
 
-        Decode, NMS (not for end-to-end exports), letterbox undo, the shape and
+        Decode, NMS, letterbox undo, the shape and
         size gates (``_is_plausible_person``) and, with ``per_box``, each box's
         own threshold (``person_threshold``). Shared by ``detect()`` and the
         shadow trial so both models are judged by exactly the same rules.
         """
-        boxes, scores, _cls, kpts = decode_output(raw, spec, conf, class_ids={PERSON_CLASS_ID})
+        boxes, scores, _cls, kpts = decode_output(raw, spec, conf)
         if len(boxes) == 0:
             return [], 0
         h, w = frame.shape[:2]
-        keep = list(range(len(boxes))) if spec.layout == "e2e" else _nms(boxes, scores, iou)
+        keep = _nms(boxes, scores, iou)
         boxes, kpts = unletterbox(boxes, kpts, scale, px, py, w, h)
         frame_area = float(w * h) or 1.0
         min_box_scale = frame_sizes.downscale(camera_id)
@@ -1899,43 +1689,6 @@ class PersonDetector:
         """What this thread's last ``detect()`` measured (device ms, model), or None."""
         return getattr(self._tls, "last", None)
 
-    def detect_objects(self, frame: np.ndarray, conf_threshold: Optional[float] = None) -> list[ObjectDetection]:
-        """Retail-context objects (configured COCO classes). Empty when unavailable."""
-        if not self._initialised:
-            self.initialise()
-        with self._obj_run_lock:
-            session, spec, class_ids = self.object_session, self.object_spec, self.object_class_ids
-        if session is None or spec is None or frame is None or frame.size == 0 or not class_ids:
-            return []
-        conf = settings.OBJECT_CONF_THRESHOLD if conf_threshold is None else conf_threshold
-        try:
-            raw, scale, px, py, infer_ms = self._run(session, spec, self._obj_run_lock, frame,
-                                                     provider=self._object_label)
-            boxes, scores, cls, _ = decode_output(raw, spec, conf, class_ids=class_ids)
-            if len(boxes) == 0:
-                out: list[ObjectDetection] = []
-            else:
-                keep = (list(range(len(boxes))) if spec.layout == "e2e"
-                        else _class_aware_nms(boxes, scores, cls, settings.OBJECT_NMS_IOU))
-                h, w = frame.shape[:2]
-                boxes, _ = unletterbox(boxes, None, scale, px, py, w, h)
-                out = [
-                    ObjectDetection(
-                        bbox=tuple(float(v) for v in boxes[i]),
-                        class_id=int(cls[i]),
-                        label=spec.names.get(int(cls[i]), str(int(cls[i]))),
-                        confidence=float(scores[i]),
-                    )
-                    for i in keep
-                ]
-        except Exception as e:
-            logger.error(f"Object inference failed: {e}")
-            self.object_error = str(e)
-            return []
-        with self._stats_lock:
-            self._obj_infer_ms.append(infer_ms)
-        return out
-
     # ----------------------------------------------- run-time load control
 
     @staticmethod
@@ -1956,7 +1709,6 @@ class PersonDetector:
         """What the scheduler measures from: cumulative device-busy ms and
         analysed frames (it differences them over time), plus per-part costs."""
         with self._stats_lock:
-            obj = self._avg(self._obj_infer_ms)
             return {
                 "busy_ms": self._busy_ms,
                 "frames": self._frames,
@@ -1964,8 +1716,6 @@ class PersonDetector:
                 "model": self.model_path.name if (self.model_path and self.available) else None,
                 "pose_ms": round(self._pose_ewma, 2) if self._pose_ewma is not None else self.warmup_steady_ms,
                 "pose_ms_measured": self._pose_ewma is not None,
-                "object_ms": obj if obj is not None else None,
-                "objects_on_device": self.object_session is not None and self._object_label == self.provider,
                 "refiner_available": self.refiner_session is not None,
                 "refiner_enabled": self.refiner_enabled,
                 "refiner_frame_ms": (round(self._refiner_frame_ewma, 2)
@@ -2065,7 +1815,6 @@ class PersonDetector:
         with self._stats_lock:
             avg_infer = self._avg(self._infer_ms)
             avg_total = self._avg(self._total_ms)
-            avg_obj = self._avg(self._obj_infer_ms)
             avg_refine = self._avg(self._refine_ms)
             frames, rejected = self._frames, self._rejected
         spec = self.spec
@@ -2122,21 +1871,6 @@ class PersonDetector:
                 "batch_ms": self.refiner_batch_ms,
                 "avg_refine_ms": avg_refine,
                 "skeletons_kept_from_pose_model": self._refine_reverted,
-            },
-            "object_model": self.object_spec.path.name if self.object_session is not None else None,
-            "object_detection": {
-                "available": self.object_session is not None,
-                # running | disabled (by configuration) | unavailable (enabled but not loaded)
-                "state": ("running" if self.object_session is not None
-                          else "disabled" if not self.object_enabled() else "unavailable"),
-                "provider": self.object_provider,
-                "classes": sorted(
-                    self.object_spec.names.get(c, str(c)) for c in self.object_class_ids
-                ) if self.object_spec else [],
-                "every_n_detection_frames": settings.OBJECT_DETECT_EVERY_N,
-                "warmup_ms": self.object_warmup_ms,
-                "avg_infer_ms": avg_obj,
-                "error": self.object_error,
             },
         }
 

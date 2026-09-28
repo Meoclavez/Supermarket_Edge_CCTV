@@ -2,7 +2,7 @@
 
 Analysing every Nth frame of every camera does not scale. Measured on an
 RX 9060 XT with 33 cameras (32 NVR sub-streams at 25 fps): 33 x (25 / 5) =
-165 pose inferences per second x 14 ms (YOLO26m-pose 960x544) is 2.3 s of GPU
+165 pose inferences per second x 14 ms (a 960x544 pose model) is 2.3 s of GPU
 work per second, so the GPU sat at 97 % busy, every camera queued behind the
 others and detections went stale. The model had also been chosen once, at
 start-up, for the cameras that existed then.
@@ -11,8 +11,8 @@ This module keeps the accelerator at ``POSE_BUDGET_UTILISATION`` of its
 *measured* capacity and shares that fairly:
 
     cost_ms   device time per analysed frame, measured over the last 10 s
-              (pose + refiner + the object model's share: every session.run
-              on the accelerator is timed under one device lock), or predicted
+              (pose + refiner: every session.run on the accelerator is
+              timed under one device lock), or predicted
               from warm-up timings until enough frames have been measured
     budget    = POSE_BUDGET_UTILISATION x 1000 / cost_ms   frames per second
     rates     max-min fair split of the budget over the cameras that are
@@ -362,15 +362,13 @@ class InferenceScheduler:
             except Exception as e:  # noqa: BLE001 - never take a capture thread down
                 logger.error(f"Inference re-fit check failed: {type(e).__name__}: {e}")
 
-    def _extras_ms(self, m: dict) -> tuple[float, float]:
-        """(object model ms per analysed frame, refiner ms per analysed frame)."""
-        every = int(settings.OBJECT_DETECT_EVERY_N)
-        obj = (float(m["object_ms"]) / every) if (m.get("objects_on_device") and m.get("object_ms")
-                                                   and every > 0) else 0.0
+    @staticmethod
+    def _refiner_ms(m: dict) -> float:
+        """Refiner device ms per analysed frame (0 when nobody was in view)."""
         ref = m.get("refiner_frame_ms")
         if ref is None:
             ref = m.get("refiner_batch_ms") or 0.0   # one batch per frame until measured: conservative
-        return obj, float(ref)
+        return float(ref)
 
     def _pose_ms(self, model: Path, m: dict) -> Optional[float]:
         key = (m["provider"], model.name)
@@ -389,8 +387,7 @@ class InferenceScheduler:
         pose = self._pose_ms(level.model, m)
         if pose is None:
             return None
-        obj, ref = self._extras_ms(m)
-        return round(pose + obj + (ref if level.refiner else 0.0), 2)
+        return round(pose + (self._refiner_ms(m) if level.refiner else 0.0), 2)
 
     def _measure(self, now: float, m: Optional[dict]) -> None:
         self._metrics = m

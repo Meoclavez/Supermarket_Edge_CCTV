@@ -93,7 +93,7 @@ All camera feeds follow Dahua's standard RTSP media URL syntax:
 
 ### Sub-Streams (Recommended for AI Analytics & Multi-Camera Dashboard):
 * **Format:** `rtsp://admin:<PASSWORD>@<HOST>:554/cam/realmonitor?channel=<CHANNEL_NUM>&subtype=1`
-* **Resolution:** D1 / 720p @ 15–25 FPS (Low latency, minimal compute load on YOLO/Hailo AI models).
+* **Resolution:** D1 / 720p @ 15–25 FPS (Low latency, minimal compute load on the AI models; D1 or better is needed by the RTMO-s person model).
 * **Examples:**
   * Camera 1 (Aisle 1): `rtsp://admin:<NVR_PASSWORD>@<HOST>:554/cam/realmonitor?channel=1&subtype=1`
   * Camera 2 (Checkout): `rtsp://admin:<NVR_PASSWORD>@<HOST>:554/cam/realmonitor?channel=2&subtype=1`
@@ -149,4 +149,4 @@ streams:
    * **Aisle Dwell & Loitering Analysis:** Polygon heatmaps measuring customer engagement.
    * **Loss Prevention / Restricted Zones:** Nighttime intrusion detection polygon triggers.
    * **Slip-and-Fall Pose Kinematics:** 17-keypoint skeleton monitoring in customer aisles.
-3. **Dataset Capture:** Record 15-minute sample MP4 clips for each channel during peak trading hours to build our automated test suite for YOLO model inference and ByteTrack evaluation.
+3. **Dataset Capture:** Record 15-minute sample MP4 clips for each channel during peak trading hours to build our automated test suite for pose model inference and tracker evaluation.

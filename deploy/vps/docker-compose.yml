@@ -1,0 +1,31 @@
+# The shared frps for Edge AI CCTV online access (all stores). See README.md.
+#   docker compose --env-file frps.env -p edge-frps up -d
+# Pinned: frp v0.71.0 (the edge boxes' frpc is the same version, see
+# edge_backend/scripts/bootstrap.py). Official image, Apache-2.0.
+services:
+  frps:
+    image: fatedier/frps:v0.71.0@sha256:cd8b947ba61678b200baa4f71ccc33f3c52e4e2cc0059700ba3b8354e36af7c3
+    container_name: edge-frps
+    restart: unless-stopped
+    command: ["-c", "/etc/frp/frps.toml"]
+    environment:
+      FRP_AUTH_TOKEN: ${FRP_AUTH_TOKEN:-}
+    volumes:
+      - ./frps.toml:/etc/frp/frps.toml:ro
+    # No "ports:" section: nothing is published on the VPS. The reverse proxy
+    # reaches edge-frps:7000 (tunnel) and :8080 (dashboards) over the network.
+    networks: [proxy]
+    user: "65534:65534"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+networks:
+  proxy:
+    external: true
+    name: ${PROXY_NETWORK:?set PROXY_NETWORK in frps.env}

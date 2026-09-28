@@ -781,10 +781,20 @@ def evaluate_live_status(status: dict, accel: dict[str, Any]) -> list:
 
 # .env keys earlier releases read and this one does not. Settings accepts
 # unknown keys silently (extra="allow"), so without this a stale line such as
-# PERSON_MODEL_PATH=./models/yolov5n.onnx looks like it selects a model.
+# PERSON_MODEL_PATH=./models/<old model>.onnx looks like it selects a model.
+_OBJECT_MODEL_RETIRED = ("not read: the object model (and the 'hand into a carried bag' cue it fed) was removed; "
+                         "the pocket/waistband concealment cue does not need it")
 RETIRED_ENV_KEYS = {
     "PERSON_MODEL_PATH": "not read: the pose model is chosen per accelerator from POSE_MODEL_LADDER_GPU/_CPU "
                          "(then POSE_MODEL_GPU/_CPU); set POSE_MODEL_PATH only to pin one file",
+    "OBJECT_MODEL_PATH": _OBJECT_MODEL_RETIRED,
+    "OBJECT_DETECT_EVERY_N": _OBJECT_MODEL_RETIRED,
+    "OBJECT_CLASSES": _OBJECT_MODEL_RETIRED,
+    "OBJECT_CONF_THRESHOLD": _OBJECT_MODEL_RETIRED,
+    "OBJECT_NMS_IOU": _OBJECT_MODEL_RETIRED,
+    "THEFT_BAG_CLASS_IDS": _OBJECT_MODEL_RETIRED,
+    "HAILO_YOLO_HEF_PATH": "not read: no YOLO HEF is used (AGPL-3.0); a Hailo NPU is reported and the next "
+                           "backend runs the pose model",
 }
 # Read by the launcher, bootstrap or native libraries rather than Settings.
 _EXTERNAL_ENV_PREFIXES = ("EDGE_", "ORT_", "MIGRAPHX_", "HIP_", "ROCM_", "HSA_", "AMD_", "MIOPEN_", "CUDA_",
@@ -813,9 +823,11 @@ def _model_file(value: str, relative_to_models: bool) -> Path:
 
 
 def check_env() -> tuple[dict, list, list]:
-    """Stale .env keys and model settings that point at files which do not exist."""
+    """Stale .env keys, model settings that point at files which do not exist,
+    and model files in use that models/manifest.json does not list (their
+    licence has not been reviewed: the product ships only listed models)."""
     warnings: list = []
-    info: dict[str, Any] = {"env_file": None, "unused_keys": [], "missing_models": []}
+    info: dict[str, Any] = {"env_file": None, "unused_keys": [], "missing_models": [], "unlisted_models": []}
     try:
         from app.config import Settings, settings  # noqa: PLC0415
     except Exception as exc:  # noqa: BLE001
@@ -842,28 +854,22 @@ def check_env() -> tuple[dict, list, list]:
                                        f"check the spelling against .env.example, or delete the {key}= line"))
 
     # Model files the configuration names. Pose names resolve under MODELS_DIR
-    # like the engine does; POSE_MODEL_PATH / OBJECT_MODEL_PATH are opened as
-    # given (relative to edge_backend/, the service's working directory).
+    # like the engine does; POSE_MODEL_PATH is opened as given (relative to
+    # edge_backend/, the service's working directory).
     named: list[tuple[str, str, bool]] = []
     for key in ("POSE_MODEL_GPU", "POSE_MODEL_CPU", "POSE_REFINER_MODEL"):
         named.append((key, getattr(settings, key, "") or "", True))
     for key in ("POSE_MODEL_LADDER_GPU", "POSE_MODEL_LADDER_CPU"):
         for name in (getattr(settings, key, "") or "").split(","):
             named.append((key, name.strip(), True))
-    for key in ("POSE_MODEL_PATH", "OBJECT_MODEL_PATH"):
-        named.append((key, getattr(settings, key, "") or "", False))
+    named.append(("POSE_MODEL_PATH", getattr(settings, "POSE_MODEL_PATH", "") or "", False))
     shadow = (getattr(settings, "SHADOW_POSE_MODEL", "") or "").strip()
     if shadow:
         named.append(("SHADOW_POSE_MODEL", shadow, True))
-    # The object model (bag context for the concealment cue) is off unless
-    # OBJECT_DETECT_EVERY_N > 0; say so rather than leave it unexplained.
-    every = int(getattr(settings, "OBJECT_DETECT_EVERY_N", 0) or 0)
-    obj_path = getattr(settings, "OBJECT_MODEL_PATH", "") or ""
-    info["object_model"] = (
-        {"enabled": True, "model": obj_path, "every_n_detection_frames": every} if every > 0 and obj_path
-        else {"enabled": False, "reason": "disabled by configuration ("
-              + ("OBJECT_MODEL_PATH is empty" if every > 0 else "OBJECT_DETECT_EVERY_N=0")
-              + "); the 'hand into a carried bag' concealment cue does not fire"})
+    try:
+        listed = {e["file"] for e in load_manifest().get("models", [])}
+    except (OSError, ValueError, KeyError):
+        listed = None
     for key, value, under_models in named:
         if not value:
             continue
@@ -873,10 +879,14 @@ def check_env() -> tuple[dict, list, list]:
             if key == "POSE_REFINER_MODEL" and str(getattr(settings, "POSE_REFINER", "auto") or "").strip().lower() \
                     in ("off", "0", "false", "no", ""):
                 continue
-            if key == "OBJECT_MODEL_PATH" and every <= 0:
-                continue
             warnings.append(_issue("config", f"{key}={value} names a model file that does not exist ({path})",
                                    f"use one of the files in {MODELS_DIR} (see models/manifest.json)"))
+        elif listed is not None and path.name not in listed:
+            info["unlisted_models"].append({"setting": key, "value": value})
+            warnings.append(_issue("config", f"{key}={value} is not listed in models/manifest.json, so its "
+                                             "licence has not been reviewed for this product",
+                                   "use a model listed in models/manifest.json, or add it there with its "
+                                   "licence after review"))
     return info, [], warnings
 
 

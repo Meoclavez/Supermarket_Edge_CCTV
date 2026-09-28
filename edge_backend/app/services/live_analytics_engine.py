@@ -45,7 +45,6 @@ from app.services.capture_backends import CameraAuthError, CameraUnreachableErro
 from app.services.frame_geometry import frame_sizes
 from app.services.inference_backend import (
     SKELETON_EDGES,
-    ObjectDetection,
     keypoints_to_list,
     person_detector,
     person_threshold,
@@ -289,7 +288,19 @@ class CameraRuntime:
             # disarmed | armed_idle | motion | person_confirmed | cooldown | unavailable,
             # with the next arm / disarm time in store time.
             "night_watch": _night_watch_status(self.camera_id, self.status == "ONLINE"),
+            # Which recorder stream this camera is analysed from, its size and
+            # why (Stream quality: auto | sub | main; services/stream_selection.py).
+            "stream_selection": _stream_selection_status(self.camera_id),
         }
+
+
+def _stream_selection_status(camera_id: str) -> Optional[dict]:
+    try:
+        from app.services.stream_selection import stream_selection
+
+        return stream_selection.status(camera_id)
+    except Exception:  # noqa: BLE001 - status must answer regardless
+        return None
 
 
 def _lighting_status(camera_id: str) -> Optional[dict]:
@@ -472,7 +483,6 @@ class CameraWorker(threading.Thread):
         self._wake = threading.Event()
         self._auth_failures = 0
         self._frame_index = 0
-        self._detect_index = 0
         # FFmpeg decode threads the current capture was opened with.
         self._decode_threads: Optional[int] = None
         # The open capture, so stop() can end a GPU capture's ffmpeg at once.
@@ -491,9 +501,6 @@ class CameraWorker(threading.Thread):
         self._clip_n = max(1, int(settings.ANALYTICS_DETECT_EVERY_N_FRAMES))
         # Every how many delivered frames one may be analysed (_clip_every).
         self._detect_n = self._clip_n
-        # Latest retail objects; refreshed every OBJECT_DETECT_EVERY_N
-        # detection frames, so at most N-1 detection frames old.
-        self._objects: list[ObjectDetection] = []
         # Night watch armed on this camera (the normal analysis is paused).
         self._night_armed = False
 
@@ -870,7 +877,6 @@ class CameraWorker(threading.Thread):
                 self.rt.set_tracks([])
                 self.rt.live_track_count = 0
                 self.rt.detections_last = 0
-                self._objects = []
                 _reset_pose_camera(self.rt.camera_id)
                 if isinstance(e, CameraAuthError):
                     logger.warning(
@@ -1066,7 +1072,6 @@ class CameraWorker(threading.Thread):
         if armed and not self._night_armed:
             for t in self.tracker.flush_all():
                 self.engine.close_track(t, reason="night_watch")
-            self._objects = []
             self.rt.set_tracks([], now)
             self.rt.live_track_count = 0
             self.rt.detections_last = 0
@@ -1102,7 +1107,6 @@ class CameraWorker(threading.Thread):
             # show no boxes, and finish any tracks (closing open visits).
             for t in self.tracker.flush_all():
                 self.engine.close_track(t, reason="analysis_disabled", persist=False)
-            self._objects = []
             self.rt.set_tracks([], now)
             self.rt.live_track_count = 0
             self.rt.detections_last = 0
@@ -1135,14 +1139,6 @@ class CameraWorker(threading.Thread):
             # Developer pose-model trial: a copy of this frame may be compared
             # with a second model later; nothing it finds comes back here.
             shadow_trial.offer(cam, frame, persons, ignore, detect_kw.get("max_frame_fraction"))
-
-        self._detect_index += 1
-        every_n = settings.OBJECT_DETECT_EVERY_N
-        if every_n > 0 and person_detector.objects_available and self._detect_index % every_n == 0:
-            self._objects = outside_ignore_regions(
-                person_detector.detect_objects(frame), ignore,
-                foot=lambda o: ((o.bbox[0] + o.bbox[2]) / 2.0, o.bbox[3]),
-            )
 
         live = self.tracker.update(detections, now=now)
         self.rt.live_track_count = sum(1 for t in live if t.confirmed)
@@ -1234,7 +1230,7 @@ class CameraWorker(threading.Thread):
         if pa is None:
             return
         try:
-            result = pa.observe(self.rt.camera_id, now, frame, tracks, list(self._objects))
+            result = pa.observe(self.rt.camera_id, now, frame, tracks)
         except Exception as e:
             _log_once(
                 f"pose_observe:{type(e).__name__}",

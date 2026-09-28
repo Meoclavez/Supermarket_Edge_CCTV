@@ -57,7 +57,7 @@ class Feed:
 
     def frame(self, tracks):
         before = len(self.rows)
-        res = pose_analytics.observe(CAM, self.t, FRAME, tracks, [])
+        res = pose_analytics.observe(CAM, self.t, FRAME, tracks)
         self.live.extend(res.interactions)
         self.row_times.extend([self.t] * (len(self.rows) - before))
         self.t += DT

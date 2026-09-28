@@ -30,11 +30,11 @@ all of it has been removed.
 One worker thread per enabled camera runs:
 
     capture frame -> (every Nth frame) pose-estimate people (box + 17 COCO
-      keypoints) [+ every OBJECT_DETECT_EVERY_N frames: retail objects]
+      keypoints; RTMO-s)
       -> drop detections whose foot point is in an AI_IGNORE mask
       -> ByteTrack association -> project foot point to floor metres
       -> resolve zone -> open/close zone visits
-      -> pose_analytics.observe(tracks + skeletons, bags, privacy-masked frame)
+      -> pose_analytics.observe(tracks + skeletons, privacy-masked frame)
       -> persist to zone_visits + customer_tracks
 
 Per-camera feature flags (`CameraFeatureConfig` in `models/schemas.py`,
@@ -51,35 +51,41 @@ takes effect without a restart.
 
 ### Inference and hardware auto-detection (`services/inference_backend.py`)
 
-Models are Ultralytics **YOLO26** ONNX exports in `edge_backend/models/`,
-listed in `models/manifest.json` (file, sha256, size, task, required, ONNX IO
-signature, exporter pin, AGPL-3.0 licence note):
+**RTMO only since 2026-09-28** (owner decision: no AGPL/Ultralytics component in
+the product; CIF channels move to D1). `models/manifest.json` lists the only
+models the product may use (sha256, IO signature, Apache-2.0 licence, body7
+training-data legal check pending); attribution in `THIRD_PARTY_NOTICES.md`:
 
-* `yolo26s-pose.onnx` -- person + 17 keypoints, default on accelerator EPs
-  (`POSE_MODEL_GPU`);
-* `yolo26n-pose.onnx` -- small pose model, default on CPU / OpenVINO
-  (`POSE_MODEL_CPU`); the other one is the fallback candidate;
-* `yolo26n.onnx` -- optional 80-class COCO object model (bags, phones); only
-  use is the "hand into carried bag" concealment cue. **Off by default since
-  2026-09-27** (`OBJECT_DETECT_EVERY_N=0`; `=3` re-enables); status/preflight say
-  "disabled by configuration" (`object_detection.state`);
-* `yolo26m-pose-544x960.onnx`, `yolo26s-pose-544x960.onnx` -- optional larger /
-  16:9 higher-resolution pose exports forming the GPU **model ladder**
-  (`POSE_MODEL_LADDER_GPU`, most accurate first; `POSE_MODEL_LADDER_CPU` on CPU);
-* `rtmpose-s-256x192.onnx` -- optional **top-down keypoint refiner** (RTMPose-s,
-  Apache-2.0, downloaded by `fetch_models.py` from the OpenMMLab release zip).
-* `rtmo-s-body7-640x640-static.onnx` -- optional one-stage RTMO-s (mmpose,
-  Apache-2.0; body7 weights, research-only datasets inside: legal check
-  pending; COCO-only checkpoint has no published ONNX). `fetch_models.py`
-  downloads the OpenMMLab zip and runs `scripts/export_rtmo_static.py` in an
-  isolated uv "tools" venv (onnx + onnx-graphsurgeon): static 1x3x640x640,
-  in-graph NMS replaced by constant TopK(300), host NMS (layout `rtmo` in
-  `decode_output`, BGR 0-255 input via `ModelSpec.input_rgb/input_scale`).
-  Byte-reproducible (sha256 in manifest). Usable as `POSE_MODEL_PATH` or as the
-  shadow-trial model.
+* `rtmo-s-body7-640x640-static.onnx` -- **the person model** (required;
+  `POSE_MODEL_GPU` = `POSE_MODEL_CPU` default). One-stage RTMO-s (mmpose).
+  `fetch_models.py` downloads the OpenMMLab zip and runs
+  `scripts/export_rtmo_static.py` in an isolated uv "tools" venv (onnx +
+  onnx-graphsurgeon): static 1x3x640x640, in-graph NMS replaced by constant
+  TopK(300), host NMS. `build_model_spec`/`decode_output` support ONLY the
+  `rtmo` layout (dets [1,K,5] + keypoints [1,K,J,3], BGR 0-255 input); other
+  layouts raise. Byte-reproducible.
+* `rtmpose-s-256x192.onnx` -- optional top-down keypoint refiner (RTMPose-s).
+  `POSE_REFINER` default **off**: on RTMO keypoints it lowered OKS (D1 .872 ->
+  .853, small persons .812 -> .758) and keypoint precision.
+* Removed: all YOLO26 files, the object model (`OBJECT_*`, `detect_objects`,
+  `THEFT_BAG_CLASS_IDS`) and the "hand into carried bag" concealment cue (the
+  pocket/waistband cue stays); Hailo YOLO HEF defaults (Hailo probe reports "no
+  compatible model for this accelerator" and falls through).
+* `fetch_models.py` deletes `*.onnx` in `models/` not listed in the manifest
+  (logged; `--keep-unlisted`; `--verify-only` just lists). Preflight ignores
+  extra files but warns when a setting names an unlisted model; retired keys
+  (`OBJECT_*`, `THEFT_BAG_CLASS_IDS`, `HAILO_YOLO_HEF_PATH`) are flagged.
+  `.dockerignore` whitelists only the manifest models.
+* Thresholds (eval on 500 COCO val images degraded to 704x576 / 352x288, dark
+  -3 EV): `PERSON_CONF_THRESHOLD` 0.50, `_DARK` 0.45 (was 0.35: RTMO dark
+  precision .914), `TRACK_LOW_CONF_THRESHOLD` 0.40 (was 0.25), keypoint gates
+  0.5 / wrist 0.25 unchanged. Scripts: session scratchpad `eval/scripts/`.
+* Cost: RX 9060 XT 10.9 ms/inference (trial) -> 32 cameras at budget 0.6 ~=
+  1.7 analysed fps per camera; ladders empty (mechanism kept for a future
+  Apache model, e.g. RTMO-m static export).
 
-**Shadow pose-model trial** (`services/shadow_trial.py`, 2026-09-27):
-`SHADOW_POSE_MODEL` (empty = off), `SHADOW_POSE_SHARE` (0.15), `SHADOW_POSE_CAMERAS`,
+**Shadow pose-model trial** (`services/shadow_trial.py`, 2026-09-27; kept,
+off by default, for future candidates): `SHADOW_POSE_MODEL` (empty = off), `SHADOW_POSE_SHARE` (0.15), `SHADOW_POSE_CAMERAS`,
 `SHADOW_TRIAL_WINDOW` ("HH:MM-HH:MM"). Runs on frames the live model already
 analysed (`LiveCameraWorker._analyse` -> `offer()`), paced by its own cost,
 device only via `DeviceGate.try_low()` (live waits counted), not in the live
@@ -433,7 +439,7 @@ than firing on empty data.
 * **[`app/services/hardware_detector.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/hardware_detector.py):** Runtime probe for decode capability (NVIDIA NVDEC, Intel VA-API, AMD Mesa, CPU SIMD) and RAM; the inference fields are read from the detector that is actually loaded, not guessed.
 * **[`app/services/feature_manager.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/feature_manager.py):** Thread-safe in-process cache of per-camera feature flags; durable copy is `cameras.features`, hydrated on first API read. Starts empty.
 * **[`app/services/ai_zone_service.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/ai_zone_service.py):** Per-camera zone store in `storage/zones_config.json`: `exclusion_masks` (privacy masks, applied by `privacy_mask.py`), plus tripwires and restricted areas (image-normalised 0..1 per camera) evaluated live by `app/services/tripwire_engine.py`.
-* **[`app/services/inference_backend.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/inference_backend.py):** YOLO26 pose (+ optional yolo26n object) detector with runtime provider probe verified by `get_providers()[0]`; `initialise_inference()` from the lifespan; `person_detector.status()` (provider attempts, warm-up, model) is what `/system/hardware` and preflight report.
+* **[`app/services/inference_backend.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/inference_backend.py):** RTMO pose detector (+ optional RTMPose refiner) with runtime provider probe verified by `get_providers()[0]`; `initialise_inference()` from the lifespan; `person_detector.status()` (provider attempts, warm-up, model) is what `/system/hardware` and preflight report.
 * **[`app/services/live_analytics_engine.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/live_analytics_engine.py):** One `CameraWorker` thread per enabled camera (capture -> pose detect -> AI_IGNORE filter -> ByteTrack -> project -> zone visits -> `pose_analytics.observe`), per-camera feature flags (`camera_flag`), thread-safe snapshots for `/layout/live`, and `render_overlay()` for `/stream?overlay=1`.
 * **[`app/services/pipeline_supervisor.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/pipeline_supervisor.py):** Starts the engine at startup, drains worker buffers to SQLite every 5s, reconciles workers against the `cameras` table every 15s.
 * **[`app/services/tracking_service.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/tracking_service.py):** `ByteTracker` (alias `CentroidTracker`; Kalman + two-stage ByteTrack association, tracks carry smoothed keypoints) and `FloorProjector` (foot point -> metres via the camera homography; declines when uncalibrated).
@@ -450,8 +456,8 @@ than firing on empty data.
 * **[`app/services/notification_service.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/notification_service.py):** `notify_loss_prevention(title, body, data)`: security-event log, websocket broadcast, per-device push; returns real outcomes.
 * **[`app/services/preflight.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/preflight.py):** Read-only installation checks (deps, ORT flavour/providers, models vs manifest, storage); shared by bootstrap and fetch_models; `python -m app.services.preflight`.
 * **[`app/services/setup_service.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/setup_service.py):** `SetupCodeManager` (one-time first-run code in `storage/setup_code.txt`), `ensure_setup_code_if_needed`, setup-completed rule (requires an active admin).
-* **[`app/services/remote_access_service.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/remote_access_service.py):** Online dashboard on the operator's domain. Settings in `system_setup.remote_access` (`enabled`, `provider` cloudflare_tunnel|direct, `hostname`, last verification); token = named secret `cloudflare_tunnel_token`. Supervises `cloudflared tunnel --no-autoupdate run` (token via env `TUNNEL_TOKEN`, never argv/logs), state stopped/starting/connected/error from its log lines, exponential backoff; only runs when enabled + hostname + token + auth on. `verify()` fetches `https://<host>/api/v1/device/identity` and compares device_id. Binary: `CLOUDFLARED_PATH`, PATH, `<repo>/bin/cloudflared` (bootstrap `--with-tunnel`). `public_url()` for pairing. Routes `app/routes/remote_access.py`: GET/PUT `/api/v1/remote-access`, POST `/verify`. UI: `static/js/remote_access.js` (`#settings-device`, `#settings-remote`).
-* **[`app/services/public_exposure.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/public_exposure.py):** `client_ip()` (CF-Connecting-IP / X-Forwarded-For trusted only from a loopback peer; used by auth lockout, rate limiter, setup), `is_remote_request()`, pure-ASGI middleware refusing `/api/v1/setup/*` (except GET status) and `/docs` via the public hostname and everything remote while AUTH_DISABLED, security headers (nosniff, `frame-ancestors 'self'`, HSTS only via remote HTTPS), and own-origin CORS (`*` ignored). TURN is opt-in (`TURN_ENABLED`, compose profile `turn`); the ICE endpoint returns STUN only + `turn_enabled:false` by default (WebRTC LAN-only; remote video = MJPEG over the tunnel).
+* **[`app/services/remote_access_service.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/remote_access_service.py):** Online access through the owner's VPS (provider `vps_tunnel`, frp v0.71.0 Apache-2.0; Cloudflare/Tailscale code removed 2026-09-28). Settings in `system_setup.remote_access` (`enabled`, `hostname`, `server_url` wss://host[:port] or tcp://host:port, `store_id`, `extra_proxies` 0-2, last verification). Secrets (named, encrypted): `vps_tunnel_store_token`, optional `vps_tunnel_server_key` (frp shared auth.token); legacy `cloudflare_tunnel_token` deleted on start. Supervises `frpc -c <STORAGE_DIR>/tunnel/frpc.toml` (dir 0700/file 0600; `user=<store id>`, `metadatas.token` + optional `auth.token` as `{{ .Envs.* }}` templates, secrets only in frpc's minimal env; one http proxy `<store>-cctv`, customDomains=[hostname] -> 127.0.0.1:PORT; wss with TLS verified against system CA / `EDGE_TUNNEL_CA_FILE`; heartbeat 30/90 s; loginFailExit + app backoff). Status from frpc log lines: stopped/starting/connected(`connected_since`)/error + `error_kind` (login_rejected, address_rejected, address_in_use, server_key_rejected, auth_service_unavailable, unreachable, certificate, not_a_tunnel, connection_lost, setup, exited). Requires HOST 0.0.0.0/127.0.0.1. `verify()` fetches `https://<host>/api/v1/device/identity`. Binary: `FRPC_PATH`, PATH, `<repo>/bin/frpc` (bootstrap `--with-tunnel`/`EDGE_TUNNEL=1`, pinned SHA-256). Routes `app/routes/remote_access.py`: GET/PUT `/api/v1/remote-access`, POST `/verify`. UI: `static/js/remote_access.js`. VPS side: `deploy/vps/` (shared frps, proxy templates; store-check plugin separate). Tests: `tests/test_remote_access.py` (fake `fixtures/fake_frpc.sh`), `tests/test_online_access.py`.
+* **[`app/services/public_exposure.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/public_exposure.py):** Tunnel request = loopback peer + Host == public hostname -> remote, HTTPS (frps rewrites X-Forwarded-Proto to http), client IP = X-Forwarded-For entry `1 + extra_proxies` from the right (frps appends the VPS proxy; X-Real-IP never trusted); other loopback proxies: right-most XFF; non-loopback peers: forwarding headers ignored. uvicorn runs with `--no-proxy-headers` (unit, entrypoint.sh, bootstrap exec) so the real peer is seen. Middleware refuses `/api/v1/setup/*` (except GET status) and `/docs` remotely and everything remote while AUTH_DISABLED; security headers (HSTS only via HTTPS); own-origin CORS. TURN opt-in only (WebRTC LAN-only; remote video = MJPEG over the tunnel).
 * **[`app/services/secret_store.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/secret_store.py):** Per-machine secret resolution/generation into `storage/secrets/device_secrets.json`.
 * **[`app/services/nvr_credential_service.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/nvr_credential_service.py):** NVR credentials in `storage/nvr_credentials.json`, passwords Fernet-encrypted (`enc:v1:`).
 * **[`app/services/log_redaction.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/log_redaction.py):** `install_log_redaction()` log-record scrubbing of tokens and credentials.
@@ -531,12 +537,15 @@ MemoryMax 9G, ProtectProc=invisible). Logs: `journalctl -u edge-cctv` (securityp
 - unit/installer/dependency change (check `git diff --stat <live>..HEAD -- deploy/ edge_backend/requirements.txt edge_backend/scripts/bootstrap.py`):
   `ssh -t aus 'sudo -u edgecctv git -C /opt/edge-cctv pull --ff-only && sudo bash /opt/edge-cctv/deploy/install.sh'`
   (stops the service, bootstrap + MIGraphX pre-compile of every ladder model, installs the unit,
-  prints the first-run setup code). Opt-in `EDGE_TAILSCALE_SERVE=1` (not used: owner declined).
+  prints the first-run setup code). `EDGE_TUNNEL=1` also fetches frpc for online access.
 
-**Access:** owner only via Tailscale `http://100.78.122.93:8000/dashboard` (ufw: 8000 on
-tailscale0 only; plain HTTP accepted, WireGuard encrypts). Others: Cloudflare Tunnel on a
-configurable hostname (Settings -> Online access; token stored encrypted), not yet set up.
-Tailscale serve/Funnel not used: the owner won't expose or share the personal tailnet.
+**Access:** owner privately via Tailscale `http://100.78.122.93:8000/dashboard` (ufw: 8000 on
+tailscale0 only; plain HTTP, WireGuard encrypts; no Tailscale text in the dashboard). Public:
+VPS reverse tunnel (frp), multi-tenant shared frps + store-check plugin; names
+`<store>-cctv.ikorex.com.au` (first store `pearcedale`), tunnel `wss://tunnel.ikorex.com.au`,
+entered in Settings -> Online access (nothing hard-coded). Not yet live: needs VPS inspection
+(proxy type, docker network, certificates, whether Cloudflare proxies the domain ->
+`extra_proxies=1`), the store-check plugin, then `sudo EDGE_TUNNEL=1 bash deploy/install.sh` on the box.
 
 **Live verification pattern:** owner saves the dashboard password to
 `/tmp/claude-1000/<project>/<session>/scratchpad/.dash_pw` (0600) with `read -rs`; one sign-in,
@@ -555,8 +564,18 @@ storage with oldest-first cap, DVR recorder removed (da529fc); CPU -47% (OpenCV 
 NV12 reader, DECODE_MAX_FPS=5, DECODE_MAX_WIDTH=auto, resolution-independent geometry) (e3bdc30).
 Measured at 5f2dc0f: CPU ~478% (box ~30%), GPU ~57% (budget 0.6), yolo26n-pose ~2.7 fps/camera.
 
-**Pending/owner decisions:** pose model choice without the object model; gaze/attention beam
-plan; public URL (Cloudflare); switch the 16 CIF channels to D1 sub-stream; phone push (FCM)
+**Pending/owner decisions:** gaze/attention beam plan; public URL (VPS tunnel built, VPS side
+pending); store manager switches
+the 16 CIF channels to D1 sub-stream (needed by RTMO); body7 training-data legal check for
+the RTMO/RTMPose weights; deploy of the RTMO-only build to the box; phone push (FCM)
 not configured; skeleton-rotation report parked until reproduced.
 
 **Client docs:** `docs/client/Edge_AI_CCTV_Features.pdf` (plain-language feature overview for customers, A4, 3 pages; rebuild with `uv run --with reportlab python docs/client/build_features_pdf.py`). Operator reference with configuration paths: `docs/FEATURES.md`.
+
+**RTMO trial result (2026-09-28, brain #324):** RTMO-s better on D1/720p/>=1440p cameras (keeps 96-98% of YOLO's people, +25-33% more, fewer fixture false positives); worse on CIF 352x288 (keeps ~60%); IR/low-light inconclusive (night review samples were overwritten: sampler keeps only the newest 200). Decided 2026-09-28: switch to RTMO-s only (YOLO removed, CIF channels to D1); see the "RTMO only" block under Inference.
+
+**Streams (brain #328):** Settings -> "Recorder sub-streams" upgrades Dahua CIF sub-streams to D1 (app/services/recorder_substreams.py, dahua_config.py; saves the previous config to STORAGE_DIR/dahua_substreams_<host>.json, verifies 704x576 on RTSP, restores on any failure, audit log recorder_audit.jsonl; API POST /api/v1/recorders/<host>/substreams/d1 {"all_cif":true}, restore .../restore). Per-camera "Stream quality" Auto|Sub-stream|Main (stream_selection.py): Auto = smallest sub-stream >= D1, else keep CIF; never auto-picks main.
+
+**Models:** RTMO-s only (Apache-2.0); YOLO and the object model removed; refiner off by default; thresholds 0.50 / dark 0.45, TRACK_LOW_CONF_THRESHOLD 0.40. THIRD_PARTY_NOTICES.md lists model/library licences.
+
+**Online access (app side done, VPS not deployed):** frpc child process managed by remote_access_service (store id + per-store token, wss://tunnel.ikorex.com.au, one http proxy for <store>-cctv.ikorex.com.au); Settings -> Online access (Tailscale/Cloudflare guidance removed); VPS stack prepared in ~/Projects-1/Server/cctv-tunnel (brain #326/#327). Owner and Claude apply VPS + Cloudflare hardening together in a final joint session; online access stays disabled on the box until then.

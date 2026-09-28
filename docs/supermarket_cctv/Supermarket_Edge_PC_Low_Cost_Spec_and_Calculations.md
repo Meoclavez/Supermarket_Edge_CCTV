@@ -1,5 +1,7 @@
 # Supermarket Edge AI CCTV System — Hardware Sizing, Calculations & Materials Checklist
 
+> **Model note (2026-09-28):** this planning document predates the build. Its YOLO model names and sizes were early assumptions. The shipped product runs only Apache-2.0 models (RTMO-s person/pose model, optional RTMPose-s refiner; see `edge_backend/models/manifest.json` and `THIRD_PARTY_NOTICES.md`); no YOLO / AGPL-3.0 component ships.
+
 > **Base Configuration:** Intel Core i5-13400F / i5-14400F | AMD Radeon™ RX 9060 XT (16GB GDDR6) | 16GB DDR5-5200 CL36 | 512GB NVMe SSD + Existing NAS Video Storage  
 > **Channel Scale:** 32 Concurrent CCTV IP Camera Streams  
 > **Material Classification:** `[MANDATORY]` for system operation; `[OPTIONAL]` marked based on existing supermarket infrastructure (Router, UPS, Cameras, Rack).  

@@ -1,0 +1,26 @@
+# Caddy: the tunnel host and every store dashboard (<store>-cctv.example.com).
+# Replace example.com. Caddy in Docker on the same network -> edge-frps:7000 / :8080;
+# Caddy on the host -> publish frps on loopback (README.md) and use 127.0.0.1:7000 / :8080.
+# Caddy sets X-Forwarded-For to the visitor's address by default.
+
+tunnel.example.com {
+	@frp path /~!frp
+	handle @frp {
+		reverse_proxy edge-frps:7000
+	}
+	handle {
+		respond 404
+	}
+}
+
+# One block per store (Caddy gets each certificate itself). For many stores,
+# use a *.example.com wildcard site with a DNS-challenge module instead.
+store1-cctv.example.com {
+	request_body {
+		max_size 50MB
+	}
+	reverse_proxy edge-frps:8080 {
+		# Live camera view is a long-running stream.
+		flush_interval -1
+	}
+}

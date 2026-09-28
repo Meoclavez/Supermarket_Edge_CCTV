@@ -19,8 +19,8 @@ Confidence is never a constant. Each rule derives it from what was measured:
 Rules
 -----
 1. ``detect_concealment``       wrist leaves a product zone, goes to the
-                                waistband/pocket band or a detected bag, holds
-                                there, and does not return to the shelf.
+                                waistband/pocket band, holds there, and does
+                                not return to the shelf.
 2. ``detect_shelf_sweeping``    many reaches into one product zone in a short
                                 window.
 3. ``detect_suspicious_loitering`` long dwell by a high-value product zone with
@@ -127,8 +127,8 @@ def detect_concealment(
 
     ``samples`` is chronological; each item has ``t`` (seconds),
     ``in_shelf`` (wrist inside a product zone), ``in_conceal`` (wrist inside
-    the waistband/pocket band or a detected bag), ``vis`` (wrist visibility)
-    and optionally ``target`` ("pocket_band" | "bag"). The first sample must
+    the waistband/pocket band), ``vis`` (wrist visibility) and optionally
+    ``target`` ("pocket_band"). The first sample must
     be the moment the wrist left the shelf; ``samples[0]["reach_vis"]`` may
     carry the mean wrist visibility observed during the reach itself.
 
@@ -193,8 +193,7 @@ def detect_concealment(
         vis_values.append(float(reach_vis))
     visibility = sum(vis_values) / len(vis_values) if vis_values else 0.0
 
-    targets = {s.get("target") for s in hold_samples if s.get("target")}
-    target = "bag" if "bag" in targets else "pocket_band"
+    target = "pocket_band"
     no_return_verified = observed_no_return >= no_return_sec
 
     # Strength terms: a longer hold, a quicker shelf->body transfer, and an
@@ -207,7 +206,7 @@ def detect_concealment(
     ]
     confidence = evidence_confidence(visibility, strength)
 
-    where = "a detected bag" if target == "bag" else "the waistband/pocket region"
+    where = "the waistband/pocket region"
     evidence = [
         f"Wrist left the product zone and reached {where} {transfer_sec:.1f}s later",
         f"Held there for {hold_frames} analysed frames ({hold_sec:.1f}s)",

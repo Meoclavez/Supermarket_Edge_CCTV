@@ -188,7 +188,7 @@ def test_trigger_loss_prevention_alert_authorized(client, auth_headers):
         "event_type": "CONCEALMENT",
         "severity": "HIGH",
         "confidence": 0.71,
-        "description": "Item moved from shelf to bag; staff review requested.",
+        "description": "Item moved from shelf to pocket; staff review requested.",
         "bounding_box": {"x_min": 0.2, "y_min": 0.3, "x_max": 0.4, "y_max": 0.9, "confidence": 0.71},
     }
     response = client.post(

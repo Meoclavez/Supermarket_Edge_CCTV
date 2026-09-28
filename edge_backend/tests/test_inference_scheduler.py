@@ -46,7 +46,7 @@ def _defaults(monkeypatch):
                        "ANALYTICS_MIN_DETECT_FPS": 1.0, "ANALYTICS_TARGET_DETECT_FPS": 2.0,
                        "ANALYTICS_REFIT_DEBOUNCE_SEC": 30.0, "ANALYTICS_MAX_INFLIGHT": 4,
                        "ANALYTICS_DETECT_EVERY_N_FRAMES": 5, "RECORDING_FPS": 25,
-                       "OBJECT_DETECT_EVERY_N": 3, "POSE_REFINER": "auto"}.items():
+                       "POSE_REFINER": "auto"}.items():
         monkeypatch.setattr(settings, key, value)
 
 
@@ -59,14 +59,14 @@ class Clock:
 
 
 class FakeDetector:
-    """Costs like the real one: pose ms per rung + object share + refiner."""
+    """Costs like the real one: pose ms per rung + refiner."""
 
-    def __init__(self, ladder_ms: dict[str, float], refiner_ms: float = 3.0, object_ms: float = N640,
+    def __init__(self, ladder_ms: dict[str, float], refiner_ms: float = 3.0,
                  measured: tuple[str, ...] = (), refiner: bool = True, mode: str = "auto"):
         self.ms = dict(ladder_ms)
         self.ladder = [Path("/models") / n for n in ladder_ms]
         self.model_path = self.ladder[0]
-        self.refiner_ms, self.object_ms = refiner_ms, object_ms
+        self.refiner_ms = refiner_ms
         self.refiner_available, self.refiner_enabled, self.mode = refiner, refiner, mode
         self.available, self.provider = True, "migraphx"
         self.busy, self.frames = 0.0, 0
@@ -83,7 +83,7 @@ class FakeDetector:
         return (settings.POSE_REFINER or "auto").lower()
 
     def cost(self) -> float:
-        return self.ms[self.model_path.name] + self.object_ms / 3 + (self.refiner_ms if self.refiner_enabled else 0)
+        return self.ms[self.model_path.name] + (self.refiner_ms if self.refiner_enabled else 0)
 
     def infer(self, n: int = 1) -> None:
         self.frames += n
@@ -92,7 +92,7 @@ class FakeDetector:
     def load_metrics(self) -> dict:
         return {"busy_ms": self.busy, "frames": self.frames, "provider": self.provider,
                 "model": self.model_path.name, "pose_ms": self.ms[self.model_path.name],
-                "pose_ms_measured": self.frames > 0, "object_ms": self.object_ms, "objects_on_device": True,
+                "pose_ms_measured": self.frames > 0,
                 "refiner_available": self.refiner_available, "refiner_enabled": self.refiner_enabled,
                 "refiner_frame_ms": self.refiner_ms if self.refiner_enabled and self.frames else None,
                 "refiner_batch_ms": self.refiner_ms}
@@ -176,7 +176,7 @@ def test_admission_is_fair_and_holds_the_target_utilisation():
 
 def test_a_camera_is_never_analysed_more_often_than_every_nth_frame():
     clock = Clock()
-    det = FakeDetector({"n.onnx": 0.5}, refiner=False, object_ms=0.0)   # nearly free: ceiling binds
+    det = FakeDetector({"n.onnx": 0.5}, refiner=False)   # nearly free: ceiling binds
     s = _sched(det, clock)
     frames: dict = {}
     got = simulate(s, det, clock, ["a", "b"], 20.0, frame=frames)
@@ -240,11 +240,11 @@ def test_levels_put_the_auto_refiner_on_the_top_rung_only():
 
 
 def test_choose_level_for_33_cameras():
-    # (m544 + refiner), m544, s544 (~7 ms), s640: + 0.9 ms object share each.
-    costs = [M544 + 0.9 + 3.0, M544 + 0.9, 7.0 + 0.9, S640 + 0.9]
+    # (m544 + refiner), m544, s544 (~7 ms), s640: pose + refiner only.
+    costs = [M544 + 3.0, M544, 7.0, S640]
     demand = 33 * 2.0
     idx, why = choose_level(costs, 0, demand, 0.6)
-    assert idx == 2 and "52%" in why                           # 66/s x 7.9 ms
+    assert idx == 2 and "46%" in why                           # 66/s x 7.0 ms
     assert choose_level(costs, 2, demand, 0.6)[0] == 2         # stays
     assert choose_level(costs, 2, 4 * 2.0, 0.6)[0] == 0        # 4 cameras: back to the top with refiner
     # Up only with a margin: level 1 at 55 % of the device is not taken from level 2.
@@ -441,10 +441,24 @@ def test_switch_is_abandoned_when_the_provider_changed(ladder, monkeypatch):
     assert not ok and "provider changed" in info["error"] and d.model_path.name == "huge.onnx"
 
 
+def test_level_cost_is_pose_plus_refiner_only():
+    """No object-model share: a stale ``object_ms`` in the metrics is ignored."""
+    assert not hasattr(InferenceScheduler, "_extras_ms")
+    assert InferenceScheduler._refiner_ms({"refiner_frame_ms": 2.5, "refiner_batch_ms": 4.0}) == 2.5
+    assert InferenceScheduler._refiner_ms({"refiner_frame_ms": None, "refiner_batch_ms": 4.0}) == 4.0
+    assert InferenceScheduler._refiner_ms({}) == 0.0
+    clock = Clock()
+    det = FakeDetector({"m.onnx": M544}, refiner_ms=3.0)
+    s = _sched(det, clock)
+    m = {**det.load_metrics(), "object_ms": 50.0, "objects_on_device": True}
+    assert s._level_cost(Level(det.model_path, True), m) == pytest.approx(M544 + 3.0)
+    assert s._level_cost(Level(det.model_path, False), m) == pytest.approx(M544)
+
+
 def test_set_refiner_needs_a_loaded_session():
     from app.services.inference_backend import PersonDetector
 
-    d = PersonDetector(object_model_path="")
+    d = PersonDetector()
     assert d.set_refiner(True, "x") is False and d.refiner_enabled is False
     d.refiner_session = object()
     assert d.set_refiner(True, "auto: on") and d.refiner_enabled
@@ -470,7 +484,7 @@ def test_global_detector_status_carries_the_load_control():
 
     lc = person_detector.status()["load_control"]
     assert lc["mode"] == "budget" and lc["target_utilisation"] == 0.6
-    assert PersonDetector(object_model_path="").status()["load_control"] is None
+    assert PersonDetector().status()["load_control"] is None
 
 
 def test_worker_admits_through_the_scheduler_and_releases_every_slot(monkeypatch):

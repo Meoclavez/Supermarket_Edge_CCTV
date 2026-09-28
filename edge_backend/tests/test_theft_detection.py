@@ -115,10 +115,15 @@ class TestTheftDetectionAlgorithms:
         assert hi["detected"] and lo["detected"]
         assert hi["confidence"] > lo["confidence"]
 
-    def test_concealment_into_bag_is_reported(self):
-        res = detect_concealment(self._conceal_samples(target="bag"), window_sec=4.0, min_hold_frames=3, no_return_sec=2.0)
-        assert res["detected"] and res["target"] == "bag"
-        assert any("bag" in e for e in res["evidence"])
+    def test_concealment_target_is_always_the_pocket_band(self):
+        """The object model (and the 'hand into a carried bag' cue) is gone: a
+        stale "bag" target is never reported, only the pocket/waistband band."""
+        for target in ("pocket_band", "bag", None):
+            res = detect_concealment(self._conceal_samples(target=target), window_sec=4.0, min_hold_frames=3,
+                                     no_return_sec=2.0)
+            assert res["detected"] and res["target"] == "pocket_band"
+            assert any("waistband/pocket region" in e for e in res["evidence"])
+            assert not any("bag" in e for e in res["evidence"])
 
     def test_concealment_negative_returned_to_shelf(self):
         res = detect_concealment(self._conceal_samples(returned=True), window_sec=4.0, min_hold_frames=3, no_return_sec=2.0)

@@ -17,5 +17,7 @@ if ! "$PY" -m app.services.preflight --session-probe; then
     echo "Preflight reported errors; starting anyway (EDGE_PREFLIGHT_STRICT=0)." >&2
 fi
 
+# --no-proxy-headers: the app decides which forwarding headers to believe
+# (app/services/public_exposure.py), so it must see the real peer address.
 exec "$PY" -m uvicorn app.main:app --host "${HOST:-0.0.0.0}" --port "${PORT:-8000}" --workers 1 \
-    --timeout-graceful-shutdown 5 --no-server-header
+    --timeout-graceful-shutdown 5 --no-server-header --no-proxy-headers

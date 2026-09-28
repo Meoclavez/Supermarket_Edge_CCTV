@@ -14,7 +14,7 @@ from app.config import settings
 
 def _client_ip(request) -> str:
     """Real client address: trusts proxy headers only from a loopback peer
-    (cloudflared / local Caddy). See services/public_exposure.py."""
+    (the VPS tunnel's frpc / a local proxy). See services/public_exposure.py."""
     from app.services.public_exposure import client_ip
 
     return client_ip(request)

@@ -156,11 +156,11 @@ mobile_app/android/key.properties
 mobile_app/android/app/google-services.json
 mobile_app/ios/Runner/GoogleService-Info.plist
 
-# Downloaded tool binaries (cloudflared, fetched by edge_backend/scripts/bootstrap.py)
+# Downloaded tool binaries (frpc, fetched by edge_backend/scripts/bootstrap.py --with-tunnel)
 /bin/
 
-# Model binaries (70-220 MB) are not versioned: models/manifest.json pins each
-# file by sha256 and ./run.sh (scripts/fetch_models.py) downloads or re-exports
-# them on a fresh machine.
+# Model binaries (20-40 MB) are not versioned: models/manifest.json pins each
+# file by sha256 and ./run.sh (scripts/fetch_models.py) downloads (and, for
+# RTMO, rebuilds) them on a fresh machine.
 edge_backend/models/*.onnx
 edge_backend/models/*.zip

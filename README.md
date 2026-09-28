@@ -1,6 +1,6 @@
 # 🛡️ Edge AI CCTV Surveillance & Safety Platform
 
-An enterprise-grade, **100% on-premises edge-processed CCTV AI monitoring and safety ecosystem**. Designed for **Intel N100 Mini PCs** paired with **Hailo-8 / 8L M.2 PCIe AI modules**, executing hardware-accelerated video decoding via **Intel QuickSync (VA-API)** and sub-10ms neural inference on the **HailoRT dataflow engine**.
+An enterprise-grade, **100% on-premises edge-processed CCTV AI monitoring and safety ecosystem**. Designed for **Intel N100 Mini PCs** paired with **Hailo-8 / 8L M.2 PCIe AI modules**, executing hardware-accelerated video decoding via **Intel QuickSync (VA-API)** and neural inference on the best accelerator found at runtime (NVIDIA, AMD, Intel or CPU).
 
 Connects directly to a **cross-platform Flutter client (PC Web/Desktop, Android, and iOS)** featuring **loss-prevention alerts for store staff**, **24/7 Segmented DVR Recording with 24-Hour Timeline Scrubbing**, **Interactive Visual Zone & Privacy Mask Editor**, **2-Way Audio Push-to-Talk**, and **Ultra-Low Latency (<300ms) WebRTC Streaming**.
 
@@ -8,8 +8,8 @@ Connects directly to a **cross-platform Flutter client (PC Web/Desktop, Android,
 
 ## 🌟 Key Features
 
-* **⚡ Sub-10ms Edge AI Vision (Hailo-8 M.2)**:
-  * Hardware accelerated **YOLOv8n** object detection ($<4\text{ms}$) + **YOLO-Pose** 17-keypoint pose estimation ($<8\text{ms}$).
+* **⚡ Edge AI Vision**:
+  * **RTMO-s** (OpenMMLab mmpose, Apache-2.0) person detection with 17-keypoint pose in one pass, on the best accelerator probed at runtime (TensorRT / CUDA / AMD MIGraphX / OpenVINO / CPU); about 11 ms per frame on an RX 9060 XT. A Hailo NPU is detected but has no compatible model, so the next backend runs.
   * **Theft / loss prevention**: pose-keypoint behaviour cues (concealment, shelf sweeps, exit without checkout) raised as *suspicious behaviour for staff review* with snapshot and clip evidence, never as an accusation.
   * **Market analysis**: footfall, zone dwell, conversion funnels and queue lengths aggregated from real tracked visits.
   * **Customer heatmaps & shelf interactions**: floor-plan heatmaps from calibrated cameras and hand-to-shelf interaction events per product zone.
@@ -45,7 +45,7 @@ Connects directly to a **cross-platform Flutter client (PC Web/Desktop, Android,
  │                                                                             │
  │ 1. Intel QuickSync (VA-API /dev/dri/renderD128) decodes raw RTSP feeds.     │
  │ 2. In-Place Privacy Masking (Blackout / Blur / Mosaic).                     │
- │ 3. Pose inference (Hailo / TensorRT / CUDA / CPU, probed at runtime).       │
+ │ 3. Pose inference (TensorRT / CUDA / MIGraphX / CPU, probed at runtime).    │
  │ 4. Zero-Copy 24/7 DVR remuxing saves 1-min MP4 chunks + Dynamic HLS.       │
  │ 5. go2rtc (<300ms WebRTC) + Coturn RFC 5766 dynamic HMAC-SHA1 TURN.        │
  │ 6. Caddy TLS Reverse Proxy.                                                 │
@@ -182,10 +182,12 @@ machine changes nothing:
    `onnxruntime-gpu` is reinstalled so that its files win. Use `--ort cpu` for the
    lean CPU-only build, or `--ort openvino` on Intel.
 4. **models**: `edge_backend/models/*.onnx` are checked against
-   `models/manifest.json` (sha256). A missing or damaged model is re-exported
-   from its Ultralytics `.pt` in an isolated Python 3.12 venv under
+   `models/manifest.json` (sha256). A missing or damaged model is downloaded
+   from OpenMMLab; RTMO is then rebuilt as a static graph
+   (`scripts/export_rtmo_static.py`) in an isolated Python 3.12 venv under
    `~/.cache/edge-cctv/model-export` (override with `--model-cache-dir`), so
-   ultralytics and torch never enter the app venv.
+   the model tools never enter the app venv. `*.onnx` files the manifest does
+   not list (models of earlier releases) are deleted, each one logged.
 5. **verify**: creates a real ONNX Runtime session and reports
    `get_providers()[0]`. On an NVIDIA machine this must say
    `CUDAExecutionProvider`.
@@ -213,7 +215,9 @@ A summary is included in `GET /api/v1/system/hardware`.
   CPU-only, Intel and Hailo hosts use plain `docker compose up -d`.
 - systemd: `deploy/edge-cctv.service` runs the preflight as `ExecStartPre` and
   allows the NVIDIA, ROCm and Hailo device nodes.
-- Model licence: the YOLO26 weights and exports are AGPL-3.0 (see `models/manifest.json`).
+- Model licences: every shipped model is Apache-2.0 (RTMO-s, RTMPose-s; see
+  `models/manifest.json` and `THIRD_PARTY_NOTICES.md`). No AGPL or
+  non-commercial model may be added.
 
 ### 1. Edge Mini PC Backend Deployment (Intel N100 + Hailo M.2)
 

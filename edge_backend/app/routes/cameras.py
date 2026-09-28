@@ -450,6 +450,7 @@ async def update_camera(camera_id: str, cam_in: CameraFeed, db: AsyncSession = D
 
     if "rtsp_url" in payload and (cam is None or payload["rtsp_url"] != cam.rtsp_url):
         source_changed = True
+    old_quality = (cam.features or {}).get("stream_quality") if cam is not None and isinstance(cam.features, dict) else None
     if cam is not None and "features" in payload:
         _keep_unsent_settings(payload["features"], cam_in.features, cam.features)
     if cam is not None:
@@ -475,9 +476,11 @@ async def update_camera(camera_id: str, cam_in: CameraFeed, db: AsyncSession = D
     camera_roles.role_cache.invalidate()
     if "features" in payload:
         feature_manager.set_camera_features(camera_id, CameraFeatureConfig.model_validate(payload["features"]))
-    if source_changed:
+    new_quality = (payload.get("features") or {}).get("stream_quality") if "features" in payload else old_quality
+    if source_changed or (old_quality or "auto") != (new_quality or "auto"):
         # A new URL or inline credentials: reconnect now (also ends a pause
-        # after a rejected login) instead of on the next reconcile tick.
+        # after a rejected login) instead of on the next reconcile tick. A
+        # changed Stream quality reopens the worker on the chosen stream.
         await _restart_worker(camera_id)
     return _model_to_feed(cam)
 
@@ -577,7 +580,7 @@ async def delete_camera(camera_id: str, db: AsyncSession = Depends(get_db)):
 # Per-camera settings that are not on/off flags. A client that does not know
 # them (an older dashboard or the mobile app sending only the toggles) must
 # not reset them, so a key absent from the request keeps its stored value.
-_NON_FLAG_SETTINGS = ("person_max_frame_fraction", "night_watch", "decode_max_width")
+_NON_FLAG_SETTINGS = ("person_max_frame_fraction", "night_watch", "decode_max_width", "stream_quality")
 
 
 def _keep_unsent_settings(target: Dict[str, object], sent: object, stored: object) -> None:
@@ -606,9 +609,14 @@ async def update_camera_features(camera_id: str, config: CameraFeatureConfig, db
     merged = config.model_dump()
     _keep_unsent_settings(merged, config, cam.features)
     config = CameraFeatureConfig.model_validate(merged)
+    old_quality = (cam.features or {}).get("stream_quality") if isinstance(cam.features, dict) else None
     cam.features = config.model_dump()
     await db.commit()
     feature_manager.set_camera_features(camera_id, config)
+    if (old_quality or "auto") != (config.stream_quality or "auto"):
+        # Stream quality changed: reopen the worker on the chosen stream (the
+        # reconcile also queues a read-only measurement if Auto needs one).
+        await _reconcile_now(camera_id)
     return config
 
 

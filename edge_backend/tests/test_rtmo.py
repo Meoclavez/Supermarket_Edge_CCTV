@@ -1,15 +1,17 @@
-"""RTMO (mmpose one-stage pose) as a person model, and the object model's default.
+"""RTMO (mmpose one-stage pose): the only person model the backend runs.
 
 * ``build_model_spec`` recognises the static RTMO export by its two outputs
-  (dets [1,K,5], keypoints [1,K,17,3]) and refuses the dynamic end2end graph.
-* Its input convention differs from Ultralytics: BGR 0-255, no /255.
-* Decoding maps boxes and keypoints back to frame pixels through the same
-  letterbox (pad top/bottom) or pillarbox (pad left/right) as the YOLO path,
-  and the host NMS replaces the graph's.
+  (dets [1,K,5], keypoints [1,K,17,3]), refuses the dynamic end2end graph and
+  rejects any other output signature (YOLO [1,56,8400], [1,84,8400], ...).
+* Its input convention: BGR 0-255, no /255.
+* Decoding maps boxes and keypoints back to frame pixels through the
+  letterbox (pad top/bottom) or pillarbox (pad left/right), and the host NMS
+  replaces the graph's.
 * With the model file present, the static export reproduces the original
   end2end graph's people on the bundled pictures (tests/fixtures/rtmo_reference.json,
   written from the original ONNX with its in-graph NMS).
-* The object model is off by default and says why.
+* The object model (and its settings/status fields) is gone, and the default
+  configuration names only models listed in models/manifest.json.
 """
 
 from __future__ import annotations
@@ -64,20 +66,31 @@ def test_dynamic_rtmo_graph_is_refused():
                          [_io("dets", [1, 300, 6]), _io("keypoints", [1, 300, 17, 3])])
 
 
-def test_yolo_exports_keep_their_input_convention():
-    spec = build_model_spec(Path("y.onnx"), {"kpt_shape": "[17, 3]", "names": "{0: 'person'}"},
-                            [_io("images", [1, 3, 640, 640])], [_io("output0", [1, 56, 8400])])
-    assert spec.layout == "cf" and spec.input_rgb is True and spec.input_scale == pytest.approx(1 / 255)
+@pytest.mark.parametrize("outputs", [
+    [[1, 56, 8400]],                        # YOLO pose, channels first
+    [[1, 84, 8400]],                        # YOLO detect (COCO 80 classes)
+    [[1, 8400, 56]],                        # channels last
+    [[1, 300, 57]],                         # end-to-end export
+    [[1, 25200, 85]],                       # YOLOv5 detect
+])
+@pytest.mark.parametrize("meta", [{}, {"kpt_shape": "[17, 3]", "names": "{0: 'person'}", "end2end": "True"}])
+def test_non_rtmo_output_signatures_are_rejected(outputs, meta):
+    with pytest.raises(ValueError, match="unsupported model outputs"):
+        build_model_spec(Path("y.onnx"), meta, [_io("images", [1, 3, 640, 640])],
+                         [_io(f"output{i}", s) for i, s in enumerate(outputs)])
 
 
-def test_rtmo_blob_is_bgr_0_255_and_yolo_blob_is_rgb_unit():
+def test_model_spec_defaults_are_the_rtmo_input_convention():
+    spec = ib.ModelSpec(Path("m.onnx"), "pose", "rtmo", 1, {0: "person"}, (17, 3), "input", (640, 640))
+    assert spec.input_rgb is False and spec.input_scale == 1.0
+
+
+def test_rtmo_blob_is_bgr_0_255():
     frame = np.zeros((640, 640, 3), np.uint8)
     frame[..., 0], frame[..., 1], frame[..., 2] = 10, 20, 200          # B, G, R
     bgr, *_ = letterbox(frame, (640, 640), rgb=False, scale_to=1.0)
-    rgb, *_ = letterbox(frame, (640, 640))
     assert bgr.shape == (1, 3, 640, 640) and bgr.dtype == np.float32
     assert tuple(bgr[0, :, 5, 5]) == (10.0, 20.0, 200.0)
-    assert np.allclose(rgb[0, :, 5, 5], np.array([200, 20, 10]) / 255.0)
 
 
 def _raw(boxes640, kpts640, scores, k=8):
@@ -106,7 +119,7 @@ def test_rtmo_decode_maps_back_to_frame_pixels(w, h):
     kp_net[:, 1] = kp_frame[:, 1] * scale + py
     dup = [v + 1.0 for v in net]                                   # the same person again: NMS removes it
     raw = _raw([net, dup], [kp_net, kp_net], [0.9, 0.8])
-    boxes, scores, cls, kpts = decode_output(raw, spec, 0.25, class_ids={0})
+    boxes, scores, cls, kpts = decode_output(raw, spec, 0.25)
     assert len(boxes) == 2 and set(cls) == {0}                     # zero-score padding dropped
     keep = _nms(boxes, scores, 0.45)
     assert keep == [0]
@@ -115,9 +128,9 @@ def test_rtmo_decode_maps_back_to_frame_pixels(w, h):
     assert np.allclose(k[0], kp_frame, atol=0.01)
 
 
-def test_rtmo_goes_through_the_same_person_gates_as_yolo():
+def test_rtmo_goes_through_the_person_gates():
     spec = _spec(k=8)
-    d = PersonDetector(model_path="/nonexistent/model.onnx", object_model_path="")
+    d = PersonDetector(model_path="/nonexistent/model.onnx")
     frame = np.full((720, 1280, 3), 100, np.uint8)
     _blob, scale, px, py = letterbox(frame, spec.input_size, rgb=False, scale_to=1.0)
     person = [400 * scale + px, 100 * scale + py, 520 * scale + px, 500 * scale + py]
@@ -148,7 +161,7 @@ def test_static_export_reproduces_the_original_graph_on_bundled_pictures():
         assert [px, py] == want["pad_xy"] and scale == pytest.approx(want["scale"])
         raw = sess.run(None, {spec.input_name: blob})
         # The original graph's post-processing: score > 0.15, NMS at IoU 0.65.
-        boxes, scores, _cls, kpts = decode_output(raw, spec, float(ref["min_score"]), class_ids={0})
+        boxes, scores, _cls, kpts = decode_output(raw, spec, float(ref["min_score"]))
         keep = _nms(boxes, scores, 0.65)
         b, k = unletterbox(boxes[keep], kpts[keep], scale, px, py, w, h)
         persons = want["persons"]
@@ -163,37 +176,43 @@ def test_static_export_reproduces_the_original_graph_on_bundled_pictures():
         assert np.abs(k[..., 2] - rk[..., 2]).max() < 0.006, name
 
 
-# ------------------------------------------------------------ object model default
+# ------------------------------------------------- no object model, manifest-only defaults
 
 
-def test_object_model_is_off_by_default():
+def test_object_model_and_yolo_settings_are_gone():
     from app.config import Settings
 
-    assert Settings.model_fields["OBJECT_DETECT_EVERY_N"].default == 0
+    for key in ("OBJECT_MODEL_PATH", "OBJECT_DETECT_EVERY_N", "OBJECT_CLASSES", "OBJECT_CONF_THRESHOLD",
+                "OBJECT_NMS_IOU", "THEFT_BAG_CLASS_IDS", "HAILO_YOLO_HEF_PATH"):
+        assert key not in Settings.model_fields, key
+    assert Settings.model_fields["HAILO_POSE_HEF_PATH"].default == ""
+    for name in ("ObjectDetection", "_COCO_FALLBACK_NAMES", "_class_aware_nms", "_parse_class_filter"):
+        assert not hasattr(ib, name), name
 
 
-def test_disabled_object_model_is_reported_as_disabled_by_configuration(monkeypatch):
-    from app.services import preflight
-
-    monkeypatch.setattr(settings, "OBJECT_DETECT_EVERY_N", 0)
+def test_detector_has_no_object_model_api():
     d = PersonDetector(model_path="/nonexistent/model.onnx")
-    st = d.status()["object_detection"]
-    assert st["available"] is False and st["state"] == "disabled"
-    info, _errors, warnings = preflight.check_env()
-    assert info["object_model"]["enabled"] is False
-    assert "disabled by configuration" in info["object_model"]["reason"]
-    assert not any("OBJECT_MODEL_PATH" in w["message"] for w in warnings)
+    for name in ("detect_objects", "objects_available", "object_enabled", "_load_object_model",
+                 "object_session", "object_spec", "_obj_run_lock", "_obj_infer_ms"):
+        assert not hasattr(d, name), name
+    st = d.status()
+    assert "object_model" not in st and "object_detection" not in st
+    m = d.load_metrics()
+    assert "object_ms" not in m and "objects_on_device" not in m
 
 
-@pytest.mark.skipif(not (MODELS / "yolo26n-pose.onnx").exists(), reason="yolo26n-pose.onnx not present")
-def test_loaded_detector_skips_the_object_model_and_says_why(monkeypatch):
-    monkeypatch.setattr(settings, "OBJECT_DETECT_EVERY_N", 0)
-    monkeypatch.setattr(settings, "INFERENCE_DISABLED_PROVIDERS", "tensorrt,cuda,migraphx,rocm,openvino,directml")
-    monkeypatch.setattr(settings, "POSE_REFINER", "off")
-    d = PersonDetector(model_path=MODELS / "yolo26n-pose.onnx")
-    st = d.initialise()
-    assert st["available"]
-    obj = st["object_detection"]
-    assert obj["state"] == "disabled" and obj["error"] == "disabled by configuration (OBJECT_DETECT_EVERY_N=0)"
-    assert d.object_session is None and not d.objects_available
-    assert ib.settings.OBJECT_DETECT_EVERY_N == 0
+def test_default_config_names_only_manifest_listed_models():
+    from app.config import Settings
+    from app.services.preflight import load_manifest
+
+    listed = {e["file"] for e in load_manifest()["models"]}
+    assert "rtmo-s-body7-640x640-static.onnx" in listed
+    assert not any("yolo" in f.lower() for f in listed)
+    defaults = {k: Settings.model_fields[k].default for k in (
+        "POSE_MODEL_GPU", "POSE_MODEL_CPU", "POSE_MODEL_LADDER_GPU", "POSE_MODEL_LADDER_CPU",
+        "POSE_REFINER_MODEL")}
+    assert defaults["POSE_MODEL_GPU"] == defaults["POSE_MODEL_CPU"] == "rtmo-s-body7-640x640-static.onnx"
+    assert defaults["POSE_MODEL_LADDER_GPU"] == defaults["POSE_MODEL_LADDER_CPU"] == ""
+    named = [n.strip() for v in defaults.values() for n in str(v or "").split(",") if n.strip()]
+    assert named and all(Path(n).name in listed for n in named), named
+

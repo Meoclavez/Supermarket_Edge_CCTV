@@ -43,7 +43,7 @@ REACH_UPPER_BODY = _kp({
 
 
 def _detector():
-    return PersonDetector(model_path="/nonexistent/model.onnx", object_model_path="")
+    return PersonDetector(model_path="/nonexistent/model.onnx")
 
 
 # ------------------------------------------------------------------ the gate
@@ -188,18 +188,19 @@ class _TimedSession:
 
     def get_modelmeta(self):
         class M:
-            custom_metadata_map = {"kpt_shape": "[17, 3]", "names": "{0: 'person'}"}
+            custom_metadata_map = {}
         return M()
 
     def get_inputs(self):
-        return [_IO("images", [1, 3, 64, 64])]
+        return [_IO("input", [1, 3, 64, 64])]
 
     def get_outputs(self):
-        return [_IO("output0", [1, 56, 84])]
+        # RTMO layout: dets [1,K,5] + keypoints [1,K,17,3]
+        return [_IO("dets", [1, 4, 5]), _IO("keypoints", [1, 4, 17, 3])]
 
     def run(self, _names, _feed):
         time.sleep(self.ms / 1000.0)
-        return [np.zeros((1, 56, 84), np.float32)]
+        return [np.zeros((1, 4, 5), np.float32), np.zeros((1, 4, 17, 3), np.float32)]
 
 
 class _TimedOrt:
@@ -232,12 +233,11 @@ def ladder(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "POSE_MODEL_CPU", "cpu.onnx")
     monkeypatch.setattr(settings, "INFERENCE_DISABLED_PROVIDERS", "")
     monkeypatch.setattr(settings, "INFERENCE_WARMUP_RUNS", 1)
-    monkeypatch.setattr(settings, "OBJECT_DETECT_EVERY_N", 0)
     return tmp_path
 
 
 def _init_with(ort):
-    d = PersonDetector(object_model_path="")
+    d = PersonDetector()
     d.available_providers = ort.get_available_providers()
     d._select(ort)
     d._finish_loading(ort)
@@ -314,13 +314,13 @@ def test_refiner_crop_and_decode_round_trip():
 
 @pytest.fixture(scope="module")
 def refined_detector():
-    pose, ref = MODELS / "yolo26s-pose.onnx", MODELS / settings.POSE_REFINER_MODEL
+    pose, ref = MODELS / "rtmo-s-body7-640x640-static.onnx", MODELS / settings.POSE_REFINER_MODEL
     if not pose.exists() or not ref.exists():
         pytest.skip("pose or refiner model not present (scripts/fetch_models.py)")
     old = settings.POSE_REFINER
     settings.POSE_REFINER = "on"
     try:
-        d = PersonDetector(model_path=pose, object_model_path="")
+        d = PersonDetector(model_path=pose)
         st = d.initialise()
     finally:
         settings.POSE_REFINER = old

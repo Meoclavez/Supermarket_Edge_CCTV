@@ -432,7 +432,7 @@ def _hip_blocking_sync(rocm_sdk, info: dict) -> None:
     CPU waits for the GPU.
 
     By default a thread in ``session.run`` spins on a core for the whole
-    inference: measured on the RX 9060 XT (yolo26n-pose, 640x640), 5.8 ms of
+    inference: measured on the RX 9060 XT (a 640x640 pose model), 5.8 ms of
     CPU for 5.9 ms of wall time per run. Blocking: 2.8 ms of CPU, wall 6.0 ms.
     Must be set before this process creates its HIP context, i.e. before the
     plugin is registered; a failure leaves the default (spinning) and is only
