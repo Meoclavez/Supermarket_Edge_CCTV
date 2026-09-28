@@ -159,6 +159,9 @@ class RecorderSubstreams:
         self.verify_gap_s = 4.0
         self._runs: dict[str, dict] = {}
         self._tasks: dict[str, asyncio.Task] = {}
+        # Per recorder: also try D1 on channels whose capabilities cannot be read
+        # (the change is still verified on the stream and restored on failure).
+        self._try_unknown: dict[str, bool] = {}
 
     # -- storage ---------------------------------------------------------------
     @property
@@ -246,10 +249,11 @@ class RecorderSubstreams:
             logger.warning(f"Could not save the sub-stream run for {host}: {e}")
 
     def start(self, kind: str, host: str, cams: list[dict], channels: Optional[list[int]], actor: str,
-              *, username: str, password: str, http_port: int = 80) -> dict:
+              *, username: str, password: str, http_port: int = 80, try_unknown: bool = False) -> dict:
         """Start an upgrade or restore in the background. Raises RecorderBusy."""
         if self.is_running(host):
             raise RecorderBusy(f"a sub-stream change on {host} is already running")
+        self._try_unknown[host] = bool(try_unknown) and kind == "upgrade"
         coro = (self.run_upgrade if kind == "upgrade" else self.run_restore)(
             host, cams, channels, actor, username=username, password=password, http_port=http_port)
         run = self._new_run(kind, host, cams, channels, actor)
@@ -513,9 +517,14 @@ class RecorderSubstreams:
             return ALREADY, f"already D1 or higher ({cur_txt})", False, None
         sizes, max_rate, err = await self._caps(client, ch, standard, cache)
         kept = f"kept {'CIF' if cur in ((352, 288), (352, 240)) else cur_txt}"
+        tried_unknown = False
         if sizes is None:
-            return CAPS_UNKNOWN, f"{kept}: could not read the camera's supported resolutions ({err})", False, None
-        if target not in sizes:
+            if not self._try_unknown.get(host):
+                return CAPS_UNKNOWN, f"{kept}: could not read the camera's supported resolutions ({err})", False, None
+            # Operator asked to try anyway: the change is verified on the
+            # stream below and restored if the camera does not deliver D1.
+            tried_unknown = True
+        elif target not in sizes:
             listed = ", ".join(dc.size_label(s) for s in sizes) or "none listed"
             return UNSUPPORTED, f"{kept}: D1 not supported by this camera (supports {listed})", False, None
 
@@ -548,7 +557,8 @@ class RecorderSubstreams:
             rate_note = ""
             if "Video.BitRate" in after:
                 rate_note = f", bit rate {before.get('Video.BitRate')}→{after['Video.BitRate']} kbps"
-            return SWITCHED, f"switched to D1 ({dc.size_label(target)}, stream verified{rate_note})", True, verified
+            unknown_note = "; supported sizes were not reported, tried and verified" if tried_unknown else ""
+            return SWITCHED, f"switched to D1 ({dc.size_label(target)}, stream verified{rate_note}{unknown_note})", True, verified
 
         try:
             restored, rdetail, now = await self._restore(client, ch, sub, standard)

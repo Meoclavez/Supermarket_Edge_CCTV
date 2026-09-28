@@ -231,8 +231,11 @@ class DahuaHttpClient:
         """Caps of one channel (1-based) via encode.cgi; {} when unsupported."""
         status, body = self.get(f"/cgi-bin/encode.cgi?action=getConfigCaps&channel={int(channel)}")
         if status != 200:
-            return {}
-        return parse_kv(body)
+            raise DahuaHttpError(f"encode.cgi getConfigCaps: HTTP {status} {first_line(body)}".rstrip())
+        data = parse_kv(body)
+        if not data:
+            raise DahuaHttpError(f"encode.cgi getConfigCaps: {first_line(body) or 'empty answer'}")
+        return data
 
     def set_config(self, assignments: dict[str, str]) -> tuple[bool, str]:
         """``setConfig`` with ``key=value`` pairs. (accepted, reason)."""

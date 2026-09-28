@@ -54,6 +54,9 @@ class SubstreamUpgradeRequest(BaseModel):
     channels: Optional[List[int]] = Field(None, description="Channel numbers (1-based) to upgrade")
     all_cif: bool = Field(False, description="Every channel of this recorder's cameras whose sub-stream is below D1")
     http_port: int = Field(80, ge=1, le=65535, description="The recorder's web (HTTP) port")
+    try_when_caps_unknown: bool = Field(
+        False, description="Also try D1 on channels whose supported sizes cannot be read; each change is "
+                           "verified on the stream and restored if the camera does not deliver D1")
 
     @model_validator(mode="after")
     def _one_of(self):
@@ -152,7 +155,8 @@ async def start_d1_upgrade(recorder_id: str, body: SubstreamUpgradeRequest, requ
     actor = await describe_actor(request, db)
     try:
         run = recorder_substreams.start("upgrade", host, cams, channels, actor,
-                                        username=user, password=pw, http_port=body.http_port)
+                                        username=user, password=pw, http_port=body.http_port,
+                                        try_unknown=body.try_when_caps_unknown)
     except RecorderBusy as e:
         raise HTTPException(status_code=409, detail=str(e)) from None
     return run

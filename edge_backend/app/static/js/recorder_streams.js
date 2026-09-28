@@ -115,18 +115,22 @@
       return `<div class="fp-status fp-error">${esc(preview.error || 'Could not read the recorder.')}</div>`;
     }
     const rows = preview.channels || [];
-    const upgradable = rows.filter((x) => x.plan === 'upgrade');
+    // 'unknown' = the camera did not report its sizes: offered unticked, tried
+    // only on request (still verified on the stream and put back on failure).
+    const upgradable = rows.filter((x) => x.plan === 'upgrade' || x.plan === 'unknown');
     let html = `<div class="dev-hint" style="margin-top:10px;">${esc(preview.standard || '')} recorder: D1 is
       ${esc(preview.target || '')}. Ticked channels will be switched.</div>
       <div class="table-scroll"><table class="data-table"><thead><tr><th></th><th>Channel</th><th>Camera</th>
       <th>Sub-stream now</th><th>Plan</th></tr></thead><tbody>`;
     rows.forEach((x) => {
       const can = x.plan === 'upgrade';
-      html += `<tr><td><input type="checkbox" data-rs-ch="${x.channel}" aria-label="Upgrade channel ${x.channel}"
-        ${can ? 'checked' : 'disabled'}></td><td>${x.channel}</td><td>${esc((x.cameras || []).join(', '))}</td>
+      const tryable = x.plan === 'unknown';
+      html += `<tr><td><input type="checkbox" data-rs-ch="${x.channel}" data-rs-unknown="${tryable ? 1 : 0}"
+        aria-label="Upgrade channel ${x.channel}" ${can ? 'checked' : (tryable ? '' : 'disabled')}></td><td>${x.channel}</td><td>${esc((x.cameras || []).join(', '))}</td>
         <td>${esc(x.current || '—')}${x.bitrate_kbps ? ` · ${x.bitrate_kbps} kbps` : ''}</td>
         <td>${esc(x.plan_text || '')}${x.supported && x.plan === 'unsupported'
-          ? `<div class="dev-hint">Supports ${esc(x.supported.join(', '))}</div>` : ''}</td></tr>`;
+          ? `<div class="dev-hint">Supports ${esc(x.supported.join(', '))}</div>` : ''}${tryable
+          ? '<div class="dev-hint">Tick to try D1 anyway: it is checked on the live stream and put back if the camera does not deliver it.</div>' : ''}</td></tr>`;
     });
     html += '</tbody></table></div>';
     if (upgradable.length) {
@@ -257,7 +261,11 @@
       });
     } else if (a === 'do-upgrade') {
       const channels = selectedChannels();
-      post('substreams/d1', { channels, http_port: httpPort() },
+      const tryUnknown = channels.some((ch) => {
+        const b = document.querySelector(`#settings-recorder-streams input[data-rs-ch="${ch}"]`);
+        return b && b.getAttribute('data-rs-unknown') === '1';
+      });
+      post('substreams/d1', { channels, http_port: httpPort(), try_when_caps_unknown: tryUnknown },
         `Upgrading ${channels.length} channel(s), one at a time…`);
     } else if (a === 'ask-restore-all') { confirming = 'restore-all'; render(); }
     else if (a === 'do-restore-all') post('substreams/restore', { all: true, http_port: httpPort() }, 'Restoring…');

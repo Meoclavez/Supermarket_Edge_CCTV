@@ -327,6 +327,36 @@ def test_caps_unknown_is_skipped(tmp_path, make_fake):
     assert _entry(run, 1)["outcome"] == CAPS_UNKNOWN and fake.set_calls == []
 
 
+def test_caps_unknown_is_tried_when_asked_and_verified(tmp_path, make_fake):
+    """The Pearcedale NVR reports no capabilities for its IP-camera channels:
+    with the operator's opt-in, D1 is tried, verified on the stream, kept."""
+    fake = make_fake({1: CIF_D1}, caps_mode="none")
+    svc = _service(tmp_path, fake)
+    svc._try_unknown[HOST] = True
+    run = _run(svc, fake, None)
+    e = _entry(run, 1)
+    assert e["outcome"] == SWITCHED and "not reported, tried and verified" in e["text"], e
+    assert fake.channels[1]["w"] == 704 and fake.auth_failures == 0
+
+
+def test_caps_unknown_tried_but_not_d1_is_restored(tmp_path, make_fake):
+    fake = make_fake({1: CIF_D1}, caps_mode="none")
+    fake.no_stick.add(1)
+    svc = _service(tmp_path, fake)
+    svc._try_unknown[HOST] = True
+    run = _run(svc, fake, None)
+    e = _entry(run, 1)
+    assert e["outcome"] == RESTORED, e
+    assert fake.channels[1]["w"] == 352
+
+
+def test_caps_unknown_not_tried_without_opt_in(tmp_path, make_fake):
+    fake = make_fake({1: CIF_D1}, caps_mode="none")
+    svc = _service(tmp_path, fake)
+    run = _run(svc, fake, None)
+    assert _entry(run, 1)["outcome"] == CAPS_UNKNOWN and fake.set_calls == []
+
+
 def test_encodecaps_firmware_variant(tmp_path, make_fake):
     fake = make_fake({1: CIF_D1, 2: {"w": 352, "h": 288, "caps": ["CIF"]}}, caps_mode="encodecaps")
     svc = _service(tmp_path, fake)
