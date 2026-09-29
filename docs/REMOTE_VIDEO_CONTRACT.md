@@ -357,3 +357,26 @@ cameras (one H.265), auth on. Fixed on the way:
 - NVR connections followed the sessions: +1 per open session, and back to the pipeline's 31 within 0.2–1 s
   of a view switch or hidden tab. After a killed browser the camera was released after 6.2 s and the
   session reaped after 7.8 s. The pipeline stayed at 31 ONLINE (+1 turned off), with no Traceback.
+- **Third live check (build e451706, template fix, 02:20 AEST): H.265 resolved.** Four H.265 channels
+  (Ch 3, 30, 31, 32) played together:
+  - Sessions report `codec H264, transcoded true, encoder h264_vaapi` (the delivered codec; the camera's
+    H.265 is in the log), prflx/host over UDP, badge "LIVE · Direct · prflx/host".
+  - 704x576, picture aspect 1.222, 16–25 fps. First frame 4.6 s after the tile appeared for a transcode,
+    against 1.5 s for passthrough. Over 33 tiles in this visit: median 4.2 s, maximum 5.4 s.
+- Cost of 4 transcoded tiles (30 s windows):
+  - Each ffmpeg child used 3.1–3.3 % of one core; go2rtc used 7.2 %; the box was 15.3 % busy (13.3 %
+    idle); GPU busy 57.4 % against 57.1 %.
+  - The pipeline was not starved: 51.1 inferences/s against 50.7, 11.8 ms average inference, 31 ONLINE.
+  - Upload per tile 34–483 kbit/s depending on the scene (at night), 1.5 Mbit/s in total on tailscale0.
+  - NVR connections were 35 (31 + 4).
+- A view switch ended the sessions in 1.3 s; the ffmpeg children and the extra NVR connections were gone
+  within 1.44 s, with no go2rtc ffmpeg left anywhere on the box.
+- Channel 25 was still passed through (H264, not transcoded).
+- A rotation through 11 H.265 cameras (10 s, 75 s): never more than 4 transcoders, NVR connections at
+  most 36 (31 + 4 + one outgoing one closing), none left after leaving.
+- Journal since the restart: 0 hwupload, 0 "source with spaces", 0 Traceback, 0 restarts. The only
+  ERROR lines are the 15 expected first "codecs not matched: H265" (one per camera, then the codec is
+  remembered).
+- With a 10 s rotation, a transcoded tile shows video for about half its time on screen, because the
+  first frame takes about 4.6 s (a VA-API keyframe after a 2 s GOP, plus ICE). Consider a longer default
+  delay in direct-video mode.
