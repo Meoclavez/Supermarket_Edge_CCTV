@@ -336,9 +336,22 @@ cameras (one H.265), auth on. Fixed on the way:
   `-hwaccel vaapi ... -vf format=vaapi|nv12,hwupload` and leaves the VA-API device to the decoder, but
   FFmpeg 7.1+ (the box has 8.0.1) checks the filter graph when it opens the output, before a decoder
   exists, so `hwupload` fails ("A hardware device reference is required"). The same was reproduced with
-  CUDA on FFmpeg 9. **Fixed in the repo, not deployed:** `go2rtc_manager.transcode_source` probes the
-  engine once itself (go2rtc's order: NVENC, then VA-API, else libx264; ARM is left to go2rtc) and, for
-  VA-API, adds `#raw=-init_hw_device vaapi`, which creates the device up front.
+  CUDA on FFmpeg 9. Fix: `go2rtc_manager.transcode_source` probes the engine once itself (go2rtc's
+  order: NVENC, then VA-API, else libx264; ARM is left to go2rtc) and, for VA-API, has ffmpeg create the
+  device up front (`-init_hw_device vaapi`).
+- **Second live check (build 6557217, 02:00 AEST):** that build passed the arguments as
+  `#raw=-init_hw_device vaapi`. go2rtc refuses a source added through its API if it contains whitespace
+  (HTTP 400 "streams: source with spaces may be insecure", `internal/streams/handlers.go`), so every H.265
+  tile failed at `PATCH /api/streams` and no transcoder started. There were no hwupload errors, and the
+  engine probe logged `vaapi`. **Fixed in the repo, not deployed:** the go2rtc config's `ffmpeg:`
+  section now defines the template `edge_vaapi_device: "-init_hw_device vaapi"`, and the source names
+  it (`#raw=edge_vaapi_device`, no spaces). The real go2rtc 1.9.14 accepts it (PATCH 200) and expands it
+  into the ffmpeg arguments. The transcode cost on the box (CPU, GPU, VCN) is still to be measured after
+  deploying this.
+- On 6557217 the rest held: channel 25 was still passed through (H264, not transcoded, 704x576, about
+  20 fps). A view switch ended the sessions in 0.77 s and the NVR connections were back to 31 in 0.14 s.
+  A rotation through 11 cameras (10 s) left no go2rtc ffmpeg process anywhere. The pipeline was unchanged
+  (31 ONLINE, 53–55 inferences/s, 10.9 ms average inference, 30 s windows before and during).
 - The passthrough channel (H.264) played at 704x576, 17–20 fps, with its first frame 1.5 s after the tile
   appeared, at about 1.1 Mbit/s over tailscale0. go2rtc used 2.6 % of one core, and the GPU did not change.
 - NVR connections followed the sessions: +1 per open session, and back to the pipeline's 31 within 0.2–1 s

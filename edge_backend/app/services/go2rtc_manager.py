@@ -166,8 +166,11 @@ def build_config(*, mode: str, webrtc_port: int, stun_servers: list[str], ffmpeg
         "webrtc": webrtc,
         "log": {"format": "text", "level": "info", "output": "stdout", "time": ""},
     }
+    # Named argument templates the stream sources refer to (no spaces allowed in
+    # an API-added source); no credentials.
+    cfg["ffmpeg"] = {VAAPI_DEVICE_TEMPLATE: VAAPI_DEVICE_ARGS}
     if ffmpeg_bin:
-        cfg["ffmpeg"] = {"bin": ffmpeg_bin}
+        cfg["ffmpeg"]["bin"] = ffmpeg_bin
     return cfg
 
 
@@ -204,8 +207,13 @@ def write_config(cfg: dict[str, Any], path: Optional[Path] = None) -> Path:
 # fails with "A hardware device reference is required" (live box, FFmpeg 8.0.1,
 # AMD GPU, 2026-09-29; the same with CUDA reproduced on FFmpeg 9). Creating the
 # device up front fixes it: the decoder reuses it and hwupload finds it. Global
-# option, so its place after -i (where #raw puts it) is fine.
-VAAPI_DEVICE_RAW = "#raw=-init_hw_device vaapi"
+# option, so its place after -i (where #raw puts it) is fine. go2rtc refuses a
+# source with spaces added through its API ("source with spaces may be
+# insecure", live box 2026-09-29), so the arguments are a named template in the
+# config's ffmpeg section and the source names it: #raw=<template>.
+VAAPI_DEVICE_TEMPLATE = "edge_vaapi_device"
+VAAPI_DEVICE_ARGS = "-init_hw_device vaapi"
+VAAPI_DEVICE_RAW = f"#raw={VAAPI_DEVICE_TEMPLATE}"
 # go2rtc's own probes (internal/ffmpeg/hardware/hardware_unix.go), same order on x86.
 _ENGINE_PROBES = (
     ("cuda", ["-init_hw_device", "cuda", "-f", "lavfi", "-i", "testsrc2", "-t", "1", "-c", "h264_nvenc",

@@ -423,6 +423,9 @@ def test_go2rtc_config_by_mode_never_has_a_relay():
                             ffmpeg_bin=None)
     assert fixed["webrtc"]["listen"] == ":8555" and fixed["webrtc"]["candidates"] == ["stun:8555"]
     assert "turn" not in str(auto).lower().replace("return", "")
+    # The VA-API device template the transcode source names (#raw=edge_vaapi_device), with or without a bin.
+    assert auto["ffmpeg"] == {"bin": "/usr/bin/ffmpeg", "edge_vaapi_device": "-init_hw_device vaapi"}
+    assert fixed["ffmpeg"] == {"edge_vaapi_device": "-init_hw_device vaapi"}
 
 
 def test_config_file_is_private(tmp_path):
@@ -440,7 +443,8 @@ def test_transcode_source_is_hardware_adaptive(monkeypatch):
     assert g2.transcode_source(url, "nvenc") == f"ffmpeg:{url}#video=h264#hardware=cuda"
     # VA-API: the device is created up front, or FFmpeg 7.1+ rejects go2rtc's hwupload filter
     # before the decoder exists (live box, AMD GPU, FFmpeg 8.0.1).
-    vaapi = f"ffmpeg:{url}#video=h264#hardware=vaapi#raw=-init_hw_device vaapi"
+    vaapi = f"ffmpeg:{url}#video=h264#hardware=vaapi#raw=edge_vaapi_device"
+    assert not any(c.isspace() for c in vaapi), "go2rtc refuses API-added sources with spaces"
     assert g2.transcode_source(url, "qsv") == vaapi and g2.transcode_source(url, "vaapi") == vaapi
     monkeypatch.setattr(g2, "detect_transcode_engine", lambda ffmpeg_bin=None: "vaapi")
     assert g2.transcode_source(url, "auto") == vaapi
