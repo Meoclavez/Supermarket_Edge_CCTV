@@ -406,7 +406,8 @@ class WebRtcSessions:
         return answer
 
     async def _exchange(self, sess: Session, source: str, offer_sdp: str, transcode: bool) -> str:
-        src = transcode_source(source) if transcode else source
+        # The first transcode probes the hardware once (about a second): off the event loop.
+        src = await asyncio.to_thread(transcode_source, source) if transcode else source
         sess.transcoded = transcode
         await self.go2rtc.add_stream(sess.stream, src)
         return await self.go2rtc.webrtc_answer(sess.stream, offer_sdp)

@@ -198,18 +198,77 @@ def write_config(cfg: dict[str, Any], path: Optional[Path] = None) -> Path:
     return path
 
 
+# go2rtc 1.9.14 builds VA-API transcodes as "-hwaccel vaapi ... -vf format=vaapi|nv12,hwupload"
+# and relies on the decoder to create the VA-API device. FFmpeg 7.1+ checks the
+# filter graph when it opens the output, before any decoder exists, so hwupload
+# fails with "A hardware device reference is required" (live box, FFmpeg 8.0.1,
+# AMD GPU, 2026-09-29; the same with CUDA reproduced on FFmpeg 9). Creating the
+# device up front fixes it: the decoder reuses it and hwupload finds it. Global
+# option, so its place after -i (where #raw puts it) is fine.
+VAAPI_DEVICE_RAW = "#raw=-init_hw_device vaapi"
+# go2rtc's own probes (internal/ffmpeg/hardware/hardware_unix.go), same order on x86.
+_ENGINE_PROBES = (
+    ("cuda", ["-init_hw_device", "cuda", "-f", "lavfi", "-i", "testsrc2", "-t", "1", "-c", "h264_nvenc",
+              "-f", "null", "-"]),
+    ("vaapi", ["-init_hw_device", "vaapi", "-f", "lavfi", "-i", "testsrc2", "-t", "1", "-vf",
+               "format=nv12,hwupload", "-c", "h264_vaapi", "-f", "null", "-"]),
+)
+_engine_cache: dict[str, str] = {}
+_engine_lock = threading.Lock()
+
+
+def detect_transcode_engine(ffmpeg_bin: Optional[str] = None) -> str:
+    """The H.264 encoder engine go2rtc's ``#hardware`` would pick here: cuda, vaapi or software.
+
+    Probed once per ffmpeg binary (about a second), like go2rtc. On ARM the
+    choice is left to go2rtc (v4l2m2m / rkmpp need no extra device): "".
+    """
+    import platform
+
+    if platform.machine().lower() not in ("x86_64", "amd64", "i686", "x86"):
+        return ""
+    if ffmpeg_bin is None:
+        from app.services.capture_backends import ffmpeg_binary
+
+        ffmpeg_bin = ffmpeg_binary()
+    if not ffmpeg_bin:
+        return "software"
+    with _engine_lock:
+        if ffmpeg_bin in _engine_cache:
+            return _engine_cache[ffmpeg_bin]
+        engine = "software"
+        for name, args in _ENGINE_PROBES:
+            try:
+                ok = subprocess.run([ffmpeg_bin, "-hide_banner", "-loglevel", "error", *args],
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL, timeout=15).returncode == 0
+            except (OSError, subprocess.SubprocessError):
+                ok = False
+            if ok:
+                engine = name
+                break
+        _engine_cache[ffmpeg_bin] = engine
+        logger.info(f"Live video transcoding engine: {engine} (probed {ffmpeg_bin})")
+        return engine
+
+
 def transcode_source(url: str, engine: Optional[str] = None) -> str:
     """go2rtc ffmpeg source that re-encodes the video to H.264 (audio dropped).
 
-    ``#hardware`` without a value makes go2rtc probe the machine once (NVENC,
-    VA-API, else libx264 on x86; v4l2m2m, rkmpp on ARM). A configured engine
-    (``WEBRTC_TRANSCODE_ENCODER``) is used as is.
+    "auto" (``WEBRTC_TRANSCODE_ENCODER``, default) probes this machine once the
+    way go2rtc does (NVENC, then VA-API, else libx264 on x86; on ARM go2rtc's
+    own ``#hardware`` probe: v4l2m2m, rkmpp). A configured engine is used as is.
+    VA-API gets its device created up front (see VAAPI_DEVICE_RAW).
     """
     choice = (engine if engine is not None else settings.WEBRTC_TRANSCODE_ENCODER or "auto").strip().lower()
     hw = ENCODER_ENGINES.get(choice, "")
+    if choice in ("auto", "") or choice not in ENCODER_ENGINES:
+        hw = detect_transcode_engine()
     suffix = "#video=h264"
     if hw == "software":
         pass
+    elif hw == "vaapi":
+        suffix += "#hardware=vaapi" + VAAPI_DEVICE_RAW
     elif hw:
         suffix += f"#hardware={hw}"
     else:

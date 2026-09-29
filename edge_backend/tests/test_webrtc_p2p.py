@@ -154,6 +154,7 @@ def svc(monkeypatch):
                CAM2: "rtsp://admin:pw@10.9.8.7:554/cam/realmonitor?channel=2&subtype=1"}
     monkeypatch.setattr(WebRtcSessions, "_source_for", staticmethod(lambda cam: sources[cam.id]))
     monkeypatch.setattr(sessions, "_ensure_reaper", lambda: None)
+    monkeypatch.setattr(g2, "detect_transcode_engine", lambda ffmpeg_bin=None: "cuda")   # no ffmpeg probe in tests
     monkeypatch.setitem(remote_access_service._settings, "max_video_sessions", 8)
     monkeypatch.setitem(remote_access_service._settings, "stun_servers", ["stun:stun.example.net:3478"])
     sessions.test_sources = sources
@@ -432,10 +433,38 @@ def test_config_file_is_private(tmp_path):
 
 def test_transcode_source_is_hardware_adaptive(monkeypatch):
     url = "rtsp://u:p@10.0.0.2/x"
+    monkeypatch.setattr(g2, "detect_transcode_engine", lambda ffmpeg_bin=None: "cuda")
+    assert g2.transcode_source(url, "auto") == f"ffmpeg:{url}#video=h264#hardware=cuda"
+    monkeypatch.setattr(g2, "detect_transcode_engine", lambda ffmpeg_bin=None: "")      # ARM: go2rtc probes
     assert g2.transcode_source(url, "auto") == f"ffmpeg:{url}#video=h264#hardware"
     assert g2.transcode_source(url, "nvenc") == f"ffmpeg:{url}#video=h264#hardware=cuda"
-    assert g2.transcode_source(url, "qsv") == f"ffmpeg:{url}#video=h264#hardware=vaapi"
+    # VA-API: the device is created up front, or FFmpeg 7.1+ rejects go2rtc's hwupload filter
+    # before the decoder exists (live box, AMD GPU, FFmpeg 8.0.1).
+    vaapi = f"ffmpeg:{url}#video=h264#hardware=vaapi#raw=-init_hw_device vaapi"
+    assert g2.transcode_source(url, "qsv") == vaapi and g2.transcode_source(url, "vaapi") == vaapi
+    monkeypatch.setattr(g2, "detect_transcode_engine", lambda ffmpeg_bin=None: "vaapi")
+    assert g2.transcode_source(url, "auto") == vaapi
     assert g2.transcode_source(url, "libx264") == f"ffmpeg:{url}#video=h264"
+
+
+def test_transcode_engine_probe_order_and_cache(monkeypatch):
+    import platform
+    import subprocess
+
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0 if "h264_vaapi" in cmd else 1)
+
+    monkeypatch.setattr(platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(g2.subprocess, "run", fake_run)
+    monkeypatch.setattr(g2, "_engine_cache", {})
+    assert g2.detect_transcode_engine("/usr/bin/ffmpeg") == "vaapi"
+    assert [("h264_nvenc" in c, "h264_vaapi" in c) for c in calls] == [(True, False), (False, True)]
+    assert g2.detect_transcode_engine("/usr/bin/ffmpeg") == "vaapi" and len(calls) == 2   # cached
+    monkeypatch.setattr(platform, "machine", lambda: "aarch64")
+    assert g2.detect_transcode_engine("/usr/bin/ffmpeg") == ""
 
 
 @pytest.mark.skipif(not hasattr(__import__("os"), "killpg"), reason="POSIX process groups")

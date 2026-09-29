@@ -328,3 +328,19 @@ cameras (one H.265), auth on. Fixed on the way:
   box without direct video.
 - Diagnostics rows for a closing report that arrived after its session ended now carry the camera. Chrome's
   STUN error 701 "host lookup" is explained as a DNS name problem, not as a network block.
+
+## Live box check (2026-09-29, build 05e6215, Tailscale + "Direct WebRTC" toggle)
+
+- 30 of the 31 NVR sub-streams are **H.265** (+ PCMA audio); only channel 25 is H.264. go2rtc picked
+  VA-API (AMD GPU), and **every H.265 transcode failed**: go2rtc 1.9.14 builds
+  `-hwaccel vaapi ... -vf format=vaapi|nv12,hwupload` and leaves the VA-API device to the decoder, but
+  FFmpeg 7.1+ (the box has 8.0.1) checks the filter graph when it opens the output, before a decoder
+  exists, so `hwupload` fails ("A hardware device reference is required"). The same was reproduced with
+  CUDA on FFmpeg 9. **Fixed in the repo, not deployed:** `go2rtc_manager.transcode_source` probes the
+  engine once itself (go2rtc's order: NVENC, then VA-API, else libx264; ARM is left to go2rtc) and, for
+  VA-API, adds `#raw=-init_hw_device vaapi`, which creates the device up front.
+- The passthrough channel (H.264) played at 704x576, 17–20 fps, with its first frame 1.5 s after the tile
+  appeared, at about 1.1 Mbit/s over tailscale0. go2rtc used 2.6 % of one core, and the GPU did not change.
+- NVR connections followed the sessions: +1 per open session, and back to the pipeline's 31 within 0.2–1 s
+  of a view switch or hidden tab. After a killed browser the camera was released after 6.2 s and the
+  session reaped after 7.8 s. The pipeline stayed at 31 ONLINE (+1 turned off), with no Traceback.
