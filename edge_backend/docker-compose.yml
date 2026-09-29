@@ -1,57 +1,15 @@
 # CPU / Intel / Hailo hosts:  docker compose up -d
 # NVIDIA hosts (needs nvidia-container-toolkit on the host):
 #   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
-# Optional TURN relay for WebRTC off the store LAN (not needed for the online
-# dashboard, which goes over HTTPS through the remote-access tunnel):
-#   set TURN_ENABLED=true, COTURN_SECRET and COTURN_PUBLIC_IP in .env, then
-#   docker compose --profile turn up -d
+# Live video: no TURN relay and no separate go2rtc container. go2rtc runs
+# inside edge_api as a child of the app, started on the first live-video
+# session and stopped with the app (services/go2rtc_manager.py; binary from
+# scripts/bootstrap.py, or GO2RTC_PATH). Remote viewers get direct
+# peer-to-peer WebRTC only (docs/REMOTE_VIDEO_CONTRACT.md).
 # See docs/DEPLOYMENT.md "Remote access".
 
 services:
-  # 1. Coturn TURN relay (RFC 5766 dynamic secret auth). OPTIONAL: only
-  # started with `--profile turn`. It relays WebRTC media for phones that
-  # cannot reach the store directly, and needs public UDP 3478 + 49152-49252.
-  coturn:
-    profiles: ["turn"]
-    image: coturn/coturn:latest
-    container_name: cctv_coturn
-    restart: unless-stopped
-    network_mode: host
-    entrypoint: ["/entrypoint.sh"]
-    volumes:
-      - ./coturn/coturn.conf:/etc/coturn/coturn.conf:ro
-      - ./coturn/entrypoint.sh:/entrypoint.sh:ro
-    environment:
-      - TZ=UTC
-      # Required for this profile: set COTURN_SECRET in .env (see .env.example).
-      # The same variable is passed to edge_api so both sides share it; the
-      # entrypoint refuses to start when it is empty or a placeholder.
-      - COTURN_SECRET=${COTURN_SECRET:-}
-    security_opt:
-      - no-new-privileges:true
-
-  # 2. go2rtc Streaming Media Gateway
-  go2rtc:
-    image: alexxit/go2rtc:latest
-    container_name: cctv_go2rtc
-    restart: unless-stopped
-    network_mode: host
-    security_opt:
-      - no-new-privileges:true
-    devices:
-      - /dev/dri:/dev/dri # Intel QuickSync / VA-API hardware decoding
-    volumes:
-      - ./go2rtc.yaml:/config/go2rtc.yaml:ro
-    environment:
-      - TZ=UTC
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://127.0.0.1:1984/api/streams || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 5s
-
-  # 3. Edge AI Core API, Ingestion Engine, 24/7 DVR & mDNS Broadcaster
+  # 1. Edge AI Core API, analysis pipeline and the in-app go2rtc (live video)
   edge_api:
     build:
       context: .
@@ -79,29 +37,22 @@ services:
     environment:
       - HOST=0.0.0.0
       - PORT=8000
-      - GO2RTC_API_URL=http://127.0.0.1:1984
+      # go2rtc's API (in-app child, 127.0.0.1 only); its binary must be in the
+      # image or mounted, e.g. GO2RTC_PATH=/opt/edge-cctv/bin/go2rtc.
+      - GO2RTC_API_PORT=1984
       # Empty means "use the per-machine store": the app generates these on
       # first start in ./storage/secrets/device_secrets.json (mode 0600).
       - JWT_SECRET=${JWT_SECRET:-}
       - INTERNAL_SERVICE_KEY=${INTERNAL_SERVICE_KEY:-}
       - NVR_CREDENTIAL_KEY=${NVR_CREDENTIAL_KEY:-}
-      # TURN is opt-in (profile "turn"). Without it the ICE endpoint returns
-      # STUN only and WebRTC is LAN-only; empty COTURN_SECRET = per-machine.
-      - TURN_ENABLED=${TURN_ENABLED:-false}
-      - COTURN_SECRET=${COTURN_SECRET:-}
-      - COTURN_REALM=cctv.local
-      - COTURN_PUBLIC_IP=${COTURN_PUBLIC_IP:-}
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://127.0.0.1:8000/api/v1/health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 3
       start_period: 10s
-    depends_on:
-      go2rtc:
-        condition: service_healthy
 
-  # 4. Caddy Reverse Proxy (TLS Termination for HTTPS/WSS)
+  # 2. Caddy Reverse Proxy (TLS Termination for HTTPS/WSS)
   caddy:
     image: caddy:2-alpine
     container_name: cctv_caddy_gateway
@@ -113,7 +64,7 @@ services:
     depends_on:
       - edge_api
 
-  # 5. Tailscale Zero-Trust VPN Gateway (Optional Subnet Router)
+  # 3. Tailscale Zero-Trust VPN Gateway (Optional Subnet Router)
   tailscale:
     image: tailscale/tailscale:latest
     container_name: cctv_tailscale

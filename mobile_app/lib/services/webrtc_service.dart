@@ -10,11 +10,8 @@ import 'api_service.dart';
 class WebRtcService {
   RTCPeerConnection? _peerConnection;
   final RTCVideoRenderer renderer = RTCVideoRenderer();
-  MediaStream? _localAudioStream;
-  MediaStreamTrack? _localAudioTrack;
 
   bool isConnected = false;
-  bool isTalkbackTransmitting = false;
   String? currentCameraId;
   String currentBaseUrl = ApiConstants.defaultBaseUrl;
   Timer? _reconnectTimer;
@@ -68,7 +65,8 @@ class WebRtcService {
     return ApiConstants.rtcIceServers;
   }
 
-  Future<void> connect(String cameraId, {String? baseUrl, bool enableBackchannel = true}) async {
+  /// Opens a receive-only video session (no audio in either direction).
+  Future<void> connect(String cameraId, {String? baseUrl}) async {
     developer.log('Attempting connection to $cameraId (Attempt $_reconnectAttempts)', name: 'WebRtcService');
     currentCameraId = cameraId;
     currentBaseUrl = baseUrl ?? ApiService().baseUrl;
@@ -106,32 +104,6 @@ class WebRtcService {
       kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
       init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
     );
-
-    if (enableBackchannel) {
-      final Map<String, dynamic> mediaConstraints = {
-        'audio': {
-          'echoCancellation': true,
-          'noiseSuppression': true,
-          'autoGainControl': true,
-          'channelCount': 1,
-          'sampleRate': 48000,
-        },
-        'video': false,
-      };
-
-      try {
-        _localAudioStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
-        _localAudioTrack = _localAudioStream!.getAudioTracks().first;
-        _localAudioTrack!.enabled = false;
-        await _peerConnection!.addTrack(_localAudioTrack!, _localAudioStream!);
-      } catch (e) {
-        developer.log('Microphone init notice: $e', name: 'WebRtcService');
-        await _peerConnection!.addTransceiver(
-          kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
-          init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
-        );
-      }
-    }
 
     try {
       RTCSessionDescription offer = await _peerConnection!.createOffer(ApiConstants.rtcMediaConstraints);
@@ -194,20 +166,6 @@ class WebRtcService {
     });
   }
 
-  /// Enables or mutes the microphone track sent to the camera speaker.
-  /// Returns false when no microphone track exists (permission denied or
-  /// capture failed), so the UI does not claim to be transmitting.
-  bool setTalkbackActive(bool active) {
-    final track = _localAudioTrack;
-    if (track == null) {
-      isTalkbackTransmitting = false;
-      return false;
-    }
-    track.enabled = active;
-    isTalkbackTransmitting = active;
-    return true;
-  }
-
   void _handleConnectionFailure() {
     isConnected = false;
     _watchdogTimer?.cancel();
@@ -232,19 +190,7 @@ class WebRtcService {
     _reconnectTimer?.cancel();
     _watchdogTimer?.cancel();
     isConnected = false;
-    isTalkbackTransmitting = false;
 
-    if (_localAudioTrack != null) {
-      await _localAudioTrack!.stop();
-      _localAudioTrack = null;
-    }
-    if (_localAudioStream != null) {
-      for (var track in _localAudioStream!.getTracks()) {
-        await track.stop();
-      }
-      await _localAudioStream!.dispose();
-      _localAudioStream = null;
-    }
     if (renderer.srcObject != null) {
       for (var track in renderer.srcObject!.getTracks()) {
         await track.stop();

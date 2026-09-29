@@ -23,6 +23,16 @@
 (function () {
   'use strict';
 
+  // Camera thumbnail helpers: snapshots on the store network; through the
+  // online-access tunnel (direct-video mode) no snapshot is ever requested.
+  function thumbTransport() {
+    return window.WebRtcLive ? window.WebRtcLive.transportNow() : 'local';
+  }
+  function thumbSnapshotUrl(cameraId) {
+    const raw = `/api/v1/cameras/${encodeURIComponent(cameraId)}/snapshot?annotate=false&max_width=640&_=${Date.now()}`;
+    return window.edgeAuth && window.edgeAuth.authUrl ? window.edgeAuth.authUrl(raw) : raw;
+  }
+
   const API = '/api/v1/layout';
 
   const CATEGORY_COLORS = {
@@ -1185,7 +1195,11 @@
           <span class="fp-zone-name" style="color:${camColorFor(this.cameras, cam.camera_id)}">${escapeHtml(cam.name)}</span>
           <span class="badge ${online ? 'badge-green' : 'badge-danger'}">${escapeHtml(cam.status || 'UNKNOWN')}</span>
         </div>
-        <img id="fpCamThumb" class="fp-thumb" alt="Live frame from ${escapeHtml(cam.name)}" src="${window.edgeAuth && window.edgeAuth.authUrl ? window.edgeAuth.authUrl(`/api/v1/cameras/${encodeURIComponent(cam.camera_id)}/snapshot?annotate=false&max_width=640&_=${Date.now()}`) : `/api/v1/cameras/${encodeURIComponent(cam.camera_id)}/snapshot?annotate=false&max_width=640&_=${Date.now()}`}">
+        <img id="fpCamThumb" class="fp-thumb" alt="Live frame from ${escapeHtml(cam.name)}"${thumbTransport() === 'local' ? ` src="${thumbSnapshotUrl(cam.camera_id)}"` : ''}>
+        <div class="fp-thumb-bar" id="fpCamThumbBar" hidden>
+          <span class="fp-thumb-note" id="fpCamThumbNote"></span>
+          <button type="button" class="btn btn-xs" id="fpCamThumbRefresh" title="Take one new picture over the direct video connection">Take a new picture</button>
+        </div>
         <div class="fp-kv">
           <span>Frame</span><b>${frame}</b>
           <span>Live tracks</span><b id="fpCamLive">${this.liveCountFor(cam.camera_id)}</b>
@@ -1238,19 +1252,84 @@
       });
       panel.querySelector('#fpDone').addEventListener('click', () => this.select(null));
 
-      // Live thumbnail while this camera stays selected.
+      // Live thumbnail while this camera stays selected: a snapshot every 2 s on
+      // the store network; in direct-video mode one still, refreshed on request.
       this._stopThumb();
+      this._thumbRemote = null;
+      this._initThumb(cam.camera_id);
       this._thumbTimer = setInterval(() => {
         const img = document.getElementById('fpCamThumb');
         const live = document.getElementById('fpCamLive');
         if (!img || !this.sel || this.sel.type !== 'camera' || this.sel.id !== cam.camera_id) { this._stopThumb(); return; }
-        const rawUrl = `/api/v1/cameras/${encodeURIComponent(cam.camera_id)}/snapshot?annotate=false&max_width=640&_=${Date.now()}`;
-        if (this.isVisible()) img.src = window.edgeAuth && window.edgeAuth.authUrl ? window.edgeAuth.authUrl(rawUrl) : rawUrl;
+        if (this.isVisible() && this._thumbRemote === false) img.src = thumbSnapshotUrl(cam.camera_id);
         if (live) live.textContent = this.liveCountFor(cam.camera_id);
       }, 2000);
     }
 
-    _stopThumb() { if (this._thumbTimer) { clearInterval(this._thumbTimer); this._thumbTimer = null; } }
+    _stopThumb() {
+      if (this._thumbTimer) { clearInterval(this._thumbTimer); this._thumbTimer = null; }
+      if (this._thumbImg && window.WebRtcLive) window.WebRtcLive.releaseStill(this._thumbImg);
+      this._thumbImg = null;
+    }
+
+    /** Pick how the camera thumbnail is shown once the live transport is known. */
+    _initThumb(cameraId) {
+      const same = () => this.sel && this.sel.type === 'camera' && this.sel.id === cameraId;
+      const go = (mode) => {
+        const img = document.getElementById('fpCamThumb');
+        const bar = document.getElementById('fpCamThumbBar');
+        if (!img || !same()) return;
+        this._thumbRemote = mode === 'webrtc';
+        if (bar) bar.hidden = !this._thumbRemote;
+        if (this._thumbRemote) {
+          const btn = document.getElementById('fpCamThumbRefresh');
+          if (btn) btn.addEventListener('click', () => this._grabThumb(cameraId, true));
+          this._grabThumb(cameraId, false);
+        } else if (!img.getAttribute('src')) {
+          img.src = thumbSnapshotUrl(cameraId);
+        }
+      };
+      if (window.WebRtcLive) window.WebRtcLive.mode().then(go); else go('local');
+    }
+
+    /**
+     * Direct-video mode: one still picture over a direct WebRTC session. The
+     * inspector re-renders on every edit, so the last still of the camera is
+     * reused; a new one is taken only on first selection or on request.
+     */
+    async _grabThumb(cameraId, force) {
+      const img = document.getElementById('fpCamThumb');
+      const note = document.getElementById('fpCamThumbNote');
+      const btn = document.getElementById('fpCamThumbRefresh');
+      if (!img || !window.WebRtcLive) return;
+      const kept = this._thumbStill;
+      if (!force && kept && kept.cameraId === cameraId) {
+        window.WebRtcLive.releaseStill(img);
+        img._rtcStillUrl = URL.createObjectURL(kept.blob);
+        img.src = img._rtcStillUrl;
+        this._thumbImg = img;
+        if (note) note.textContent = `Still picture from ${kept.at} (direct video).`;
+        return;
+      }
+      if (btn) btn.disabled = true;
+      if (note) { note.textContent = 'Taking a picture over direct video…'; note.classList.remove('is-err'); }
+      const res = await window.WebRtcLive.loadStill(img, cameraId, { maxWidth: 640 });
+      if (res.ok) this._thumbStill = { cameraId, blob: res.blob, at: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) };
+      if (!document.body.contains(img) || !this.sel || this.sel.id !== cameraId) {
+        window.WebRtcLive.releaseStill(img);
+        return;
+      }
+      this._thumbImg = img;
+      if (btn) btn.disabled = false;
+      if (!note) return;
+      if (res.ok) {
+        note.textContent = `Still picture from ${this._thumbStill.at} (direct video).`;
+      } else {
+        const e = res.error || {};
+        note.textContent = `${e.network ? 'Direct video not possible from this network' : (e.message || 'No picture')}. ${e.detail || ''}`.trim();
+        note.classList.add('is-err');
+      }
+    }
 
     liveCountFor(cameraId) {
       const d = this.detections.find((x) => x.camera_id === cameraId);

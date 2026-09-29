@@ -223,11 +223,14 @@ async def health_check():
     log_path = settings.STORAGE_DIR / "logs" / "edge_cctv.log"
     log_size_mb = round(os.path.getsize(log_path) / (1024 * 1024), 2) if log_path.exists() else 0
 
-    # Whatever subsystems have reported (recorders, database, go2rtc on a
-    # real WebRTC negotiation), then the components read at request time.
+    # Whatever subsystems have reported (recorders, database, go2rtc once a
+    # live-video session started it), then the components read at request time.
+    # go2rtc is started lazily by the first live-video session (never by this
+    # endpoint); it then reports HEALTHY, FAILED (with the reason) or
+    # NOT_PRESENT, and NOT_CHECKED again once it is stopped.
     services = tracker.get_system_health_report()["services"]
     services.setdefault("go2rtc", ServiceHealthTracker.unchecked_status(
-        "not probed; checked when a client negotiates WebRTC"))
+        "not started: it starts on the first live-video session"))
     services["hailo"] = _hailo_service(detector)
     services["notification"] = _notification_service()
     services.update(_camera_services(cameras, pipeline))

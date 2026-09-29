@@ -26,6 +26,10 @@ second run on a healthy machine changes nothing:
                    enabled in Settings: fetch frpc (frp, pinned version) for this
                    OS/arch from the official GitHub release into <repo>/bin/,
                    verified against the pinned SHA-256 and the release's list
+  8b. go2rtc       live video gateway for direct peer-to-peer remote video
+                   (WebRTC): fetched by default (skip with --no-go2rtc or
+                   EDGE_GO2RTC=0), pinned version, verified against the pinned
+                   SHA-256 and the release's published digest, into <repo>/bin/
   9. start         exec uvicorn (skipped with --check-only)
 
 It never uses sudo and never touches system packages. When the fix is at the
@@ -743,6 +747,102 @@ def ensure_frpc(requested: bool) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Remote live video: go2rtc binary (fetched by default)
+# --------------------------------------------------------------------------- #
+
+# go2rtc (AlexxIT/go2rtc, MIT). The app runs it as a child process, only while
+# someone watches live video directly (docs/REMOTE_VIDEO_CONTRACT.md). Release
+# assets are plain executables. To upgrade, change the version and replace the
+# hashes with the release's asset digests (GitHub shows "sha256:..." per asset;
+# `gh release view vX --repo AlexxIT/go2rtc --json assets`).
+GO2RTC_VERSION = "1.9.14"
+GO2RTC_RELEASE_URL = f"https://github.com/AlexxIT/go2rtc/releases/download/v{GO2RTC_VERSION}"
+GO2RTC_RELEASE_API = f"https://api.github.com/repos/AlexxIT/go2rtc/releases/tags/v{GO2RTC_VERSION}"
+GO2RTC_SHA256 = {
+    "go2rtc_linux_amd64": "32d616af226bd731678ffde328b94cfb94e30339bfefc469cfb76323144615a6",
+    "go2rtc_linux_arm64": "359fabade8a7a51e81a55fe6df6b0ef81764a5e1d63179577534eaaa71904b50",
+    "go2rtc_linux_arm": "4d7e1639af5a2722a28e864468fd8099b3c1682565446c798bf9e3b38fde12e4",
+}
+
+
+def go2rtc_asset_name(system: str | None = None, machine: str | None = None) -> str | None:
+    system = (system or platform.system()).lower()
+    machine = (machine or platform.machine()).lower()
+    arch = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64",
+            "armv7l": "arm"}.get(machine)
+    if system != "linux" or not arch:
+        return None
+    name = f"go2rtc_linux_{arch}"
+    return name if name in GO2RTC_SHA256 else None
+
+
+def _go2rtc_version(exe: Path) -> str | None:
+    """"go2rtc version 1.9.14 (b5948cf) linux/amd64" -> "1.9.14"."""
+    res = sh([str(exe), "-version"])
+    m = re.search(r"go2rtc version (\S+)", res.stdout or "")
+    return m.group(1) if res.returncode == 0 and m else None
+
+
+def _published_digest(asset: str) -> str | None:
+    try:
+        data = json.loads(_http_get(GO2RTC_RELEASE_API, timeout=30).decode("utf-8", "replace"))
+    except Exception:
+        return None
+    for item in data.get("assets") or []:
+        if item.get("name") == asset:
+            digest = str(item.get("digest") or "")
+            return digest.split(":", 1)[1] if digest.startswith("sha256:") else None
+    return None
+
+
+def ensure_go2rtc(skip: bool) -> None:
+    """Fetch go2rtc into <repo>/bin (default on; the app starts it only when video is watched)."""
+    import hashlib
+
+    exe = BIN_DIR / "go2rtc"
+    have = _go2rtc_version(exe) if exe.is_file() else None
+    if skip or os.environ.get("EDGE_GO2RTC") == "0":
+        if have:
+            R.ok(f"go2rtc {have} present ({exe})")
+        else:
+            R.info("go2rtc not fetched (--no-go2rtc / EDGE_GO2RTC=0): remote live video is unavailable")
+        return
+    if have == GO2RTC_VERSION:
+        R.ok(f"go2rtc {have} ({exe})")
+        return
+    asset = go2rtc_asset_name()
+    if not asset:
+        R.warn(f"No go2rtc build pinned for {platform.system()} {platform.machine()}; remote live video "
+               "cannot run on this machine", "see https://github.com/AlexxIT/go2rtc/releases")
+        return
+    try:
+        R.info(f"downloading {asset} (go2rtc {GO2RTC_VERSION}{', replacing ' + have if have else ''})")
+        data = _http_get(f"{GO2RTC_RELEASE_URL}/{asset}", timeout=300)
+    except Exception as exc:  # offline, rate-limited, ...
+        R.warn(f"go2rtc download failed: {exc}; remote live video is unavailable until it is installed",
+               f"{REPO_DIR / 'run.sh'} --check-only")
+        return
+    published = _published_digest(asset)
+    digest = hashlib.sha256(data).hexdigest()
+    pinned = GO2RTC_SHA256[asset]
+    if digest != pinned or (published and published != pinned):
+        R.fail(f"go2rtc checksum mismatch for {asset}: got {digest}, pinned {pinned}"
+               + (f", published {published}" if published and published != pinned else "") + ". Not installed.")
+        return
+    BIN_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = exe.with_suffix(".download")
+    tmp.write_bytes(data)
+    os.chmod(tmp, 0o755)
+    os.replace(tmp, exe)
+    version = _go2rtc_version(exe)
+    if version != GO2RTC_VERSION:
+        R.fail(f"downloaded go2rtc does not run as expected (version {version!r})")
+        return
+    R.fix(f"go2rtc {version} installed: {exe} (sha256 matches the pinned hash"
+          + (" and the release's published digest)" if published else "; release digest unreachable)"))
+
+
+# --------------------------------------------------------------------------- #
 
 def finish(exit_code: int | None = None, provider: str | None = None) -> None:
     secs = time.perf_counter() - R.t0
@@ -779,6 +879,8 @@ def main() -> None:
     ap.add_argument("--with-tunnel", action="store_true",
                     help="fetch frpc into <repo>/bin for online access through your VPS (also with "
                          "EDGE_TUNNEL=1, and automatically when online access is enabled in Settings)")
+    ap.add_argument("--no-go2rtc", action="store_true",
+                    help="do not fetch go2rtc (remote live video); also EDGE_GO2RTC=0")
     args = ap.parse_args(argv)
 
     venv = Path(args.venv).expanduser().absolute()
@@ -809,6 +911,7 @@ def main() -> None:
     probe = verify_session(py, accel, mgx_cache)
     run_preflight(py)
     ensure_frpc(args.with_tunnel)
+    ensure_go2rtc(args.no_go2rtc)
 
     if args.check_only:
         finish(exit_code=1 if R.errors else 0, provider=probe.get("provider"))

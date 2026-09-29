@@ -200,6 +200,15 @@ async def lifespan(app: FastAPI):
         await remote_access_service.start()
     except Exception as exc:  # never block the store system on the tunnel
         startup_log.exception(f"Remote access failed to start: {exc}")
+    # 6. Live video (direct WebRTC): go2rtc is NOT started here (the first
+    # viewing session starts it). Only stop a go2rtc left running by an
+    # earlier process of this app that was killed, so no camera stays pulled.
+    try:
+        from .services.go2rtc_manager import go2rtc_manager
+
+        await asyncio.to_thread(go2rtc_manager.stop_leftover)
+    except Exception as exc:
+        startup_log.warning(f"Could not check for a leftover go2rtc: {exc}")
     # Learn about SIGTERM/SIGINT when it arrives, not after uvicorn has drained
     # connections: open /stream responses poll this flag and end, otherwise
     # the drain waits for them forever (see services/shutdown_signal.py).
@@ -214,6 +223,14 @@ async def lifespan(app: FastAPI):
         await pipeline_supervisor.stop()
         await asyncio.to_thread(pose_analytics.stop)
         await remote_access_service.stop()
+        # Live video (direct WebRTC): end every session and stop go2rtc. It is
+        # never started here: the first viewing session starts it on demand.
+        try:
+            from .services.webrtc_sessions import webrtc_sessions
+
+            await webrtc_sessions.stop()
+        except Exception as exc:
+            startup_log.exception(f"Live video shutdown failed: {exc}")
         await recommendations_service.stop()
         await evidence_storage.stop()
         await asyncio.to_thread(shadow_trial.stop)

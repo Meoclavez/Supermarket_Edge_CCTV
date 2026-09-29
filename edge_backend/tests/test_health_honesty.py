@@ -171,3 +171,31 @@ def test_tracker_seeds_nothing_and_counts_only_failures():
     ServiceHealthTracker.report_status("go2rtc", ServiceHealthTracker.NOT_CHECKED)
     assert t.get("go2rtc")["consecutive_failures"] == 0
     t.reset()
+
+
+def test_go2rtc_is_not_started_by_health_and_reports_why_it_failed(fresh, monkeypatch):
+    """go2rtc starts only for a live video session; a failed start is reported with its reason."""
+    from app.services.go2rtc_manager import Go2RtcManager, Go2RtcUnavailable
+
+    body = fresh.get("/api/v1/health").json()["services"]["go2rtc"]
+    assert body["status"] == "NOT_CHECKED"
+    m = Go2RtcManager()
+    assert m.status()["running"] is False
+    m.binary_finder = lambda: None
+    with pytest.raises(Go2RtcUnavailable):
+        _run(m.ensure_running())
+    svc = fresh.get("/api/v1/health").json()["services"]["go2rtc"]
+    assert svc["status"] == "NOT_PRESENT" and "not installed" in svc["last_error"]
+    assert svc["last_success_time"] is None
+
+
+def test_go2rtc_stopped_is_not_reported_healthy(fresh):
+    """Stopped (idle after a settings change, shutdown, or to cut a viewer): not HEALTHY any more."""
+    from app.services.go2rtc_manager import Go2RtcManager
+    from app.services.resilience import ServiceHealthTracker
+
+    ServiceHealthTracker.report_status("go2rtc", ServiceHealthTracker.HEALTHY)
+    assert fresh.get("/api/v1/health").json()["services"]["go2rtc"]["status"] == "HEALTHY"
+    _run(Go2RtcManager().stop())
+    svc = fresh.get("/api/v1/health").json()["services"]["go2rtc"]
+    assert svc["status"] == "NOT_CHECKED" and "next live-video session" in svc["last_error"]

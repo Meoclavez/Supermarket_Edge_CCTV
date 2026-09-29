@@ -436,6 +436,49 @@ class WebRtcAnswer(BaseModel):
     camera_id: str
     sdp: str
     type: str = "answer"
+    # Set by the compatibility /offer route: the session it opened. The
+    # phone app does not heartbeat yet, so such a session ends when the
+    # connection drops or after idle_timeout_s.
+    session_id: Optional[str] = None
+
+
+# Remote live video: direct peer-to-peer WebRTC (docs/REMOTE_VIDEO_CONTRACT.md).
+WebRtcPurpose = Literal["tile", "focus", "frame"]
+CandidateType = Literal["host", "srflx", "prflx", "relay"]
+
+
+class WebRtcSessionCreate(BaseModel):
+    camera_id: str = Field(..., min_length=1, max_length=128)
+    # The browser's offer with ICE gathering complete (non-trickle).
+    sdp: str = Field(..., min_length=10, max_length=65536)
+    purpose: WebRtcPurpose = "tile"
+
+
+class WebRtcSessionCreated(BaseModel):
+    session_id: str
+    sdp: str
+    heartbeat_s: int
+    expires_at: str
+    codec: Optional[str] = None
+    transcoded: bool = False
+
+
+class WebRtcHeartbeat(BaseModel):
+    expires_at: str
+
+
+class WebRtcCandidatePair(BaseModel):
+    local: Optional[CandidateType] = None
+    remote: Optional[CandidateType] = None
+    protocol: Optional[Literal["udp", "tcp"]] = None
+
+
+class WebRtcReport(BaseModel):
+    state: Literal["connected", "failed", "closed"]
+    pair: Optional[WebRtcCandidatePair] = None
+    bytes_received: Optional[int] = Field(default=None, ge=0)
+    frames_decoded: Optional[int] = Field(default=None, ge=0)
+    error: Optional[str] = Field(default=None, max_length=500)
 
 
 # ---------------- 24-Hour Timeline & DVR ----------------

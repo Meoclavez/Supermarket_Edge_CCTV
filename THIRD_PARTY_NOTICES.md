@@ -78,6 +78,6 @@ OpenMMLab publishes no ONNX for it.
 
 | Component | Licence |
 |---|---|
-| go2rtc (live video gateway) | MIT |
+| go2rtc (live video gateway for direct WebRTC; official release v1.9.14 from `AlexxIT/go2rtc`, unmodified, pinned by SHA-256 in `edge_backend/scripts/bootstrap.py`; run as a separate process) | MIT |
 | FFmpeg (installed from the operating system's packages) | LGPL-2.1-or-later, or GPL-2.0-or-later for GPL-enabled builds such as Debian/Ubuntu's |
 | frp: frpc on the edge box, frps on the owner's VPS (optional online access; official release v0.71.0 / `fatedier/frps` image, unmodified) | Apache-2.0 |

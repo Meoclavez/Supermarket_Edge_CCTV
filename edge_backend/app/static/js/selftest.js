@@ -180,6 +180,10 @@
         // stalls the virtual clock), so the tool is pointed at the finite
         // snapshot of the same camera; pixel geometry is identical.
         cal.frameUrl = () => `/api/v1/cameras/${encodeURIComponent(camId)}/snapshot?annotate=false&_=${Date.now()}`;
+        // Direct-video mode (through the online-access tunnel): the tool takes one
+        // still over WebRTC (WebRtcLive.grabFrame) and ignores frameUrl.
+        const direct = !!window.WebRtcLive && window.WebRtcLive.transportNow() === 'webrtc';
+        out('calibration picture source', undefined, direct ? 'direct video still (grabFrame)' : 'snapshot');
         cal.open(camId);
         await sleep(400);
         out('calibration panel opened', document.getElementById('fpLayout').classList.contains('fp-cal-open') && !!document.getElementById('fpCalImg'));
@@ -187,7 +191,7 @@
         // Image click -> native pixel conversion on the overlay canvas.
         const ov = document.getElementById('fpCalCanvas');
         const img = document.getElementById('fpCalImg');
-        await waitFor(() => img.naturalWidth > 0, 3000);
+        await waitFor(() => img.naturalWidth > 0, direct ? 20000 : 3000);
         if (img.naturalWidth > 0 && ov.clientWidth > 0) {
           const r = ov.getBoundingClientRect();
           ov.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: r.left + r.width * 0.25, clientY: r.top + r.height * 0.5 }));

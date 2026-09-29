@@ -14,7 +14,6 @@ import '../services/server_registry.dart';
 import '../services/webrtc_service.dart';
 import '../widgets/mjpeg_view.dart';
 import '../widgets/biometric_gate.dart';
-import '../widgets/talkback_button.dart';
 import '../widgets/timeline_models.dart';
 import '../widgets/timeline_scrubber_widget.dart';
 import 'camera_settings_screen.dart';
@@ -39,7 +38,6 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
   Uri? _mjpegUri;
   String? _fallbackReason;
   Timer? _webrtcTimer;
-  bool _isMuted = false;
 
   late CameraFeed _currentCamera;
   List<CameraFeed> _cameras = [];
@@ -137,7 +135,7 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
     }
     try {
       await _webrtcService.initialize();
-      await _webrtcService.connect(cameraId, enableBackchannel: true);
+      await _webrtcService.connect(cameraId);
       if (!mounted) return;
       setState(() => _isConnecting = false);
       _webrtcTimer = Timer(kWebRtcConnectTimeout, () {
@@ -208,10 +206,6 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
             ],
           ),
           actions: [
-            IconButton(
-              icon: Icon(_isMuted ? Icons.volume_off : Icons.volume_up),
-              onPressed: () => setState(() => _isMuted = !_isMuted),
-            ),
             IconButton(
               icon: const Icon(Icons.refresh),
               onPressed: _initAndConnect,
@@ -325,20 +319,13 @@ class _LiveViewScreenState extends State<LiveViewScreen> {
                 ),
               ),
 
-              // 2. Control bar (store PA push-to-talk, privacy masking info)
+              // 2. Control bar (privacy masking info)
               Container(
                 padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 24),
                 color: AppTheme.cardSurface,
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                   children: [
-                    if (_transport == LiveTransport.webrtc)
-                      TalkbackButton(webrtcService: _webrtcService)
-                    else
-                      const Tooltip(
-                        message: 'Store PA needs WebRTC on the store network',
-                        child: Icon(Icons.mic_off, color: Colors.white38),
-                      ),
                     IconButton(
                       icon: const Icon(Icons.security, color: AppTheme.cyberBlue),
                       tooltip: 'Privacy Masking Active',

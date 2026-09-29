@@ -68,7 +68,11 @@ MemoryMax=9G
 # Hardening. The service needs its storage directory, the video devices and
 # the network, and nothing else. Online access needs nothing extra: frpc runs
 # from /opt/edge-cctv/bin (read-only is enough), its generated config lives in
-# storage/tunnel/ (0700), and it only makes outbound connections.
+# storage/tunnel/ (0700), and it only makes outbound connections. The same
+# holds for go2rtc (remote live video, started on the first viewing session):
+# /opt/edge-cctv/bin/go2rtc, config in storage/go2rtc/ (0700), API and RTSP on
+# 127.0.0.1 only, WebRTC on ephemeral UDP ports (mode auto). Its ffmpeg
+# transcode children use the same DeviceAllow GPU nodes as the decoders.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

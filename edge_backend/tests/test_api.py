@@ -96,24 +96,20 @@ def test_list_cameras(client, auth_headers):
     assert "cameras" in data
 
 
-def test_dynamic_ice_servers(client, auth_headers, monkeypatch):
-    # TURN is opt-in (compose profile "turn"); with it enabled, time-limited
-    # credentials are issued.
+def test_ice_servers_never_offer_a_relay(client, auth_headers, monkeypatch):
+    # Remote video is direct peer-to-peer (docs/REMOTE_VIDEO_CONTRACT.md): no
+    # TURN relay exists, and TURN_ENABLED is ignored.
     from app.config import settings
-    from app.services.turn_service import turn_service
 
     monkeypatch.setattr(settings, "TURN_ENABLED", True)
-    monkeypatch.setattr(turn_service, "turn_host", "203.0.113.10")
     response = client.get("/api/v1/webrtc/ice-servers?client_id=test_client", headers=auth_headers)
     assert response.status_code == 200
     data = response.json()
-    assert "iceServers" in data
-    assert data["turn_enabled"] is True
-    assert len(data["iceServers"]) >= 2
-    # Verify TURN credential presence
-    turn_entry = data["iceServers"][1]
-    assert "username" in turn_entry
-    assert "credential" in turn_entry
+    assert data["turn_enabled"] is False
+    assert data["webrtc_scope"] == "internet"
+    assert data["iceServers"], "the configured STUN server is listed"
+    assert all("credential" not in s and "username" not in s for s in data["iceServers"])
+    assert all(u.startswith("stun:") for s in data["iceServers"] for u in s["urls"])
 
 
 def test_ice_servers_stun_only_without_turn(client, auth_headers, monkeypatch):
@@ -122,7 +118,6 @@ def test_ice_servers_stun_only_without_turn(client, auth_headers, monkeypatch):
     monkeypatch.setattr(settings, "TURN_ENABLED", False)
     data = client.get("/api/v1/webrtc/ice-servers", headers=auth_headers).json()
     assert data["turn_enabled"] is False
-    assert data["webrtc_scope"] == "lan_only"
     assert all("credential" not in s for s in data["iceServers"])
     assert all(u.startswith("stun:") for s in data["iceServers"] for u in s["urls"])
 
@@ -329,21 +324,25 @@ def test_path_traversal_prevention(client):
     assert "Invalid filename format" in exc_info.value.detail
 
 
-def test_webrtc_offer_exchange(client, auth_headers):
+def test_webrtc_offer_exchange(client, auth_headers, monkeypatch):
+    """The phone app's /offer is a thin wrapper that opens a live video session.
+
+    Without a go2rtc binary it says so (503); it used to return a hand-written
+    SDP no peer could connect to. The full flow is in tests/test_webrtc_p2p.py.
+    """
+    from app.services.go2rtc_manager import go2rtc_manager
+
+    monkeypatch.setattr(go2rtc_manager, "binary_finder", lambda: None)
     offer_payload = {
         "camera_id": TEST_CAMERA,
-        "sdp": "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=EdgeCCTV_test\r\nt=0 0\r\na=sendrecv\r\n",
+        "sdp": "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n"
+               "a=rtpmap:96 H264/90000\r\na=recvonly\r\n",
         "type": "offer"
     }
     response = client.post("/api/v1/webrtc/offer", json=offer_payload, headers=auth_headers)
-    # With a go2rtc gateway the answer is its real SDP; without one the route
-    # says so. It used to return a hand-written SDP no peer could connect to.
-    assert response.status_code in (200, 501), response.text
-    data = response.json()
-    if response.status_code == 200:
-        assert "sdp" in data and data["type"] == "answer"
-    else:
-        assert data["detail"].startswith("WebRTC signaling not available")
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"].startswith("WebRTC signaling not available")
+    assert "go2rtc" in response.json()["detail"]
 
 
 def test_dvr_export_incident(client, auth_headers):

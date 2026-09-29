@@ -14,6 +14,12 @@
  * frame. The feed is displayed with object-fit: contain, so a click has to
  * be mapped through the letterboxed content box, computed from the image's
  * naturalWidth/naturalHeight, before it is normalised.
+ *
+ * Direct video (WebRtcLive transport 'webrtc', always through the online-
+ * access tunnel, which never carries camera pixels): the feed is a <video>
+ * backed by one direct WebRTC session (js/webrtc_live.js) instead of MJPEG.
+ * It is raw camera video, without the detector's boxes. The session closes
+ * when the tab is hidden or the page is left, and reopens when visible.
  */
 
 'use strict';
@@ -22,7 +28,10 @@ const DASH = '—';
 const canvas = document.getElementById('interactiveCanvas');
 const ctx = canvas ? canvas.getContext('2d') : null;
 const streamImg = document.getElementById('streamImg');
+const streamVideo = document.getElementById('streamVideo');
 const viewport = document.getElementById('viewportWrapper');
+let studioRtc = null;         // direct-video session of the camera on screen (remote mode)
+let studioRtcRetry = null;
 
 let currentMode = 'NONE';
 let drawnPoints = [];
@@ -163,13 +172,22 @@ function contentBox() {
   if (!viewport) return { ox: 0, oy: 0, w: 0, h: 0 };
   const W = viewport.clientWidth;
   const H = viewport.clientHeight;
-  const nw = streamImg && streamImg.naturalWidth;
-  const nh = streamImg && streamImg.naturalHeight;
+  const { w: nw, h: nh } = frameSize();
   if (!nw || !nh || !W || !H) return { ox: 0, oy: 0, w: W, h: H };
   const scale = Math.min(W / nw, H / nh);
   const w = nw * scale;
   const h = nh * scale;
   return { ox: (W - w) / 2, oy: (H - h) / 2, w, h };
+}
+
+/** Native size of the picture on screen: the direct video's, else the MJPEG image's. */
+function frameSize() {
+  if (studioDirect() && streamVideo && streamVideo.videoWidth) return { w: streamVideo.videoWidth, h: streamVideo.videoHeight };
+  return { w: (streamImg && streamImg.naturalWidth) || 0, h: (streamImg && streamImg.naturalHeight) || 0 };
+}
+
+function studioDirect() {
+  return !!(window.WebRtcLive && window.WebRtcLive.transportNow() === 'webrtc');
 }
 
 function resizeCanvas() {
@@ -199,6 +217,7 @@ if (streamImg) {
     if (sig !== lastNatural) { lastNatural = sig; resizeCanvas(); }
   });
   streamImg.addEventListener('error', () => {
+    if (studioDirect() || !streamImg.getAttribute('src')) return;   // direct video: no MJPEG to retry
     setViewportEmpty('Reconnecting to camera feed…');
     clearTimeout(streamImg._retryTimer);
     streamImg._retryTimer = setTimeout(() => {
@@ -209,6 +228,113 @@ if (streamImg) {
       }
     }, 1500);
   });
+}
+
+if (streamVideo) {
+  let lastVideoSize = '';
+  const onVideoSize = () => {
+    const sig = `${streamVideo.videoWidth}x${streamVideo.videoHeight}`;
+    if (streamVideo.videoWidth) setViewportEmpty('');
+    if (sig !== lastVideoSize) { lastVideoSize = sig; resizeCanvas(); }
+  };
+  streamVideo.addEventListener('loadedmetadata', onVideoSize);
+  streamVideo.addEventListener('resize', onVideoSize);
+}
+
+/** Direct video badge in the header: honest connection state. */
+function setTransportBadge(text, kind, tip) {
+  const b = el('liveTransportBadge');
+  if (!b) return;
+  b.hidden = !text;
+  b.textContent = text || '';
+  b.title = tip || '';
+  b.classList.toggle('badge-green', kind === 'ok');
+  b.classList.toggle('badge-warning', kind === 'wait');
+  b.classList.toggle('badge-danger', kind === 'err');
+}
+
+function closeStudioVideo(reason) {
+  clearTimeout(studioRtcRetry);
+  studioRtcRetry = null;
+  const h = studioRtc;
+  studioRtc = null;
+  if (h) h.close(reason || 'closed');
+}
+
+/** Open the camera's direct video on the <video> (remote mode). */
+function openStudioVideo(cameraId) {
+  closeStudioVideo('switch-camera');
+  if (!streamVideo || !window.WebRtcLive || document.hidden) return;
+  setViewportEmpty('Opening a direct video connection to the store…');
+  setTransportBadge('Connecting…', 'wait', 'Opening a direct video connection to the store');
+  const h = window.WebRtcLive.open(cameraId, streamVideo, { purpose: 'focus' });
+  studioRtc = h;
+  h.on('state', (state) => {
+    if (studioRtc !== h) return;
+    if (state === 'connected') {
+      const via = window.WebRtcLive.pairLabel(h.pair);
+      setTransportBadge(`Direct${via ? ` · ${via}` : ''}`, 'ok',
+        'Direct peer-to-peer video; it does not pass through the online-access server. Raw camera video: the detector boxes are shown only on the store network.');
+      if (!streamVideo.videoWidth) setViewportEmpty('Connected. Waiting for the first picture…');
+    } else if (state === 'failed') {
+      studioRtc = null;
+      const e = h.error || {};
+      const title = e.network ? 'Direct video not possible from this network' : (e.message || 'Direct video failed');
+      setTransportBadge(title, 'err', e.detail || '');
+      setViewportHtml(`<div class="studio-rtc-fail">
+          <div class="studio-rtc-fail-title">${escapeHtml(title)}</div>
+          <div>${escapeHtml(e.detail || '')}</div>
+          <div class="studio-rtc-fail-actions">
+            <button type="button" class="btn btn-sm" onclick="studioRetryVideo()">Try again</button>
+            <a class="btn btn-sm btn-primary" href="/dashboard#settings">Check connection (Settings → Online access)</a>
+          </div>
+        </div>`);
+    } else if (state === 'closed') {
+      studioRtc = null;
+      setTransportBadge('Direct video closed', 'wait', 'Reopens when this page is visible');
+      // The box ended it (idle / time cap): reopen while the page is still shown.
+      if (h.closeReason === 'expired' && !document.hidden && activeCameraId === cameraId) {
+        studioRtcRetry = setTimeout(() => { if (activeCameraId === cameraId && !studioRtc) openStudioVideo(cameraId); }, 1000);
+      }
+    }
+  });
+}
+
+function studioRetryVideo() {
+  if (activeCameraId && studioDirect()) openStudioVideo(activeCameraId);
+}
+window.studioRetryVideo = studioRetryVideo;
+
+/** Show the camera: direct video in remote mode, MJPEG with the detector's boxes on the store network. */
+async function startFeed(cameraId) {
+  const mode = window.WebRtcLive ? await window.WebRtcLive.mode() : 'local';
+  if (activeCameraId !== cameraId) return;
+  if (viewport) viewport.classList.toggle('video-viewport-rtc', mode === 'webrtc');
+  if (mode === 'webrtc') {
+    if (streamImg && streamImg.getAttribute('src')) streamImg.removeAttribute('src');
+    openStudioVideo(cameraId);
+    return;
+  }
+  closeStudioVideo('local');
+  setTransportBadge('', '');
+  if (streamImg) {
+    setViewportEmpty('');
+    const sUrl = `/stream?camera_id=${encodeURIComponent(cameraId)}&overlay=1`;
+    streamImg.src = window.edgeAuth && window.edgeAuth.authUrl ? window.edgeAuth.authUrl(sUrl) : sUrl;
+  }
+}
+
+// Hidden tab: webrtc_live.js closes every session. Visible again: reopen.
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && activeCameraId && studioDirect() && !studioRtc) openStudioVideo(activeCameraId);
+});
+window.addEventListener('pagehide', () => closeStudioVideo('pagehide'));
+
+function setViewportHtml(html) {
+  const e = el('viewportEmpty');
+  if (!e) return;
+  e.innerHTML = html;
+  e.style.display = html ? 'flex' : 'none';
 }
 
 function setViewportEmpty(message) {
@@ -1133,11 +1259,7 @@ function selectCamera(cameraId) {
     history.replaceState(null, '', url.toString());
   }
   syncChecklistLink();
-  if (streamImg) {
-    setViewportEmpty('');
-    const sUrl = `/stream?camera_id=${encodeURIComponent(cameraId)}&overlay=1`;
-    streamImg.src = window.edgeAuth && window.edgeAuth.authUrl ? window.edgeAuth.authUrl(sUrl) : sUrl;
-  }
+  startFeed(cameraId);
   drawnPoints = [];
   loadZonesList();
   pollTelemetry();
@@ -1154,6 +1276,7 @@ async function loadStudioSources() {
     list.innerHTML = '<span class="fp-empty">No cameras configured.</span>';
     el('sourceBadge').textContent = 'No cameras configured';
     if (streamImg && streamImg.getAttribute('src')) streamImg.removeAttribute('src');
+    closeStudioVideo('no-cameras');
     setViewportEmpty(data === null
       ? 'Camera list unavailable: the API did not respond.'
       : 'No camera has been adopted yet. Use "Find & adopt cameras" to scan the network and USB ports from the Blueprint tab.');
@@ -1231,8 +1354,8 @@ async function pollTelemetry() {
   setTelemetry('tDetections', analysed && isNum(live.detections_last_frame) ? live.detections_last_frame : null);
   setTelemetry('tTracks', analysed && isNum(live.live_tracks) ? live.live_tracks : null);
   setTelemetry('tFrames', isNum(live.frames_read) ? live.frames_read.toLocaleString() : null);
-  const fw = live.frame_width || (analysed && streamImg && streamImg.naturalWidth) || null;
-  const fh = live.frame_height || (analysed && streamImg && streamImg.naturalHeight) || null;
+  const fw = live.frame_width || (analysed && frameSize().w) || null;
+  const fh = live.frame_height || (analysed && frameSize().h) || null;
   setTelemetry('tFrameSize', fw && fh ? `${fw}x${fh}` : null);
   setTelemetry('tAge', isNum(live.seconds_since_frame) ? live.seconds_since_frame.toFixed(1) : null, ' s');
   setTelemetry('tCalibrated', typeof live.calibrated === 'boolean' ? (live.calibrated ? 'calibrated' : 'not calibrated') : null);
@@ -1250,6 +1373,10 @@ async function triggerSnapshot() {
   try {
     const res = await fetch(`/api/v1/cameras/${encodeURIComponent(activeCameraId)}/actions/snapshot`, { method: 'POST' });
     const body = await res.json().catch(() => ({}));
+    if (res.status === 403 && body.code === 'video_direct_only') {
+      out.innerHTML = '<div class="fp-empty">Snapshot not saved: over online access, live pictures travel only on the direct video connection, never through the online-access server. Save snapshots from the store network.</div>';
+      return;
+    }
     if (!res.ok) {
       out.innerHTML = `<div class="fp-empty">Snapshot not saved (HTTP ${res.status}): ${escapeHtml(body.detail || 'no detail')}</div>`;
       return;
@@ -1314,16 +1441,25 @@ async function runStudioSelfTest() {
   check('cameras loaded', Array.isArray(studioCameras), `${studioCameras.length} camera(s)`);
   if (studioCameras.length) {
     check('camera selected from URL or first', !!activeCameraId, activeCameraId);
-    check('stream src has camera id + overlay', /\/stream\?camera_id=.+&overlay=1/.test(streamImg.getAttribute('src') || ''), streamImg.getAttribute('src'));
-    const r = streamImg.getBoundingClientRect();
-    check('stream img rendered height > 100', r.height > 100, `${r.width.toFixed(0)}x${r.height.toFixed(0)}`);
-    check('stream img naturalWidth > 0', streamImg.naturalWidth > 0, `${streamImg.naturalWidth}x${streamImg.naturalHeight}`);
+    const direct = studioDirect();
+    if (direct) {
+      check('direct video: no MJPEG stream', !streamImg.getAttribute('src'), streamImg.getAttribute('src'));
+      const rv = streamVideo.getBoundingClientRect();
+      check('direct video rendered height > 100', rv.height > 100, `${rv.width.toFixed(0)}x${rv.height.toFixed(0)}`);
+      check('direct video has a picture', streamVideo.videoWidth > 0, `${streamVideo.videoWidth}x${streamVideo.videoHeight}`);
+    } else {
+      check('stream src has camera id + overlay', /\/stream\?camera_id=.+&overlay=1/.test(streamImg.getAttribute('src') || ''), streamImg.getAttribute('src'));
+      const r = streamImg.getBoundingClientRect();
+      check('stream img rendered height > 100', r.height > 100, `${r.width.toFixed(0)}x${r.height.toFixed(0)}`);
+      check('stream img naturalWidth > 0', streamImg.naturalWidth > 0, `${streamImg.naturalWidth}x${streamImg.naturalHeight}`);
+    }
     const box = contentBox();
     const cr = canvas.getBoundingClientRect();
     check('canvas tracks displayed content box', Math.abs(cr.width - box.w) < 2 && Math.abs(cr.height - box.h) < 2,
       `canvas ${cr.width.toFixed(0)}x${cr.height.toFixed(0)} vs content ${box.w.toFixed(0)}x${box.h.toFixed(0)}`);
-    if (streamImg.naturalWidth) {
-      check('canvas aspect equals frame aspect', Math.abs((cr.width / cr.height) - (streamImg.naturalWidth / streamImg.naturalHeight)) < 0.05);
+    const fs = frameSize();
+    if (fs.w) {
+      check('canvas aspect equals frame aspect', Math.abs((cr.width / cr.height) - (fs.w / fs.h)) < 0.05);
     }
     check('telemetry status populated', el('tStatus').textContent !== DASH, el('tStatus').textContent);
     check('telemetry error shown honestly', true, el('tError').textContent);

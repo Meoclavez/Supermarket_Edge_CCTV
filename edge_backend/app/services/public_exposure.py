@@ -77,6 +77,24 @@ REMOTE_REFUSED_PREFIXES = ("/api/v1/setup/",)
 # setup is complete.
 REMOTE_READONLY_ALLOWED = ("/api/v1/setup/status",)
 REMOTE_REFUSED_EXACT = ("/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect")
+# No live pixels through the tunnel (docs/REMOTE_VIDEO_CONTRACT.md, rule 2):
+# remote viewers get camera video only as direct peer-to-peer WebRTC
+# (/api/v1/webrtc/*), never through the VPS. Any method. Recorded DVR video
+# is refused too (the device is evidence-only). Stored evidence stills and
+# short clips (event clips/snapshots, theft evidence, night-watch evidence,
+# zone alert snapshots) stay downloadable on an explicit click.
+VIDEO_DIRECT_ONLY = "video_direct_only"
+REMOTE_VIDEO_REFUSED = tuple(re.compile(p) for p in (
+    r"^/stream/?$",                                   # MJPEG
+    r"^/api/v1/cameras/[^/]+/snapshot/?$",            # live JPEG
+    r"^/api/v1/cameras/[^/]+/actions/snapshot/?$",    # live JPEG saved on demand
+    r"^/api/v1/cameras/test-connection/?$",           # opens a camera and returns a frame
+    r"^/api/v1/dvr/cameras/[^/]+/hls(?:/|$)",         # DVR HLS
+    r"^/api/v1/dvr/segments/[^/]+/video/?$",          # recorded video segment
+    r"^/api/v1/dvr/archives/[^/]+/download/?$",       # recorded video export
+))
+REMOTE_VIDEO_DETAIL = ("Live camera video is not sent through the online-access tunnel. Remote viewers get "
+                       "it directly from this device (peer-to-peer WebRTC, /api/v1/webrtc/config).")
 
 
 def _is_loopback(host: Optional[str]) -> bool:
@@ -254,6 +272,12 @@ def came_via_https_proxy(request: Request) -> bool:
     return proto == "https"
 
 
+def is_live_video_path(path: str) -> bool:
+    """True for an endpoint that serves live camera pixels (refused through the tunnel)."""
+    path = re.sub(r"/{2,}", "/", path or "")
+    return any(p.match(path) for p in REMOTE_VIDEO_REFUSED)
+
+
 # --------------------------------------------------------------------------- #
 # Middleware
 # --------------------------------------------------------------------------- #
@@ -273,13 +297,17 @@ class PublicExposureMiddleware:
         request = Request(scope) if scope["type"] == "http" else HTTPConnection(scope)
         remote = is_remote_request(request)
         if remote:
-            refusal = self._refusal(scope.get("path", ""), scope.get("method", "GET"))
+            path = scope.get("path", "")
+            refusal = self._refusal(path, scope.get("method", "GET"))
+            code = None
+            if refusal is None and is_live_video_path(path):
+                refusal, code = REMOTE_VIDEO_DETAIL, VIDEO_DIRECT_ONLY
             if refusal:
                 logger.warning(f"Refused remote request to {scope.get('path')} from {client_ip(request)}: {refusal}")
                 if scope["type"] == "websocket":
                     await send({"type": "websocket.close", "code": 1008})
                     return
-                body = json.dumps({"detail": refusal}).encode()
+                body = json.dumps({"code": code, "detail": refusal} if code else {"detail": refusal}).encode()
                 await send({"type": "http.response.start", "status": 403, "headers": [
                     (b"content-type", b"application/json"), (b"content-length", str(len(body)).encode()),
                     *self._security_headers(request, remote)]})

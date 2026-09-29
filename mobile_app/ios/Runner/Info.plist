@@ -37,9 +37,7 @@
 
 	<!-- Hardware & Streaming Permissions for WebRTC -->
 	<key>NSCameraUsageDescription</key>
-	<string>Used for bi-directional CCTV video and calibration.</string>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>Used only while you hold the Store PA button, to speak to shoppers through a camera's speaker.</string>
+	<string>Used to scan the pairing QR code shown on the store dashboard.</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>Used to confirm it is you before showing camera feeds.</string>
 	

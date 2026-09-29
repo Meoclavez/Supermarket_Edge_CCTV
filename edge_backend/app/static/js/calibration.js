@@ -10,6 +10,12 @@
  *
  * Image points are always in the camera's NATIVE pixel space (naturalWidth x
  * naturalHeight of the frame), never in the displayed size.
+ *
+ * Direct video (WebRtcLive transport 'webrtc', always through the online-
+ * access tunnel, which never carries camera pixels): the picture is one
+ * still taken over a direct WebRTC session (WebRtcLive.grabFrame), shown in
+ * the same <img>, so the pixel geometry is unchanged. A new still is taken
+ * only when the operator presses "Take a new picture"; nothing is polled.
  */
 (function () {
   'use strict';
@@ -32,6 +38,8 @@
     frameH: null,
     hasHomography: false,
     frameSource: null,    // 'live' | 'no-signal' | null
+    remote: false,        // direct-video mode: one still per explicit refresh
+    _grabCtl: null,
     _ro: null,
     _lastResult: null,
 
@@ -48,6 +56,7 @@
       const panel = this.panel;
       if (!panel || !editor) return;
       if (this.cameraId && this.cameraId !== cameraId) this.close();
+      this.remote = !!window.WebRtcLive && (await window.WebRtcLive.mode()) === 'webrtc';
 
       this.cameraId = cameraId;
       this.camera = (editor.cameras || []).find((c) => c.camera_id === cameraId) || { camera_id: cameraId, name: cameraId };
@@ -74,10 +83,12 @@
     close() {
       const layout = document.getElementById('fpLayout');
       if (layout) layout.classList.remove('fp-cal-open');
+      if (this._grabCtl) { this._grabCtl.abort(); this._grabCtl = null; }
       const img = document.getElementById('fpCalImg');
       if (img) {
         img.onload = null;
         img.src = '';                   // drops the MJPEG connection immediately
+        if (window.WebRtcLive) window.WebRtcLive.releaseStill(img);
       }
       if (this._ro) { this._ro.disconnect(); this._ro = null; }
       if (this.editor) {
@@ -113,10 +124,51 @@
 
     /** Find out whether the frame shown is a real one or the no-signal slate. */
     async probeFrame() {
+      if (this.remote) { await this.loadRemoteFrame(); return; }
       try {
         const res = await fetch(`/api/v1/cameras/${encodeURIComponent(this.cameraId)}/snapshot?annotate=false&_=${Date.now()}`);
         this.frameSource = res.headers.get('X-Frame-Source') || (res.ok ? 'unknown' : null);
       } catch (_) { this.frameSource = null; }
+    },
+
+    /** Remote mode: take one still over direct video into the frame <img>. */
+    async loadRemoteFrame() {
+      const camId = this.cameraId;
+      if (!camId || !window.WebRtcLive) return;
+      if (this._grabCtl) this._grabCtl.abort();
+      const ctl = new AbortController();
+      this._grabCtl = ctl;
+      this._remoteNote = { kind: 'busy', text: 'Taking a picture over a direct video connection to the store…' };
+      this.renderRemoteBar();
+      const img = document.getElementById('fpCalImg');
+      const res = await window.WebRtcLive.loadStill(img, camId, { signal: ctl.signal });
+      if (ctl.signal.aborted || this.cameraId !== camId) return;
+      this._grabCtl = null;
+      if (res.ok) {
+        this.frameSource = 'live';
+        const at = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        this._remoteNote = { kind: 'ok', text: `Still picture taken at ${at} over direct video. Take a new one if the scene changed.` };
+      } else {
+        this.frameSource = null;
+        const e = res.error || {};
+        const title = e.network ? 'Direct video not possible from this network' : (e.message || 'No picture');
+        this._remoteNote = { kind: 'err', text: `${title}. ${e.detail || ''}`.trim(), network: !!e.network };
+      }
+      if (this.isOpen()) this.render();
+    },
+
+    renderRemoteBar() {
+      const bar = document.getElementById('fpCalRemote');
+      if (!bar) return;
+      bar.hidden = !this.remote;
+      if (!this.remote) return;
+      const n = this._remoteNote || { kind: 'busy', text: '' };
+      const busy = n.kind === 'busy';
+      bar.innerHTML = `
+        <span class="fp-cal-remote-text ${n.kind === 'err' ? 'is-err' : ''}">${esc(n.text)}</span>
+        <button type="button" class="btn btn-sm" id="fpCalRefresh" ${busy ? 'disabled' : ''}>Take a new picture</button>
+        ${n.kind === 'err' ? '<a class="btn btn-sm btn-primary" href="#settings" onclick="openRemoteVideoCheck(); return false;">Check connection</a>' : ''}`;
+      bar.querySelector('#fpCalRefresh')?.addEventListener('click', () => this.loadRemoteFrame());
     },
 
     // ---------------------------------------------------------------- render
@@ -138,10 +190,11 @@
         <div class="fp-cal-steps" id="fpCalSteps"></div>
         <div id="fpCalSignalWarning"></div>
         <div class="fp-cal-frame" id="fpCalFrame">
-          <img id="fpCalImg" alt="Live frame from ${esc(cam.name || cam.camera_id)}" src="${this.frameUrl()}">
+          <img id="fpCalImg" alt="${this.remote ? 'Still picture' : 'Live frame'} from ${esc(cam.name || cam.camera_id)}"${this.remote ? '' : ` src="${this.frameUrl()}"`}>
           <canvas id="fpCalCanvas"></canvas>
           <div class="fp-cal-framesize" id="fpCalFrameSize">${this.frameW && this.frameH ? `${this.frameW}×${this.frameH} px` : 'frame size: waiting for first frame'}</div>
         </div>
+        <div class="fp-cal-remote" id="fpCalRemote" hidden></div>
         <div class="fp-actions" id="fpCalActions"></div>
         <div id="fpCalResultWrap"></div>
         <div class="fp-cal-pairs" id="fpCalPairs"></div>`;
@@ -213,8 +266,9 @@
       }
 
       // Check if frameUrl target has changed significantly (e.g. from selftest redirecting to snapshot)
+      this.renderRemoteBar();
       const img = panel.querySelector('#fpCalImg');
-      if (img) {
+      if (img && !this.remote) {
         const targetUrl = this.frameUrl();
         const baseTarget = targetUrl.split('&_')[0].split('?_')[0];
         if (!img.src.includes(baseTarget)) {

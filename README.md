@@ -2,7 +2,7 @@
 
 An enterprise-grade, **100% on-premises edge-processed CCTV AI monitoring and safety ecosystem**. Designed for **Intel N100 Mini PCs** paired with **Hailo-8 / 8L M.2 PCIe AI modules**, executing hardware-accelerated video decoding via **Intel QuickSync (VA-API)** and neural inference on the best accelerator found at runtime (NVIDIA, AMD, Intel or CPU).
 
-Connects directly to a **cross-platform Flutter client (PC Web/Desktop, Android, and iOS)** featuring **loss-prevention alerts for store staff**, **24/7 Segmented DVR Recording with 24-Hour Timeline Scrubbing**, **Interactive Visual Zone & Privacy Mask Editor**, **2-Way Audio Push-to-Talk**, and **Ultra-Low Latency (<300ms) WebRTC Streaming**.
+Connects directly to a **cross-platform Flutter client (PC Web/Desktop, Android, and iOS)** featuring **loss-prevention alerts for store staff**, **24/7 Segmented DVR Recording with 24-Hour Timeline Scrubbing**, **Interactive Visual Zone & Privacy Mask Editor**, and **Ultra-Low Latency (<300ms) receive-only WebRTC video**.
 
 ---
 
@@ -21,7 +21,6 @@ Connects directly to a **cross-platform Flutter client (PC Web/Desktop, Android,
   * Dynamic HLS (`.m3u8`) generator with gap discontinuity tags and sub-2-second lossless incident MP4 export (`/api/v1/cameras/{id}/export`).
 * **🌐 Zero-Trust WebRTC & NAT Traversal**:
   * **go2rtc** media gateway ($<300\text{ms}$ latency) + **Coturn** RFC 5766 dynamic HMAC-SHA1 authenticated STUN/TURN relay for symmetric 4G/5G mobile connectivity.
-  * **Push-to-Talk 2-Way Audio Backchannel**: Encodes Flutter microphone audio to Opus 48kHz and routes to camera speakers.
   * Automated 2048-bit SAN TLS certificates.
 * **🔔 Loss-prevention alerts for staff**:
   * High-priority, time-sensitive pushes (APNs `time-sensitive`, FCM `priority: high`) with the normal alert sound; no critical-alert entitlement and no siren.
@@ -51,7 +50,7 @@ Connects directly to a **cross-platform Flutter client (PC Web/Desktop, Android,
  │ 6. Caddy TLS Reverse Proxy.                                                 │
  │ 7. Loss-prevention alert fan-out: APNs / FCM pushes + dashboard websocket.  │
  └──────────────────────────────────────┬──────────────────────────────────────┘
-                                        │ (HTTPS / WSS / WebRTC + Opus Mic)
+                                        │ (HTTPS / WSS / WebRTC video)
                                         ▼
  ┌─────────────────────────────────────────────────────────────────────────────┐
  │             CROSS-PLATFORM FLUTTER CLIENT (DESKTOP / WEB / MOBILE)         │
@@ -63,7 +62,6 @@ Connects directly to a **cross-platform Flutter client (PC Web/Desktop, Android,
  │  • System & SMART Storage Dashboard: Disk gauges, wear level, camera quota. │
  │  • AI Incident Center: Severity-filtered alerts with instant clip playback. │
  │  • Biometric Gate: FaceID / Fingerprint lock with 60s grace period.         │
- │  • WebRTC 2-Way Audio Talkback: Native Opus microphone backchannel.         │
  └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -134,17 +132,16 @@ Supermarket_Edge_CCTV/
         │   ├── api_service.dart              # REST client with auto-failover & base URL switching
         │   ├── discovery_service.dart        # Universal mDNS discovery + subnet sweep
         │   ├── biometric_auth_service.dart   # FaceID / Fingerprint manager with 60s grace
-        │   ├── webrtc_service.dart           # WebRTC manager with H.264/Opus SDP prioritization
+        │   ├── webrtc_service.dart           # Receive-only WebRTC video session manager
         │   └── notification_service.dart     # Push handler with lockscreen interactive actions
         ├── widgets/
         │   ├── biometric_gate.dart           # Biometric authentication screen wrapper
-        │   ├── talkback_button.dart          # Push-to-Talk 2-way audio button
         │   ├── timeline_scrubber_widget.dart # Gesture scrubber with pinch zoom 1h-24h
         │   └── zone_canvas_painter.dart      # Interactive canvas painter for polygon/tripwire drawing
         └── screens/
             ├── app_shell.dart                # Master adaptive responsive AppShell
             ├── multi_cam_grid_screen.dart    # Adaptive 1 to 16 camera live grid wall
-            ├── live_view_screen.dart         # WebRTC live player with talkback & 24h timeline
+            ├── live_view_screen.dart         # WebRTC live player (video only) & 24h timeline
             ├── dvr_playback_screen.dart      # 24/7 continuous DVR timeline player
             ├── events_center_screen.dart     # Filtered AI incident center
             ├── zone_editor_screen.dart       # Visual zone & privacy mask drawing canvas

@@ -4,12 +4,16 @@ GET  /api/v1/remote-access          status + settings (the token is never return
 PUT  /api/v1/remote-access          configure / enable / disable (operator session)
 POST /api/v1/remote-access/verify   fetch https://<hostname>/api/v1/device/identity
                                     and compare device_id with this device
+
+The same settings carry remote live video (direct WebRTC, STUN only):
+``stun_servers``, ``webrtc_mode``, ``webrtc_port``, ``max_video_sessions`` and
+``live_transport_on_lan`` (routes/webrtc.py uses them).
 """
 
 from __future__ import annotations
 
 import asyncio
-from typing import Optional
+from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -41,6 +45,15 @@ class RemoteAccessUpdate(BaseModel):
     clear_server_key: bool = False
     extra_proxies: Optional[int] = Field(default=None, ge=0, le=2,
                                          description="proxies in front of the VPS's reverse proxy (e.g. a CDN): 0-2")
+    # Remote live video: direct peer-to-peer WebRTC (docs/REMOTE_VIDEO_CONTRACT.md).
+    stun_servers: Optional[List[str]] = Field(default=None, max_length=4,
+                                              description="STUN servers (stun:host:port); TURN is refused")
+    webrtc_mode: Optional[Literal["auto", "fixed_port"]] = Field(
+        default=None, description="auto: no router change; fixed_port: a forwarded UDP port")
+    webrtc_port: Optional[int] = Field(default=None, ge=1024, le=65535, description="fixed_port mode: UDP/TCP port")
+    max_video_sessions: Optional[int] = Field(default=None, ge=1, le=32, description="live video sessions at once")
+    live_transport_on_lan: Optional[Literal["local", "webrtc"]] = Field(
+        default=None, description="live video on the store network: local (snapshots/MJPEG) or webrtc")
 
 
 def _require_operator(request: Request) -> None:
@@ -73,6 +86,11 @@ async def put_remote_access(body: RemoteAccessUpdate, request: Request):
             server_key=body.server_key or None,
             clear_server_key=body.clear_server_key,
             extra_proxies=body.extra_proxies,
+            stun_servers=body.stun_servers,
+            webrtc_mode=body.webrtc_mode,
+            webrtc_port=body.webrtc_port,
+            max_video_sessions=body.max_video_sessions,
+            live_transport_on_lan=body.live_transport_on_lan,
         )
     except RemoteAccessError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

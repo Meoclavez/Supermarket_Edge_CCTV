@@ -20,10 +20,10 @@ class ApiConstants {
     'sdpSemantics': 'unified-plan',
   };
 
-  // WebRTC Media Constraints
+  // WebRTC Media Constraints: live view is receive-only video.
   static const Map<String, dynamic> rtcMediaConstraints = {
     'mandatory': {
-      'OfferToReceiveAudio': true,
+      'OfferToReceiveAudio': false,
       'OfferToReceiveVideo': true,
     },
     'optional': [],

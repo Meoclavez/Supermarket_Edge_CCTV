@@ -1,0 +1,74 @@
+/* ===================================================================
+   Direct peer-to-peer live video (js/webrtc_live.js and its users).
+   Camera video never passes through the online-access server; these
+   styles cover the <video> tiles, the honest failure panels, the one-off
+   still pictures and Settings → Online access · Live video.
+   Colours drawn over camera footage are fixed (like the tile HUD), so they
+   stay legible on video in both themes; everything else uses theme tokens.
+   =================================================================== */
+
+/* ---- camera grid tiles (js/analytics.js) ---- */
+.camera-video { display: none; width: 100%; height: 100%; object-fit: contain; background: #05070b; }
+.camera-card-rtc .camera-img { display: none; }
+.camera-card-rtc .camera-video { display: block; }
+
+.cam-rtc-fail { position: absolute; inset: 34px 10px 34px 10px; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 6px; padding: 10px 12px; text-align: center;
+  line-height: 1.45; color: #e6edf3; background: rgba(5,7,11,0.82); border: 1px solid rgba(255,91,107,0.35);
+  border-radius: 8px; z-index: 2; cursor: default; overflow: auto; }
+.cam-rtc-fail[hidden] { display: none; }
+.cam-rtc-fail-title { font-size: 12px; font-weight: 800; color: #ff8a95; }
+.cam-rtc-fail-text { font-size: 11px; color: #c9d4e0; max-width: 46ch; }
+.cam-rtc-fail-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; margin-top: 2px; }
+
+/* A still picture is taken on a tiny <video> that must stay in the viewport
+   (browsers pause off-screen muted video); it is invisible and inert. */
+.webrtc-grab-video { position: fixed; right: 0; bottom: 0; width: 2px; height: 2px; opacity: 0.01;
+  pointer-events: none; z-index: 0; }
+
+/* ---- camera studio (studio.html, js/studio.js) ---- */
+.studio-video { display: none; width: 100%; height: 100%; object-fit: contain; background: #05070b; }
+.video-viewport-rtc img { display: none; }
+.video-viewport-rtc .studio-video { display: block; }
+/* A failure panel carries buttons, so it sits above the drawing canvas. */
+.video-viewport-rtc .viewport-empty { z-index: 11; }
+#liveTransportBadge[hidden] { display: none; }
+.studio-rtc-fail { display: flex; flex-direction: column; align-items: center; gap: 8px; max-width: 56ch; color: #c9d4e0; }
+.studio-rtc-fail-title { font-size: 13.5px; font-weight: 800; color: #ff8a95; }
+.studio-rtc-fail-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+
+/* ---- calibration still (js/calibration.js) ---- */
+.fp-cal-remote { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 11.5px; color: var(--text-dim);
+  line-height: 1.45; }
+.fp-cal-remote[hidden] { display: none; }
+.fp-cal-remote-text { flex: 1 1 220px; min-width: 0; }
+.fp-cal-remote-text.is-err { color: var(--rose); }
+
+/* ---- store map camera thumbnail (js/floorplan.js) ---- */
+.fp-thumb-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: -2px 0 6px; }
+.fp-thumb-bar[hidden] { display: none; }
+.fp-thumb-note { flex: 1 1 160px; min-width: 0; font-size: 11px; color: var(--text-dim); line-height: 1.45; }
+.fp-thumb-note.is-err { color: var(--rose); }
+
+/* ---- heatmap history background (js/heatmap_history.js) ---- */
+.btn[data-action="hm-bg-refresh"][hidden] { display: none; }
+
+/* ---- Settings → Online access · Live video (js/remote_video.js) ---- */
+.rv-section { margin-top: 14px; padding-top: 12px; border-top: 1px solid rgba(var(--slate-rgb), 0.18); }
+.rv-section-title { font-size: 12px; font-weight: 800; color: var(--text-strong); margin-bottom: 8px; }
+.rv-fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
+.rv-fieldset:disabled { opacity: 0.55; }
+.rv-textarea { resize: vertical; min-height: 64px; font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; }
+.rv-port { margin-top: 8px; }
+.rv-port[hidden] { display: none; }
+.rv-port label { display: block; font-size: 11px; color: var(--text-dim); margin-bottom: 4px; }
+.rv-sub { display: flex; align-items: center; gap: 8px; margin: 12px 0 6px; font-size: 11.5px; font-weight: 700;
+  color: var(--text-soft); }
+.rv-advice { margin: 6px 0 0 18px; padding: 0; font-size: 12px; color: var(--text-soft); line-height: 1.55; }
+.rv-advice li { margin-bottom: 4px; }
+.rv-kv th { width: 34%; text-transform: none; font-size: 11px; vertical-align: top; }
+.rv-kv td { word-break: break-word; }
+.rv-table-wrap { width: 100%; overflow-x: auto; }
+.rv-raw { margin-top: 10px; font-size: 11.5px; color: var(--text-dim); }
+.rv-raw summary { cursor: pointer; }
+.rv-raw .ra-pre { max-height: 280px; overflow: auto; margin-top: 6px; white-space: pre-wrap; word-break: break-word; }

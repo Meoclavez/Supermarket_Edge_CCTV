@@ -10,6 +10,7 @@
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/css/style.css?v=2.3.0">
   <link rel="stylesheet" href="/static/css/studio_tools.css?v=2.3.0">
+  <link rel="stylesheet" href="/static/css/live_video.css?v=2.3.0">
   <script src="/static/js/auth.js?v=2.3.0"></script>
 </head>
 <body>
@@ -29,6 +30,7 @@
       </div>
       <div class="studio-badges header-actions">
         <span class="badge" id="sourceBadge">No camera selected</span>
+        <span class="badge" id="liveTransportBadge" hidden></span>
         <span class="badge" id="fpsBadge" title="Frames per second the pipeline is actually reading">&mdash; FPS</span>
         <span class="badge" id="detectorBadge" title="Inference backend in use">&mdash;</span>
       </div>
@@ -47,6 +49,7 @@
       <div class="video-card">
         <div class="video-viewport" id="viewportWrapper">
           <img id="streamImg" alt="Live camera feed with detector overlay" />
+          <video id="streamVideo" class="studio-video" muted playsinline autoplay disablepictureinpicture aria-label="Live camera video (direct connection)"></video>
           <canvas id="interactiveCanvas"></canvas>
           <div id="viewportEmpty" class="viewport-empty" style="display:none;"></div>
         </div>
@@ -335,6 +338,7 @@
 
   <div class="toast" id="toast">Notification</div>
 
+  <script src="/static/js/webrtc_live.js?v=2.3.0" defer></script>
   <script src="/static/js/studio.js?v=2.3.0" defer></script>
   <script src="/static/js/theme.js?v=2.3.0" defer></script>
 </body>

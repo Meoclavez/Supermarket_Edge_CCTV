@@ -224,6 +224,8 @@ function switchTab(id) {
   document.querySelectorAll('.tab-view').forEach((v) => {
     v.classList.toggle('active', v.id === sectionId);
   });
+  // Direct video lives only while its view is shown: a switch closes every session.
+  if (view !== currentView && window.WebRtcLive) window.WebRtcLive.closeAll('view');
   if (view === 'insights') {
     Object.entries(INSIGHT_SUBS).forEach(([k, elId]) => {
       const node = el(elId);
@@ -793,7 +795,7 @@ function cameraById(id) { return allCamerasList.find((c) => c.id === id) || null
 
 function buildCameraCard(cam, slot) {
   const card = document.createElement('div');
-  card.className = 'camera-card';
+  card.className = liveTransport() === 'webrtc' ? 'camera-card camera-card-rtc' : 'camera-card';
   card.setAttribute('data-cam-name', cam.name || '');
   card.setAttribute('data-cam-loc', cam.location || '');
   card.setAttribute('data-camera-card', cam.id);
@@ -815,8 +817,10 @@ function buildCameraCard(cam, slot) {
 
     <div class="camera-video-container" data-focus-for="${id}" role="button" tabindex="0" aria-pressed="false"
       title="Click to enlarge and watch this camera live" onclick="focusCameraTile('${id}')"
-      onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); focusCameraTile('${id}'); }">
+      onkeydown="if (event.target === this && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); focusCameraTile('${id}'); }">
       <img class="camera-img" data-camera-id="${id}" alt="${escapeHtml(cam.name)} live picture" />
+      <video class="camera-video" data-video-for="${id}" muted playsinline autoplay disablepictureinpicture aria-label="${escapeHtml(cam.name)} live video"></video>
+      <div class="cam-rtc-fail" data-rtc-fail-for="${id}" hidden></div>
       <div class="camera-overlay-top">
         <span class="cam-hud-badge ${online ? 'cam-hud-stale' : 'cam-hud-offline'}" data-live-for="${id}">${online ? '● waiting for picture' : '● ' + escapeHtml(cameraStatusLabel(cam.status))}</span>
         <span class="cam-hud-badge" data-res-for="${id}" title="Picture size">${DASH}</span>
@@ -1274,6 +1278,16 @@ async function measureCameraStreams() {
  *
  * A tile says LIVE only when it received a real picture recently; otherwise
  * it says how old its picture is, or that none has arrived.
+ *
+ * Direct video (WebRtcLive transport 'webrtc', always the case through the
+ * online-access tunnel): the tunnel never carries camera pixels, so each
+ * visible tile is a <video> backed by one direct WebRTC session instead of
+ * snapshots (docs/REMOTE_VIDEO_CONTRACT.md). Only tiles on screen hold a
+ * session; a rotation closes the outgoing camera's session before the
+ * incoming one opens; an enlarged tile keeps its session and every other
+ * tile's is closed until it shrinks again; leaving the view, hiding the tab
+ * or leaving the page closes them all. A failure is shown as it is, with a
+ * link to the connection check, and is never replaced by snapshots.
  */
 const TILE_MAX_IN_FLIGHT = 2;
 const TILE_TIMEOUT_MS = 10000;
@@ -1294,8 +1308,8 @@ function tileObserver() {
   if (!tileFeed.observer && typeof IntersectionObserver === 'function') {
     tileFeed.observer = new IntersectionObserver((entries) => {
       entries.forEach((e) => {
-        const t = tileFeed.tiles.get(e.target.getAttribute('data-camera-id'));
-        if (t && t.img === e.target) t.visible = e.isIntersecting;
+        const t = tileFeed.tiles.get(e.target.getAttribute('data-focus-for') || e.target.getAttribute('data-camera-id'));
+        if (t && (t.box === e.target || t.img === e.target)) t.visible = e.isIntersecting;
       });
       pumpTiles();
     }, { rootMargin: '150px 0px' });
@@ -1306,10 +1320,15 @@ function tileObserver() {
 function tileFeedRegister(id, img) {
   if (!img) return;
   const obs = tileObserver();
+  // The box is observed, not the <img>: in direct-video mode the <img> is not displayed.
+  const box = img.closest('.camera-video-container') || img;
+  const card = img.closest('.camera-card');
   tileFeed.tiles.set(id, {
-    id, img, visible: !obs, ctl: null, url: null, lastTry: 0, lastFrameAt: 0, source: null, error: null, streamHash: null,
+    id, img, box, visible: !obs, ctl: null, url: null, lastTry: 0, lastFrameAt: 0, source: null, error: null, streamHash: null,
+    video: card ? card.querySelector('video.camera-video') : null,
+    rtc: null, rtcError: null, rtcFails: 0, rtcRetryAt: 0, stopFrames: null,
   });
-  if (obs) obs.observe(img);
+  if (obs) obs.observe(box);
 }
 
 /** Drop one tile (its camera rotated out or was turned off): abort, free, forget. */
@@ -1320,11 +1339,12 @@ function tileFeedUnregister(id) {
     closeFocusStream();
     tileFeed.focusId = null;
   }
+  tileRtcClose(t, 'rotated-out');
   clearTimeout(t.img._retryTimer);
   if (t.ctl) t.ctl.abort();
   if (t.url) URL.revokeObjectURL(t.url);
   t.url = null;
-  if (tileFeed.observer) tileFeed.observer.unobserve(t.img);
+  if (tileFeed.observer) tileFeed.observer.unobserve(t.box || t.img);
   tileFeed.tiles.delete(id);
 }
 
@@ -1333,6 +1353,7 @@ function tileFeedReset() {
   closeFocusStream();
   if (tileFeed.observer) tileFeed.observer.disconnect();
   tileFeed.tiles.forEach((t) => {
+    tileRtcClose(t, 'rerender');
     if (t.ctl) t.ctl.abort();
     if (t.url) URL.revokeObjectURL(t.url);
     t.url = null;
@@ -1343,13 +1364,126 @@ function tileFeedReset() {
 
 /** Stop all video traffic. Leaving the view also un-enlarges the focused tile. */
 function pauseTiles(leavingView) {
-  tileFeed.tiles.forEach((t) => { if (t.ctl) t.ctl.abort(); });
+  tileFeed.tiles.forEach((t) => {
+    if (t.ctl) t.ctl.abort();
+    tileRtcClose(t, leavingView ? 'view' : 'hidden');
+  });
   closeFocusStream();
   if (leavingView && tileFeed.focusId) setTileFocus(null);
 }
 
+/**
+ * How live video reaches this page: 'webrtc' (direct, always through the
+ * tunnel), 'local' (snapshots and MJPEG on the store network), or null while
+ * the box has not answered yet (then nothing is requested).
+ */
+function liveTransport() {
+  if (!window.WebRtcLive) return 'local';
+  return window.WebRtcLive.transportNow();
+}
+
+// ---- direct video (WebRTC) tiles
+
+/** Seconds before a failed tile tries again, by what failed. */
+function rtcRetryDelayMs(err, fails) {
+  const code = err && err.code;
+  if (code === 'session_limit' || code === 'rate_limited' || code === 'box_unreachable') return 15000;
+  if (code === 'camera_off' || code === 'not_found' || code === 'unavailable' || code === 'no_webrtc') return 60000;
+  if (err && err.network) return Math.min(120000, 15000 * 2 ** Math.max(0, fails - 1));
+  return 30000;
+}
+
+function tileRtcDetach(t) {
+  if (t.stopFrames) { t.stopFrames(); t.stopFrames = null; }
+  t.rtc = null;
+}
+
+function tileRtcClose(t, reason) {
+  if (!t || !t.rtc) return;
+  const h = t.rtc;
+  tileRtcDetach(t);
+  t.lastFrameAt = 0;
+  h.close(reason);
+}
+
+function tileRtcOpen(t, purpose) {
+  if (!t.video || !window.WebRtcLive) return;
+  t.rtcError = null;
+  t.lastFrameAt = 0;
+  t.source = null;
+  const h = window.WebRtcLive.open(t.id, t.video, { purpose });
+  t.rtc = h;
+  t.stopFrames = window.WebRtcLive.watchFrames(t.video, () => {
+    if (t.rtc !== h) return;
+    t.lastFrameAt = Date.now();
+    t.source = 'live';
+  });
+  h.on('state', (state) => {
+    if (t.rtc !== h) return;
+    if (state === 'connected') {
+      t.rtcFails = 0;
+    } else if (state === 'failed') {
+      t.rtcFails += 1;
+      t.rtcError = h.error;
+      t.rtcRetryAt = Date.now() + rtcRetryDelayMs(h.error, t.rtcFails);
+      tileRtcDetach(t);
+    } else if (state === 'closed') {
+      // The box ended it (idle timeout, 4 h cap, camera gone): reopen if still on screen.
+      tileRtcDetach(t);
+      t.lastFrameAt = 0;
+      t.rtcRetryAt = h.closeReason === 'expired' ? Date.now() + 1000 : 0;
+    }
+    // No re-pump from here: the 500 ms tick reopens a tile that is still on
+    // screen, so a close during pagehide / hide cannot reopen in a loop.
+    renderTileLive(t.id);
+  });
+  renderTileLive(t.id);
+}
+
+/** One session per tile on screen; while a tile is enlarged, only that one. */
+function pumpRtcTiles() {
+  const focus = tileFeed.focusId;
+  const all = [...tileFeed.tiles.values()];
+  const wants = (t) => {
+    if (!t.img.isConnected || !t.video) return false;
+    if (focus ? t.id !== focus : !t.visible) return false;
+    const pipe = ((pipelineSnapshot && pipelineSnapshot.cameras) || []).find((c) => c.camera_id === t.id);
+    const cam = cameraById(t.id);
+    const status = pipe ? pipe.status : (cam && cam.status) || 'UNKNOWN';
+    return status === 'ONLINE' || !!t.rtc;
+  };
+  // Close first, so a slot's outgoing camera is gone before the incoming one opens.
+  all.forEach((t) => { if (t.rtc && !wants(t)) tileRtcClose(t, focus ? 'focus-other' : 'offscreen'); });
+  const now = Date.now();
+  all.forEach((t) => {
+    if (t.rtc || !wants(t) || now < t.rtcRetryAt) return;
+    tileRtcOpen(t, t.id === focus ? 'focus' : 'tile');
+  });
+}
+
+/** "Try again" on a failed tile. */
+function retryCameraVideo(id) {
+  const t = tileFeed.tiles.get(id);
+  if (!t) return;
+  t.rtcRetryAt = 0;
+  t.rtcError = null;
+  t.rtcFails = 0;
+  renderTileLive(id);
+  pumpTiles();
+}
+
+/** "Check connection" on a failed tile: Settings → Online access → Check remote video. */
+function openRemoteVideoCheck() {
+  switchTab('settings');
+  if (window.edgeRemoteVideo && typeof window.edgeRemoteVideo.openCheck === 'function') window.edgeRemoteVideo.openCheck();
+  else jumpTo('settings-remote-video');
+}
+
 function pumpTiles() {
   if (!tileFeedActive()) return;
+  const transport = liveTransport();
+  if (transport === null) return;              // not known yet: request nothing
+  if (transport === 'webrtc') { pumpRtcTiles(); return; }
   const now = Date.now();
   const every = TILE_REFRESH_MS[currentDecimationFPS] || 2000;
   const due = [...tileFeed.tiles.values()]
@@ -1367,6 +1501,14 @@ async function fetchTilePicture(t) {
   try {
     const url = `/api/v1/cameras/${encodeURIComponent(t.id)}/snapshot?annotate=false&overlay=1&max_width=${previewWidth(t.img)}`;
     const res = await fetch(url, { signal: ctl.signal, cache: 'no-store', priority: 'low' });
+    if (res.status === 403) {
+      const body = await res.json().catch(() => ({}));
+      if (body && body.code === 'video_direct_only') {
+        // Live pictures travel only over direct video on this connection: ask the box again.
+        if (window.WebRtcLive) window.WebRtcLive.config({ refresh: true }).catch(() => {});
+        throw new Error('live pictures are sent only over direct video on this connection');
+      }
+    }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const source = res.headers.get('X-Frame-Source') || 'live';
     const blob = await res.blob();
@@ -1412,6 +1554,8 @@ function renderTileLive(id) {
     text = '● OFF'; kind = 'off'; tip = 'Turned off: nothing is fetched or analysed';
   } else if (status !== 'ONLINE') {
     text = `● ${cameraStatusLabel(status)}`; kind = 'offline';
+  } else if (liveTransport() === 'webrtc') {
+    ({ text, kind, tip } = rtcTileBadge(t));
   } else if (t && t.source === 'no-signal') {
     text = '● NO PICTURE'; kind = 'offline'; tip = 'The server has no picture from this camera right now';
   } else if (age !== null && age * 1000 <= TILE_LIVE_MS) {
@@ -1430,6 +1574,52 @@ function renderTileLive(id) {
   badge.classList.toggle('cam-hud-offline', kind === 'offline');
   badge.classList.toggle('cam-hud-stale', kind === 'stale');
   badge.classList.toggle('cam-hud-off', kind === 'off');
+  renderRtcFail(id, t, status);
+}
+
+/** LIVE badge of a direct-video tile: what the connection really does. */
+function rtcTileBadge(t) {
+  if (!t) return { text: '● waiting for video', kind: 'stale', tip: '' };
+  if (t.rtcError) {
+    const e = t.rtcError;
+    return {
+      text: e.network ? '● Direct video not possible from this network' : `● ${e.message}`,
+      kind: 'offline',
+      tip: e.detail || e.message,
+    };
+  }
+  const h = t.rtc;
+  if (!h) return { text: '● waiting for video', kind: 'stale', tip: t.visible ? '' : 'Video starts when the tile is on screen' };
+  if (h.state === 'connecting') return { text: '● Connecting…', kind: 'stale', tip: 'Opening a direct video connection to the store' };
+  const via = window.WebRtcLive ? window.WebRtcLive.pairLabel(h.pair) : '';
+  const how = `Direct peer-to-peer video${h.pair ? ` (this browser: ${h.pair.local || '?'}, store: ${h.pair.remote || '?'}, ${h.pair.protocol || '?'})` : ''}`
+    + `${h.codec ? ` · ${h.codec}${h.transcoded ? ' (converted on the box)' : ''}` : ''}. It does not pass through the online-access server.`
+    + ' Detector boxes are not drawn on direct video.';
+  const age = t.lastFrameAt ? (Date.now() - t.lastFrameAt) / 1000 : null;
+  if (age !== null && age * 1000 <= TILE_LIVE_MS) return { text: `● LIVE · Direct${via ? ` · ${via}` : ''}`, kind: 'live', tip: how };
+  if (age !== null) return { text: `● video stalled ${formatDuration(age)}`, kind: 'stale', tip: how };
+  return { text: `● Direct${via ? ` · ${via}` : ''} · waiting for picture`, kind: 'stale', tip: how };
+}
+
+/** The panel over a tile whose direct video failed: what happened, retry, connection check. */
+function renderRtcFail(id, t, status) {
+  const box = document.querySelector(`[data-rtc-fail-for="${CSS.escape(id)}"]`);
+  if (!box) return;
+  const e = liveTransport() === 'webrtc' && t && t.rtcError && status === 'ONLINE' ? t.rtcError : null;
+  const wait = e ? Math.max(0, Math.ceil((t.rtcRetryAt - Date.now()) / 1000)) : 0;
+  const key = e ? `${e.code}|${e.message}|${e.detail}|${wait}` : '';
+  if (box.getAttribute('data-key') === key) return;
+  box.setAttribute('data-key', key);
+  box.hidden = !e;
+  if (!e) { box.innerHTML = ''; return; }
+  const sid = escapeHtml(id);
+  box.innerHTML = `
+    <div class="cam-rtc-fail-title">${escapeHtml(e.network ? 'Direct video not possible from this network' : e.message)}</div>
+    <div class="cam-rtc-fail-text">${escapeHtml(e.detail || '')}${wait ? ` Trying again in ${wait} s.` : ''}</div>
+    <div class="cam-rtc-fail-actions">
+      <button type="button" class="btn btn-xs" onclick="event.stopPropagation(); retryCameraVideo('${sid}')">Try again</button>
+      <button type="button" class="btn btn-xs btn-primary" onclick="event.stopPropagation(); openRemoteVideoCheck()">Check connection</button>
+    </div>`;
 }
 
 // ---- the one enlarged, live-streaming tile
@@ -1470,13 +1660,14 @@ function focusCameraTile(id) {
   const t = tileFeed.tiles.get(id);
   if (t && t.ctl) t.ctl.abort();
   if (tileFeedActive()) openFocusStream(id);
+  pumpTiles();                       // direct video: close the other tiles' sessions
   const card = document.querySelector(`[data-camera-card="${CSS.escape(id)}"]`);
   if (card) card.scrollIntoView({ behavior: 'instant', block: 'nearest' });
 }
 
 function openFocusStream(id) {
   const t = tileFeed.tiles.get(id);
-  if (!t) return;
+  if (!t || liveTransport() !== 'local') return;   // direct video: the tile's own session carries it
   const img = t.img;
   img.onerror = () => {
     img.removeAttribute('src');
@@ -1542,6 +1733,10 @@ function attachCameraStreams() {
   pumpTiles();
 }
 document.addEventListener('visibilitychange', attachCameraStreams);
+// The box said how live video reaches this page (or it changed): rebuild the tiles for it.
+window.addEventListener('edge:live-transport', () => {
+  if (el('cameraMatrixGrid') && lastCameraSignature !== null) renderCameraGrid();   // not before the camera list is in
+});
 // Leaving the page (e.g. "Camera setup"): let no picture request outlive it.
 window.addEventListener('pagehide', () => pauseTiles(false));
 document.addEventListener('keydown', (e) => {
@@ -2184,18 +2379,29 @@ async function runSelfTest() {
   const cams = allCamerasList.length;
   check('cameras loaded from /api/v1/cameras', Array.isArray(allCamerasList), `${cams} camera(s)`);
   const tiles = document.querySelectorAll('img.camera-img[data-camera-id]');
-  const onScreen = (img) => { const r = img.getBoundingClientRect(); return r.bottom > 0 && r.top < window.innerHeight && r.width > 0; };
+  // Direct video (remote / WebRTC mode): tiles show a <video>, never a snapshot or stream.
+  const rtcMode = liveTransport() === 'webrtc';
+  const shownEl = (img) => (rtcMode ? img.closest('.camera-video-container') || img : img);
+  const onScreen = (img) => { const r = shownEl(img).getBoundingClientRect(); return r.bottom > 0 && r.top < window.innerHeight && r.width > 0; };
+  const hasPicture = (img) => {
+    if (!rtcMode) return img.naturalWidth > 0;
+    const v = img.parentElement && img.parentElement.querySelector('video.camera-video');
+    return !!v && v.videoWidth > 0;
+  };
+  const rtcOpen = () => [...tileFeed.tiles.values()].filter((t) => t.rtc).length;
+  check(`live transport: ${liveTransport()}`, liveTransport() !== null);
   if (cams === 0) {
     check('empty state rendered', !!document.querySelector('.matrix-empty'));
   } else {
     const shown = Math.min(CAMERA_SLOTS, gridPool().length);
     check(`${shown} tile(s): at most ${CAMERA_SLOTS}, cameras that are on only`, tiles.length === shown, `${tiles.length}/${shown}`);
     tiles.forEach((img) => {
-      const r = img.getBoundingClientRect();
+      const r = shownEl(img).getBoundingClientRect();
       const id = img.getAttribute('data-camera-id');
       check(`tile ${id} never holds a stream`, !/\/stream\?/.test(img.getAttribute('src') || ''), img.getAttribute('src'));
+      if (rtcMode) check(`tile ${id} requests no snapshot in direct-video mode`, !img.getAttribute('src'), img.getAttribute('src'));
       check(`tile ${id} rendered height > 100`, r.height > 100, `${r.width.toFixed(0)}x${r.height.toFixed(0)}`);
-      if (onScreen(img)) check(`on-screen tile ${id} has a picture`, img.naturalWidth > 0, `${img.naturalWidth}x${img.naturalHeight}`);
+      if (onScreen(img)) check(`on-screen tile ${id} has a picture`, hasPicture(img), rtcMode ? 'direct video' : `${img.naturalWidth}x${img.naturalHeight}`);
     });
     check('picture requests in flight within the cap', tileFeed.inFlight <= TILE_MAX_IN_FLIGHT, String(tileFeed.inFlight));
     const hud = document.querySelector('[data-hud-for]');
@@ -2207,11 +2413,18 @@ async function runSelfTest() {
   if (tiles.length) {
     const id = tiles[0].getAttribute('data-camera-id');
     focusCameraTile(id);
-    check('enlarged tile streams live', /\/stream\?camera_id=/.test(tiles[0].getAttribute('src') || ''), tiles[0].getAttribute('src'));
-    setDecimationFPS(1);
-    check('video smoothness re-sets the live stream', /fps=1&/.test(tiles[0].getAttribute('src') || ''), tiles[0].getAttribute('src'));
-    setDecimationFPS(5);
-    check('only one stream open', [...tiles].filter((img) => /\/stream\?/.test(img.getAttribute('src') || '')).length === 1);
+    if (rtcMode) {
+      const f = tileFeed.tiles.get(id);
+      check('enlarged tile keeps (or opens) its direct video', !!f && !!f.rtc, f && f.rtc ? f.rtc.state : 'no session');
+      check('only the enlarged tile holds a session', rtcOpen() === 1, String(rtcOpen()));
+      focusCameraTile(id);
+    } else {
+      check('enlarged tile streams live', /\/stream\?camera_id=/.test(tiles[0].getAttribute('src') || ''), tiles[0].getAttribute('src'));
+      setDecimationFPS(1);
+      check('video smoothness re-sets the live stream', /fps=1&/.test(tiles[0].getAttribute('src') || ''), tiles[0].getAttribute('src'));
+      setDecimationFPS(5);
+      check('only one stream open', [...tiles].filter((img) => /\/stream\?/.test(img.getAttribute('src') || '')).length === 1);
+    }
   }
 
   // Every route (old hashes included) lands on its view.
@@ -2224,10 +2437,12 @@ async function runSelfTest() {
   }
   check('no stream and no picture request while the matrix is hidden',
     [...tiles].every((img) => !/\/stream\?/.test(img.getAttribute('src') || '')) && tileFeed.tiles.size === tiles.length
-    && [...tileFeed.tiles.values()].every((t) => !t.ctl || t.ctl.signal.aborted) && !tileFeed.focusId);
+    && [...tileFeed.tiles.values()].every((t) => !t.ctl || t.ctl.signal.aborted) && !tileFeed.focusId
+    && rtcOpen() === 0 && (!window.WebRtcLive || window.WebRtcLive.activeCount() === 0));
   switchTab('cameras');
   await new Promise((r) => setTimeout(r, 1500));
-  check('pictures refresh again on the camera view', tiles.length === 0 || [...tiles].some((img) => onScreen(img) && img.naturalWidth > 0));
+  if (rtcMode) await new Promise((r) => setTimeout(r, 3500));   // a direct connection takes a moment
+  check('pictures refresh again on the camera view', tiles.length === 0 || [...tiles].some((img) => onScreen(img) && hasPicture(img)));
 
   // Modal opens with metres and closes without prompt/confirm.
   if (cams) {
@@ -2258,6 +2473,8 @@ window.filterCameras = filterCameras;
 window.filterCamerasBySearch = filterCamerasBySearch;
 window.setDecimationFPS = setDecimationFPS;
 window.focusCameraTile = focusCameraTile;
+window.retryCameraVideo = retryCameraVideo;
+window.openRemoteVideoCheck = openRemoteVideoCheck;
 window.toggleCameraPin = toggleCameraPin;
 window.stepCameraGrid = stepCameraGrid;
 window.toggleCameraRotation = toggleCameraRotation;

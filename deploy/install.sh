@@ -23,6 +23,10 @@
 #                     fetches it anyway. The address, tunnel server, store ID
 #                     and store token are entered in Settings -> Online access
 #                     (deploy/vps/README.md).
+#   EDGE_GO2RTC=0     do not fetch go2rtc (pinned, checksum-verified; fetched by
+#                     default). It is the live video gateway for direct
+#                     peer-to-peer remote video (docs/REMOTE_VIDEO_CONTRACT.md);
+#                     the service starts it only while someone watches.
 #
 # HOST/PORT come from edge_backend/.env (defaults 0.0.0.0 / 8000). With
 # HOST=127.0.0.1 the plain-HTTP port is closed to the network: the dashboard is
@@ -158,6 +162,14 @@ if [ -x "$DEST/bin/frpc" ]; then
   echo "Set the public address, tunnel server, store ID and store token in Settings -> Online access."
 else
   echo "not installed (re-run with EDGE_TUNNEL=1 to fetch it; see deploy/vps/README.md)"
+fi
+if [ -x "$DEST/bin/go2rtc" ]; then
+  echo "go2rtc $("$DEST/bin/go2rtc" -version 2>/dev/null | awk '{print $3}') installed in $DEST/bin (remote live video,"
+  echo "direct peer-to-peer; started only while someone watches). Video mode 'auto' needs no router or"
+  echo "firewall change. Only for mode 'fixed_port' forward that UDP port on the store router and allow it"
+  echo "here yourself, for example: sudo ufw allow 8555/udp"
+else
+  echo "go2rtc not installed: remote live video is unavailable (re-run without EDGE_GO2RTC=0)"
 fi
 
 step "waiting for the service to answer"

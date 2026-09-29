@@ -644,38 +644,89 @@ When the box moves from the installer's test domain to the customer's own:
 8. From a phone on mobile data: open `https://cctv.<customer-domain>/dashboard`,
    and check the old test URL no longer loads.
 
-### Why there is no TURN server (coturn) by default
+### Remote live video: direct peer-to-peer WebRTC (no relay)
 
-TURN relays WebRTC media when a phone (for example on 4G) cannot reach the
-store's video gateway directly. That needs a relay with public UDP ports
-(3478 and 49152–49252) open to the internet and a shared secret — more
-exposed surface, more to configure, and more bandwidth through the store's
-uplink.
+Binding contract: `docs/REMOTE_VIDEO_CONTRACT.md`. The VPS is only a broker:
+the dashboard, JSON and the WebRTC offer/answer go through the tunnel, but
+**camera video never does**. A remote viewer receives live video directly from
+this box over WebRTC, and only while watching.
 
-It is no longer needed: remote viewing goes over HTTPS through the tunnel.
-The dashboard's live view and Camera Studio use MJPEG (`/stream`, same
-origin, token in the query string, which the tunnel passes through
-unbuffered), so they work unchanged through the public hostname. Only the
-app's port is published; go2rtc's own port (1984) never is. No public UDP
-ports and no TURN server are required.
-
-WebRTC therefore stays **LAN-only**: `GET /api/v1/webrtc/ice-servers`
-returns STUN only with `"turn_enabled": false, "webrtc_scope": "lan_only"`,
-and off-site clients use `/stream`. Coturn is kept as an **opt-in compose
-profile** for sites that specifically want WebRTC off-site:
-
-```bash
-# in edge_backend/.env
-TURN_ENABLED=true
-COTURN_SECRET=<python3 -c "import secrets; print(secrets.token_urlsafe(64))">
-COTURN_PUBLIC_IP=<the store's public IP>
-# then
-docker compose --profile turn up -d
+```
+viewer ──https──> VPS ──> frps ──> frpc ──> uvicorn          pages, JSON, SDP offer/answer
+viewer <══════ WebRTC media, direct (host/srflx/prflx) ══════> go2rtc on this box
+viewer ──UDP──> STUN (stun.ikorex.com.au:3478) <── box        address discovery only
 ```
 
-`docker compose up -d` without the profile does not start coturn and does
-not need `COTURN_SECRET`; the coturn container itself refuses to start when
-the secret is empty or a placeholder.
+- **No TURN anywhere.** ICE lists contain only `stun:` URLs; the backend
+  refuses `turn:`/`turns:` in settings and never emits one (`TURN_ENABLED` is
+  ignored). A browser report of a `relay` pair is logged as a violation.
+- **No live pixels through the tunnel.** Requests arriving through the public
+  hostname get `403 {"code": "video_direct_only"}` for `/stream`,
+  `/api/v1/cameras/{id}/snapshot`, `/api/v1/cameras/{id}/actions/snapshot`,
+  `/api/v1/cameras/test-connection` and the DVR HLS paths. Stored evidence
+  (theft/event snapshots and clips) stays downloadable. On the LAN and
+  Tailscale nothing changes.
+- **go2rtc** (MIT, pinned v1.9.14 by sha256 in `scripts/bootstrap.py`, fetched
+  by default to `/opt/edge-cctv/bin/go2rtc`; skip with `EDGE_GO2RTC=0`) runs as
+  a child of the service, like frpc. It is **not started at boot**: the first
+  live video session starts it, and it then stays up idle (no streams, nothing
+  pulled). Config `storage/go2rtc/go2rtc.yaml` (0600) has no streams and no
+  credentials; its API is `127.0.0.1:1984` only (`GO2RTC_API_PORT`), with a
+  random per-start password even from loopback, and only `/api`,
+  `/api/streams`, `/api/webrtc` exposed (no web UI, no `/api/config`). Its
+  RTSP server listens on `127.0.0.1:18554` only (the ffmpeg transcode source
+  publishes back through it); RTMP, SRTP, HLS and the rest are not loaded.
+- **Sessions** (`/api/v1/webrtc/sessions`): one go2rtc stream per session,
+  from the same resolver as analysis (`stream_selection` + stored
+  credentials, so the D1 sub-stream). The camera is pulled only while the
+  viewer's WebRTC connection is up. A session ends on `DELETE` (tile closed,
+  view switched, tab hidden, `pagehide`), a missed heartbeat
+  (`WEBRTC_IDLE_TIMEOUT_S`, 45 s), go2rtc reporting the connection gone,
+  `WEBRTC_MAX_SESSION_S` (4 h), or the camera being turned off, deleted or its
+  credentials changed. The reaper checks every 3 s, only while a session
+  exists. If a viewer keeps a connection open after its session ended
+  (heartbeat answered 404), go2rtc is restarted after one heartbeat plus 10 s
+  to cut it. At most `max_video_sessions` (8) at once (429 beyond).
+- **Codec**: passed through when the browser supports the camera's codec,
+  otherwise (e.g. H.265 to a browser without it) an ffmpeg H.264 transcode;
+  go2rtc probes NVENC, then VA-API (AMD/Intel), else libx264. Force one with
+  `WEBRTC_TRANSCODE_ENCODER=vaapi|nvenc|libx264`.
+- **Settings → Online access** (stored with the tunnel settings, editable per
+  site): `stun_servers` (default `stun:stun.ikorex.com.au:3478`),
+  `webrtc_mode`, `webrtc_port`, `max_video_sessions`, `live_transport_on_lan`
+  (`local` keeps snapshots/MJPEG on the store network; `webrtc` uses direct
+  WebRTC there too; a browser can opt in with the header `X-Live-Transport: webrtc`).
+
+**Modes.** `auto` (default) needs **no router or firewall change**: go2rtc
+uses `webrtc.listen: ""`, so each connection gets its own ephemeral UDP port
+and a server-reflexive (srflx) candidate from STUN; go2rtc is a full ICE agent
+(not ICE-lite) and sends its own connectivity checks to the viewer, which
+opens the store router's NAT mapping and the box firewall's conntrack entry
+(UFW's default deny-incoming is fine). This works when the store router maps
+endpoint-independently (most do; the first store box measured
+endpoint-independent and port-preserving). `fixed_port` listens on
+`:<webrtc_port>` (UDP+TCP, default 8555) and advertises
+`<public IP>:<port>`; use it only with a port forward on the store router,
+and allow it on the box yourself: `sudo ufw allow 8555/udp`.
+
+**Connection check.** `GET /api/v1/webrtc/diagnostics` (admin; the dashboard's
+Settings → Online access → "Check remote video") shows go2rtc's state, the
+box's public address as seen by each STUN server, the NAT mapping
+(`endpoint_independent|endpoint_dependent|unknown`, from two STUN servers
+queried off one local UDP port; a second public server is added only for this
+check when one is configured), the last 50 session outcomes and advice. It
+runs only when asked; nothing polls the internet in the background.
+
+**Phone app.** `GET /api/v1/webrtc/ice-servers` now returns STUN only with
+`"turn_enabled": false, "webrtc_scope": "internet"`, and `POST
+/api/v1/webrtc/offer` opens a session without heartbeats (it ends when the
+connection closes, the camera is turned off, or after the 4 h cap). The app
+still falls back to MJPEG through the tunnel for remote viewing, which is now
+refused (`video_direct_only`): it needs an update to the session API
+(heartbeat + DELETE) before it can show live video off-site.
+
+The optional coturn compose profile (`docker compose --profile turn`) is
+obsolete under this rule and must not be used for remote video.
 
 ---
 

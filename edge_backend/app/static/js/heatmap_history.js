@@ -205,6 +205,7 @@
           <button type="button" class="btn btn-sm" data-action="hm-play" aria-pressed="false" title="Step through the recorded hours of this day">Play day</button>
           <button type="button" class="btn btn-sm" data-action="hm-compare" aria-pressed="false" aria-controls="hmComparePanel">Compare with…</button>
           <button type="button" class="btn btn-sm btn-secondary" data-action="hm-record-now" title="Write the current hour so far now instead of waiting for it to end">Record now</button>
+          <button type="button" class="btn btn-sm" data-action="hm-bg-refresh" hidden title="Take a new picture from this camera for the background">New camera picture</button>
         </div>
       </div>
       <div class="hm-compare-panel" id="hmComparePanel" hidden>
@@ -283,6 +284,7 @@
     sec.querySelector('[data-action="hm-play"]').addEventListener('click', togglePlay);
     sec.querySelector('[data-action="hm-compare"]').addEventListener('click', toggleCompare);
     sec.querySelector('[data-action="hm-record-now"]').addEventListener('click', recordNow);
+    sec.querySelector('[data-action="hm-bg-refresh"]').addEventListener('click', refreshBackground);
     sec.querySelectorAll('[data-hm-preset]').forEach((b) => b.addEventListener('click', () => applyPreset(b.dataset.hmPreset)));
     sec.querySelector('[data-action="hm-compare-apply"]').addEventListener('click', applyCustomCompare);
     el('hmStrip').addEventListener('click', (e) => {
@@ -353,6 +355,8 @@
     if (dt) { dt.value = S.date || ''; dt.max = todayStr(); }
     const hf = el('hmHourField');
     if (hf) hf.classList.toggle('hm-dim', S.range !== 'hour' || !!S.compare);
+    const bgBtn = sec.querySelector('[data-action="hm-bg-refresh"]');
+    if (bgBtn) bgBtn.hidden = S.space !== 'image';
     const cmpBtn = sec.querySelector('[data-action="hm-compare"]');
     if (cmpBtn) {
       cmpBtn.classList.toggle('btn-primary', !!S.compareOpen);
@@ -414,12 +418,55 @@
     return c ? (c.name || c.id) : id;
   }
 
-  /** The camera's still picture; X-Frame-Source: no-signal means there is none. */
-  async function ensureBackground(camId) {
+  /** "New camera picture": take a new background for the camera shown. */
+  async function refreshBackground() {
+    if (S.space !== 'image' || !S.cameraId) return;
+    const btn = document.querySelector('[data-action="hm-bg-refresh"]');
+    if (btn) btn.disabled = true;
+    try {
+      await ensureBackground(S.cameraId, true);
+      draw();
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  /**
+   * The camera's still picture; X-Frame-Source: no-signal means there is none.
+   * In direct-video mode (through the online-access tunnel, which never
+   * carries camera pixels) it is one still over a direct WebRTC session,
+   * taken once and then only on "New camera picture" (force), never on a timer.
+   */
+  async function ensureBackground(camId, force) {
     const have = S.backgrounds.get(camId);
-    if (have && Date.now() - have.at < 60 * 1000) return have;
-    const entry = { img: null, url: null, noSignal: true, at: Date.now(), aspect: 16 / 9 };
+    const direct = !!window.WebRtcLive && (await window.WebRtcLive.mode()) === 'webrtc';
+    if (have && !force && (direct || Date.now() - have.at < 60 * 1000)) return have;
+    const entry = { img: null, url: null, noSignal: true, at: Date.now(), aspect: 16 / 9, error: null };
     if (typeof canPoll === 'function' && !canPoll()) return have || entry;
+    if (direct) {
+      try {
+        const blob = await window.WebRtcLive.grabFrame(camId, { maxWidth: 1280 });
+        const url = URL.createObjectURL(blob);
+        const img = await new Promise((resolve) => {
+          const im = new Image();
+          im.onload = () => resolve(im);
+          im.onerror = () => resolve(null);
+          im.src = url;
+        });
+        if (img && img.naturalWidth > 0 && img.naturalHeight > 0) {
+          entry.img = img; entry.url = url; entry.noSignal = false;
+          entry.aspect = img.naturalWidth / img.naturalHeight;
+        } else {
+          URL.revokeObjectURL(url);
+        }
+      } catch (e) {
+        const d = window.WebRtcLive.describe(e) || {};
+        entry.error = d.network ? 'direct video not possible from this network' : (d.message || 'no picture');
+      }
+      if (have && have.url && have.url !== entry.url) URL.revokeObjectURL(have.url);
+      S.backgrounds.set(camId, entry);
+      return entry;
+    }
     try {
       const res = await fetch(`/api/v1/cameras/${encodeURIComponent(camId)}/snapshot?annotate=false`);
       const src = (res.headers.get('X-Frame-Source') || '').toLowerCase();
@@ -988,7 +1035,7 @@
     ctx.font = '600 12px "Plus Jakarta Sans", system-ui, sans-serif';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
-    ctx.fillText('Camera picture unavailable right now', r.x + 10, r.y + 10);
+    ctx.fillText(bg && bg.error ? `Camera picture unavailable: ${bg.error}` : 'Camera picture unavailable right now', r.x + 10, r.y + 10);
   }
 
   function drawFloorBackground(ctx, r, P) {

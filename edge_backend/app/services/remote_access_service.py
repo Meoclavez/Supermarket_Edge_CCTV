@@ -101,6 +101,18 @@ CONNECTION_LOST = "connection_lost"        # was connected; frpc is reconnecting
 SETUP = "setup"                            # missing on this machine (binary, CA, config)
 EXITED = "exited"                          # frpc stopped without a recognised reason
 
+# Remote live video (WebRTC) settings, stored with the rest of Online access.
+DEFAULT_STUN_SERVERS = ("stun:stun.ikorex.com.au:3478",)
+MAX_STUN_SERVERS = 4
+WEBRTC_MODE_AUTO, WEBRTC_MODE_FIXED = "auto", "fixed_port"
+WEBRTC_MODES = (WEBRTC_MODE_AUTO, WEBRTC_MODE_FIXED)
+DEFAULT_WEBRTC_PORT = 8555
+DEFAULT_MAX_VIDEO_SESSIONS = 8
+MAX_VIDEO_SESSIONS_LIMIT = 32
+LAN_TRANSPORT_LOCAL, LAN_TRANSPORT_WEBRTC = "local", "webrtc"
+LAN_TRANSPORTS = (LAN_TRANSPORT_LOCAL, LAN_TRANSPORT_WEBRTC)
+WEBRTC_SETTING_KEYS = ("stun_servers", "webrtc_mode", "webrtc_port", "max_video_sessions", "live_transport_on_lan")
+
 _HOSTNAME_RE = re.compile(
     r"^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$"
 )
@@ -222,6 +234,84 @@ def normalise_store_id(value: Optional[str]) -> str:
 def proxy_name_for(store_id: str) -> str:
     """frp proxy name for this store (frps shows it as ``<store id>.<name>``)."""
     return f"{store_id or 'store'}-cctv"
+
+
+_STUN_HOST_RE = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+
+
+def normalise_stun_server(value: Optional[str]) -> str:
+    """``stun:host[:port]`` from ``stun:host:port``, ``host:port`` or ``host``.
+
+    Relays are refused outright (``turn:``/``turns:``): remote video is direct
+    only, and no TURN server exists anywhere in this system.
+    """
+    raw = (value or "").strip()
+    low = raw.lower()
+    if not raw:
+        raise RemoteAccessError("A STUN server address is empty.")
+    if low.startswith(("turn:", "turns:")):
+        raise RemoteAccessError(
+            f"'{raw}' is a TURN relay. Remote video never goes through a relay: enter STUN servers only "
+            "(stun:host:port).")
+    if low.startswith("stuns:"):
+        raise RemoteAccessError(f"'{raw}': use a plain stun: address (UDP), for example stun:stun.example.com:3478.")
+    body = low[5:] if low.startswith("stun:") else low
+    body = re.sub(r"^//", "", body)
+    if not body or "/" in body or "@" in body or "?" in body:
+        raise RemoteAccessError(f"'{raw}' is not a STUN server address. Use stun:host:port.")
+    if body.startswith("["):
+        host, _, rest = body[1:].partition("]")
+        port_txt = rest[1:] if rest.startswith(":") else ""
+        if rest and not rest.startswith(":"):
+            raise RemoteAccessError(f"'{raw}' is not a STUN server address. Use stun:host:port.")
+        try:
+            import ipaddress
+
+            ipaddress.IPv6Address(host)
+        except ValueError:
+            raise RemoteAccessError(f"'{raw}' is not a STUN server address. Use stun:host:port.")
+        host_txt = f"[{host}]"
+    else:
+        host, _, port_txt = body.partition(":")
+        if not _STUN_HOST_RE.match(host):
+            raise RemoteAccessError(f"'{raw}' is not a STUN server address. Use stun:host:port.")
+        host_txt = host
+    port = 3478
+    if port_txt:
+        if not port_txt.isdigit() or not 1 <= int(port_txt) <= 65535:
+            raise RemoteAccessError(f"'{raw}': the STUN port must be between 1 and 65535.")
+        port = int(port_txt)
+    return f"stun:{host_txt}:{port}"
+
+
+def normalise_stun_servers(values: Any) -> list[str]:
+    if isinstance(values, str):
+        values = [v for v in re.split(r"[\s,]+", values) if v]
+    if not isinstance(values, (list, tuple)):
+        raise RemoteAccessError("STUN servers must be a list of stun:host:port addresses.")
+    out: list[str] = []
+    for value in values:
+        norm = normalise_stun_server(str(value))
+        if norm not in out:
+            out.append(norm)
+    if len(out) > MAX_STUN_SERVERS:
+        raise RemoteAccessError(f"Enter at most {MAX_STUN_SERVERS} STUN servers.")
+    return out
+
+
+def _stored_stun_servers(value: Any) -> list[str]:
+    """Stored list, silently dropping anything that is not a valid stun: address."""
+    if not isinstance(value, (list, tuple)):
+        return list(DEFAULT_STUN_SERVERS)
+    out: list[str] = []
+    for v in value:
+        try:
+            norm = normalise_stun_server(str(v))
+        except RemoteAccessError:
+            continue
+        if norm not in out:
+            out.append(norm)
+    return out[:MAX_STUN_SERVERS]
 
 
 def _toml_str(value: str) -> str:
@@ -426,6 +516,13 @@ def _default_settings() -> dict[str, Any]:
         "verified_at": None,
         "verified_hostname": None,
         "verify_error": None,
+        # Remote live video: direct peer-to-peer WebRTC (docs/REMOTE_VIDEO_CONTRACT.md).
+        # STUN only: the backend never hands out a turn:/turns: URL.
+        "stun_servers": list(DEFAULT_STUN_SERVERS),
+        "webrtc_mode": WEBRTC_MODE_AUTO,        # auto | fixed_port
+        "webrtc_port": DEFAULT_WEBRTC_PORT,     # fixed_port only (UDP+TCP)
+        "max_video_sessions": DEFAULT_MAX_VIDEO_SESSIONS,
+        "live_transport_on_lan": LAN_TRANSPORT_LOCAL,  # local | webrtc
     }
 
 
@@ -454,11 +551,27 @@ def load_settings() -> dict[str, Any]:
                 data.update({k: stored[k] for k in data if k in stored})
         except ValueError:
             logger.warning("Stored remote access settings are not valid JSON; using defaults")
+    _sanitise_webrtc(data)
     if data.get("provider") not in PROVIDERS:
         # Settings from a removed provider (Cloudflare Tunnel, direct): keep the
         # hostname, but nothing runs until a tunnel server and token are entered.
         data.update(provider=PROVIDER, enabled=False)
     return data
+
+
+def _sanitise_webrtc(data: dict[str, Any]) -> None:
+    """Stored WebRTC settings as the code expects them (defaults for anything invalid)."""
+    data["stun_servers"] = _stored_stun_servers(data.get("stun_servers"))
+    if data.get("webrtc_mode") not in WEBRTC_MODES:
+        data["webrtc_mode"] = WEBRTC_MODE_AUTO
+    port = data.get("webrtc_port")
+    if not isinstance(port, int) or isinstance(port, bool) or not 1024 <= port <= 65535:
+        data["webrtc_port"] = DEFAULT_WEBRTC_PORT
+    n = data.get("max_video_sessions")
+    if not isinstance(n, int) or isinstance(n, bool) or not 1 <= n <= MAX_VIDEO_SESSIONS_LIMIT:
+        data["max_video_sessions"] = DEFAULT_MAX_VIDEO_SESSIONS
+    if data.get("live_transport_on_lan") not in LAN_TRANSPORTS:
+        data["live_transport_on_lan"] = LAN_TRANSPORT_LOCAL
 
 
 def save_settings(data: dict[str, Any]) -> None:
@@ -597,6 +710,13 @@ class RemoteAccessService:
         with self._lock:
             return self._settings.get("hostname") or ""
 
+    def webrtc_settings(self) -> dict[str, Any]:
+        """Remote live video settings (a copy; sanitised on load)."""
+        with self._lock:
+            data = {k: self._settings.get(k) for k in WEBRTC_SETTING_KEYS}
+        _sanitise_webrtc(data)
+        return data
+
     def forwarding_hops(self) -> int:
         """Trusted proxies that appended to X-Forwarded-For before frps: the VPS proxy + extras."""
         with self._lock:
@@ -614,7 +734,10 @@ class RemoteAccessService:
                hostname: Optional[str] = None, server_url: Optional[str] = None,
                store_id: Optional[str] = None, token: Optional[str] = None, clear_token: bool = False,
                server_key: Optional[str] = None, clear_server_key: bool = False,
-               extra_proxies: Optional[int] = None) -> dict[str, Any]:
+               extra_proxies: Optional[int] = None, stun_servers: Optional[list[str]] = None,
+               webrtc_mode: Optional[str] = None, webrtc_port: Optional[int] = None,
+               max_video_sessions: Optional[int] = None,
+               live_transport_on_lan: Optional[str] = None) -> dict[str, Any]:
         """Validate and persist a change, then start/stop/restart the tunnel to match."""
         with self._lock:
             old = dict(self._settings)
@@ -633,6 +756,28 @@ class RemoteAccessService:
                         or not 0 <= extra_proxies <= MAX_EXTRA_PROXIES:
                     raise RemoteAccessError(f"Proxies in front of the server must be 0 to {MAX_EXTRA_PROXIES}.")
                 new["extra_proxies"] = extra_proxies
+            if stun_servers is not None:
+                new["stun_servers"] = normalise_stun_servers(stun_servers)
+            if webrtc_mode is not None:
+                if webrtc_mode not in WEBRTC_MODES:
+                    raise RemoteAccessError("Video connection mode must be 'auto' (no router change) or "
+                                            "'fixed_port' (a UDP port forwarded on the store router).")
+                new["webrtc_mode"] = webrtc_mode
+            if webrtc_port is not None:
+                if not isinstance(webrtc_port, int) or isinstance(webrtc_port, bool) \
+                        or not 1024 <= webrtc_port <= 65535:
+                    raise RemoteAccessError("The video port must be between 1024 and 65535.")
+                new["webrtc_port"] = webrtc_port
+            if max_video_sessions is not None:
+                if not isinstance(max_video_sessions, int) or isinstance(max_video_sessions, bool) \
+                        or not 1 <= max_video_sessions <= MAX_VIDEO_SESSIONS_LIMIT:
+                    raise RemoteAccessError(
+                        f"Live video sessions must be between 1 and {MAX_VIDEO_SESSIONS_LIMIT}.")
+                new["max_video_sessions"] = max_video_sessions
+            if live_transport_on_lan is not None:
+                if live_transport_on_lan not in LAN_TRANSPORTS:
+                    raise RemoteAccessError("Live video on the store network must be 'local' or 'webrtc'.")
+                new["live_transport_on_lan"] = live_transport_on_lan
             new_token = validate_token(token) if token else None
             new_key = validate_token(server_key, "server key", 16) if server_key else None
             if enabled is not None:
@@ -679,6 +824,16 @@ class RemoteAccessService:
             f"Online access settings saved: enabled={new['enabled']} hostname={new['hostname'] or '-'} "
             f"server={new['server_url'] or '-'} store={new['store_id'] or '-'}"
         )
+        if any(new.get(k) != old.get(k) for k in WEBRTC_SETTING_KEYS):
+            logger.info(f"Remote video settings saved: mode={new['webrtc_mode']} port={new['webrtc_port']} "
+                        f"stun={','.join(new['stun_servers']) or '-'} max_sessions={new['max_video_sessions']} "
+                        f"lan={new['live_transport_on_lan']}")
+            try:
+                from app.services.webrtc_sessions import webrtc_sessions
+
+                webrtc_sessions.settings_changed()
+            except Exception as exc:  # the video service must never block saving settings
+                logger.warning(f"Remote video could not apply the new settings: {exc.__class__.__name__}")
         self.apply(restart=restart)
         return self.status()
 
@@ -1071,6 +1226,8 @@ class RemoteAccessService:
             # 127.0.0.1 rather than localhost: with HOST=127.0.0.1 uvicorn
             # listens on IPv4 only, and "localhost" may resolve to ::1 first.
             "local_origin": f"http://127.0.0.1:{settings.PORT}",
+            # Remote live video (direct WebRTC, STUN only).
+            **self.webrtc_settings(),
         }
 
     # -- lifespan ---------------------------------------------------------------

@@ -302,10 +302,25 @@ class Settings(BaseSettings):
     DVR_DEFAULT_RETENTION_DAYS: int = 7
     DVR_DEFAULT_QUOTA_GB: float = 100.0
     
-    # go2rtc Media Gateway
-    GO2RTC_API_URL: str = os.getenv("GO2RTC_API_URL", "http://127.0.0.1:1984")
-    GO2RTC_WS_URL: str = os.getenv("GO2RTC_WS_URL", "ws://127.0.0.1:1984/api/ws")
-    GO2RTC_CONFIG_PATH: Path = Path(os.getenv("GO2RTC_CONFIG_PATH", "./go2rtc.yaml"))
+    # go2rtc (live video gateway for direct peer-to-peer WebRTC; see
+    # services/go2rtc_manager.py and docs/REMOTE_VIDEO_CONTRACT.md). It runs as
+    # a child of this service, started on the first live-video session only.
+    # Its API listens on 127.0.0.1:GO2RTC_API_PORT, never on another address.
+    # The binary: GO2RTC_PATH, PATH, then <repo>/bin/go2rtc (bootstrap.py).
+    # Its config is STORAGE_DIR/go2rtc/go2rtc.yaml (generated, no streams, no
+    # credentials). Mode/port/STUN are Settings -> Online access.
+    GO2RTC_API_PORT: int = int(os.getenv("GO2RTC_API_PORT", "1984"))
+    GO2RTC_START_TIMEOUT_S: float = float(os.getenv("GO2RTC_START_TIMEOUT_S", "10"))
+    # Live video sessions (the page heartbeats every WEBRTC_HEARTBEAT_S).
+    WEBRTC_HEARTBEAT_S: int = int(os.getenv("WEBRTC_HEARTBEAT_S", "15"))
+    WEBRTC_IDLE_TIMEOUT_S: int = int(os.getenv("WEBRTC_IDLE_TIMEOUT_S", "45"))
+    WEBRTC_MAX_SESSION_S: int = int(os.getenv("WEBRTC_MAX_SESSION_S", "14400"))
+    # How often the reaper checks go2rtc consumers, heartbeats and cameras
+    # (runs only while a session exists).
+    WEBRTC_REAP_INTERVAL_S: float = float(os.getenv("WEBRTC_REAP_INTERVAL_S", "3"))
+    # H.264 encoder for a browser that cannot play the camera's codec:
+    # auto (probe VA-API, NVENC, QSV, then libx264) or one of those names.
+    WEBRTC_TRANSCODE_ENCODER: str = os.getenv("WEBRTC_TRANSCODE_ENCODER", "auto")
     
     # Hardware Devices
     VAAPI_DEVICE: str = os.getenv("VAAPI_DEVICE", "/dev/dri/renderD128")
@@ -333,11 +348,10 @@ class Settings(BaseSettings):
     # Encrypts NVR/camera passwords at rest (storage/nvr_credentials.json).
     NVR_CREDENTIAL_KEY: str = ""
 
-    # Optional TURN relay (docker compose profile "turn"). Off by default:
-    # remote viewing goes over HTTPS through the remote-access tunnel (MJPEG),
-    # so WebRTC is LAN-only and the ICE endpoint returns STUN only. Set
-    # TURN_ENABLED=true (with COTURN_SECRET shared with the coturn container and
-    # COTURN_PUBLIC_IP reachable from phones) only when running that profile.
+    # TURN is never used: remote live video is direct peer-to-peer WebRTC and
+    # the ICE lists contain stun: URLs only (docs/REMOTE_VIDEO_CONTRACT.md).
+    # TURN_ENABLED is ignored (a warning is logged); COTURN_SECRET stays a
+    # managed secret only so existing secret stores keep their layout.
     TURN_ENABLED: bool = False
     COTURN_SECRET: str = ""
     COTURN_REALM: str = os.getenv("COTURN_REALM", "cctv.local")

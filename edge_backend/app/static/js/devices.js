@@ -574,6 +574,18 @@
             ...(body.role ? { role: body.role } : {}),
           }),
         });
+        if (res.status === 403) {
+          // Through online access the box never sends a live picture (the test
+          // shows one), so it refuses the test outright: say so, plainly.
+          const data = await res.clone().json().catch(() => ({}));
+          if (data && data.code === 'video_direct_only') {
+            this.clearPreview();
+            this.addStatus('Testing a camera shows its live picture, and over online access live pictures are never sent '
+              + 'through the online-access server. Test the camera from the store network, or save it and watch it on the '
+              + 'Cameras view, which uses a direct video connection.', 'info');
+            return;
+          }
+        }
         if (!res.ok) {
           const msg = await this._errorText(res);
           if (res.status === 422) el('acUrl').setAttribute('aria-invalid', 'true');

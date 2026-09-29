@@ -1,3 +1,9 @@
+> **Legacy, do not use (2026-09-29).** These templates forward live video
+> (`/stream`) through the VPS and have no per-store authentication, which breaks
+> the owner rule that the VPS is only a connection broker and camera video goes
+> directly from the box to the viewer (see `docs/REMOTE_VIDEO_CONTRACT.md`).
+> The maintained VPS package is `~/Projects-1/Server/cctv-tunnel`.
+
 # Online access through your VPS (shared frps)
 
 Each store's edge box runs `frpc` and connects **out** to one shared `frps`

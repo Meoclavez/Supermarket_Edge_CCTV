@@ -205,7 +205,8 @@ def test_sign_in_through_the_tunnel_charges_the_visitor():
     assert keys and all(k.startswith(VISITOR) for k in keys), keys
 
 
-def test_mjpeg_token_in_query_works_through_the_tunnel():
+def test_stream_token_is_still_accepted_through_the_tunnel():
+    """Auth itself still accepts query tokens remotely (e.g. evidence downloads)."""
     tok = auth_service.issue_session_tokens("op-test", "owner")["access_token"]
     req = Request({"type": "http", "method": "GET", "path": "/stream", "scheme": "http", "server": ("x", 80),
                    "headers": [(b"host", PUBLIC.encode()), (b"x-forwarded-for", f"{VISITOR}, {VPS_PROXY}".encode()),
@@ -215,6 +216,67 @@ def test_mjpeg_token_in_query_works_through_the_tunnel():
     assert auth_service.verify_api_access(req, api_key=None, bearer=None, token=None) is True
     stream_tok = auth_service.generate_stream_token("c1")
     assert auth_service.verify_stream_access("c1", req, token=stream_tok, bearer=None)["camera_id"] == "c1"
+
+
+LIVE_VIDEO_PATHS = [
+    ("GET", "/stream?camera_id=c1"),
+    ("GET", "/stream/"),
+    ("HEAD", "/stream"),
+    ("GET", "/api/v1/cameras/c1/snapshot"),
+    ("GET", "/api/v1/cameras/c1/snapshot?max_width=640"),
+    ("POST", "/api/v1/cameras/c1/actions/snapshot"),
+    ("POST", "/api/v1/cameras/test-connection"),
+    ("GET", "/api/v1/dvr/cameras/c1/hls/2026-09-29/index.m3u8"),
+    ("GET", "/api/v1/dvr/segments/seg1/video"),
+    ("GET", "/api/v1/dvr/archives/arc1/download"),
+]
+
+
+@pytest.mark.parametrize("method,path", LIVE_VIDEO_PATHS)
+def test_live_pixels_refused_through_the_tunnel(method, path):
+    """No live picture or video through the VPS (docs/REMOTE_VIDEO_CONTRACT.md rule 2), even signed in."""
+    tok = auth_service.issue_session_tokens("op-test", "owner")["access_token"]
+    r = _via_tunnel().request(method, path, headers={**TUNNEL_TRAEFIK, "Authorization": f"Bearer {tok}"})
+    assert r.status_code == 403, (path, r.status_code)
+    if method != "HEAD":
+        body = r.json()
+        assert body["code"] == "video_direct_only"
+        assert "directly" in body["detail"]
+
+
+def test_live_pixels_still_served_on_the_lan_and_webrtc_signalling_through_the_tunnel():
+    tok = auth_service.issue_session_tokens("op-test", "owner")["access_token"]
+    auth = {"Authorization": f"Bearer {tok}"}
+    lan = TestClient(app, client=("192.168.1.40", 40000), raise_server_exceptions=False)
+    r = lan.get("/api/v1/cameras/no-such-cam/snapshot", headers=auth)
+    assert r.status_code != 403 or r.json().get("code") != "video_direct_only"
+    tunnel = _via_tunnel()
+    cfg = tunnel.get("/api/v1/webrtc/config", headers={**TUNNEL_TRAEFIK, **auth})
+    assert cfg.status_code == 200, cfg.text
+    body = cfg.json()
+    assert body["remote"] is True and body["transport"] == "webrtc" and body["relay"] is False
+    assert all(u.startswith("stun:") for s in body["ice_servers"] for u in s["urls"])
+    # A remote request can never be switched to local (MJPEG/snapshots) by the header.
+    body2 = tunnel.get("/api/v1/webrtc/config", headers={**TUNNEL_TRAEFIK, **auth,
+                                                          "X-Live-Transport": "local"}).json()
+    assert body2["transport"] == "webrtc"
+    # Stored evidence is not a live feed: its route is not refused as video.
+    ev = tunnel.get("/api/v1/theft/incidents/nothing/evidence", headers={**TUNNEL_TRAEFIK, **auth})
+    assert not (ev.status_code == 403 and ev.json().get("code") == "video_direct_only")
+
+
+def test_live_video_path_matching():
+    assert public_exposure.is_live_video_path("/stream")
+    assert public_exposure.is_live_video_path("//stream")
+    assert not public_exposure.is_live_video_path("/streams")
+    assert not public_exposure.is_live_video_path("/api/v1/events/ws")
+    assert not public_exposure.is_live_video_path("/api/v1/cameras/c1/snapshots/old.jpg")
+    assert not public_exposure.is_live_video_path("/api/v1/webrtc/sessions")
+    # Stored evidence stays downloadable through the tunnel.
+    for path in ("/api/v1/events/clips/x.mp4", "/api/v1/events/snapshots/x.jpg",
+                 "/api/v1/theft/incidents/i1/evidence", "/api/zones/alerts/a1/snapshot",
+                 "/api/v1/dvr/archives"):
+        assert not public_exposure.is_live_video_path(path), path
 
 
 def test_pairing_lockout_uses_the_real_phone_address():
