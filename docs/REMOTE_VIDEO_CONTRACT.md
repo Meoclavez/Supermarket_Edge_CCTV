@@ -380,3 +380,54 @@ cameras (one H.265), auth on. Fixed on the way:
 - With a 10 s rotation, a transcoded tile shows video for about half its time on screen, because the
   first frame takes about 4.6 s (a VA-API keyframe after a 2 s GOP, plus ICE). Consider a longer default
   delay in direct-video mode.
+
+## Public path check (2026-10-01, e451706, https://pearcedale-cctv.ikorex.com.au)
+
+Path: Cloudflare -> VPS web-gateway -> cctv-frps -> box frpc. Viewer PC on a mobile ISP (public 157.51.229.59);
+box behind the store router (public 58.179.142.243). Headless Chrome with
+`--force-webrtc-ip-handling-policy=default_public_interface_only`.
+
+- **Page and signalling: PASS.**
+  - Sign-in went through the real form in 2.2 s (secure context).
+  - Config: `remote:true`, `transport:webrtc`, `ice_servers:[stun:stun.ikorex.com.au:3478]`, `relay:false`.
+  - `/api/v1/events/ws` opened through the tunnel in 0.76 s (101) and was still open after 8 s.
+  - No JS errors. The one console error is Cloudflare's injected Web Analytics beacon
+    (`static.cloudflareinsights.com`), which the page's CSP blocks. Turn off Cloudflare's automatic Web
+    Analytics injection for the zone; do not widen the CSP.
+- **Selected pair with nothing changed: over Tailscale.**
+  - The viewer PC has Tailscale. The box advertises its Tailscale host candidates (100.78.122.93 and
+    fd7a:115c:a1e0::db36:7a5f), and ICE chose `host fd7a:…:7a5f` with the PC's Tailscale address as the
+    local prflx.
+  - That is still direct and still not through the VPS, but it does not prove the internet path.
+- **Internet path (test side: the box's answers were filtered with CDP Fetch to its public candidates,
+  the way a viewer without Tailscale sees them): PASS.**
+  - Pair `srflx 157.51.229.59 <-> srflx 58.179.142.243`, UDP, RTT 211–226 ms. The box saw the same
+    (`connected_to 157.51.229.59:… srflx`).
+  - 4 H.265 tiles (Ch 3/30/31/32) were transcoded with `h264_vaapi`: 704x576, aspect 1.222, 24.5–25.5 fps,
+    first frame 4.0–4.2 s, badge "LIVE · Direct · srflx".
+  - Box tailscale0 sent 0.13 MB during the 60 s window, against 33.4 MB on wlo1.
+- **No video through the VPS (60 s, 4 tiles, internet path): PASS.**
+  - The box's sessions sent **24.3 MB** (3.22 Mbit/s; per tile 34, 1004, 1051 and 1134 kbit/s) and the
+    browser received 24.2 MB.
+  - VPS in the same 60 s: cctv-frps **0.44 MB**, web-gateway 0.86 MB (dashboard JSON polling plus other
+    sites), cctv-stun 0.003 MB.
+- **No live pixels through the tunnel: PASS.** The page made 0 requests to `/stream`, `*/snapshot` or HLS.
+  Forced requests to `/stream`, `snapshot`, `actions/snapshot`, `test-connection` and DVR HLS got 403
+  `{"code":"video_direct_only"}` from the **gateway** (gateway log, `server: cloudflare`); the box logged
+  none of them.
+- **Leaving: PASS.**
+  - A view switch ended the sessions in 0.64 s; the transcoders were gone and NVR connections back to 31
+    in 1.02 s.
+  - Chrome killed with SIGKILL: the transcoders were gone and NVR connections back to 31 in 6.2 s, and the
+    sessions were reaped in 9.0 s (4× `connection_closed`).
+  - With no browser open for 61 s, the VPS saw cctv-frps 2.8 kB rx / 3.1 kB tx (frpc heartbeats) and
+    cctv-stun 0, and the box had 0 transcoders and 31 NVR connections.
+- **Check remote video: PASS.**
+  - The browser found srflx 157.51.229.59 over UDP. Error 701 "host lookup" once: probably the IPv6
+    lookup, as `stun.ikorex.com.au` has no AAAA record.
+  - The box got 58.179.142.243:34445 from both stun.ikorex.com.au and Google (the same port), so the NAT
+    is endpoint-independent. Advice: "direct video works without any router change (mode 'auto')".
+    Relay violations: 0.
+- **Journal (20 min): clean.** 0 Traceback, 0 hwupload, 0 relay, 0 restarts. One frpc ERROR
+  "StartWorkConn … work connection pool is full, discarding" (once since 2026-09-30; benign frp
+  pooling noise during a burst of parallel requests).
