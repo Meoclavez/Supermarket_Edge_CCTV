@@ -219,8 +219,9 @@ To get a code again:
 
 ### Viewing the dashboard from off-site
 
-- **Public, for anyone you give an account:** `https://cctv.<your-domain>`
-  through your own VPS (section 7a).
+- **Public, for anyone you give an account:**
+  `https://<store>-cctv.ikorex.com.au` through the iKorex VPS (section 7a).
+  Live video then comes directly from this box, never through the VPS.
 - **Private VPN:** a VPN such as Tailscale reaches the plain address,
   `http://<vpn-ip>:8000/dashboard`, encrypted by the VPN itself.
   `deploy/install.sh` keeps port 8000 open on `tailscale0` only (plus UDP
@@ -448,69 +449,110 @@ that now performs the same full reset; it no longer keeps cameras or zones.
 
 ---
 
-## 7a. Online access through your own server (VPS)
+## 7a. Online access through the iKorex server (VPS)
 
-The dashboard is published at `https://cctv.<your-domain>` through a server
-you already run (a VPS with Docker and a reverse proxy). Nothing moves to the
-cloud: footage, detection and the database stay on this machine; the VPS only
-relays connections.
+Each store's dashboard is published at `https://<store>-cctv.ikorex.com.au`
+(naming `<store>-<service>.ikorex.com.au`; the first store is
+`https://pearcedale-cctv.ikorex.com.au`, live since 2026-10-01). Nothing moves
+to the cloud: footage, detection and the database stay on this machine.
+
+**The VPS is only a connection broker and a debugging aid** (owner rule,
+2026-09-29). Dashboard pages, JSON and the WebRTC offer/answer pass through it;
+**camera video never does**. Live video goes directly from this box to the
+viewer's browser over WebRTC, and only while someone is watching (section
+"Remote live video" below; contract `docs/REMOTE_VIDEO_CONTRACT.md`).
 
 ```
-browser --HTTPS--> VPS reverse proxy --> frps (Docker) ==tunnel==> frpc (this machine) --> 127.0.0.1:8000
+box frpc ──wss──> Cloudflare ──> VPS web-gateway (nginx) ──> cctv-frps ──> cctv-auth   store login: token + hostname lock
+viewer ──https──> Cloudflare ──> VPS web-gateway (nginx) ──> cctv-frps ──> box frpc ──> uvicorn   pages, JSON, SDP offer/answer
+viewer <═══════════════ WebRTC media, direct (host / srflx / prflx) ═══════════════> box go2rtc
+viewer ──UDP 3478──> cctv-stun (coturn --stun-only, no TURN) <──UDP 3478── box   address discovery only
 ```
 
-- **frpc** (frp, Apache-2.0) runs on this machine as a child of the service
-  (`app/services/remote_access_service.py`: started, supervised, restarted
-  with backoff, status read from its log). It dials **out** to the VPS, so
-  the store needs no port forwarding and works behind carrier-grade NAT.
-- **frps** runs on the VPS as one Docker container shared by all stores, on
-  the reverse proxy's network, with no published ports (`deploy/vps/`). Each
-  box logs in with its **store ID** and **store token**; a server plugin (the
-  store check) verifies them and allows each store only its own hostname(s).
-- The tunnel itself goes over **WebSocket + TLS through the VPS's existing
-  reverse proxy on 443**, on a hostname of its own (`wss://tunnel.<your-domain>`),
-  so no new port is opened on the VPS. `tcp://<vps>:7000` (frp's own TLS on a
-  published port) is the fallback for proxies that cannot pass WebSockets.
-- The VPS proxy terminates HTTPS for `cctv.<your-domain>` with its own
-  certificates (Let's Encrypt) and hands requests to frps, which routes them
-  by name down this store's tunnel.
+- **frpc** (frp 0.71.0, Apache-2.0) runs on this machine as a child of the
+  service (`app/services/remote_access_service.py`: started, supervised,
+  restarted with backoff, status read from its log). It dials **out** over
+  WebSocket + TLS to `wss://tunnel.ikorex.com.au`, so the store needs no port
+  forwarding and works behind carrier-grade NAT.
+- **VPS package:** `~/Projects-1/Server/cctv-tunnel` (its `README.md` has the
+  apply plan, operations and debugging tables). `deploy/vps/` in this repo is
+  **legacy, do not use**: it forwards `/stream` through the VPS and has no
+  per-store authentication.
+  - `web-gateway` (the VPS's existing nginx) accepts only Cloudflare peers on
+    the CCTV names, applies per-visitor and per-store limits, and answers
+    `403 video_direct_only` for live-picture paths before they reach frps.
+  - `cctv-frps` is shared by all stores, publishes no ports and is reachable
+    only from the gateway.
+  - `cctv-auth` (frps plugin) checks each box's **store ID** and **store
+    token** and allows a store only its own hostname(s) (hostname lock).
+  - `cctv-stun` is coturn with `--stun-only` on `3478/udp+tcp`: it tells each
+    side its public address and can relay nothing.
 
-It is online **only** while enabled in **Settings → Online access**; disable
-it there and the address stops working within seconds.
+### What passes through the VPS, and what never does
 
-**VPS side:** `deploy/vps/README.md` (compose file, `frps.toml`, snippets for
-Traefik, nginx, Caddy and Nginx Proxy Manager, security checklist, adding a
-store). Store names are one level deep, `<store>-cctv.<domain>`, so a CDN's
-free certificate covers them.
+| Through the VPS | Never through the VPS |
+|---|---|
+| Dashboard pages, JSON, the events websocket | Live video (WebRTC media is box ↔ browser) |
+| WebRTC offer/answer (SDP), session heartbeats and reports | Live pictures: `/stream`, camera `snapshot` and `actions/snapshot`, `test-connection`, DVR HLS and recorded DVR video (403 `video_direct_only` from the gateway **and** the box) |
+| Stored evidence stills and short clips, on an explicit click | Any relay: there is no TURN server; a `relay` pair counts as a failure |
+| frpc heartbeats (every 30 s); STUN address lookups (`cctv-stun`) | Background streaming or polling: nothing streams while nobody watches |
 
-**Edge box side:**
+Measured on the public path (2026-10-01, build e451706): 4 live tiles ≈
+3.2 Mbit/s straight from the store to the viewer, while the VPS carried
+≈ 0.44 MB/min of signalling (cctv-frps) and ≈ 3 kB/min with nobody watching.
 
-1. Fetch frpc (pinned frp version, SHA-256 checked against the value pinned in
-   `bootstrap.py` and the release's checksum list, x86_64/arm64/armv7):
+### Set up a store
+
+1. **VPS (once per store):** on the dev PC, in `~/Projects-1/Server/cctv-tunnel`:
+   `./onboard-store.sh <store> --notes "<address>"`. It registers the store on
+   `cctv-auth`, prints the **store token once**, and prints the next steps.
+2. **Cloudflare DNS** (zone `ikorex.com.au`, all records to the VPS IP):
+   - `tunnel`: A record, **Proxied** (once; WebSockets on);
+   - `<store>-cctv`: A record, **Proxied** (one per store);
+   - `stun`: A record, **DNS only** (grey cloud; once). Cloudflare does not
+     proxy UDP, so a proxied `stun` record breaks STUN.
+3. **Box: install frpc** (pinned version, SHA-256 checked; go2rtc for live
+   video is fetched by default):
 
    ```bash
    sudo EDGE_TUNNEL=1 bash /opt/edge-cctv/deploy/install.sh
    ```
 
    (`./run.sh --with-tunnel` does the same for a manual install; once online
-   access is enabled, every later bootstrap keeps frpc in place by itself.)
-2. **Settings → Online access**: **Public address** `<store>-cctv.<your-domain>`,
-   **Tunnel server** `wss://tunnel.<your-domain>`, **Store ID** and **Store
-   token** (issued for this store; e.g. `pearcedale-cctv.ikorex.com.au`,
-   `wss://tunnel.ikorex.com.au`, `pearcedale`), **Server key** only if the server sets
-   frp's shared token, **Proxies in front of your server** = *One* if a CDN
-   proxy (e.g. Cloudflare's orange cloud) sits in front of the VPS, tick
-   **Enable online access**, **Save**. The status goes *Connecting… →
-   Connected since …*.
-3. Press **Verify now**. The app fetches
-   `https://cctv.<your-domain>/api/v1/device/identity` and checks that the
-   device id is *this* machine's, so an address routed to another store's box
-   is caught. The badge shows *Verified* with the time. It is checked again
+   access is enabled, every later bootstrap keeps frpc in place.)
+4. **Box: Settings → Online access:** **Public address**
+   `<store>-cctv.ikorex.com.au`, **Tunnel server** `wss://tunnel.ikorex.com.au`,
+   **Store ID** `<store>`, **Store token** (from step 1), **Server key** only
+   if the server sets frp's shared token (the iKorex server does not),
+   **Proxies in front of your server** = *One* (Cloudflare), tick **Enable
+   online access**, **Save**. The status goes *Connecting… → Connected since …*.
+   The **Live video** card's STUN servers default to
+   `stun:stun.ikorex.com.au:3478`; leave them unless you know better.
+5. Press **Verify now**. The app fetches
+   `https://<store>-cctv.ikorex.com.au/api/v1/device/identity` and checks that
+   the device id is *this* machine's, so an address routed to another store's
+   box is caught. The badge shows *Verified* with the time. It is checked again
    a few seconds after every (re)connection, and every 10 minutes while the
    Settings page is open.
-4. From a phone on mobile data, open `https://cctv.<your-domain>/dashboard`.
+6. Press **Check remote video** (Settings → Online access · Live video) and,
+   from a phone on mobile data (Wi-Fi and any VPN off), open
+   `https://<store>-cctv.ikorex.com.au/dashboard`: tiles should show
+   "LIVE · Direct · srflx" (or prflx/host).
 
-What the status says when it is not connected (`error_kind` in
+It is online **only** while enabled in **Settings → Online access**; disable
+it there and the address stops working within seconds.
+
+### Troubleshooting
+
+| Question | Where to look |
+|---|---|
+| Is the box connected? Why was it refused? | VPS: `ssh deployer@103.146.112.176 'cd ~/cctv-tunnel && docker compose exec -T auth manage status'` (ONLINE, last seen, frpc version, last refusal); refusals: `docker logs cctv-auth \| grep DENY` |
+| What does the box say? | Settings → Online access status, or `error_kind` in `GET /api/v1/remote-access` (below) |
+| Does direct video work from here? | Settings → Online access · Live video → **Check remote video**: browser STUN result, the box's public address per STUN server, NAT type, recent session outcomes, advice |
+| Does STUN answer? | `./stun-selftest.py stun.ikorex.com.au 3478` from a laptop or the box (in `~/Projects-1/Server/cctv-tunnel`, Python 3 only): 4/4 PASS = Binding works and no relay is allocated. UDP fails but TCP passes = a firewall drops UDP 3478 |
+| A tile says "Direct video not possible from this network" | The viewer's network blocks direct UDP or the store NAT is endpoint-dependent. It never falls back to the VPS. See "Modes" below (fixed port with a router forward) |
+
+What the box status says when it is not connected (`error_kind` in
 `GET /api/v1/remote-access`): the store login was refused (check Store ID and
 token), the address is not allowed for this store, another connection already
 serves the address, the shared server key does not match, the store check is
@@ -533,9 +575,16 @@ The tunnel server's certificate is always verified (system CA bundle;
 read, the config is under `storage/`, connections are outbound).
 
 Nothing assumes a fixed domain: the address, tunnel server, store ID and
-secrets are settings and can change at any time (test domain now, the
-customer's at handover). Any change restarts frpc; changing the address
-clears *Verified* and moves the CORS origin and remote rules to the new name.
+secrets are settings and can change at any time. Any change restarts frpc;
+changing the address clears *Verified* and moves the CORS origin and remote
+rules to the new name. (The box also accepts `tcp://host:port` as a tunnel
+server, but the iKorex VPS offers only `wss://`.)
+
+**Security, next work.** Open hardening items for the VPS and Cloudflare
+(origin TLS / Full (strict), authenticated origin pulls, WAF rate limit on
+sign-in, fail2ban via the Cloudflare API, turning off Cloudflare's automatic
+Web Analytics injection, which the dashboard's CSP blocks) are tracked in
+`~/Projects-1/Server/SECURITY_NEXT_WORK.md`.
 
 ### Close the plain-HTTP port (HOST=127.0.0.1)
 
@@ -603,8 +652,11 @@ left-most entry, written by a trusted hop, is then used.)
 - CORS is limited to this device's own origins (the public address,
   `EDGE_BASE_URL`, explicit `ALLOWED_CORS_ORIGINS` entries; `*` is ignored).
 - API responses carry `Cache-Control: no-store`.
-- On the VPS: rate limits, optional basic-auth/SSO in front, no published frps
-  ports, token per store (`deploy/vps/README.md`, security checklist).
+- On the VPS: Cloudflare-only peers on the CCTV names, per-visitor and
+  per-store rate limits, no published frps ports, a token and hostname lock
+  per store, and 403 for live-picture paths (security checklist in
+  `~/Projects-1/Server/cctv-tunnel/README.md`; next steps in
+  `~/Projects-1/Server/SECURITY_NEXT_WORK.md`).
 
 ### Speed over a slow uplink
 
@@ -621,28 +673,33 @@ short (`app/services/web_delivery.py`):
   hash, so nothing stale is ever used.
 - Scripts are deferred, so the page renders before Chart.js and the modules
   arrive.
-- The VPS proxy speaks HTTP/2 to browsers; frp multiplexes the requests over
+- Cloudflare speaks HTTP/2 to browsers; frp multiplexes the requests over
   the one tunnel connection.
+- Live video does not use the uplink path through the VPS at all: it goes
+  directly from the box to the viewer (about 0.8 Mbit/s per tile on average,
+  34–1134 kbit/s depending on the scene).
 
 ### Handover to a customer
 
 When the box moves from the installer's test domain to the customer's own:
 
-1. On the VPS that will serve the customer (theirs or the installer's): add
-   the store as in `deploy/vps/README.md` ("Add a store") with a **new store
-   token** and the customer's name, e.g. `store1-cctv.<customer-domain>`.
+1. On the VPS that will serve the customer: add the store with
+   `./onboard-store.sh` (`~/Projects-1/Server/cctv-tunnel`) for a **new store
+   token**. A customer-owned domain (e.g. `cctv.<customer-domain>`) is a plan
+   only (see "Customer-owned domains" in that README).
 2. **Settings → Online access**: enter the new public address, tunnel server
    and store ID, **Replace token** with the new one, keep *Enable* ticked,
    **Save**. frpc restarts with them; the *Verified* badge resets.
 3. Wait for *Connected since …*, press **Verify now**, confirm *Verified*.
-4. Revoke the old store ID/token in the test VPS's store check.
+4. Revoke the old store ID/token: `manage disable <id>`, then
+   `manage remove <id>` on the VPS, and delete its Cloudflare DNS record.
 5. Dashboard: **change the operator password** (and remove installer
    accounts); the customer sets their own.
 6. **Rotate phone pairing**: revoke every paired phone under **Settings →
    Paired phones** and pair the customer's phones afresh with new codes.
 7. Remove the installer's VPN access to the box, if any.
-8. From a phone on mobile data: open `https://cctv.<customer-domain>/dashboard`,
-   and check the old test URL no longer loads.
+8. From a phone on mobile data: open the new address's `/dashboard`, check
+   live tiles show "LIVE · Direct", and check the old URL no longer loads.
 
 ### Remote live video: direct peer-to-peer WebRTC (no relay)
 
@@ -651,11 +708,17 @@ the dashboard, JSON and the WebRTC offer/answer go through the tunnel, but
 **camera video never does**. A remote viewer receives live video directly from
 this box over WebRTC, and only while watching.
 
-```
-viewer ──https──> VPS ──> frps ──> frpc ──> uvicorn          pages, JSON, SDP offer/answer
-viewer <══════ WebRTC media, direct (host/srflx/prflx) ══════> go2rtc on this box
-viewer ──UDP──> STUN (stun.ikorex.com.au:3478) <── box        address discovery only
-```
+Same diagram as section 7a: pages, JSON and SDP go viewer → Cloudflare → VPS
+web-gateway → cctv-frps → frpc → uvicorn; WebRTC media goes viewer ↔ go2rtc on
+this box directly; both sides ask `stun.ikorex.com.au:3478` only for their
+public address.
+
+**Status:** verified live on the public path on 2026-10-01 (build e451706,
+`https://pearcedale-cctv.ikorex.com.au`, viewer on a mobile ISP): pair
+srflx ↔ srflx over UDP, 4 H.265 tiles converted with `h264_vaapi` at
+704x576, 24–25 fps, first frame 4.0–4.2 s; VPS traffic 0.44 MB/min while
+watching; sessions ended 0.64 s after a view switch and 9 s after the browser
+was killed. Details: "Public path check" in the contract.
 
 - **No TURN anywhere.** ICE lists contain only `stun:` URLs; the backend
   refuses `turn:`/`turns:` in settings and never emits one (`TURN_ENABLED` is
@@ -663,9 +726,13 @@ viewer ──UDP──> STUN (stun.ikorex.com.au:3478) <── box        addres
 - **No live pixels through the tunnel.** Requests arriving through the public
   hostname get `403 {"code": "video_direct_only"}` for `/stream`,
   `/api/v1/cameras/{id}/snapshot`, `/api/v1/cameras/{id}/actions/snapshot`,
-  `/api/v1/cameras/test-connection` and the DVR HLS paths. Stored evidence
-  (theft/event snapshots and clips) stays downloadable. On the LAN and
-  Tailscale nothing changes.
+  `/api/v1/cameras/test-connection`, the DVR HLS paths and recorded DVR video.
+  The VPS gateway refuses the same paths before they reach frps. Stored
+  evidence (theft/event snapshots and clips) stays downloadable on a click.
+  Views that need a still remotely (floor-map thumbnail, heatmap background,
+  calibration) take one frame over a direct connection, refreshed only by
+  "Take a new picture". On the store network and a private VPN nothing
+  changes unless "Live video on the store network" is set to direct WebRTC.
 - **go2rtc** (MIT, pinned v1.9.14 by sha256 in `scripts/bootstrap.py`, fetched
   by default to `/opt/edge-cctv/bin/go2rtc`; skip with `EDGE_GO2RTC=0`) runs as
   a child of the service, like frpc. It is **not started at boot**: the first
@@ -689,13 +756,20 @@ viewer ──UDP──> STUN (stun.ikorex.com.au:3478) <── box        addres
   to cut it. At most `max_video_sessions` (8) at once (429 beyond).
 - **Codec**: passed through when the browser supports the camera's codec,
   otherwise (e.g. H.265 to a browser without it) an ffmpeg H.264 transcode;
-  go2rtc probes NVENC, then VA-API (AMD/Intel), else libx264. Force one with
-  `WEBRTC_TRANSCODE_ENCODER=vaapi|nvenc|libx264`.
-- **Settings → Online access** (stored with the tunnel settings, editable per
-  site): `stun_servers` (default `stun:stun.ikorex.com.au:3478`),
-  `webrtc_mode`, `webrtc_port`, `max_video_sessions`, `live_transport_on_lan`
-  (`local` keeps snapshots/MJPEG on the store network; `webrtc` uses direct
-  WebRTC there too; a browser can opt in with the header `X-Live-Transport: webrtc`).
+  the box probes NVENC, then VA-API (AMD/Intel, device created up front via
+  the go2rtc ffmpeg template `edge_vaapi_device`), else libx264. Force one with
+  `WEBRTC_TRANSCODE_ENCODER=vaapi|nvenc|libx264`. On the Pearcedale box
+  (H.265 NVR sub-streams) each converted tile costs about 3 % of one core,
+  and its first frame takes about 4 s against 1.5 s for passed-through H.264.
+- **Settings → Online access · Live video** (stored with the tunnel settings,
+  editable per site): "STUN servers" (`stun_servers`, default
+  `stun:stun.ikorex.com.au:3478`), "Connection mode" (`webrtc_mode`
+  auto/fixed port, `webrtc_port`), "Most live videos at once"
+  (`max_video_sessions`, 8), "Live video on the store network (every viewer)"
+  (`live_transport_on_lan`: `local` keeps snapshots/MJPEG on the store network,
+  `webrtc` uses direct WebRTC there too) and "Live video on this network" (per
+  browser; sends `X-Live-Transport: webrtc`). The card also lists "Watching
+  now" and holds "Check remote video".
 
 **Modes.** `auto` (default) needs **no router or firewall change**: go2rtc
 uses `webrtc.listen: ""`, so each connection gets its own ephemeral UDP port
@@ -703,8 +777,8 @@ and a server-reflexive (srflx) candidate from STUN; go2rtc is a full ICE agent
 (not ICE-lite) and sends its own connectivity checks to the viewer, which
 opens the store router's NAT mapping and the box firewall's conntrack entry
 (UFW's default deny-incoming is fine). This works when the store router maps
-endpoint-independently (most do; the first store box measured
-endpoint-independent and port-preserving). `fixed_port` listens on
+endpoint-independently (most do; the Pearcedale store router measured
+endpoint-independent and port-preserving, so no port forward is needed). `fixed_port` listens on
 `:<webrtc_port>` (UDP+TCP, default 8555) and advertises
 `<public IP>:<port>`; use it only with a port forward on the store router,
 and allow it on the box yourself: `sudo ufw allow 8555/udp`.
@@ -721,12 +795,20 @@ runs only when asked; nothing polls the internet in the background.
 `"turn_enabled": false, "webrtc_scope": "internet"`, and `POST
 /api/v1/webrtc/offer` opens a session without heartbeats (it ends when the
 connection closes, the camera is turned off, or after the 4 h cap). The app
-still falls back to MJPEG through the tunnel for remote viewing, which is now
-refused (`video_direct_only`): it needs an update to the session API
-(heartbeat + DELETE) before it can show live video off-site.
+still asks for MJPEG through the tunnel for remote viewing, which is refused
+(`video_direct_only`): it needs the session API (heartbeat + DELETE) before
+it can show live video off-site. The list of fixes is
+`mobile_app/UPCOMING_FIXES.md` (talk-back was removed on 2026-09-29).
 
-The optional coturn compose profile (`docker compose --profile turn`) is
-obsolete under this rule and must not be used for remote video.
+**Known gaps.** Detector boxes are not drawn on direct video (it is the raw
+camera picture, also without privacy masks). With the default 10 s rotation, a
+converted tile shows video for about half its time on screen because the first
+frame takes about 4 s; a longer remote rotation or opening the next camera
+early is an open owner decision. `stun.ikorex.com.au` has no AAAA record, so a
+browser may log one STUN "host lookup" error for IPv6; IPv4 works.
+
+The old coturn `turn` compose profile has been removed from
+`edge_backend/docker-compose.yml`; never add a TURN server for remote video.
 
 ---
 

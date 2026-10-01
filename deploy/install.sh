@@ -22,7 +22,7 @@
 #                     access is already enabled in Settings: bootstrap then
 #                     fetches it anyway. The address, tunnel server, store ID
 #                     and store token are entered in Settings -> Online access
-#                     (deploy/vps/README.md).
+#                     (VPS side: Server/cctv-tunnel/README.md).
 #   EDGE_GO2RTC=0     do not fetch go2rtc (pinned, checksum-verified; fetched by
 #                     default). It is the live video gateway for direct
 #                     peer-to-peer remote video (docs/REMOTE_VIDEO_CONTRACT.md);
@@ -161,7 +161,7 @@ if [ -x "$DEST/bin/frpc" ]; then
   echo "frpc $("$DEST/bin/frpc" --version 2>/dev/null || echo '?') installed in $DEST/bin"
   echo "Set the public address, tunnel server, store ID and store token in Settings -> Online access."
 else
-  echo "not installed (re-run with EDGE_TUNNEL=1 to fetch it; see deploy/vps/README.md)"
+  echo "not installed (re-run with EDGE_TUNNEL=1 to fetch it; see docs/DEPLOYMENT.md section 7a)"
 fi
 if [ -x "$DEST/bin/go2rtc" ]; then
   echo "go2rtc $("$DEST/bin/go2rtc" -version 2>/dev/null | awk '{print $3}') installed in $DEST/bin (remote live video,"

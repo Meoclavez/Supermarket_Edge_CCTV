@@ -19,9 +19,9 @@ Connects directly to a **cross-platform Flutter client (PC Web/Desktop, Android,
   * Continuous zero-copy H.264 stream remuxing (`-c:v copy`) consumes **$<0.5\%$ CPU per 1080p stream** on the Intel N100.
   * Fragmented keyframe moov headers prevent video file corruption during unexpected power outages.
   * Dynamic HLS (`.m3u8`) generator with gap discontinuity tags and sub-2-second lossless incident MP4 export (`/api/v1/cameras/{id}/export`).
-* **🌐 Zero-Trust WebRTC & NAT Traversal**:
-  * **go2rtc** media gateway ($<300\text{ms}$ latency) + **Coturn** RFC 5766 dynamic HMAC-SHA1 authenticated STUN/TURN relay for symmetric 4G/5G mobile connectivity.
-  * Automated 2048-bit SAN TLS certificates.
+* **🌐 Online access & direct live video**:
+  * Dashboard published at `https://<store>-cctv.ikorex.com.au` through the iKorex VPS (Cloudflare → nginx gateway → frps; the box's frpc dials out, per-store token + hostname lock). No router port forward.
+  * The VPS is only a connection broker: live video is **direct peer-to-peer WebRTC** from the box's in-app **go2rtc** to the viewer, STUN only (`stun.ikorex.com.au:3478`), **no TURN relay**, and only while a tile is on screen. Live pictures through the tunnel are refused (`403 video_direct_only`). Details: [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) §7a and [`docs/REMOTE_VIDEO_CONTRACT.md`](docs/REMOTE_VIDEO_CONTRACT.md).
 * **🔔 Loss-prevention alerts for staff**:
   * High-priority, time-sensitive pushes (APNs `time-sensitive`, FCM `priority: high`) with the normal alert sound; no critical-alert entitlement and no siren.
   * Live dashboard feed over `/api/v1/events/ws`, an acknowledgeable alert log, and per-camera alert muting (e.g. during restocking).
@@ -46,11 +46,11 @@ Connects directly to a **cross-platform Flutter client (PC Web/Desktop, Android,
  │ 2. In-Place Privacy Masking (Blackout / Blur / Mosaic).                     │
  │ 3. Pose inference (TensorRT / CUDA / MIGraphX / CPU, probed at runtime).    │
  │ 4. Zero-Copy 24/7 DVR remuxing saves 1-min MP4 chunks + Dynamic HLS.       │
- │ 5. go2rtc (<300ms WebRTC) + Coturn RFC 5766 dynamic HMAC-SHA1 TURN.        │
+ │ 5. In-app go2rtc: direct P2P WebRTC to viewers, STUN only, no TURN relay.  │
  │ 6. Caddy TLS Reverse Proxy.                                                 │
  │ 7. Loss-prevention alert fan-out: APNs / FCM pushes + dashboard websocket.  │
  └──────────────────────────────────────┬──────────────────────────────────────┘
-                                        │ (HTTPS / WSS / WebRTC video)
+                                        │ (HTTPS via VPS tunnel; WebRTC video direct)
                                         ▼
  ┌─────────────────────────────────────────────────────────────────────────────┐
  │             CROSS-PLATFORM FLUTTER CLIENT (DESKTOP / WEB / MOBILE)         │
@@ -100,7 +100,7 @@ Supermarket_Edge_CCTV/
 │   │   │   ├── health.py                     # Hardware & telemetry monitoring (/api/v1/health)
 │   │   │   ├── cameras.py                    # Camera CRUD, snapshots, device registration
 │   │   │   ├── events.py                     # Loss-prevention alerts: log, ack, websocket, devices
-│   │   │   ├── webrtc.py                     # WebRTC SDP signaling & dynamic ICE servers
+│   │   │   ├── webrtc.py                     # Direct WebRTC sessions (STUN only), heartbeat, diagnostics
 │   │   │   ├── dvr.py                        # 24h timeline, dynamic HLS, incident exports
 │   │   │   └── zones.py                      # Per-camera privacy masks
 │   │   └── services/
@@ -109,18 +109,18 @@ Supermarket_Edge_CCTV/
 │   │       ├── dvr_recorder.py               # 24/7 continuous segmenter, HLS, stitcher & SMART
 │   │       ├── clip_recorder.py              # In-memory JPEG ring-buffer MP4 generator
 │   │       ├── notification_service.py       # Loss-prevention pushes (APNs/FCM) + websocket hub
-│   │       ├── turn_service.py               # RFC 5766 dynamic ephemeral TURN credentials
+│   │       ├── turn_service.py               # Legacy; TURN is never used for remote video
 │   │       └── auth_service.py               # JWT session manager & path traversal sanitizer
 │   ├── tests/
 │   │   ├── test_api.py                       # REST API, auth, ICE, zones, timeline tests
 │   │   └── test_features.py                  # Per-camera retail feature flags
-│   ├── coturn/coturn.conf                    # Coturn TURN/STUN relay configuration
+│   ├── coturn/coturn.conf                    # Legacy; no TURN relay (STUN runs on the VPS)
 │   ├── Caddyfile                             # Caddy reverse proxy config (TLS termination)
 │   ├── scripts/generate_certs.py             # Automated local TLS certificate generator
-│   ├── go2rtc.yaml                           # go2rtc Media Gateway config
+│   ├── go2rtc.yaml                           # Legacy sample; go2rtc runs in-app (storage/go2rtc/)
 │   ├── requirements.txt                      # Backend dependencies
 │   ├── Dockerfile                            # Multi-stage container with HailoRT & VA-API
-│   └── docker-compose.yml                    # Stack: coturn, go2rtc, edge_api, caddy, tailscale
+│   └── docker-compose.yml                    # Stack: edge_api (with in-app go2rtc), caddy, tailscale
 │
 └── mobile_app/                               # Cross-Platform Flutter Client (Desktop, Web, Mobile)
     ├── pubspec.yaml                          # Dependencies (local_auth, webrtc, notifications)
@@ -132,7 +132,7 @@ Supermarket_Edge_CCTV/
         │   ├── api_service.dart              # REST client with auto-failover & base URL switching
         │   ├── discovery_service.dart        # Universal mDNS discovery + subnet sweep
         │   ├── biometric_auth_service.dart   # FaceID / Fingerprint manager with 60s grace
-        │   ├── webrtc_service.dart           # Receive-only WebRTC video session manager
+        │   ├── webrtc_service.dart           # Receive-only WebRTC (remote use needs mobile_app/UPCOMING_FIXES.md)
         │   └── notification_service.dart     # Push handler with lockscreen interactive actions
         ├── widgets/
         │   ├── biometric_gate.dart           # Biometric authentication screen wrapper
@@ -329,8 +329,8 @@ Open `https://edge-cctv.local` or `http://192.168.1.100:8000` in any desktop bro
 cd edge_backend
 python -m pytest tests/ -v
 
-# Test WebRTC ICE servers
-curl -s http://localhost:8000/api/v1/webrtc/ice-servers | jq .
+# Live-video config (STUN only, never a turn: URL); needs a signed-in token
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/v1/webrtc/config | jq .
 
 # Post a test loss-prevention alert for a camera you have already added
 # (there are no built-in demo cameras; use an id from GET /api/v1/cameras)

@@ -26,7 +26,7 @@ RULE = colors.HexColor("#D5DCE4")
 
 SECTIONS = [
     ("Live cameras", [
-        ("Live camera view", "See your cameras live from any authorised computer or phone."),
+        ("Live camera view", "See your cameras live from any authorised computer or phone, in the store or away."),
         ("Rotating camera wall", "Shows four cameras at a time and cycles through the rest, so every area gets seen."),
         ("Pin a camera", "Keep an important camera on screen while the others rotate."),
         ("Turn cameras on or off", "Switch off cameras you don't need right now; they then use no processing power."),
@@ -66,7 +66,10 @@ SECTIONS = [
     ]),
     ("Alerts and access", [
         ("Phone alerts", "Sends alerts to paired phones, filtered by type, camera and quiet hours."),
-        ("Secure online access", "Open the dashboard securely from outside the store with your own web address."),
+        ("Secure online access", "Open the dashboard securely from outside the store at your store's own web address. "
+                                 "No changes to your router are needed."),
+        ("Private live video", "Live video goes straight from the store to your screen, never through anyone else's "
+                               "server, and only while you are watching."),
         ("Protected sign-in", "Every screen requires a signed-in user; repeated wrong passwords are blocked."),
     ]),
     ("Privacy and data", [

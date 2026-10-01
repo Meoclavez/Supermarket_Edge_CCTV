@@ -463,7 +463,7 @@ than firing on empty data.
 ## File & API Reference
 
 ### Backend Core (`edge_backend/app/`)
-* **[`app/main.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/main.py):** FastAPI entrypoint: installs log redaction at import, lifespan (safety warnings -> preflight -> `init_db` -> setup code -> `initialise_inference` -> pipeline -> `pose_analytics.start`), static mounts, `/dashboard` and `/dashboard/analytics` (both serve `index.html`), `/dashboard/studio` (Camera Studio), `/stream?camera_id=&fps=&overlay=1` (live MJPEG of real, privacy-masked frames; a NO SIGNAL slate otherwise), and router registrations.
+* **[`app/main.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/main.py):** FastAPI entrypoint: installs log redaction at import, lifespan (safety warnings -> preflight -> `init_db` -> setup code -> `initialise_inference` -> pipeline -> `pose_analytics.start`), static mounts, `/dashboard` and `/dashboard/analytics` (both serve `index.html`), `/dashboard/studio` (Camera Studio), `/stream?camera_id=&fps=&overlay=1` (live MJPEG of real, privacy-masked frames for the store network/VPN; a NO SIGNAL slate otherwise; refused 403 `video_direct_only` through the tunnel), and router registrations.
 * **[`app/config.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/config.py):** Settings, storage paths, retention policies, JWT keys, go2rtc URLs, and hardware device paths with graceful local fallback directory resolution.
 * **[`app/models/schemas.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/models/schemas.py):** Pydantic schemas incl. `EventType` (loss-prevention types only: THEFT_SUSPECTED, CONCEALMENT, SHELF_SWEEP, EXIT_WITHOUT_CHECKOUT, LOITERING, QUEUE_ALERT, CAMERA_OFFLINE), `MaskMode` (BLACKOUT/BLUR/MOSAIC/COLOR/AI_IGNORE), `CameraFeatureConfig` (`people_counting`, `shelf_interaction`, `theft_detection`; `extra="ignore"`), `ZoneConfig`, `Keypoint`, `HardwareProfile`, `SystemStats`, `SecurityEvent`, camera/DVR/storage models.
 * **[`app/services/hardware_detector.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/hardware_detector.py):** Runtime probe for decode capability (NVIDIA NVDEC, Intel VA-API, AMD Mesa, CPU SIMD) and RAM; the inference fields are read from the detector that is actually loaded, not guessed.
@@ -486,9 +486,9 @@ than firing on empty data.
 * **[`app/services/notification_service.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/notification_service.py):** `notify_loss_prevention(title, body, data)`: security-event log, websocket broadcast, per-device push; returns real outcomes.
 * **[`app/services/preflight.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/preflight.py):** Read-only installation checks (deps, ORT flavour/providers, models vs manifest, storage); shared by bootstrap and fetch_models; `python -m app.services.preflight`.
 * **[`app/services/setup_service.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/setup_service.py):** `SetupCodeManager` (one-time first-run code in `storage/setup_code.txt`), `ensure_setup_code_if_needed`, setup-completed rule (requires an active admin).
-* **[`app/services/remote_access_service.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/remote_access_service.py):** Online access through the owner's VPS (provider `vps_tunnel`, frp v0.71.0 Apache-2.0; Cloudflare/Tailscale code removed 2026-09-28). Settings in `system_setup.remote_access` (`enabled`, `hostname`, `server_url` wss://host[:port] or tcp://host:port, `store_id`, `extra_proxies` 0-2, last verification). Secrets (named, encrypted): `vps_tunnel_store_token`, optional `vps_tunnel_server_key` (frp shared auth.token); legacy `cloudflare_tunnel_token` deleted on start. Supervises `frpc -c <STORAGE_DIR>/tunnel/frpc.toml` (dir 0700/file 0600; `user=<store id>`, `metadatas.token` + optional `auth.token` as `{{ .Envs.* }}` templates, secrets only in frpc's minimal env; one http proxy `<store>-cctv`, customDomains=[hostname] -> 127.0.0.1:PORT; wss with TLS verified against system CA / `EDGE_TUNNEL_CA_FILE`; heartbeat 30/90 s; loginFailExit + app backoff). Status from frpc log lines: stopped/starting/connected(`connected_since`)/error + `error_kind` (login_rejected, address_rejected, address_in_use, server_key_rejected, auth_service_unavailable, unreachable, certificate, not_a_tunnel, connection_lost, setup, exited). Requires HOST 0.0.0.0/127.0.0.1. `verify()` fetches `https://<host>/api/v1/device/identity`. Binary: `FRPC_PATH`, PATH, `<repo>/bin/frpc` (bootstrap `--with-tunnel`/`EDGE_TUNNEL=1`, pinned SHA-256). Routes `app/routes/remote_access.py`: GET/PUT `/api/v1/remote-access`, POST `/verify`. UI: `static/js/remote_access.js`. VPS side: `deploy/vps/` (shared frps, proxy templates; store-check plugin separate). Tests: `tests/test_remote_access.py` (fake `fixtures/fake_frpc.sh`), `tests/test_online_access.py`.
-* **Remote live video (direct WebRTC, 2026-09-29, uncommitted):** `routes/webrtc.py` (session API; heartbeat/report/DELETE not rate-limited, opens have their own 240/min budget), `services/webrtc_sessions.py` (one go2rtc stream per session, reaper; go2rtc restarted only for a *connected* consumer that outlives its session), `services/go2rtc_manager.py` (supervised child, reaps its ffmpeg process group), dashboard `static/js/webrtc_live.js` + `remote_video.js`. **H.265 remote video resolved (e451706, verified live 2026-09-30 02:20 AEST):** 30/31 NVR sub-streams are H.265 and are transcoded with h264_vaapi (go2rtc config template `edge_vaapi_device` = `-init_hw_device vaapi`, source `#raw=edge_vaapi_device`); about 3 % of a core per tile, GPU +0.3 %, first frame about 4.6 s; ch25 H.264 is passed through. **Public path verified 2026-10-01 (e451706):** https://pearcedale-cctv.ikorex.com.au through the deployed VPS tunnel. Video goes peer-to-peer srflx<->srflx (box 58.179.142.243, endpoint-independent NAT) and the VPS carries about 0.44 MB/min of frps signalling against 24 MB/min of video; gateway 403 on live-pixel paths. Open items: Cloudflare Web Analytics injection is blocked by the CSP (disable it in Cloudflare); `stun.ikorex.com.au` has no AAAA record. Integration harness (scratch only): real frps/frpc + headless Chrome `--host-resolver-rules` + source go2rtc with ffmpeg testsrc cameras; results in the contract's "Integration run" section.
-* **[`app/services/public_exposure.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/public_exposure.py):** Tunnel request = loopback peer + Host == public hostname -> remote, HTTPS (frps rewrites X-Forwarded-Proto to http), client IP = X-Forwarded-For entry `1 + extra_proxies` from the right (frps appends the VPS proxy; X-Real-IP never trusted); other loopback proxies: right-most XFF; non-loopback peers: forwarding headers ignored. uvicorn runs with `--no-proxy-headers` (unit, entrypoint.sh, bootstrap exec) so the real peer is seen. Middleware refuses `/api/v1/setup/*` (except GET status) and `/docs` remotely and everything remote while AUTH_DISABLED; security headers (HSTS only via HTTPS); own-origin CORS. Live pixels through the tunnel are refused (403 `video_direct_only`); remote viewers get direct peer-to-peer WebRTC via the in-app go2rtc, STUN only, never TURN (docs/REMOTE_VIDEO_CONTRACT.md, uncommitted as of 2026-09-29).
+* **[`app/services/remote_access_service.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/remote_access_service.py):** Online access through the owner's VPS (provider `vps_tunnel`, frp v0.71.0 Apache-2.0; Cloudflare/Tailscale code removed 2026-09-28). Settings in `system_setup.remote_access` (`enabled`, `hostname`, `server_url` wss://host[:port] or tcp://host:port, `store_id`, `extra_proxies` 0-2, last verification). Secrets (named, encrypted): `vps_tunnel_store_token`, optional `vps_tunnel_server_key` (frp shared auth.token); legacy `cloudflare_tunnel_token` deleted on start. Supervises `frpc -c <STORAGE_DIR>/tunnel/frpc.toml` (dir 0700/file 0600; `user=<store id>`, `metadatas.token` + optional `auth.token` as `{{ .Envs.* }}` templates, secrets only in frpc's minimal env; one http proxy `<store>-cctv`, customDomains=[hostname] -> 127.0.0.1:PORT; wss with TLS verified against system CA / `EDGE_TUNNEL_CA_FILE`; heartbeat 30/90 s; loginFailExit + app backoff). Status from frpc log lines: stopped/starting/connected(`connected_since`)/error + `error_kind` (login_rejected, address_rejected, address_in_use, server_key_rejected, auth_service_unavailable, unreachable, certificate, not_a_tunnel, connection_lost, setup, exited). Requires HOST 0.0.0.0/127.0.0.1. `verify()` fetches `https://<host>/api/v1/device/identity`. Binary: `FRPC_PATH`, PATH, `<repo>/bin/frpc` (bootstrap `--with-tunnel`/`EDGE_TUNNEL=1`, pinned SHA-256). Routes `app/routes/remote_access.py`: GET/PUT `/api/v1/remote-access`, POST `/verify`. UI: `static/js/remote_access.js`. VPS side: `~/Projects-1/Server/cctv-tunnel` (`deploy/vps/` in this repo is legacy, do not use; `deploy/install.sh`, `bootstrap.py` and `.env.example` comments still point at it). Deployed state: see "Online access + remote live video" under Live deployment. Tests: `tests/test_remote_access.py` (fake `fixtures/fake_frpc.sh`), `tests/test_online_access.py`.
+* **Remote live video (direct WebRTC; committed 05e6215, 6557217, e451706):** `routes/webrtc.py` (session API; heartbeat/report/DELETE not rate-limited, opens have their own 240/min budget), `services/webrtc_sessions.py` (one go2rtc stream per session, reaper; go2rtc restarted only for a *connected* consumer that outlives its session), `services/go2rtc_manager.py` (supervised child, reaps its ffmpeg process group; H.265 -> H.264 via go2rtc ffmpeg template `edge_vaapi_device` = `-init_hw_device vaapi`, source `#raw=edge_vaapi_device`), dashboard `static/js/webrtc_live.js` + `remote_video.js` (Settings -> Online access · Live video card). Deployed state, measurements and pending items: "Online access + remote live video" under Live deployment. Integration harness (scratch only): real frps/frpc + headless Chrome `--host-resolver-rules` + source go2rtc with ffmpeg testsrc cameras; results in the contract's "Integration run" section.
+* **[`app/services/public_exposure.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/public_exposure.py):** Tunnel request = loopback peer + Host == public hostname -> remote, HTTPS (frps rewrites X-Forwarded-Proto to http), client IP = X-Forwarded-For entry `1 + extra_proxies` from the right (frps appends the VPS proxy; X-Real-IP never trusted); other loopback proxies: right-most XFF; non-loopback peers: forwarding headers ignored. uvicorn runs with `--no-proxy-headers` (unit, entrypoint.sh, bootstrap exec) so the real peer is seen. Middleware refuses `/api/v1/setup/*` (except GET status) and `/docs` remotely and everything remote while AUTH_DISABLED; security headers (HSTS only via HTTPS); own-origin CORS. Live pixels through the tunnel are refused (403 `video_direct_only`); remote viewers get direct peer-to-peer WebRTC via the in-app go2rtc, STUN only, never TURN (docs/REMOTE_VIDEO_CONTRACT.md).
 * **[`app/services/secret_store.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/secret_store.py):** Per-machine secret resolution/generation into `storage/secrets/device_secrets.json`.
 * **[`app/services/nvr_credential_service.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/nvr_credential_service.py):** NVR credentials in `storage/nvr_credentials.json`, passwords Fernet-encrypted (`enc:v1:`).
 * **[`app/services/log_redaction.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/log_redaction.py):** `install_log_redaction()` log-record scrubbing of tokens and credentials.
@@ -524,6 +524,7 @@ than firing on empty data.
 * **[`app/static/css/style.css`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/static/css/style.css):** Glassmorphism cyber-HUD stylesheet with full mobile (<768px), tablet (768-1024px), desktop (>1024px), and print media query support.
 
 ### Mobile Client (`mobile_app/lib/`)
+* **Live video (pending fixes):** `lib/services/webrtc_service.dart` still uses the one-shot `/api/v1/webrtc/offer` and picks MJPEG for the remote URL, which the tunnel refuses (403 `video_direct_only`), so remote live video in the app does not work until the fixes in `mobile_app/UPCOMING_FIXES.md` (session API with heartbeat + DELETE, auth header, no MJPEG remote fallback, stale defaults). Talk-back removed 2026-09-29. Build only when the owner asks.
 * **`lib/screens/loss_prevention_screen.dart`:** Incident list from `GET /api/v1/theft/incidents` (model: `lib/models/theft_incident.dart`, `rule` falling back to `theft_type`).
 * **`lib/screens/loss_prevention_alert_screen.dart`:** Single-incident detail (opened from a push with only the id, or from the list): evidence image, evidence bullets, acknowledge and inline resolve form. Framed as suspicious behaviour for staff review, never a verdict.
 * **`lib/services/notification_service.dart`:** `loss_prevention_alerts` channel ("Loss prevention", normal high importance, created from Dart) and `LOSS_PREVENTION_ALERT` category; routes taps to the alert screen. iOS uses the time-sensitive interruption level (`ios/Runner/AppDelegate.swift`), not critical alerts; Android `MainActivity.kt` has no alarm channel. The emergency siren screen was deleted.
@@ -548,7 +549,7 @@ than firing on empty data.
 * **`static/js/heatmap_history.js`:** Insights heatmap history (floor or per-camera view, Walked / Stopped / Touched shelves, hour strip observed/quiet/camera off, playback, compare with diff legend, hour-of-day profile, Record now, cited HEATMAP_* findings). Store map heatmap has Today / Yesterday / 7 d / 30 d ranges.
 * **Backend behind these:** `services/hourly_traffic.py` (`GET /analytics/footfall/hourly`), `services/recommendations_service.py` + `routes/insights.py` (consolidated list, analysis runs, m0014), `services/camera_roles.py` + `routes/camera_roles.py` (m0012), `services/heatmap_history.py` (m0013). No GET route writes to the database (enforced by `tests/test_ux_backend.py`).
 
-## Live deployment: Ubuntu edge box (updated 2026-09-27)
+## Live deployment: Ubuntu edge box (updated 2026-10-01)
 
 **Box:** `securitypc-MS-7D90`, Ubuntu 26.04, i5-14400F (no iGPU), RX 9060 XT 16 GB (gfx1200),
 16 GB RAM, Wi-Fi 192.168.20.239, Tailscale 100.78.122.93 (tailnet `tail9fc52a`), TZ
@@ -572,11 +573,42 @@ MemoryMax 9G, ProtectProc=invisible). Logs: `journalctl -u edge-cctv` (securityp
 
 **Access:** owner privately via Tailscale `http://100.78.122.93:8000/dashboard` (ufw: 8000 on
 tailscale0 only; plain HTTP, WireGuard encrypts; no Tailscale text in the dashboard). Public:
-VPS reverse tunnel (frp), multi-tenant shared frps + store-check plugin; names
-`<store>-cctv.ikorex.com.au` (first store `pearcedale`), tunnel `wss://tunnel.ikorex.com.au`,
-entered in Settings -> Online access (nothing hard-coded). Not yet live: needs VPS inspection
-(proxy type, docker network, certificates, whether Cloudflare proxies the domain ->
-`extra_proxies=1`), the store-check plugin, then `sudo EDGE_TUNNEL=1 bash deploy/install.sh` on the box.
+`https://pearcedale-cctv.ikorex.com.au`, live since 2026-10-01 (see next block).
+
+**Online access + remote live video (deployed; public path verified 2026-10-01 on e451706):**
+- Path: viewer -> Cloudflare -> VPS `web-gateway` (nginx) -> `cctv-frps` (frp 0.71.0) -> box
+  frpc -> uvicorn; per-store token + hostname lock in `cctv-auth`. VPS package
+  `~/Projects-1/Server/cctv-tunnel` (README: apply plan, `manage status`, debugging,
+  `onboard-store.sh`, `stun-selftest.py`); `deploy/vps/` is legacy, do not use. Naming
+  `<store>-<service>.ikorex.com.au`; tunnel `wss://tunnel.ikorex.com.au`; Cloudflare DNS:
+  `tunnel` and `<store>-cctv` proxied, `stun` DNS-only.
+- Box settings (Settings -> Online access): Public address, Tunnel server, Store ID, Store
+  token, optional Server key, Proxies in front = 1 (Cloudflare). frpc via
+  `sudo EDGE_TUNNEL=1 bash deploy/install.sh`; go2rtc 1.9.14 fetched by default.
+- Owner rule: the VPS is only a connection broker + debugging aid. Live video is direct P2P
+  WebRTC box go2rtc <-> browser, STUN only (`stun.ikorex.com.au:3478`, coturn `--stun-only`),
+  never TURN/relay; sessions only while a tile is on screen (rotate, enlarge-other, view
+  switch, hidden tab, page close end them; vanished viewers reaped within ~45 s). Live
+  pictures through the tunnel get 403 `video_direct_only` from the gateway and the box;
+  stored evidence stills/clips still open on click. Remote stills (floor-map thumbnail,
+  heatmap background, calibration) are one frame over a direct connection ("Take a new
+  picture"). Store NAT is endpoint-independent, so mode `auto` needs no port forward.
+- Builds: 05e6215 (direct P2P video), 6557217 (VA-API device up front), e451706 (go2rtc
+  ffmpeg template fix; H.265 resolved). 30/31 NVR sub-streams are H.265 -> h264_vaapi, ~3 %
+  of a core per tile, first frame ~4 s (H.264 ch25 passthrough ~1.5 s).
+- Measured on the public path: pair srflx<->srflx (box 58.179.142.243), 4 tiles ≈ 3.2 Mbit/s
+  direct; VPS ≈ 0.44 MB/min cctv-frps while watching, ~3 kB/min idle; sessions end 0.64 s
+  after a view switch, 9 s after a killed browser. Evidence: contract "Public path check".
+- Dashboard: Settings -> "Online access · Live video" card (STUN servers, mode/port, most
+  live videos at once = 8, store-network transport, per-browser toggle, Check remote video
+  with STUN test, diagnostics, Watching now, advice).
+- Pending: Cloudflare/VPS security hardening -> `~/Projects-1/Server/SECURITY_NEXT_WORK.md`;
+  rotation delay for remote tiles (10 s default shows converted tiles ~half the time; owner
+  to decide longer remote rotation or overlap); phone app remote live video
+  (`mobile_app/UPCOMING_FIXES.md`; talk-back removed 2026-09-29); detector boxes on direct
+  video (also no privacy masks on it); Cloudflare Web Analytics beacon blocked by the CSP
+  (owner to disable automatic injection, do not widen the CSP); no AAAA record for `stun`
+  (one harmless IPv6 STUN lookup error in browsers).
 
 **Live verification pattern:** owner saves the dashboard password to
 `/tmp/claude-1000/<project>/<session>/scratchpad/.dash_pw` (0600) with `read -rs`; one sign-in,
@@ -598,13 +630,13 @@ storage with oldest-first cap, DVR recorder removed (da529fc); CPU -47% (OpenCV 
 NV12 reader, DECODE_MAX_FPS=5, DECODE_MAX_WIDTH=auto, resolution-independent geometry) (e3bdc30).
 Measured at 5f2dc0f: CPU ~478% (box ~30%), GPU ~57% (budget 0.6), yolo26n-pose ~2.7 fps/camera.
 
-**Pending/owner decisions:** gaze/attention beam plan; public URL (VPS tunnel built, VPS side
-pending); store manager switches
+**Pending/owner decisions:** gaze/attention beam plan; online-access items listed in the
+block above; store manager switches
 the 16 CIF channels to D1 sub-stream (needed by RTMO); body7 training-data legal check for
 the RTMO/RTMPose weights; deploy of the RTMO-only build to the box; phone push (FCM)
 not configured; skeleton-rotation report parked until reproduced.
 
-**Client docs:** `docs/client/Edge_AI_CCTV_Features.pdf` (plain-language feature overview for customers, A4, 3 pages; rebuild with `uv run --with reportlab python docs/client/build_features_pdf.py`). Operator reference with configuration paths: `docs/FEATURES.md`.
+**Client docs:** `docs/client/Edge_AI_CCTV_Features.pdf` (plain-language feature overview for customers, A4, 3 pages; last rebuilt 2026-10-01 with "Secure online access" + "Private live video" rows; rebuild with `uv run --no-project --with reportlab python docs/client/build_features_pdf.py`). Operator reference with configuration paths: `docs/FEATURES.md`.
 
 **RTMO trial result (2026-09-28, brain #324):** RTMO-s better on D1/720p/>=1440p cameras (keeps 96-98% of YOLO's people, +25-33% more, fewer fixture false positives); worse on CIF 352x288 (keeps ~60%); IR/low-light inconclusive (night review samples were overwritten: sampler keeps only the newest 200). Decided 2026-09-28: switch to RTMO-s only (YOLO removed, CIF channels to D1); see the "RTMO only" block under Inference.
 
@@ -612,4 +644,4 @@ not configured; skeleton-rotation report parked until reproduced.
 
 **Models:** RTMO-s only (Apache-2.0); YOLO and the object model removed; refiner off by default; thresholds 0.50 / dark 0.45, TRACK_LOW_CONF_THRESHOLD 0.40. THIRD_PARTY_NOTICES.md lists model/library licences.
 
-**Online access (app side done, VPS not deployed):** frpc child process managed by remote_access_service (store id + per-store token, wss://tunnel.ikorex.com.au, one http proxy for <store>-cctv.ikorex.com.au); Settings -> Online access (Tailscale/Cloudflare guidance removed); VPS stack prepared in ~/Projects-1/Server/cctv-tunnel (brain #326/#327). Owner and Claude apply VPS + Cloudflare hardening together in a final joint session; online access stays disabled on the box until then.
+**Online access:** live and verified 2026-10-01; see "Online access + remote live video" above (brain #326/#327 for the VPS package history).

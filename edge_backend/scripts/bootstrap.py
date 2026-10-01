@@ -593,7 +593,7 @@ def run_preflight(py: Path) -> dict:
 # --------------------------------------------------------------------------- #
 
 # frp (fatedier/frp, Apache-2.0). Pinned: the tunnel server on the VPS runs
-# the same version (deploy/vps/docker-compose.yml). To upgrade, change the
+# the same version (Server/cctv-tunnel/docker-compose.yml). To upgrade, change the
 # version here and there, and replace the hashes below with the ones from the
 # release's frp_sha256_checksums.txt.
 FRP_VERSION = "0.71.0"

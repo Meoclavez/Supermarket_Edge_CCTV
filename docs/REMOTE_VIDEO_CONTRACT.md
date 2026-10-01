@@ -181,7 +181,7 @@ Clarifications the dashboard relies on, where the contract left a choice open:
 
 ## Deviations (VPS)
 
-Status 2026-09-29: prepared in `~/Projects-1/Server/cctv-tunnel` and tested locally. **Not deployed.**
+Status 2026-09-29: prepared in `~/Projects-1/Server/cctv-tunnel` and tested locally. Deployed on the VPS by 2026-10-01 (see "Public path check" below).
 
 - **coturn flags.**
   - Image: `coturn/coturn:4.18.0-alpine`, pinned by its linux/amd64 digest
@@ -213,7 +213,7 @@ Status 2026-09-29: prepared in `~/Projects-1/Server/cctv-tunnel` and tested loca
 
 ## Deviations (backend)
 
-Status 2026-09-29: implemented in `edge_backend` (not deployed). go2rtc **v1.9.14**, pinned in
+Status 2026-09-29: implemented in `edge_backend`. Deployed to the Pearcedale box as 05e6215, 6557217 and e451706 (see the live checks below). go2rtc **v1.9.14**, pinned in
 `edge_backend/scripts/bootstrap.py` by the release asset digests (`go2rtc_linux_amd64`
 `32d616af226bd731678ffde328b94cfb94e30339bfefc469cfb76323144615a6`, `go2rtc_linux_arm64`
 `359fabade8a7a51e81a55fe6df6b0ef81764a5e1d63179577534eaaa71904b50`, `go2rtc_linux_arm`

@@ -1,6 +1,6 @@
 # Edge AI CCTV: Dashboard Feature Reference
 
-Last updated: 2026-09-28 · Describes main after the switch to the RTMO-s pose model (object model removed)
+Last updated: 2026-10-01 · Describes main at e451706 (RTMO-s pose model; online access live; direct peer-to-peer live video)
 
 The Edge AI CCTV dashboard runs on the in-store edge device. It shows live cameras, counts shoppers,
 maps them onto a store plan, and flags suspicious behaviour for staff to review. It also produces
@@ -24,12 +24,14 @@ else is site-wide. "Installer-level" means the setting is in `edge_backend/.env`
 >   viewer's own time when it differs.
 > - **Privacy masks.** Masks are burned into every picture that is shown or saved, including evidence.
 >   If a mask cannot be applied, the whole frame is blacked out.
+>   Exception: direct live video (see "Live video" under Access and security), and pictures taken over it, show the camera's own
+>   picture: privacy masks and detector boxes are not drawn on them.
 
 ## Sign-in and navigation
 
 | Feature | What it's for | Where / how to configure |
 |---|---|---|
-| First-run account | Creates the owner account; needs the one-time setup code the device prints at start. | Shown automatically on first visit (store network or tailnet only) |
+| First-run account | Creates the owner account; needs the one-time setup code the device prints at start. | Shown automatically on first visit (store network or a private VPN only; refused through online access) |
 | Sign in / "Sign out" | Every page and API call needs a signed-in operator. | Sign-in form; "Sign out" in the header |
 | "Forgot password?" | Explains how to reset access on the device. | Link on the sign-in form |
 | Main tabs | "Today", "Cameras", "Store map", "Insights", "Loss prevention", plus "Settings" (gear). | Header; phones get a bottom tab bar |
@@ -50,10 +52,10 @@ else is site-wide. "Installer-level" means the setting is in `edge_backend/.env`
 
 | Feature | What it's for | Where / how to configure |
 |---|---|---|
-| Live grid | Four live tiles; click a tile to enlarge it with smoother live video. | Cameras |
+| Live grid | Four live tiles; click a tile to enlarge it with smoother live video. Opened through online access, each tile plays direct live video from the device (badge "LIVE · Direct"), only while it is on screen. | Cameras |
 | Rotation and pins | With more than four cameras, tiles rotate. "Pin" keeps a camera in its tile. | "Previous" / "Pause" / "Next", "Change every" (seconds), tile "Pin" (per viewer) |
 | "Area:" filter and search | Filters tiles by camera purpose, or finds a camera by name. | Cameras toolbar |
-| "Video smoothness" | Tile refresh (Low 5 s, Normal 2 s, High 1 s) and enlarged-view frame rate. | Cameras toolbar (per viewer) |
+| "Video smoothness" | Tile refresh (Low 5 s, Normal 2 s, High 1 s) and enlarged-view frame rate, for store-network pictures. | Cameras toolbar (per viewer) |
 | Tile status | Shows online status, picture size, people seen, picture age, and wrong-password warnings. | Automatic; "Reconnect" on an offline tile |
 | Camera on/off | "Turn off" stops a camera's video, analysis and network traffic until it is turned on again. | Tile "Turn off"; bar under the grid: "Turn on", or turn off all offline cameras |
 | Camera settings | Sets the name, channel, stream address, sign-in, capture FPS, resolution and placement. | Cameras → tile → "Settings" (per camera) |
@@ -150,8 +152,10 @@ Opened from Cameras → tile → "Camera setup". All shapes are drawn on the cam
 
 | Feature | What it's for | Where / how to configure |
 |---|---|---|
-| "Online access" | Publishes the dashboard at https://your own address through your own server (VPS reverse tunnel); live status Stopped / Connecting / Connected since / Error. | Settings → "Online access" → "Enable online access", "Public address", "Tunnel server", "Store ID", "Store token" and optional "Server key" (write-only), "Proxies in front of your server"; VPS side: `deploy/vps/README.md` |
+| "Online access" | Publishes the dashboard at `https://<store>-cctv.ikorex.com.au` (e.g. pearcedale-cctv) through the iKorex server: the device dials out, so no router port forward. The server only passes pages, data and video set-up; it never carries live video. Live status Stopped / Connecting / Connected since / Error. | Settings → "Online access": "Public address", "Tunnel server" (`wss://tunnel.ikorex.com.au`), "Store ID", "Store token" and optional "Server key" (write-only), "Proxies in front of your server" = One (Cloudflare), "Enable online access". Installer: `sudo EDGE_TUNNEL=1 bash deploy/install.sh` fetches the tunnel program. Server side: `~/Projects-1/Server/cctv-tunnel` (DEPLOYMENT.md §7a) |
 | Access check | Confirms the public address really reaches this device. | Settings → "Online access" → "Verify now" |
+| "Live video" (direct) | Remote viewers get live video straight from the device to their browser (peer-to-peer WebRTC), never through the server. Video runs only while a tile is on screen and stops on rotate, enlarging another tile, view switch, hidden tab or page close (a vanished viewer is cut within about 45 s). H.265 cameras are converted to H.264 on the device's GPU (about 3% of a core per tile). Pictures needed by other remote views (floor-map thumbnail, heatmap background, calibration) are taken once over a direct connection; press "Take a new picture" to refresh. Stored evidence still opens on click. | Settings → "Online access · Live video": "STUN servers" (default `stun:stun.ikorex.com.au:3478`), "Connection mode" (Automatic: no router change / Fixed port: forwarded on the store router), "Most live videos at once" (8), "Live video on the store network (every viewer)", "Live video on this network" (per viewer), "Watching now" |
+| "Check remote video" | Tests the browser's and the device's STUN results, the store router's NAT type and recent connections, and says in plain words whether direct video works and what to change. | Settings → "Online access · Live video" → "Check remote video" (administrators) |
 | "Pair a phone" | Pairs the mobile app with a one-time code and QR. | Settings → "Phones" → "Pair a phone" |
 | "Push notifications" | Firebase key for phone pushes; test sends and delivery log. | Settings → "Push notifications" → "Upload", "Send test alert" |
 | "Paired phones" | Controls which alerts each phone receives, or removes a phone. | "Alert settings" (types, "Minimum severity", cameras, "Quiet hours"), "Rename", "Revoke" |
@@ -180,6 +184,9 @@ These features have no dashboard screen. They are listed so they are not rebuilt
 | Outdoor features | Perimeter lines and areas for night watch, loitering, dock activity log, camera tamper alerts, vehicle dwell (exterior only), left objects (experimental). | Planned | Drawn and switched on per camera in the dashboard |
 | Shopper attention ("eye-sight beam") | Phase 0: full camera calibration. Phase 1: aisle-side / 1 m shelf-bay attention from the skeleton, attention heatmap and looked→reached funnel. | Planned | Calibration and shelf bays in the dashboard |
 | Shopper attention, later phases | Head-pose model and planogram. Product-level attention is not expected from CCTV. | Planned | In the dashboard |
+| Detector boxes on direct video | Draw the detector's boxes over remote (direct) live video; today it shows the raw camera picture. | Planned | Automatic |
+| Faster remote rotation | Converted (H.265) cameras take about 4 s to show a first frame, so with the default 10 s rotation remote tiles show video about half the time. Options: a longer rotation for remote viewers, or opening the next camera before the switch. | Owner to decide | "Change every" on the Cameras toolbar |
+| Phone app live video away from the store | The app still asks for the old picture stream, which online access refuses; it needs the direct-video session API (fixes listed in `mobile_app/UPCOMING_FIXES.md`). Talk-back was removed on 2026-09-29. | Planned (not built until the owner asks) | Phone app |
 | Licence inventory | Third-party notices for every bundled component before commercial sale. | Started: models and key libraries in `THIRD_PARTY_NOTICES.md`; body7 training-data legal check pending | Not a setting |
 
 ## Installer-level settings
