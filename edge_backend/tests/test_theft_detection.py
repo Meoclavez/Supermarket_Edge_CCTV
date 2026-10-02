@@ -15,6 +15,7 @@ from app.models.schemas import (
 )
 from app.services.auth_service import auth_service
 from app.services.theft_detection_service import (
+    detect_behaviour_pattern,
     detect_concealment,
     detect_exit_without_checkout,
     detect_shelf_sweeping,
@@ -115,13 +116,14 @@ class TestTheftDetectionAlgorithms:
         assert hi["detected"] and lo["detected"]
         assert hi["confidence"] > lo["confidence"]
 
-    def test_concealment_target_is_always_the_pocket_band(self):
+    def test_concealment_unlabelled_or_legacy_target_is_the_pocket_band(self):
         """The object model (and the 'hand into a carried bag' cue) is gone: a
-        stale "bag" target is never reported, only the pocket/waistband band."""
-        for target in ("pocket_band", "bag", None):
+        stale "bag" target is never reported; the old "pocket_band" label and
+        an unlabelled in-region sample are the pocket band."""
+        for target in ("pocket_band", "bag", None, "pocket"):
             res = detect_concealment(self._conceal_samples(target=target), window_sec=4.0, min_hold_frames=3,
                                      no_return_sec=2.0)
-            assert res["detected"] and res["target"] == "pocket_band"
+            assert res["detected"] and res["target"] == "pocket"
             assert any("waistband/pocket region" in e for e in res["evidence"])
             assert not any("bag" in e for e in res["evidence"])
 
@@ -228,6 +230,99 @@ class TestTheftDetectionAlgorithms:
         assert evidence_confidence(0.0, [1.0, 1.0]) == 0.0
         assert evidence_confidence(1.0, [0.0]) == 0.0
         assert evidence_confidence(0.8, [0.5, 1.0]) == pytest.approx(0.6)
+
+    # ---- pose-only concealment targets (chest, behind the back)
+
+    def test_concealment_chest_target_and_wording(self):
+        samples = self._conceal_samples(target="chest")
+        res = detect_concealment(samples, window_sec=4.0, min_hold_frames=3, no_return_sec=2.0,
+                                 chest_max_hold_sec=3.0)
+        assert res["detected"] and res["target"] == "chest"
+        assert any("opposite side of the chest" in e for e in res["evidence"])
+
+    def test_concealment_chest_waits_for_the_hand_to_leave(self):
+        """A hand still at the chest is not confirmed (it may be reading a label)."""
+        t, s = 0.0, [{"t": 0.0, "in_shelf": False, "in_conceal": False, "vis": 0.9, "reach_vis": 0.9}]
+        for _ in range(12):
+            t += 0.2
+            s.append({"t": t, "in_shelf": False, "in_conceal": True, "vis": 0.9, "target": "chest"})
+        res = detect_concealment(s, window_sec=4.0, min_hold_frames=3, no_return_sec=2.0, chest_max_hold_sec=3.0)
+        assert res["detected"] is False and res["state"] == "held"
+
+    def test_concealment_long_chest_hold_is_examining(self):
+        res = detect_concealment(self._conceal_samples(hold=20, target="chest"), window_sec=4.0,
+                                 min_hold_frames=3, no_return_sec=2.0, chest_max_hold_sec=3.0)
+        assert res["detected"] is False and res["state"] == "examining"
+
+    def test_concealment_behind_back_needs_a_longer_hold_and_scores_lower(self):
+        def occluded(hold):
+            s = self._conceal_samples(hold=hold, target="behind_back", vis=0.05)
+            s[0]["reach_vis"] = 0.9
+            for x in s:
+                if x.get("in_conceal"):
+                    x["body_vis"] = 0.9
+            return s
+
+        kw = dict(window_sec=4.0, min_hold_frames=3, no_return_sec=2.0, occluded_min_hold_sec=0.8,
+                  occluded_confidence_factor=0.8)
+        short = detect_concealment(occluded(3), **kw)      # 0.4 s hidden: an arm swing
+        assert short["detected"] is False
+        ok = detect_concealment(occluded(6), **kw)         # 1.0 s hidden
+        assert ok["detected"] and ok["target"] == "behind_back"
+        assert any("out of sight behind the body" in e for e in ok["evidence"])
+        # Confidence comes from the torso/elbow visibility, scaled by the factor.
+        visible = detect_concealment(self._conceal_samples(hold=6, vis=0.9), window_sec=4.0, min_hold_frames=3,
+                                     no_return_sec=2.0)
+        assert ok["confidence"] == pytest.approx(round(visible["confidence"] * 0.8, 3), abs=0.002)
+
+    def test_concealment_mixed_run_is_labelled_by_where_the_wrist_was_seen(self):
+        s = self._conceal_samples(hold=6, target="behind_back")
+        s[1]["target"] = "pocket"
+        s[2]["target"] = "pocket"
+        res = detect_concealment(s, window_sec=4.0, min_hold_frames=3, no_return_sec=2.0,
+                                 occluded_min_hold_sec=0.8)
+        assert res["detected"] and res["target"] == "pocket"
+
+    # ---- behaviour-pattern fusion
+
+    W = {"conceal_hold": 0.5, "reach_no_return": 0.1, "head_scan": 0.35, "high_value_dwell": 0.35,
+         "sweep_partial": 0.4, "exit_no_checkout": 0.5}
+    CAPS = {"conceal_hold": 0.8, "reach_no_return": 0.3, "head_scan": 0.35, "high_value_dwell": 0.35,
+            "sweep_partial": 0.4, "exit_no_checkout": 0.5}
+
+    def _fuse(self, cues, now, threshold=1.2):
+        return detect_behaviour_pattern(cues, now=now, half_life_sec=60.0, threshold=threshold, min_cue_types=2,
+                                        weights=self.W, caps=self.CAPS)
+
+    def test_pattern_fires_with_two_cue_types(self):
+        cues = [{"t": 0.0, "cue": "conceal_hold", "vis": 0.8}, {"t": 5.0, "cue": "conceal_hold", "vis": 0.8},
+                {"t": 10.0, "cue": "exit_no_checkout", "vis": 0.9}]
+        res = self._fuse(cues, now=10.0)
+        assert res["detected"] and res["rule"] == "BEHAVIOUR_PATTERN"
+        assert set(res["cue_types"]) == {"conceal_hold", "exit_no_checkout"}
+        assert 0.3 <= res["confidence"] <= 1.0
+        assert any("Went to the exit" in e for e in res["evidence"])
+        assert any("No single loss-prevention rule fired" in e for e in res["evidence"])
+
+    def test_pattern_one_cue_type_never_fires_however_often(self):
+        cues = [{"t": float(i), "cue": "conceal_hold", "vis": 0.9} for i in range(20)]
+        res = self._fuse(cues, now=20.0, threshold=0.6)
+        assert res["detected"] is False
+        assert res["score"] == pytest.approx(0.8)          # capped
+
+    def test_pattern_ordinary_shopping_stays_below_threshold(self):
+        """Dwell at high-value stock, looking along the shelf and picking items up."""
+        cues = [{"t": 0.0, "cue": "high_value_dwell", "vis": 0.9}, {"t": 2.0, "cue": "head_scan", "vis": 0.9}]
+        cues += [{"t": 3.0 + i, "cue": "reach_no_return", "vis": 0.9} for i in range(8)]
+        res = self._fuse(cues, now=12.0)
+        assert res["detected"] is False and res["score"] < 1.2
+
+    def test_pattern_decays(self):
+        cues = [{"t": 0.0, "cue": "conceal_hold", "vis": 0.8}, {"t": 0.0, "cue": "conceal_hold", "vis": 0.8},
+                {"t": 0.0, "cue": "exit_no_checkout", "vis": 0.9}]
+        assert self._fuse(cues, now=0.0)["detected"] is True
+        late = self._fuse(cues, now=120.0)                 # two half-lives later
+        assert late["detected"] is False and late["score"] < 0.5
 
 # ============================================================================
 # 2. Integration API Tests

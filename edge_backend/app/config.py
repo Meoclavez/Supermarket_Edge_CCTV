@@ -274,6 +274,44 @@ class Settings(BaseSettings):
     TRACK_KEYPOINT_EMA_ARMS: float = float(os.getenv("TRACK_KEYPOINT_EMA_ARMS", "0.8"))
     TRACK_KEYPOINT_JITTER_FRAC: float = float(os.getenv("TRACK_KEYPOINT_JITTER_FRAC", "0.02"))
     TRACK_KEYPOINT_FAST_FRAC: float = float(os.getenv("TRACK_KEYPOINT_FAST_FRAC", "0.06"))
+    # Static-figure filter (tracking_service.ByteTracker): a poster, cut-out or
+    # mannequin the pose model keeps recognising is a "static" track, shown
+    # grey on the live view but excluded from counts, footfall, heatmaps,
+    # zone rules and theft analytics. Per camera it can be switched off and
+    # STATIC_FIGURE_SECONDS overridden (features static_figure_filter /
+    # static_figure_seconds); these are the server defaults.
+    #
+    # Motion is measured per joint against an anchor pose, normalised by the
+    # torso length (shoulder-mid to hip-mid; 0.3 x box height when the torso
+    # is not visible), and must exceed STATIC_FIGURE_MOTION_FRAC on two
+    # consecutive detection frames to count. Why 0.15: RTMO keypoints on an
+    # unchanging image (a poster) still jitter with sensor/compression noise
+    # by a few pixels, about TRACK_KEYPOINT_JITTER_FRAC (2 %) of the box
+    # height, i.e. ~0.07 of the torso (torso ~ 0.3 x height). The anchor is
+    # the mean of 5 still frames and the pose is jitter-smoothed, so 0.15 is
+    # ~3.5-4 sigma per joint for a 1 %-of-height jitter; with the two-frame
+    # rule a simulated poster (250 px box, Gaussian jitter sigma 2.5 px per
+    # axis) was flagged at 60 s and never un-flagged in 10 x 10 min. A real person standing still (cashier, someone reading a label)
+    # turns the head (nose/eyes move 10-15 cm, 0.2-0.3 torso) or moves a hand
+    # (wrist 10-30 cm) many times a minute, well above 0.15 torso (~7-8 cm).
+    # Measured with the real RTMO model (noisy JPEG frames of a still photo,
+    # 2026-10-02), small figures (box 150-230 px) can have a wrist that flips
+    # by 0.3-0.45 torso between frames: each joint therefore also has its own
+    # jitter floor (tracking_service.MOTION_JITTER_K x the 75th percentile
+    # of its frame-to-frame step) and is compared as the median of its last
+    # 3 positions. With it every poster figure at 1.0/0.5/0.33 scale went static
+    # at ~60 s; without it one never did.
+    # A figure whose jitter still clears the threshold fails open: it
+    # stays "moving" and is counted as before, never silently dropped.
+    STATIC_FIGURE_SECONDS: float = float(os.getenv("STATIC_FIGURE_SECONDS", "60"))
+    STATIC_FIGURE_MOTION_FRAC: float = float(os.getenv("STATIC_FIGURE_MOTION_FRAC", "0.15"))
+    # A new track on a remembered static box (same box, IoU >= STATIC_MEMORY_IOU,
+    # and the same pose) is static after only this long without motion:
+    # poster tracks flicker and come back with new ids.
+    STATIC_FIGURE_GRACE_SEC: float = float(os.getenv("STATIC_FIGURE_GRACE_SEC", "5"))
+    STATIC_MEMORY_IOU: float = float(os.getenv("STATIC_MEMORY_IOU", "0.7"))
+    # A remembered static box is forgotten after this long unseen.
+    STATIC_MEMORY_TTL_SEC: float = float(os.getenv("STATIC_MEMORY_TTL_SEC", "1800"))
     # A person must linger this long inside a zone before it counts as dwell
     # rather than a pass-through.
     ZONE_DWELL_MIN_SECONDS: float = float(os.getenv("ZONE_DWELL_MIN_SECONDS", "3.0"))
@@ -379,7 +417,8 @@ class Settings(BaseSettings):
     # Pre-event clip ring (services/clip_recorder.py): ~5 JPEG-encoded frames a
     # second per camera, so a clip can start PRE_EVENT_BUFFER_SECONDS before
     # the event. "auto": kept only for cameras that can raise a clip on their
-    # own (night watch armed with NIGHT_WATCH_CLIP on); an operator's clip
+    # own (night watch armed with NIGHT_WATCH_CLIP on, or the camera feature
+    # theft_clip with theft detection on: a clip per theft incident); an operator's clip
     # export or an /events/trigger clip then records its post-roll only.
     # "on": every streaming camera (the old behaviour; the encoding was ~27 %
     # of the camera threads' CPU on the store box). "off": never, post-roll only.
@@ -464,6 +503,51 @@ class Settings(BaseSettings):
     # Visibility accepted for a wrist inside the concealment band: a hand at a
     # waistband is often partly occluded, so this is lower than the general gate.
     THEFT_CONCEAL_MIN_WRIST_VIS: float = float(os.getenv("THEFT_CONCEAL_MIN_WRIST_VIS", "0.25"))
+    # A straight arm hanging down with the wrist below the hip line is how a
+    # basket (or a bag) is carried, not a hand in a pocket: such a wrist never
+    # counts as in the pocket band. "Straight" = |shoulder->wrist| /
+    # (|shoulder->elbow| + |elbow->wrist|) at least this (a hand pushed into a
+    # front pocket bends the elbow outwards, typically 0.7-0.85).
+    THEFT_HANGING_ARM_STRAIGHT_RATIO: float = float(os.getenv("THEFT_HANGING_ARM_STRAIGHT_RATIO", "0.9"))
+    # Pose-only concealment targets beyond the pocket band. Both need a body
+    # seen from the front: nose and an eye visible and the shoulder width at
+    # least this fraction of the shoulder->hip length (profile ~0.1-0.3,
+    # frontal ~0.6-0.8). In profile or from behind, left/right and
+    # "behind the body" cannot be told apart from 2D keypoints.
+    THEFT_FRONTAL_MIN_SHOULDER_TORSO: float = float(os.getenv("THEFT_FRONTAL_MIN_SHOULDER_TORSO", "0.45"))
+    # Inside-jacket / chest: the wrist crosses the body midline to the
+    # opposite side of the upper torso. Crossing is measured from the
+    # shoulder midpoint (0) to the opposite shoulder (1); the wrist must be
+    # at least THEFT_CHEST_MIN_CROSS across (a hand holding a product up to
+    # read stays near the middle or on its own side) and at most
+    # THEFT_CHEST_MAX_CROSS (beyond that it is reaching past the body).
+    THEFT_CHEST_MIN_CROSS: float = float(os.getenv("THEFT_CHEST_MIN_CROSS", "0.3"))
+    THEFT_CHEST_MAX_CROSS: float = float(os.getenv("THEFT_CHEST_MAX_CROSS", "1.3"))
+    # Vertical extent of the chest region, as fractions of shoulder->hip
+    # length below the shoulder line (the pocket band starts at
+    # THEFT_CONCEAL_REGION_TOP_FRAC and wins where they overlap).
+    THEFT_CHEST_TOP_FRAC: float = float(os.getenv("THEFT_CHEST_TOP_FRAC", "0.05"))
+    THEFT_CHEST_BOTTOM_FRAC: float = float(os.getenv("THEFT_CHEST_BOTTOM_FRAC", "0.55"))
+    # A hand that stays at the chest longer than this is examining a product
+    # or using a phone, not slipping something inside a jacket (which takes
+    # about a second): such a hold is never concealment.
+    THEFT_CHEST_MAX_HOLD_SEC: float = float(os.getenv("THEFT_CHEST_MAX_HOLD_SEC", "3.0"))
+    # Both wrists closer than this many shoulder widths at the chest = a
+    # product handled with two hands (opening, reading), not concealment.
+    THEFT_CHEST_TWO_HAND_DIST: float = float(os.getenv("THEFT_CHEST_TWO_HAND_DIST", "0.6"))
+    # Behind the back / into a worn bag: after a shelf reach the wrist, seen
+    # leaving the shelf at waist height at the side of the body, drops below
+    # THEFT_OCCLUDED_WRIST_MAX_VIS (out of sight) within
+    # THEFT_OCCLUDED_ONSET_SEC of last being seen, while both shoulders, both
+    # hips, both knees (no trolley or display in front) and that arm's elbow
+    # (at the flank, at waist height) stay visible and the face looks at the
+    # camera. It must stay hidden THEFT_OCCLUDED_MIN_HOLD_SEC (an arm swing
+    # while walking hides the wrist for ~0.3 s). Being an inference from
+    # occlusion, its confidence is scaled by THEFT_OCCLUDED_CONFIDENCE_FACTOR.
+    THEFT_OCCLUDED_WRIST_MAX_VIS: float = float(os.getenv("THEFT_OCCLUDED_WRIST_MAX_VIS", "0.2"))
+    THEFT_OCCLUDED_ONSET_SEC: float = float(os.getenv("THEFT_OCCLUDED_ONSET_SEC", "1.0"))
+    THEFT_OCCLUDED_MIN_HOLD_SEC: float = float(os.getenv("THEFT_OCCLUDED_MIN_HOLD_SEC", "0.8"))
+    THEFT_OCCLUDED_CONFIDENCE_FACTOR: float = float(os.getenv("THEFT_OCCLUDED_CONFIDENCE_FACTOR", "0.8"))
     # Shelf sweeping: this many reaches into one zone inside the window.
     THEFT_SWEEP_WINDOW_SEC: float = float(os.getenv("THEFT_SWEEP_WINDOW_SEC", "10.0"))
     THEFT_SWEEP_MIN_REACHES: int = int(os.getenv("THEFT_SWEEP_MIN_REACHES", "4"))
@@ -483,6 +567,38 @@ class Settings(BaseSettings):
     THEFT_LOITER_REACH_TORSOS: float = float(os.getenv("THEFT_LOITER_REACH_TORSOS", "1.5"))
     # |yaw proxy| beyond this is "looking to one side"; a flip between sides is a head turn.
     THEFT_HEAD_TURN_YAW: float = float(os.getenv("THEFT_HEAD_TURN_YAW", "0.35"))
+    # Behaviour pattern (BEHAVIOUR_PATTERN): weak cues of one track that no
+    # single rule fired on are fused into a score. Each cue event adds its
+    # weight, decayed with THEFT_PATTERN_HALF_LIFE_SEC; each cue type's total
+    # is capped, so many ordinary pickups or glances cannot add up alone. An
+    # incident needs the score to reach THEFT_PATTERN_SCORE_THRESHOLD (divided
+    # by the camera role's sensitivity) from at least THEFT_PATTERN_MIN_CUE_TYPES
+    # distinct cue types, and no other rule fired on the track within
+    # THEFT_INCIDENT_COOLDOWN_SEC. Defaults: hidden-hand holds and an exit
+    # without checkout weigh most; a pickup that was not put back weighs
+    # least (every purchase is one). A shopper who dwells at high-value
+    # stock, looks around and picks items scores 1.0, below the threshold.
+    THEFT_PATTERN_ENABLED: bool = os.getenv("THEFT_PATTERN_ENABLED", "true").lower() in ("1", "true", "yes")
+    THEFT_PATTERN_SCORE_THRESHOLD: float = float(os.getenv("THEFT_PATTERN_SCORE_THRESHOLD", "1.2"))
+    THEFT_PATTERN_MIN_CUE_TYPES: int = int(os.getenv("THEFT_PATTERN_MIN_CUE_TYPES", "2"))
+    THEFT_PATTERN_HALF_LIFE_SEC: float = float(os.getenv("THEFT_PATTERN_HALF_LIFE_SEC", "60.0"))
+    # cue:weight per event, and cue:cap on that cue type's decayed total.
+    THEFT_PATTERN_WEIGHTS: str = os.getenv(
+        "THEFT_PATTERN_WEIGHTS",
+        "conceal_hold:0.5,reach_no_return:0.1,head_scan:0.35,high_value_dwell:0.35,"
+        "sweep_partial:0.4,exit_no_checkout:0.5",
+    )
+    THEFT_PATTERN_CAPS: str = os.getenv(
+        "THEFT_PATTERN_CAPS",
+        "conceal_hold:0.8,reach_no_return:0.3,head_scan:0.35,high_value_dwell:0.35,"
+        "sweep_partial:0.4,exit_no_checkout:0.5",
+    )
+    # head_scan cue: this many head turns within the window (12/min by default).
+    THEFT_PATTERN_HEAD_WINDOW_SEC: float = float(os.getenv("THEFT_PATTERN_HEAD_WINDOW_SEC", "30.0"))
+    THEFT_PATTERN_HEAD_TURNS: int = int(os.getenv("THEFT_PATTERN_HEAD_TURNS", "6"))
+    # high_value_dwell cue: dwell by a high-value zone of this fraction of
+    # THEFT_LOITER_MIN_DWELL_SEC (the loitering rule needs all of it).
+    THEFT_PATTERN_DWELL_FRAC: float = float(os.getenv("THEFT_PATTERN_DWELL_FRAC", "0.5"))
     # Exit without checkout (needs a calibrated camera and ENTRANCE/EXIT + CHECKOUT zones).
     THEFT_EXIT_RULE_ENABLED: bool = os.getenv("THEFT_EXIT_RULE_ENABLED", "true").lower() in ("1", "true", "yes")
     # Sweethearting: seconds between a checkout hand pass and a POS scan to count as matched.

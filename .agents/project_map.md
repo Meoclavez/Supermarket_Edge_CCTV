@@ -149,6 +149,31 @@ a joint not visible now is never carried forward.
 `FloorProjector` maps foot points to metres through the camera homography and
 declines when uncalibrated.
 
+**Static-figure filter (2026-10-01).** A poster or mannequin is detected by RTMO
+as a person, so each `Track` carries `motion_state` (`pending`/`moving`/`static`),
+`is_static` and `is_human` (= confirmed and not static). Motion is judged on
+keypoints and box centre/height against a 5-frame mean anchor, normalised by torso
+length (`body_scale()`): a move above `STATIC_FIGURE_MOTION_FRAC` (0.15 torso) on 2
+consecutive frames is motion; `STATIC_FIGURE_SECONDS` (60) without motion flags
+`static`, and motion un-flags it at once. The pose compared is the per-joint
+median of the last 3 observations, and each joint must also exceed its own
+jitter floor (`MOTION_JITTER_K` 2.5 x p75 of its last 50 frame-to-frame steps,
+used from 8 steps), because RTMO wrists on small (150-260 px) figures jitter
+0.12-0.38 torso per frame; box centre/height are not floored. Real-model check
+(2026-10-02, CUDA, noisy still photos at 1.0/0.5/0.33 scale, 10 and 2 fps): every
+poster figure flagged at 60.0-60.7 s with no un-flags, re-spawned tracks re-flagged
+after 5.0-5.4 s. Known limit: a real person whose only motion is head turns under
+~0.15 torso or ~1.5 % sway for 60 s is flagged static (un-flagged on the next
+real movement); reliable minimum ~0.06-0.09 torso on figures >= 250 px. Per-camera `static_memory` (TTL
+`STATIC_MEMORY_TTL_SEC` 1800, IoU `STATIC_MEMORY_IOU` 0.7, same pose) flags a
+re-spawned poster track after `STATIC_FIGURE_GRACE_SEC` (5). Static tracks are
+excluded from live counts, pose/theft analytics, zone rules/tripwires, heatmap/path
+points, `close_track` persistence (footfall, traffic) and night-watch confirmation;
+the server overlay draws them thin grey labelled "static", and snapshot boxes carry
+`motion_state`. Per-camera features `static_figure_filter` (default on) and
+`static_figure_seconds` are set in the dashboard camera editor. Tests:
+`tests/test_static_figure_filter.py`.
+
 ### Pose analytics and loss prevention (`services/pose_analytics.py`, `services/theft_detection_service.py`)
 
 `pose_analytics.observe()` runs on the camera worker thread (cheap arithmetic
@@ -171,13 +196,23 @@ event loop in the lifespan so alerts go out immediately.
   approximate). Ground truth: `tests/test_reach_mapping.py`.
 * **Rules** (pure functions in `theft_detection_service.py`, stored as
   `theft_incidents.rule`): `CONCEALMENT` (wrist leaves shelf -> waistband/pocket
-  band from shoulder/hip keypoints or a detected bag, holds, no return),
+  band from shoulder/hip keypoints, inside the jacket (one hand crossing to the
+  opposite chest, frontal, released within `THEFT_CHEST_MAX_HOLD_SEC`), or behind
+  the back / into a worn bag (wrist occluded after a reach with face, hips, knees
+  and flank elbow visible); `target` = pocket/chest/behind_back; a straight arm
+  hanging below the hip is a carried basket, never concealment; holds, no return),
   `SHELF_SWEEPING` (many reaches into one zone in a window),
   `SUSPICIOUS_LOITERING` (long dwell at a high-value zone + reaches + head
   turns from head yaw), `EXIT_WITHOUT_CHECKOUT` (interacted, then
   ENTRANCE/EXIT zone without CHECKOUT; `THEFT_EXIT_RULE_ENABLED`),
   `SWEETHEARTING` (POS-linked; returns `evaluable: False` without POS data and
-  is not wired into the live pipeline). Thresholds are `THEFT_*` in `config.py`.
+  is not wired into the live pipeline), `BEHAVIOUR_PATTERN` (2026-10-01: per-track
+  fusion of weak cues — conceal hold below confidence, reach without return, head
+  scanning, high-value dwell, partial sweep, unraised exit — weighted, capped per
+  cue and decayed with `THEFT_PATTERN_HALF_LIFE_SEC` 60; fires at
+  `THEFT_PATTERN_SCORE_THRESHOLD` 1.2 with >= 2 cue types when no other rule fired;
+  ordinary shopping scores 1.0). Thresholds are `THEFT_*` in `config.py`. No object
+  detector exists since 3096ff0: every rule is pose keypoints + operator zones.
 * **Confidence is never a constant:** `evidence_confidence(visibility, terms)`
   = mean keypoint visibility of the joints used x mean of 0..1 strength terms
   (duration/count via `saturating(v, ref) = 1 - exp(-v/ref)`, signal
@@ -191,8 +226,20 @@ event loop in the lifespan so alerts go out immediately.
 * **Notification:** `notification_service.notify_loss_prevention(title, body,
   data)` (logs a security event, websocket broadcast, device push) scheduled
   onto the bound loop with a 15 s timeout.
-* Routes (`routes/theft.py`, `/api/v1/theft`): incidents list/detail/evidence,
-  statistics, acknowledge / dispatch / resolve.
+* **Evidence clip (optional):** per-camera feature `theft_clip` (default off)
+  keeps the in-memory pre-event ring for that camera and saves ~5 s pre + 10 s
+  post as `<incident_id>.mp4` after the incident is committed (at most 2 clips
+  recording at once); counted and deleted together with the still by the
+  evidence storage cap. Served at `GET /incidents/{id}/clip` (range, 410 once
+  expired).
+* **Patterns:** `GET /api/v1/theft/patterns?days=N` — hotspots by camera and zone,
+  7x24 hour/weekday matrix (store-local), rule mix with false-alarm rate per rule,
+  weekly trend, bursts (>= `burst_min` incidents at one camera/zone within
+  `burst_minutes`; place/time only, no person identity). Dashboard: Patterns card
+  on the Loss prevention tab (`#lossPatternsCard`), clip playback in the evidence
+  viewer.
+* Routes (`routes/theft.py`, `/api/v1/theft`): incidents list/detail/evidence/clip,
+  statistics, patterns, acknowledge / dispatch / resolve.
 
 ### Privacy masks (`services/privacy_mask.py`)
 
@@ -465,7 +512,7 @@ than firing on empty data.
 ### Backend Core (`edge_backend/app/`)
 * **[`app/main.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/main.py):** FastAPI entrypoint: installs log redaction at import, lifespan (safety warnings -> preflight -> `init_db` -> setup code -> `initialise_inference` -> pipeline -> `pose_analytics.start`), static mounts, `/dashboard` and `/dashboard/analytics` (both serve `index.html`), `/dashboard/studio` (Camera Studio), `/stream?camera_id=&fps=&overlay=1` (live MJPEG of real, privacy-masked frames for the store network/VPN; a NO SIGNAL slate otherwise; refused 403 `video_direct_only` through the tunnel), and router registrations.
 * **[`app/config.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/config.py):** Settings, storage paths, retention policies, JWT keys, go2rtc URLs, and hardware device paths with graceful local fallback directory resolution.
-* **[`app/models/schemas.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/models/schemas.py):** Pydantic schemas incl. `EventType` (loss-prevention types only: THEFT_SUSPECTED, CONCEALMENT, SHELF_SWEEP, EXIT_WITHOUT_CHECKOUT, LOITERING, QUEUE_ALERT, CAMERA_OFFLINE), `MaskMode` (BLACKOUT/BLUR/MOSAIC/COLOR/AI_IGNORE), `CameraFeatureConfig` (`people_counting`, `shelf_interaction`, `theft_detection`; `extra="ignore"`), `ZoneConfig`, `Keypoint`, `HardwareProfile`, `SystemStats`, `SecurityEvent`, camera/DVR/storage models.
+* **[`app/models/schemas.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/models/schemas.py):** Pydantic schemas incl. `EventType` (loss-prevention types only: THEFT_SUSPECTED, CONCEALMENT, SHELF_SWEEP, EXIT_WITHOUT_CHECKOUT, LOITERING, QUEUE_ALERT, CAMERA_OFFLINE), `MaskMode` (BLACKOUT/BLUR/MOSAIC/COLOR/AI_IGNORE), `CameraFeatureConfig` (`people_counting`, `shelf_interaction`, `theft_detection`, plus options `static_figure_filter`, `static_figure_seconds`, `theft_clip`; `extra="ignore"`), `ZoneConfig`, `Keypoint`, `HardwareProfile`, `SystemStats`, `SecurityEvent`, camera/DVR/storage models.
 * **[`app/services/hardware_detector.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/hardware_detector.py):** Runtime probe for decode capability (NVIDIA NVDEC, Intel VA-API, AMD Mesa, CPU SIMD) and RAM; the inference fields are read from the detector that is actually loaded, not guessed.
 * **[`app/services/feature_manager.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/feature_manager.py):** Thread-safe in-process cache of per-camera feature flags; durable copy is `cameras.features`, hydrated on first API read. Starts empty.
 * **[`app/services/ai_zone_service.py`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/edge_backend/app/services/ai_zone_service.py):** Per-camera zone store in `storage/zones_config.json`: `exclusion_masks` (privacy masks, applied by `privacy_mask.py`), plus tripwires and restricted areas (image-normalised 0..1 per camera) evaluated live by `app/services/tripwire_engine.py`.
@@ -633,7 +680,7 @@ Measured at 5f2dc0f: CPU ~478% (box ~30%), GPU ~57% (budget 0.6), yolo26n-pose ~
 **Pending/owner decisions:** gaze/attention beam plan; online-access items listed in the
 block above; store manager switches
 the 16 CIF channels to D1 sub-stream (needed by RTMO); body7 training-data legal check for
-the RTMO/RTMPose weights; deploy of the RTMO-only build to the box; phone push (FCM)
+the RTMO/RTMPose weights; deploy of the 2026-10-01 static-filter / pose-only theft / patterns build to the box (not yet committed or deployed); confirm on the box that only RTMO is loaded (no `SHADOW_POSE_MODEL`); phone push (FCM)
 not configured; skeleton-rotation report parked until reproduced.
 
 **Client docs:** `docs/client/Edge_AI_CCTV_Features.pdf` (plain-language feature overview for customers, A4, 3 pages; last rebuilt 2026-10-01 with "Secure online access" + "Private live video" rows; rebuild with `uv run --no-project --with reportlab python docs/client/build_features_pdf.py`). Operator reference with configuration paths: `docs/FEATURES.md`.

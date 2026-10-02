@@ -353,6 +353,15 @@
     set('featPeopleCounting', features.people_counting);
     set('featShelfInteraction', features.shelf_interaction);
     set('featTheftDetection', features.theft_detection);
+    set('featTheftClip', features.theft_clip);
+    set('featStaticFigureFilter', features.static_figure_filter);
+    const secs = $('configStaticFigureSeconds');
+    if (secs && 'static_figure_seconds' in features) {
+      const v = features.static_figure_seconds;
+      secs.value = typeof v === 'number' && isFinite(v) ? v : '';
+    }
+    // Clip needs theft detection; the delay needs the filter (analytics.js).
+    if (typeof syncCameraFeatureFields === 'function') syncCameraFeatureFields();
     const frac = $('configPersonMaxFrac');
     if (frac && 'person_max_frame_fraction' in features) {
       const v = features.person_max_frame_fraction;

@@ -71,6 +71,8 @@ class TheftIncidentOut(TheftIncident):
     dispatched_at: Optional[datetime] = None
     # For the dashboard's "Watch camera now" link.
     studio_url: Optional[str] = None
+    # Evidence clip (camera feature theft_clip): the URL when the file exists.
+    clip_url: Optional[str] = None
 
 
 class TheftIncidentOutList(BaseModel):
@@ -88,6 +90,9 @@ def _serialize(inc: TheftIncidentModel) -> TheftIncidentOut:
     out.snapshot_url = f"/api/v1/theft/incidents/{inc.id}/evidence" if has_image else None
     # The mobile app reads this field (relative URL, fetched with a bearer token).
     out.evidence_snapshot_url = out.snapshot_url
+    has_clip = bool(inc.clip_path) and Path(inc.clip_path).is_file()
+    out.clip_url = f"/api/v1/theft/incidents/{inc.id}/clip" if has_clip else None
+    out.evidence_clip_url = out.clip_url
     if inc.status in ("RESOLVED", "FALSE_ALARM") and inc.resolution:
         out.outcome = inc.resolution
         out.outcome_label = THEFT_OUTCOME_LABELS.get(inc.resolution, inc.resolution.replace("_", " ").capitalize())
@@ -100,7 +105,7 @@ async def get_theft_incidents(
     status: Optional[str] = Query(None, description="Filter by status (ACTIVE, ACKNOWLEDGED, DISPATCHED, RESOLVED, FALSE_ALARM)"),
     severity: Optional[str] = Query(None, description="Filter by severity (HIGH, MEDIUM, LOW)"),
     department: Optional[str] = Query(None, description="Filter by department name"),
-    rule: Optional[str] = Query(None, description="Filter by rule (CONCEALMENT, SHELF_SWEEPING, SUSPICIOUS_LOITERING, EXIT_WITHOUT_CHECKOUT, SWEETHEARTING)"),
+    rule: Optional[str] = Query(None, description="Filter by rule (CONCEALMENT, SHELF_SWEEPING, SUSPICIOUS_LOITERING, EXIT_WITHOUT_CHECKOUT, SWEETHEARTING, BEHAVIOUR_PATTERN)"),
     limit: int = Query(50, ge=1, le=200, description="Max incidents to retrieve"),
     db: AsyncSession = Depends(get_db),
 ):
@@ -151,6 +156,57 @@ async def get_theft_incident_evidence(incident_id: str, db: AsyncSession = Depen
         raise HTTPException(status_code=404, detail="Evidence image not found")
     return FileResponse(str(path), media_type="image/jpeg",
                         headers={"Cache-Control": "private, max-age=3600"})
+
+
+@router.get("/incidents/{incident_id}/clip")
+async def get_theft_incident_clip(incident_id: str, db: AsyncSession = Depends(get_db)):
+    """The incident's evidence clip (MP4, about 5 s before to 10 s after), when one was saved.
+
+    Clips are saved only for cameras with the ``theft_clip`` feature on. 404:
+    no such incident or no clip recorded; 410: the evidence storage limit
+    deleted it. Range requests are honoured so the browser can seek.
+    """
+    inc = await db.get(TheftIncidentModel, incident_id)
+    if inc is None:
+        raise HTTPException(status_code=404, detail=f"Theft incident '{incident_id}' not found")
+    if not inc.clip_path:
+        raise HTTPException(status_code=404, detail="No clip was recorded for this incident")
+    path = Path(inc.clip_path).resolve()
+    root = pose_analytics.evidence_dir().resolve()
+    if root not in path.parents:
+        raise HTTPException(status_code=404, detail="Evidence clip not found")
+    if not path.is_file():
+        if inc.evidence_expired_at is not None:
+            raise HTTPException(status_code=410, detail=(
+                f"Evidence expired: the clip was deleted by the evidence storage limit on "
+                f"{inc.evidence_expired_at:%Y-%m-%d %H:%M} UTC"))
+        raise HTTPException(status_code=404, detail="Evidence clip not found")
+    return FileResponse(str(path), media_type="video/mp4",
+                        headers={"Cache-Control": "private, max-age=3600"})
+
+
+@router.get("/patterns")
+async def get_theft_patterns(
+    days: int = Query(28, ge=1, le=365, description="How many days back to analyse"),
+    burst_minutes: int = Query(30, ge=1, le=1440,
+                               description="Incidents on the same camera and zone within this many minutes form a burst"),
+    burst_min: int = Query(3, ge=2, le=50, description="Fewest incidents that make a burst"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Where and when suspicious behaviour is flagged, from recorded incidents only.
+
+    Hotspots by camera and zone, an hour-of-day x day-of-week matrix (store
+    time), the rule mix with each rule's false-alarm rate from reviewer
+    outcomes, a weekly trend and bursts of incidents on one camera/zone.
+    Arrays are empty when there are no incidents. Bursts group incidents by
+    place and time only: no person is identified across incidents.
+    """
+    try:
+        return await theft_detection_service.get_patterns(
+            db, days=days, burst_minutes=burst_minutes, burst_min=burst_min)
+    except Exception as e:
+        logger.error(f"Error computing theft patterns: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/statistics", response_model=TheftStatisticsResponse)

@@ -203,6 +203,12 @@ class HandState:
     # The active reach duplicates another track's reach (the pose model gave
     # one physical hand to two overlapping people): it is never persisted.
     active_suppressed: bool = False
+    # (t, x, y) of the latest frame the wrist was clearly seen outside every
+    # product zone: proof that it left the shelf in view before it went out
+    # of sight (the behind-the-back cue needs that).
+    last_vis_out: Optional[Tuple[float, float, float]] = None
+    # Start of the current "hidden behind the body" run, or None.
+    occluded_since: Optional[float] = None
 
 
 @dataclass
@@ -235,6 +241,11 @@ class TrackState:
     fired: Dict[str, float] = field(default_factory=dict)
     # (t, x, y) of the hip centre, for the walking-past filter.
     hip_hist: Deque[Tuple[float, float, float]] = field(default_factory=lambda: deque(maxlen=32))
+    # Weak behaviour cues for the BEHAVIOUR_PATTERN fusion:
+    # {"t", "cue", "vis", "detail", "zone_id"}.
+    cues: Deque[Dict[str, Any]] = field(default_factory=lambda: deque(maxlen=64))
+    last_head_cue: float = float("-inf")
+    last_sweep_cue: float = float("-inf")
 
 
 @dataclass
@@ -497,6 +508,184 @@ class PoseAnalytics:
         bottom = body["hip_y"] + settings.THEFT_CONCEAL_REGION_BOTTOM_FRAC * body["torso"]
         return (body["x_lo"] - m, top, body["x_hi"] + m, bottom)
 
+    # ------------------------------------------------- concealment targets
+
+    @staticmethod
+    def _frontal(kps: np.ndarray, body: Dict[str, float], vis_thr: float, both_eyes: bool) -> bool:
+        """The person faces the camera: nose and eye(s) seen, shoulders spread wide.
+
+        From behind or in profile a hand on the far side of the body is out of
+        sight wherever it is, and left/right crossing cannot be measured, so
+        the chest and behind-the-back targets need a frontal view.
+        """
+        if float(kps[NOSE][2]) < vis_thr:
+            return False
+        eyes = int(float(kps[L_EYE][2]) >= vis_thr) + int(float(kps[R_EYE][2]) >= vis_thr)
+        if eyes < (2 if both_eyes else 1):
+            return False
+        return body["sh_w"] >= settings.THEFT_FRONTAL_MIN_SHOULDER_TORSO * body["torso"]
+
+    @staticmethod
+    def _cross(kps: np.ndarray, hand: HandState, x: float) -> Optional[float]:
+        """How far ``x`` lies across the body for this hand's arm.
+
+        0 at the shoulder midpoint, +1 at the *opposite* shoulder, -1 at the
+        hand's own shoulder (measured on the image x axis, so it holds whether
+        the person faces the camera or not).
+        """
+        own_idx = ARM[hand.kp_index][0]
+        other_idx = R_SHOULDER if own_idx == L_SHOULDER else L_SHOULDER
+        own_x, other_x = float(kps[own_idx][0]), float(kps[other_idx][0])
+        mid = (own_x + other_x) / 2.0
+        half = other_x - mid
+        if abs(half) < 1.0:
+            return None
+        return (x - mid) / half
+
+    @staticmethod
+    def _hanging_arm(kps: np.ndarray, hand: HandState, body: Dict[str, float], vis_thr: float) -> bool:
+        """A straight arm hanging down with the wrist below the hip: carrying, not a pocket."""
+        s_idx, e_idx = ARM[hand.kp_index]
+        s, e, w = kps[s_idx], kps[e_idx], kps[hand.kp_index]
+        if float(w[1]) <= body["hip_y"]:
+            return False
+        if min(float(s[2]), float(e[2])) < vis_thr:
+            return False                     # arm not measurable: keep the band as it was
+        if float(w[1]) < float(e[1]) + 0.2 * body["torso"]:
+            return False                     # forearm not pointing down
+        upper = math.hypot(float(e[0] - s[0]), float(e[1] - s[1]))
+        fore = math.hypot(float(w[0] - e[0]), float(w[1] - e[1]))
+        if upper + fore < 1.0:
+            return False
+        span = math.hypot(float(w[0] - s[0]), float(w[1] - s[1]))
+        return span / (upper + fore) >= settings.THEFT_HANGING_ARM_STRAIGHT_RATIO
+
+    def _at_chest(self, kps: np.ndarray, hand: HandState, body: Dict[str, float],
+                  wx: float, wy: float, vis_thr: float) -> bool:
+        """Wrist on the opposite side of the upper torso (inside-jacket position).
+
+        Requires a frontal view, a real crossing of the body midline (a hand
+        holding a product up to read stays near the middle or on its own
+        side) and no second hand at the same spot (two-handed handling:
+        opening or reading a pack).
+        """
+        if not self._frontal(kps, body, vis_thr, both_eyes=False):
+            return False
+        c = self._cross(kps, hand, wx)
+        if c is None or not (settings.THEFT_CHEST_MIN_CROSS <= c <= settings.THEFT_CHEST_MAX_CROSS):
+            return False
+        top = body["sh_y"] + settings.THEFT_CHEST_TOP_FRAC * body["torso"]
+        bottom = body["sh_y"] + settings.THEFT_CHEST_BOTTOM_FRAC * body["torso"]
+        if not (top <= wy <= bottom):
+            return False
+        other = kps[R_WRIST if hand.kp_index == L_WRIST else L_WRIST]
+        if (float(other[2]) >= settings.THEFT_CONCEAL_MIN_WRIST_VIS
+                and math.hypot(float(other[0]) - wx, float(other[1]) - wy)
+                < settings.THEFT_CHEST_TWO_HAND_DIST * body["sh_w"]):
+            return False
+        return True
+
+    def _hidden_behind_body(self, cam: CameraState, st: TrackState, hand: HandState, kps: np.ndarray,
+                            body: Dict[str, float], ts: float, vis_thr: float) -> Optional[float]:
+        """Mean torso/elbow visibility when the wrist is hidden behind the body, else None.
+
+        Every condition below removes an ordinary reason for a wrist to be
+        out of sight:
+
+        * the face looks at the camera (nose + both eyes, shoulders spread):
+          seen from behind or in profile, a hand in front of the body -- at a
+          trolley, in a basket -- is hidden too;
+        * both hips and both knees are seen: nothing (trolley, display, low
+          shelf) stands in front of the lower body;
+        * that arm's elbow is seen at the flank at waist height: the arm is
+          lowered and bent at the side, not reaching across or out;
+        * nobody else's box overlaps the torso (another shopper in between);
+        * at onset only: the wrist was clearly seen *after* it left the shelf,
+          at the side of the body at waist height, within
+          THEFT_OCCLUDED_ONSET_SEC (it went behind the body, it did not
+          vanish into the shelf or out of a blurred frame).
+        """
+        t = body["torso"]
+        lh, rh, lk, rk = kps[L_HIP], kps[R_HIP], kps[13], kps[14]
+        if min(float(lh[2]), float(rh[2]), float(lk[2]), float(rk[2])) < vis_thr:
+            return None
+        if not self._frontal(kps, body, vis_thr, both_eyes=True):
+            return None
+        _s, e_idx = ARM[hand.kp_index]
+        e = kps[e_idx]
+        if float(e[2]) < vis_thr:
+            return None
+        if not (body["sh_y"] + 0.3 * t <= float(e[1]) <= body["hip_y"] + 0.15 * t):
+            return None
+        ce = self._cross(kps, hand, float(e[0]))
+        if ce is None or not (-2.0 <= ce <= -0.6):
+            return None                      # elbow not at its own flank
+        torso_box = (body["x_lo"], body["sh_y"], body["x_hi"], body["hip_y"] + 0.3 * t)
+        for other in cam.tracks.values():
+            if other is st or ts - other.last_seen > 0.5:
+                continue
+            if _boxes_intersect(other.bbox, torso_box):
+                return None
+        if hand.occluded_since is None:
+            # Onset: only right after a reach, and only for a wrist seen
+            # leaving the shelf towards the side of the body.
+            if hand.post_reach is None and hand.active_zone is None:
+                return None
+            lv = hand.last_vis_out
+            if lv is None or hand.hit_ts < 0 or lv[0] <= hand.hit_ts:
+                return None
+            if ts - lv[0] > settings.THEFT_OCCLUDED_ONSET_SEC:
+                return None
+            if not (body["sh_y"] + 0.35 * t <= lv[2] <= body["hip_y"] + 0.2 * t):
+                return None
+            cl = self._cross(kps, hand, lv[1])
+            if cl is None or not (-2.5 <= cl <= -0.3):
+                return None
+            hand.occluded_since = ts
+        ls, rs = kps[L_SHOULDER], kps[R_SHOULDER]
+        return float(np.mean([ls[2], rs[2], lh[2], rh[2], e[2]]))
+
+    def _conceal_target(self, cam: CameraState, st: TrackState, hand: HandState, kps: np.ndarray,
+                        body: Optional[Dict[str, float]], conceal: Optional[Tuple[float, float, float, float]],
+                        wx: float, wy: float, wv: float, ts: float, passing: bool,
+                        vis_thr: float) -> Tuple[Optional[str], Optional[float]]:
+        """(target, body_vis) of this hand on this frame; (None, None) when not at the body.
+
+        ``"pocket"`` -- wrist seen in the waistband/pocket band, unless the
+        arm hangs straight down past the hip (a basket or bag carried at the
+        side); ``"chest"`` -- wrist seen on the opposite side of the upper
+        torso; ``"behind_back"`` -- wrist out of sight behind the body (see
+        ``_hidden_behind_body``), never while walking past.
+        """
+        if body is None:
+            hand.occluded_since = None
+            return None, None
+        if wv >= settings.THEFT_CONCEAL_MIN_WRIST_VIS:
+            hand.occluded_since = None
+            if conceal and _box_contains(conceal, wx, wy) and not self._hanging_arm(kps, hand, body, vis_thr):
+                return rules.CONCEAL_POCKET, None
+            if self._at_chest(kps, hand, body, wx, wy, vis_thr):
+                return rules.CONCEAL_CHEST, None
+            return None, None
+        if wv < settings.THEFT_OCCLUDED_WRIST_MAX_VIS and not passing:
+            bv = self._hidden_behind_body(cam, st, hand, kps, body, ts, vis_thr)
+            if bv is not None:
+                return rules.CONCEAL_BEHIND_BACK, bv
+        hand.occluded_since = None
+        return None, None
+
+    def _conceal_verdict(self, cam: CameraState, hand: HandState, track_ended: bool = False) -> Dict[str, Any]:
+        return rules.detect_concealment(
+            hand.post_reach or [],
+            window_sec=settings.THEFT_CONCEAL_WINDOW_SEC,
+            min_hold_frames=self._thr(cam, "conceal_min_hold_frames", settings.THEFT_CONCEAL_MIN_HOLD_FRAMES),
+            no_return_sec=settings.THEFT_CONCEAL_NO_RETURN_SEC,
+            track_ended=track_ended,
+            occluded_min_hold_sec=settings.THEFT_OCCLUDED_MIN_HOLD_SEC,
+            occluded_confidence_factor=settings.THEFT_OCCLUDED_CONFIDENCE_FACTOR,
+            chest_max_hold_sec=settings.THEFT_CHEST_MAX_HOLD_SEC,
+        )
+
     # ------------------------------------------------------------- observe
 
     def observe(self, camera_id: str, ts: float, frame_bgr: Optional[np.ndarray],
@@ -531,6 +720,10 @@ class PoseAnalytics:
         seen: set = set()
         for t in tracks:
             if not getattr(t, "confirmed", True):
+                continue
+            # A static figure (poster, mannequin) is not a shopper. The live
+            # engine filters these out already; this is the defensive copy.
+            if getattr(t, "motion_state", None) == "static" or getattr(t, "is_static", False) is True:
                 continue
             tid = getattr(t, "track_id", None)
             if tid is None:
@@ -577,6 +770,7 @@ class PoseAnalytics:
             self._update_head(st, kps, ts)
             self._update_hands(cam, st, kps, floor, ts, frame, result)
             self._update_presence(cam, st, ts, frame, result)
+            self._update_pattern(cam, st, ts, frame, result)
 
         # One physical hand given to two overlapping people is one reach.
         self._dedupe_reaches(cam, ts, result)
@@ -783,36 +977,53 @@ class PoseAnalytics:
                 hand.hit_xy, hand.hit_zone, hand.hit_ts = (hit[2], hit[3]), zone.id, ts
                 hand.hit_wrist = (wx, wy)
 
-            # Is the wrist at the waistband/pocket band? (Only matters after
-            # a reach, but cheap.)
-            target = None
-            if wv >= settings.THEFT_CONCEAL_MIN_WRIST_VIS and conceal and _box_contains(conceal, wx, wy):
-                target = "pocket_band"
+            # The wrist clearly seen outside every product zone: it is in view
+            # and away from the shelf (the behind-the-back cue's onset proof).
+            if wv >= vis_thr and zone is None:
+                hand.last_vis_out = (ts, wx, wy)
+
+            # Is the hand at a concealment target -- pocket band, opposite
+            # side of the chest, or hidden behind the body? (Only matters
+            # after a reach, but cheap.)
+            target, body_vis = self._conceal_target(cam, st, hand, kps, body, conceal, wx, wy, wv,
+                                                    ts, passing, vis_thr)
 
             # ---- concealment evidence for a hand that recently left a shelf
             if hand.post_reach is not None:
                 hand.post_reach.append({
                     "t": ts, "in_shelf": zone is not None, "in_conceal": target is not None,
-                    "vis": wv, "target": target,
+                    "vis": wv, "target": target, "body_vis": body_vis,
                 })
-                verdict = rules.detect_concealment(
-                    hand.post_reach,
-                    window_sec=settings.THEFT_CONCEAL_WINDOW_SEC,
-                    min_hold_frames=self._thr(cam, "conceal_min_hold_frames", settings.THEFT_CONCEAL_MIN_HOLD_FRAMES),
-                    no_return_sec=settings.THEFT_CONCEAL_NO_RETURN_SEC,
-                )
+                verdict = self._conceal_verdict(cam, hand)
                 state = verdict.get("state")
                 if state in ("holding", "held") and hand.post_reach_snapshot is None and target:
                     hand.post_reach_snapshot = self._snapshot(frame, st, kps, ts)
                 if verdict.get("detected"):
-                    self._raise(cam, st, rules.RULE_CONCEALMENT, verdict, ts, result,
-                                snapshot=hand.post_reach_snapshot or self._snapshot(frame, st, kps, ts),
-                                zone_id=hand.post_reach_zone, hand=hand.name,
-                                extra_evidence=[f"{hand.name.capitalize()} hand; body region from shoulder/hip keypoints"])
+                    raised = self._raise(
+                        cam, st, rules.RULE_CONCEALMENT, verdict, ts, result,
+                        snapshot=hand.post_reach_snapshot or self._snapshot(frame, st, kps, ts),
+                        zone_id=hand.post_reach_zone, hand=hand.name,
+                        extra_evidence=[f"{hand.name.capitalize()} hand; body region from shoulder/hip keypoints"])
+                    if not raised:
+                        # Too weakly seen to stand alone: a cue for the fusion.
+                        self._add_cue(st, rules.CUE_CONCEAL_HOLD, ts, verdict.get("confidence"),
+                                      f"{hand.name} hand to {verdict.get('target')}, "
+                                      f"confidence {float(verdict.get('confidence') or 0):.2f}",
+                                      hand.post_reach_zone)
                     self._clear_post_reach(hand)
-                elif state in ("returned", "expired"):
+                elif state == "expired":
+                    # Left the shelf with the product and did not put it back
+                    # (every purchase does this: the weakest cue).
+                    self._add_cue(st, rules.CUE_REACH_NO_RETURN, ts, hand.post_reach[0].get("reach_vis"),
+                                  None, hand.post_reach_zone)
+                    self._clear_post_reach(hand)
+                elif state in ("returned", "examining"):
                     self._clear_post_reach(hand)
                 elif len(hand.post_reach) > settings.INTERACTION_HISTORY_FRAMES:
+                    if state == "held":
+                        self._add_cue(st, rules.CUE_CONCEAL_HOLD, ts, hand.post_reach[0].get("reach_vis"),
+                                      f"{hand.name} hand held at the body, outcome not observed",
+                                      hand.post_reach_zone)
                     self._clear_post_reach(hand)
 
             # ---- reach state machine
@@ -836,9 +1047,9 @@ class PoseAnalytics:
                 if observed:
                     hand.active_missing += 1
                     if hand.active_missing > settings.INTERACTION_EXIT_GRACE_FRAMES:
-                        self._leave_shelf(cam, st, hand, kps, ts, frame, wv, target)
+                        self._leave_shelf(cam, st, hand, kps, ts, frame, wv, target, body_vis)
                 elif ts - hand.active_last > settings.INTERACTION_OCCLUSION_GRACE_SEC:
-                    self._leave_shelf(cam, st, hand, kps, ts, frame, wv, target)
+                    self._leave_shelf(cam, st, hand, kps, ts, frame, wv, target, body_vis)
 
             if zone is not None and not passing:
                 if hand.candidate_zone == zone.id:
@@ -865,7 +1076,8 @@ class PoseAnalytics:
                 hand.candidate_vis = []
 
     def _leave_shelf(self, cam: CameraState, st: TrackState, hand: HandState, kps: np.ndarray, ts: float,
-                     frame: Optional[np.ndarray], wv: float, target: Optional[str]) -> None:
+                     frame: Optional[np.ndarray], wv: float, target: Optional[str],
+                     body_vis: Optional[float] = None) -> None:
         """The hand left its zone: end the reach and start collecting concealment evidence.
 
         ``kps`` is None when the reach ends on a frame without a skeleton
@@ -882,7 +1094,7 @@ class PoseAnalytics:
             return
         hand.post_reach = [{
             "t": ts, "in_shelf": False, "in_conceal": target is not None, "vis": wv,
-            "reach_vis": reach_vis, "target": target,
+            "reach_vis": reach_vis, "target": target, "body_vis": body_vis,
         }]
         hand.post_reach_zone = left_zone
         hand.post_reach_snapshot = self._snapshot(frame, st, kps, ts) if target else None
@@ -944,6 +1156,17 @@ class PoseAnalytics:
                         snapshot=self._snapshot(frame, st, st.keypoints, ts),
                         zone_id=zone.id, hand=hand.name,
                         loss_multiplier=int(verdict.get("count", 1)))
+        else:
+            # One reach short of sweeping (at least 3 quick reaches): a cue,
+            # at most once per sweep window.
+            min_reaches = int(self._thr(cam, "sweep_min_reaches", settings.THEFT_SWEEP_MIN_REACHES))
+            count = int(verdict.get("count") or 0)
+            if (count >= max(3, min_reaches - 1)
+                    and ts - st.last_sweep_cue > settings.THEFT_SWEEP_WINDOW_SEC):
+                st.last_sweep_cue = ts
+                self._add_cue(st, rules.CUE_SWEEP_PARTIAL, ts, vis,
+                              f"{count} reaches into '{zone.name}' within {settings.THEFT_SWEEP_WINDOW_SEC:.0f}s",
+                              zone.id)
 
     def _resume_reach(self, hand: HandState, ts: float, wv: float) -> None:
         """Continue the reach held in ``closing`` (the hand came straight back)."""
@@ -1190,6 +1413,52 @@ class PoseAnalytics:
                 st.head_turns.append(ts)
             st.head_side = side
 
+    # ------------------------------------------------- behaviour pattern
+
+    @staticmethod
+    def _add_cue(st: TrackState, cue: str, ts: float, vis: Optional[float], detail: Optional[str],
+                 zone_id: Optional[str]) -> None:
+        st.cues.append({"t": ts, "cue": cue, "vis": None if vis is None else float(vis),
+                        "detail": detail, "zone_id": zone_id})
+
+    def _update_pattern(self, cam: CameraState, st: TrackState, ts: float,
+                        frame: Optional[np.ndarray], result: ObserveResult) -> None:
+        """Record the head-scanning cue and evaluate the fused BEHAVIOUR_PATTERN score.
+
+        Not evaluated for a track on which any other rule fired within the
+        incident cooldown: that person has already been reported for review.
+        """
+        if not settings.THEFT_PATTERN_ENABLED:
+            return
+        window = settings.THEFT_PATTERN_HEAD_WINDOW_SEC
+        if ts - st.last_head_cue > window:
+            turns = sum(1 for t in st.head_turns if ts - t <= window)
+            if turns >= settings.THEFT_PATTERN_HEAD_TURNS:
+                st.last_head_cue = ts
+                vis = [v for (t, v) in st.head_samples if ts - t <= window]
+                self._add_cue(st, rules.CUE_HEAD_SCAN, ts, float(np.mean(vis)) if vis else None,
+                              f"{turns} head turns in {window:.0f}s", None)
+        if not st.cues or not cam.theft_on:
+            return
+        half_life = max(float(settings.THEFT_PATTERN_HALF_LIFE_SEC), 1.0)
+        while st.cues and ts - st.cues[0]["t"] > 6.0 * half_life:   # < 2 % left
+            st.cues.popleft()
+        cooldown = settings.THEFT_INCIDENT_COOLDOWN_SEC
+        if any(r != rules.RULE_BEHAVIOUR_PATTERN and ts - t < cooldown for r, t in st.fired.items()):
+            return
+        verdict = rules.detect_behaviour_pattern(
+            list(st.cues), now=ts, half_life_sec=half_life,
+            threshold=float(self._thr(cam, "pattern_score_threshold", settings.THEFT_PATTERN_SCORE_THRESHOLD)),
+            min_cue_types=settings.THEFT_PATTERN_MIN_CUE_TYPES,
+            weights=rules.parse_cue_map(settings.THEFT_PATTERN_WEIGHTS),
+            caps=rules.parse_cue_map(settings.THEFT_PATTERN_CAPS),
+        )
+        if not verdict.get("detected"):
+            return
+        zone_id = next((c["zone_id"] for c in reversed(st.cues) if c.get("zone_id")), None)
+        self._raise(cam, st, rules.RULE_BEHAVIOUR_PATTERN, verdict, ts, result,
+                    snapshot=self._snapshot(frame, st, st.keypoints, ts), zone_id=zone_id)
+
     # --------------------------------------------------------- presence
 
     def _update_presence(self, cam: CameraState, st: TrackState, ts: float,
@@ -1223,6 +1492,10 @@ class PoseAnalytics:
             p["last"] = ts
             dwell = p["last"] - p["start"]
             min_dwell = self._thr(cam, "loiter_min_dwell_sec", settings.THEFT_LOITER_MIN_DWELL_SEC)
+            if not p.get("cued") and dwell >= settings.THEFT_PATTERN_DWELL_FRAC * min_dwell:
+                p["cued"] = 1.0
+                self._add_cue(st, rules.CUE_HIGH_VALUE_DWELL, ts, body["vis"] if body else None,
+                              f"{dwell:.0f}s by '{z.name}'", z.id)
             if dwell < min_dwell:
                 continue
             reaches = sum(1 for r in st.reaches if r["zone_id"] == z.id and r["timestamp"] >= p["start"])
@@ -1272,8 +1545,12 @@ class PoseAnalytics:
             floor_coverage=st.frames_with_floor / max(st.frames, 1),
         )
         if verdict.get("detected"):
-            self._raise(cam, st, rules.RULE_EXIT_WITHOUT_CHECKOUT, verdict, ts, result,
-                        snapshot=self._snapshot(frame, st, st.keypoints, ts), zone_id=zid)
+            raised = self._raise(cam, st, rules.RULE_EXIT_WITHOUT_CHECKOUT, verdict, ts, result,
+                                 snapshot=self._snapshot(frame, st, st.keypoints, ts), zone_id=zid)
+            if not raised:
+                self._add_cue(st, rules.CUE_EXIT_NO_CHECKOUT, ts,
+                              st.interaction_vis_sum / max(st.interaction_count, 1),
+                              f"entered {cat} zone after {st.interaction_count} shelf interaction(s)", None)
 
     # --------------------------------------------------------- incidents
 
@@ -1287,16 +1564,22 @@ class PoseAnalytics:
     def _raise(self, cam: CameraState, st: TrackState, rule: str, verdict: Dict[str, Any], ts: float,
                result: ObserveResult, *, snapshot: Optional[Dict[str, Any]], zone_id: Optional[str] = None,
                hand: Optional[str] = None, extra_evidence: Optional[List[str]] = None,
-               loss_multiplier: int = 1) -> None:
+               loss_multiplier: int = 1) -> bool:
+        """Queue an incident; returns whether one was raised.
+
+        Any raised incident clears the track's fusion cues: the evidence has
+        been reported, and BEHAVIOUR_PATTERN must not re-report it.
+        """
         if not cam.theft_on:
-            return
+            return False
         confidence = float(verdict.get("confidence") or 0.0)
         if confidence < self._thr(cam, "min_confidence", settings.THEFT_MIN_CONFIDENCE):
-            return
+            return False
         last = st.fired.get(rule)
         if last is not None and ts - last < settings.THEFT_INCIDENT_COOLDOWN_SEC:
-            return
+            return False
         st.fired[rule] = ts
+        st.cues.clear()
 
         zone = self._zone_by_id(cam, zone_id)
         evidence = list(verdict.get("evidence") or [])
@@ -1337,6 +1620,7 @@ class PoseAnalytics:
         result.incidents.append({k: v for k, v in incident.items() if k != "snapshot"})
         logger.info(f"Suspicious behaviour for review: {rule} on {cam.camera_id} track {st.track_id} "
                     f"(confidence {confidence:.2f})")
+        return True
 
     @staticmethod
     def _severity(cam: CameraState, confidence: float) -> str:
@@ -1356,13 +1640,7 @@ class PoseAnalytics:
                         frame: Optional[np.ndarray] = None) -> None:
         for hand in st.hands.values():
             if hand.post_reach:
-                verdict = rules.detect_concealment(
-                    hand.post_reach,
-                    window_sec=settings.THEFT_CONCEAL_WINDOW_SEC,
-                    min_hold_frames=self._thr(cam, "conceal_min_hold_frames", settings.THEFT_CONCEAL_MIN_HOLD_FRAMES),
-                    no_return_sec=settings.THEFT_CONCEAL_NO_RETURN_SEC,
-                    track_ended=True,
-                )
+                verdict = self._conceal_verdict(cam, hand, track_ended=True)
                 if verdict.get("detected"):
                     self._raise(cam, st, rules.RULE_CONCEALMENT, verdict, ts, ObserveResult(),
                                 snapshot=hand.post_reach_snapshot, zone_id=hand.post_reach_zone, hand=hand.name)
@@ -1437,6 +1715,7 @@ class PoseAnalytics:
 
             written = 0
             notifications: List[Tuple[str, str, Dict[str, Any]]] = []
+            clip_jobs: List[Dict[str, Any]] = []
             try:
                 with Session(self._engine()) as db:
                     cams: Dict[str, Any] = {}
@@ -1477,6 +1756,7 @@ class PoseAnalytics:
                             db.add(TheftIncidentModel(**row))
                             written += 1
                             notifications.append(self._notification(p, row))
+                            clip_jobs.append({"id": p["id"], "camera_id": cid, "ts": p.get("ts")})
                     db.commit()
             except Exception as e:
                 self.stats["write_errors"] += 1
@@ -1495,6 +1775,8 @@ class PoseAnalytics:
             self.stats["persisted"] += written
             for title, body, data in notifications:
                 self._dispatch_notification(title, body, data)
+            for job in clip_jobs:
+                self._start_incident_clip(job)
             return written
 
     @staticmethod
@@ -1526,6 +1808,72 @@ class PoseAnalytics:
         except Exception as e:
             logger.error(f"Could not write evidence image for {p.get('id')}: {e}")
             return None
+
+    # ------------------------------------------------------------ theft clips
+    # At most this many clips are recorded at once (each holds ~15 s of decoded
+    # frames in memory while it waits for its post-roll); an incident on a
+    # camera whose clip is still recording and covers it shares that clip.
+    MAX_CONCURRENT_CLIPS = 2
+
+    def _start_incident_clip(self, job: Dict[str, Any]) -> bool:
+        """Record the incident's evidence clip on a worker thread when the camera has theft_clip on.
+
+        Returns whether a clip is being recorded (or shared) for it. Nothing
+        is recorded for a camera with theft_clip off: the incident keeps its
+        still only.
+        """
+        try:
+            from app.services.clip_recorder import clip_recorder_service
+        except Exception:  # pragma: no cover - recorder unavailable
+            return False
+        cid = job["camera_id"]
+        if not clip_recorder_service.theft_clip_enabled(cid):
+            return False
+        ts = float(job.get("ts") or time.time())
+        clips = self.__dict__.setdefault("_clips_active", {})   # camera -> {"id", "end"}
+        lock = self.__dict__.setdefault("_clips_lock", threading.Lock())
+        with lock:
+            cur = clips.get(cid)
+            if cur is not None and ts <= cur["end"]:
+                cur["shared"].append(job["id"])       # linked when that clip is saved
+                return True
+            if len(clips) >= self.MAX_CONCURRENT_CLIPS:
+                self.stats["clips_skipped"] = int(self.stats.get("clips_skipped", 0)) + 1
+                logger.warning(f"No clip for incident {job['id']}: {len(clips)} clip(s) already recording")
+                return False
+            clips[cid] = {"id": job["id"], "shared": [],
+                          "end": ts + float(settings.POST_EVENT_RECORD_SECONDS)}
+
+        def run() -> None:
+            path = None
+            try:
+                path = clip_recorder_service.record_incident_clip(job["id"], cid, self.evidence_dir(), event_ts=ts)
+            except Exception as e:  # noqa: BLE001 - a lost clip never breaks the pipeline
+                logger.error(f"Theft clip for {job['id']} failed: {e}")
+            finally:
+                with lock:
+                    entry = clips.pop(cid, None) or {}
+            if path is not None:
+                self._link_clip([job["id"], *entry.get("shared", [])], str(path))
+
+        threading.Thread(target=run, name=f"theft-clip-{job['id']}", daemon=True).start()
+        return True
+
+    def _link_clip(self, incident_ids: List[str], clip_path: str) -> None:
+        """Point the incidents at their saved clip (served by /theft/incidents/{id}/clip)."""
+        from sqlalchemy import update
+        from sqlalchemy.orm import Session
+        from app.models.db_models import TheftIncidentModel
+
+        try:
+            with Session(self._engine()) as db:
+                for iid in incident_ids:
+                    db.execute(update(TheftIncidentModel).where(TheftIncidentModel.id == iid).values(
+                        clip_path=clip_path, evidence_clip_url=f"/api/v1/theft/incidents/{iid}/clip"))
+                db.commit()
+            self.stats["clips_saved"] = int(self.stats.get("clips_saved", 0)) + 1
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Could not link clip {clip_path} to {incident_ids}: {e}")
 
     @staticmethod
     def _incident_row(p: Dict[str, Any], cam: Any, snapshot_path: Optional[str]) -> Dict[str, Any]:

@@ -193,6 +193,26 @@ class CameraFeatureConfig(BaseModel):
     people_counting: bool = Field(True, description="Zone visits, dwell, queues and footfall from tracked people")
     shelf_interaction: bool = Field(True, description="Hand-to-shelf interaction events from pose keypoints")
     theft_detection: bool = Field(True, description="Suspicious-behaviour incidents for staff review")
+    # Static-figure filter (tracking_service): a person-shaped detection with no
+    # body or keypoint motion for static_figure_seconds (a poster, mannequin or
+    # cut-out) is shown as "static" and kept out of counts and theft analytics.
+    static_figure_filter: bool = Field(
+        True,
+        description=("Ignore person-shaped figures that never move (posters, mannequins, cut-outs): "
+                     "they stay visible on the live view as 'static' but are not counted or analysed"),
+    )
+    static_figure_seconds: Optional[int] = Field(
+        None, ge=10, le=3600,
+        description=("Seconds without any body or limb movement before a figure is treated as static; "
+                     "empty = server default (STATIC_FIGURE_SECONDS)"),
+    )
+    # Theft evidence clip: keep an in-memory pre-event buffer for this camera
+    # and save ~5 s before + 10 s after each theft incident to the evidence store.
+    theft_clip: bool = Field(
+        False,
+        description=("Save a short video clip (about 5 s before and 10 s after) with each theft incident. "
+                     "Only the in-memory pre-event buffer is kept; nothing is recorded continuously"),
+    )
     # Detector tuning for this camera. None = the global PERSON_MAX_FRAME_FRACTION.
     person_max_frame_fraction: Optional[float] = Field(
         None, ge=0.05, le=1.0,

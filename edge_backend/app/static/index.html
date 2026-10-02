@@ -12,19 +12,19 @@
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;800&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/static/css/style.css?v=2.3.0" />
-  <link rel="stylesheet" href="/static/css/floorplan.css?v=2.3.0" />
-  <link rel="stylesheet" href="/static/css/loss.css?v=2.3.0" />
-  <link rel="stylesheet" href="/static/css/insights.css?v=2.3.0" />
-  <link rel="stylesheet" href="/static/css/camera_roles.css?v=2.3.0" />
-  <link rel="stylesheet" href="/static/css/heatmap_history.css?v=2.3.0" />
-  <link rel="stylesheet" href="/static/css/night_watch.css?v=2.3.0" />
-  <link rel="stylesheet" href="/static/css/live_video.css?v=2.3.0" />
+  <link rel="stylesheet" href="/static/css/style.css?v=2.4.0" />
+  <link rel="stylesheet" href="/static/css/floorplan.css?v=2.4.0" />
+  <link rel="stylesheet" href="/static/css/loss.css?v=2.4.0" />
+  <link rel="stylesheet" href="/static/css/insights.css?v=2.4.0" />
+  <link rel="stylesheet" href="/static/css/camera_roles.css?v=2.4.0" />
+  <link rel="stylesheet" href="/static/css/heatmap_history.css?v=2.4.0" />
+  <link rel="stylesheet" href="/static/css/night_watch.css?v=2.4.0" />
+  <link rel="stylesheet" href="/static/css/live_video.css?v=2.4.0" />
   <!-- auth.js stays a classic (blocking) script: it must wrap fetch before any
        module runs. Everything else is deferred and runs in document order after
        parsing; theme.js is listed last so it still runs after the modules.
        The server rewrites each ?v= to a hash of the file (web_delivery.py). -->
-  <script src="/static/js/auth.js?v=2.3.0"></script>
+  <script src="/static/js/auth.js?v=2.4.0"></script>
 
   <!-- Chart.js 4.4.1 for the visitors-by-hour charts (vendored: vendor/chartjs/SOURCE.txt) -->
   <script src="/static/vendor/chartjs/chart.umd.min.js" defer></script>
@@ -660,17 +660,68 @@
         </div>
       </div>
 
+      <!-- Patterns (GET /api/v1/theft/patterns): built from recorded incidents only. -->
+      <div class="glass-card" id="lossPatternsCard">
+        <div class="card-title">
+          <span>Patterns</span>
+          <span class="loss-chips loss-pattern-days" id="lossPatternDays" role="group" aria-label="Period">
+            <button type="button" class="loss-chip" data-pattern-days="7" aria-pressed="false">7 days</button>
+            <button type="button" class="loss-chip active" data-pattern-days="28" aria-pressed="true">4 weeks</button>
+            <button type="button" class="loss-chip" data-pattern-days="90" aria-pressed="false">3 months</button>
+          </span>
+        </div>
+        <p class="loss-intro">
+          Where and when the checks fire, from the incidents recorded on this device. A <b>burst</b> is several
+          incidents at the same camera and area within a short time; it shows repeated behaviour at one place and
+          does not identify a person, so it may be one shopper or several.
+        </p>
+        <div id="lossPatternsSummary" class="loss-pattern-summary" role="status" aria-live="polite"><div class="fp-empty">Loading…</div></div>
+        <div class="loss-pattern-grid">
+          <section class="loss-pattern-block" aria-labelledby="lossPatternCamerasTitle">
+            <div class="loss-pattern-title" id="lossPatternCamerasTitle">Hotspots by camera</div>
+            <div id="lossPatternCameras"></div>
+          </section>
+          <section class="loss-pattern-block" aria-labelledby="lossPatternZonesTitle">
+            <div class="loss-pattern-title" id="lossPatternZonesTitle">Hotspots by area</div>
+            <div id="lossPatternZones"></div>
+          </section>
+          <section class="loss-pattern-block loss-pattern-wide" aria-labelledby="lossPatternHeatTitle">
+            <div class="loss-pattern-title" id="lossPatternHeatTitle">Day and hour (store time)</div>
+            <div id="lossPatternHeat"></div>
+          </section>
+          <section class="loss-pattern-block" aria-labelledby="lossPatternRulesTitle">
+            <div class="loss-pattern-title" id="lossPatternRulesTitle">Checks that fired</div>
+            <div id="lossPatternRules"></div>
+          </section>
+          <section class="loss-pattern-block" aria-labelledby="lossPatternWeeklyTitle">
+            <div class="loss-pattern-title" id="lossPatternWeeklyTitle">Week by week</div>
+            <div id="lossPatternWeekly"></div>
+          </section>
+          <section class="loss-pattern-block loss-pattern-wide" aria-labelledby="lossPatternBurstsTitle">
+            <div class="loss-pattern-title" id="lossPatternBurstsTitle">Bursts at one place</div>
+            <div id="lossPatternBursts"></div>
+          </section>
+        </div>
+      </div>
+
       <!-- Full-size evidence viewer (inline overlay; no popups or dialogs) -->
       <div id="theftEvidenceViewer" class="loss-viewer" role="dialog" aria-modal="true" aria-label="Evidence image" style="display: none;">
         <div class="loss-viewer-inner">
           <div class="loss-viewer-bar">
             <span id="theftEvidenceCaption" class="loss-viewer-caption"></span>
             <span class="loss-viewer-actions">
+              <span class="loss-viewer-switch" id="theftEvidenceSwitch" role="group" aria-label="Evidence" hidden>
+                <button id="theftEvidenceShowStill" type="button" class="btn btn-sm" aria-pressed="true">Image</button>
+                <button id="theftEvidenceShowClip" type="button" class="btn btn-sm" aria-pressed="false">Clip</button>
+              </span>
               <a id="theftEvidenceOpen" class="btn btn-sm" href="#" target="_blank" rel="noopener">Open in new tab</a>
               <button id="theftEvidenceClose" type="button" class="btn btn-sm">Close</button>
             </span>
           </div>
           <img id="theftEvidenceFull" class="loss-viewer-img" alt="Evidence image: annotated frame and person crop">
+          <video id="theftEvidenceVideo" class="loss-viewer-video" controls playsinline preload="metadata" hidden
+                 aria-label="Evidence clip: about 5 seconds before to 10 seconds after"></video>
+          <div id="theftEvidenceVideoError" class="loss-viewer-error" role="status" hidden></div>
         </div>
       </div>
       <!-- LOSS:END -->
@@ -896,6 +947,24 @@
             <label class="checkbox-label" for="featPeopleCounting" title="Zone visits, dwell, queues and footfall from tracked people"><input type="checkbox" id="featPeopleCounting" name="featPeopleCounting" /> People counting &amp; dwell</label>
             <label class="checkbox-label" for="featShelfInteraction" title="Hand-to-shelf interactions from pose keypoints"><input type="checkbox" id="featShelfInteraction" name="featShelfInteraction" /> Shelf interaction</label>
             <label class="checkbox-label" for="featTheftDetection" title="Suspicious behaviour flagged for staff review"><input type="checkbox" id="featTheftDetection" name="featTheftDetection" /> Theft detection</label>
+            <label class="checkbox-label" for="featTheftClip" title="Save about 5 s before and 10 s after each theft incident with its evidence"><input type="checkbox" id="featTheftClip" name="featTheftClip" /> Theft evidence clip</label>
+            <label class="checkbox-label" for="featStaticFigureFilter" title="Posters, mannequins and cut-outs that never move are shown as static and not counted or analysed"><input type="checkbox" id="featStaticFigureFilter" name="featStaticFigureFilter" /> Ignore figures that never move</label>
+          </div>
+          <div class="cam-feat-hint" id="featTheftClipHint">
+            Evidence clip: with theft detection on, this camera keeps the last few seconds in memory only and saves a
+            short clip (about 5&nbsp;s before to 10&nbsp;s after) with each incident. Nothing is recorded continuously;
+            clips count towards the evidence storage limit and are deleted with the incident's image.
+          </div>
+        </div>
+
+        <div class="form-group cam-feat-static" id="configStaticFigureGroup">
+          <label for="configStaticFigureSeconds">Treat a figure as static after (seconds without movement)</label>
+          <input type="number" min="10" max="3600" step="1" class="form-input" id="configStaticFigureSeconds" name="staticFigureSeconds" placeholder="Server default" />
+          <div class="cam-feat-hint">
+            A person-shaped figure whose body and limbs do not move for this long (a poster, mannequin or cut-out) is
+            drawn grey as "static" on the live view and left out of counts and theft checks. A real person standing
+            still still moves their head and hands, so they stay counted. Leave empty for the server default
+            (<code>STATIC_FIGURE_SECONDS</code>, 60&nbsp;s unless changed); 10 to 3600.
           </div>
         </div>
 
@@ -940,24 +1009,24 @@
 
   <!-- Scripts -->
   <!-- Direct peer-to-peer live video (WebRTC); used by the modules below. -->
-  <script src="/static/js/webrtc_live.js?v=2.3.0" defer></script>
-  <script src="/static/js/floorplan.js?v=2.3.0" defer></script>
-  <script src="/static/js/duplicates.js?v=2.3.0" defer></script>
-  <script src="/static/js/devices.js?v=2.3.0" defer></script>
-  <script src="/static/js/calibration.js?v=2.3.0" defer></script>
-  <script src="/static/js/analytics.js?v=2.3.0" defer></script>
-  <script src="/static/js/camera_roles.js?v=2.3.0" defer></script>
-  <script src="/static/js/today.js?v=2.3.0" defer></script>
-  <script src="/static/js/loss.js?v=2.3.0" defer></script>
-  <script src="/static/js/insights.js?v=2.3.0" defer></script>
-  <script src="/static/js/heatmap_history.js?v=2.3.0" defer></script>
-  <script src="/static/js/product_reach.js?v=2.3.0" defer></script>
-  <script src="/static/js/entrances.js?v=2.3.0" defer></script>
-  <script src="/static/js/remote_access.js?v=2.3.0" defer></script>
-  <script src="/static/js/remote_video.js?v=2.3.0" defer></script>
-  <script src="/static/js/pairing.js?v=2.3.0" defer></script>
-  <script src="/static/js/night_watch.js?v=2.3.0" defer></script>
-  <script src="/static/js/recorder_streams.js?v=2.3.0" defer></script>
-  <script src="/static/js/theme.js?v=2.3.0" defer></script>
+  <script src="/static/js/webrtc_live.js?v=2.4.0" defer></script>
+  <script src="/static/js/floorplan.js?v=2.4.0" defer></script>
+  <script src="/static/js/duplicates.js?v=2.4.0" defer></script>
+  <script src="/static/js/devices.js?v=2.4.0" defer></script>
+  <script src="/static/js/calibration.js?v=2.4.0" defer></script>
+  <script src="/static/js/analytics.js?v=2.4.0" defer></script>
+  <script src="/static/js/camera_roles.js?v=2.4.0" defer></script>
+  <script src="/static/js/today.js?v=2.4.0" defer></script>
+  <script src="/static/js/loss.js?v=2.4.0" defer></script>
+  <script src="/static/js/insights.js?v=2.4.0" defer></script>
+  <script src="/static/js/heatmap_history.js?v=2.4.0" defer></script>
+  <script src="/static/js/product_reach.js?v=2.4.0" defer></script>
+  <script src="/static/js/entrances.js?v=2.4.0" defer></script>
+  <script src="/static/js/remote_access.js?v=2.4.0" defer></script>
+  <script src="/static/js/remote_video.js?v=2.4.0" defer></script>
+  <script src="/static/js/pairing.js?v=2.4.0" defer></script>
+  <script src="/static/js/night_watch.js?v=2.4.0" defer></script>
+  <script src="/static/js/recorder_streams.js?v=2.4.0" defer></script>
+  <script src="/static/js/theme.js?v=2.4.0" defer></script>
 </body>
 </html>

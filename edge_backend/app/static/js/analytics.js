@@ -2133,7 +2133,10 @@ async function openCameraConfigModal(cameraId) {
   // 0 means the frame rate is not known yet; leave the field empty rather than
   // pre-filling a value the input's own min="1" rejects (which blocked Save).
   safeSet('configFps', isNum(cam.fps) && cam.fps > 0 ? cam.fps : '');
-  safeSet('configResolution', cam.resolution || '');
+  // "unknown" (a camera added without one: nothing writes the measured size
+  // back) fails the field's WxH pattern and silently blocked Save; leave it
+  // empty instead, which keeps the stored value on save.
+  safeSet('configResolution', /^\d+x\d+$/.test(cam.resolution || '') ? cam.resolution : '');
   // The field is the value saved with the camera, which nothing measures; say
   // what the camera is really sending next to it.
   const liveRes = ((pipelineSnapshot && pipelineSnapshot.cameras) || []).find((c) => c.camera_id === cameraId);
@@ -2159,6 +2162,12 @@ async function openCameraConfigModal(cameraId) {
   safeCheck('featPeopleCounting', feats.people_counting);
   safeCheck('featShelfInteraction', feats.shelf_interaction);
   safeCheck('featTheftDetection', feats.theft_detection);
+  // Off unless switched on: a clip per theft incident (in-memory pre-event buffer only).
+  safeCheck('featTheftClip', feats.theft_clip === true);
+  // On unless switched off: posters/mannequins that never move are not analysed.
+  safeCheck('featStaticFigureFilter', feats.static_figure_filter !== false);
+  safeSet('configStaticFigureSeconds', isNum(feats.static_figure_seconds) ? feats.static_figure_seconds : '');
+  syncCameraFeatureFields();
   // Stored as a fraction (0.05-1), edited as a percentage; empty = server default.
   safeSet('configPersonMaxFrac', isNum(feats.person_max_frame_fraction)
     ? Math.round(feats.person_max_frame_fraction * 1000) / 10 : '');
@@ -2176,6 +2185,35 @@ async function openCameraConfigModal(cameraId) {
   modal.style.display = 'flex';
   modal.setAttribute('data-camera-object', JSON.stringify(cam));
 }
+
+/**
+ * Keep the dependent camera-feature fields honest: the evidence clip needs
+ * theft detection, and the static-figure delay only matters while the filter
+ * is on. Disabled fields keep their value, so switching back restores it.
+ */
+function syncCameraFeatureFields() {
+  const theft = el('featTheftDetection');
+  const clip = el('featTheftClip');
+  if (theft && clip) {
+    clip.disabled = !theft.checked;
+    const label = clip.closest('label');
+    if (label) label.classList.toggle('is-disabled', !theft.checked);
+    const hint = el('featTheftClipHint');
+    if (hint) hint.classList.toggle('is-muted', !theft.checked);
+  }
+  const filter = el('featStaticFigureFilter');
+  const secs = el('configStaticFigureSeconds');
+  if (filter && secs) {
+    secs.disabled = !filter.checked;
+    const group = el('configStaticFigureGroup');
+    if (group) group.classList.toggle('is-muted', !filter.checked);
+  }
+}
+
+document.addEventListener('change', (e) => {
+  const id = e.target && e.target.id;
+  if (id === 'featTheftDetection' || id === 'featStaticFigureFilter') syncCameraFeatureFields();
+});
 
 function closeCameraConfigModal() {
   const modal = el('modalCameraConfig');
@@ -2223,6 +2261,20 @@ async function handleCameraConfigSubmit(event) {
     personMaxFrac = Math.round(pct * 10) / 1000;
   }
 
+  // Seconds without movement before a figure counts as static; empty = server default.
+  const staticRaw = (el('configStaticFigureSeconds') ? el('configStaticFigureSeconds').value : '').trim();
+  let staticSeconds = null;
+  if (staticRaw !== '') {
+    const secs = Number(staticRaw);
+    if (!Number.isInteger(secs) || secs < 10 || secs > 3600) {
+      setCameraConfigStatus('"Treat a figure as static after" must be a whole number of seconds from 10 to 3600, or empty for the server default.', true);
+      const f = el('configStaticFigureSeconds');
+      if (f) f.focus();
+      return;
+    }
+    staticSeconds = secs;
+  }
+
   const camUser = (el('configCamUser') ? el('configCamUser').value : '').trim();
   const camPass = el('configCamPass') ? el('configCamPass').value : '';
   if (camPass && !camUser) {
@@ -2235,6 +2287,9 @@ async function handleCameraConfigSubmit(event) {
     people_counting: el('featPeopleCounting').checked,
     shelf_interaction: el('featShelfInteraction').checked,
     theft_detection: el('featTheftDetection').checked,
+    theft_clip: el('featTheftClip') ? el('featTheftClip').checked : false,
+    static_figure_filter: el('featStaticFigureFilter') ? el('featStaticFigureFilter').checked : true,
+    static_figure_seconds: staticSeconds,
     person_max_frame_fraction: personMaxFrac,
     stream_quality: el('configStreamQuality') ? el('configStreamQuality').value : 'auto',
   };

@@ -305,6 +305,10 @@ class PipelineSupervisor:
                         written += 1
 
                 for t in tracks:
+                    if getattr(t, "is_static", False):
+                        # Static figure (poster/mannequin): close_track already
+                        # keeps these out; never stored as a customer.
+                        continue
                     db.add(
                         CustomerTrackModel(
                             id=f"ct_{uuid.uuid4().hex[:14]}",

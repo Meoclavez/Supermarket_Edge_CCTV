@@ -81,9 +81,12 @@ class ClipRecorderService:
     Keeping a ring means JPEG-encoding ~5 frames a second per camera, so it
     is kept only where a clip can be needed (CLIP_PRE_EVENT_BUFFER): always
     ("on"), never ("off"), or ("auto") for a camera whose armed night watch
-    saves clips (NIGHT_WATCH_CLIP). A clip being recorded asks for frames for
-    its post-roll (``request``) in every mode, so an on-demand clip still
-    gets real footage from the moment it was asked for.
+    saves clips (NIGHT_WATCH_CLIP) or whose theft detection saves an
+    evidence clip with each incident (per-camera ``theft_clip`` feature).
+    A clip being recorded asks for frames for its post-roll (``request``) in
+    every mode, so an on-demand clip still gets real footage from the moment
+    it was asked for. The ring is memory only: nothing reaches the disk
+    unless an incident or an operator asks for a clip.
     """
 
     # How long a "does this camera need a ring" answer is reused (seconds).
@@ -119,8 +122,8 @@ class ClipRecorderService:
         cached = self._auto_cache.get(camera_id)
         if cached is not None and now - cached[0] < self.WANT_CACHE_SEC:
             return cached[1]
-        want = False
-        if settings.NIGHT_WATCH_CLIP:
+        want = self.theft_clip_enabled(camera_id)
+        if not want and settings.NIGHT_WATCH_CLIP:
             try:
                 from app.services.night_watch import night_watch
 
@@ -129,6 +132,24 @@ class ClipRecorderService:
                 want = True
         self._auto_cache[camera_id] = (now, want)
         return want
+
+    @staticmethod
+    def theft_clip_enabled(camera_id: str) -> bool:
+        """The camera saves a clip with each theft incident (theft_clip and theft_detection on)."""
+        try:
+            from app.services.feature_manager import feature_manager
+
+            return (feature_manager.is_enabled(camera_id, "theft_detection")
+                    and feature_manager.is_enabled(camera_id, "theft_clip"))
+        except Exception:  # noqa: BLE001 - unreadable settings: no clip (the default is off)
+            return False
+
+    def invalidate(self, camera_id: Optional[str] = None) -> None:
+        """Forget cached "keep a ring" answers (after a camera's features changed)."""
+        if camera_id is None:
+            self._auto_cache.clear()
+        else:
+            self._auto_cache.pop(camera_id, None)
 
     def wants(self, camera_id: str) -> bool:
         """Should the camera worker push frames into this camera's ring now?"""
@@ -223,6 +244,71 @@ class ClipRecorderService:
         token = auth_service.generate_clip_token(event_id)
         clip_url = f"{settings.EDGE_BASE_URL}/api/v1/events/clips/{output_filename}?token={token}"
         return clip_url
+
+    def record_incident_clip(
+        self,
+        incident_id: str,
+        camera_id: str,
+        out_dir: Path,
+        event_ts: Optional[float] = None,
+        pre_seconds: Optional[float] = None,
+        post_seconds: Optional[float] = None,
+    ) -> Optional[Path]:
+        """Theft evidence clip: the ring's pre-event part plus the post-roll, as ``<id>.mp4``.
+
+        Blocking (it waits for the post-roll): run it on a worker thread.
+        ``event_ts`` is when the behaviour was seen (epoch seconds); the clip
+        covers about ``pre_seconds`` before it (as much as the ring holds) to
+        ``post_seconds`` after it. Frames come from the same masked ring as
+        every other clip and are muxed by ``_mux_frames_to_mp4``. Returns the
+        file, or None when no real frame was available (no clip is invented).
+        The file lands in the theft evidence directory, so the evidence
+        storage limit counts it and ages it out with the incident's image.
+        """
+        pre = float(settings.PRE_EVENT_BUFFER_SECONDS if pre_seconds is None else pre_seconds)
+        post = float(settings.POST_EVENT_RECORD_SECONDS if post_seconds is None else post_seconds)
+        now = time.time()
+        event_ts = now if event_ts is None else min(float(event_ts), now)
+        end = event_ts + max(0.0, post)
+        # Keep the worker feeding the ring for the post-roll whatever the mode.
+        self.request(camera_id, max(0.0, end - now) + 2.0)
+        buf = self.buffers.get(camera_id)
+        if buf is None:
+            # No ring yet (e.g. theft_clip was switched on a moment ago): wait
+            # briefly for the worker's first push, then record post-roll only.
+            deadline = time.monotonic() + 2.0
+            while buf is None and time.monotonic() < deadline:
+                time.sleep(0.1)
+                buf = self.buffers.get(camera_id)
+            if buf is None:
+                logger.info(f"No clip for incident {incident_id}: camera {camera_id} delivered no frames")
+                return None
+        frames = buf.get_pre_event_frames(max_age=(now - event_ts) + pre)
+        fps = max(1, int(buf.fps))
+        last_t = buf.latest_frame_time
+        while time.time() < end:
+            time.sleep(1.0 / fps)
+            if buf.latest_frame_time != last_t:
+                last_t = buf.latest_frame_time
+                f = buf.get_latest_frame_copy()
+                if f is not None:
+                    frames.append(f)
+        if not frames:
+            logger.info(f"No clip for incident {incident_id}: no frames from {camera_id} around the event")
+            return None
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / f"{incident_id}.mp4"
+        try:
+            self._mux_frames_to_mp4(frames, path, fps)
+        except Exception as e:  # noqa: BLE001 - an encoder failure loses the clip, not the incident
+            logger.error(f"Theft clip for {incident_id} not written: {e}")
+            return None
+        if not path.is_file():
+            return None
+        note_evidence_written(path)
+        logger.info(f"Theft clip saved: {path.name} ({len(frames)} frames at {fps} fps)")
+        return path
 
     def _mux_frames_to_mp4(self, frames: List[np.ndarray], output_path: Path, fps: int):
         """Write frames to H.264 MP4 with faststart flags for instant streaming."""

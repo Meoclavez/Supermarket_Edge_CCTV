@@ -11,7 +11,7 @@ One worker thread per enabled camera does the following loop:
       share of the accelerator, at most every Nth frame) pose-estimate
       people (box + 17 keypoints) -> ByteTrack association -> project foot point to floor
       metres -> resolve which zone that is -> emit zone entry/exit facts
-      -> hand confirmed tracks (with skeletons) and retail objects to
+      -> hand confirmed, moving person tracks (with skeletons) to
       pose_analytics -> mark zone visits that saw a shelf interaction
       -> tripwire crossings / restricted areas (tripwire_engine) -> persist
 
@@ -124,6 +124,33 @@ def camera_setting(camera_id: str, name: str):
     except Exception as e:
         _log_once(f"setting:{name}", f"camera setting {name} unreadable ({e}); using the global default")
         return None
+
+
+def static_figure_config(camera_id: str) -> tuple[bool, Optional[float]]:
+    """(filter enabled, seconds before static or None = STATIC_FIGURE_SECONDS) for a camera.
+
+    Read from the per-camera features (static_figure_filter /
+    static_figure_seconds). A store that does not know these keys yet, or
+    cannot be read, keeps the filter on with the server default.
+    """
+    from app.services.feature_manager import feature_manager
+
+    try:
+        enabled = bool(feature_manager.is_enabled(camera_id, "static_figure_filter"))
+    except KeyError:
+        enabled = True
+    except Exception as e:  # noqa: BLE001
+        _log_once("static_figure_filter", f"static-figure setting unreadable ({e}); filter stays on")
+        enabled = True
+    try:
+        seconds = feature_manager.get_setting(camera_id, "static_figure_seconds")
+    except Exception:  # noqa: BLE001 - unknown key or unreadable store: server default
+        seconds = None
+    try:
+        seconds = None if seconds is None else float(seconds)
+    except (TypeError, ValueError):
+        seconds = None
+    return enabled, seconds
 
 
 def _append_path_point(t, fx: float, fy: float, w: int, h: int, floor, now: float) -> None:
@@ -1108,6 +1135,13 @@ class CameraWorker(threading.Thread):
             kw["max_frame_fraction"] = max_frac
         dets = person_detector.detect(frame, camera_id=cam, **kw)
         dets = outside_ignore_regions(dets, ignore_polygons(cam, w, h))
+        # A remembered static figure (poster, mannequin: same box and pose as
+        # one the tracker flagged) is not a person at night either.
+        enabled, seconds = static_figure_config(cam)
+        self.tracker.configure_static(enabled, seconds)
+        if enabled:
+            dets = [d for d in dets
+                    if not self.tracker.matches_static_memory(d.bbox, d.keypoints, now)]
         self.rt.detections_last = len(dets)
         nw.night_watch.confirm(cam, frame, dets, now)
 
@@ -1154,8 +1188,12 @@ class CameraWorker(threading.Thread):
             # with a second model later; nothing it finds comes back here.
             shadow_trial.offer(cam, frame, persons, ignore, detect_kw.get("max_frame_fraction"))
 
+        # Static-figure filter (tracking_service): posters and mannequins the
+        # pose model keeps recognising become "static" tracks, drawn grey on
+        # the overlay but kept out of counts, paths, zones, rules and theft.
+        self.tracker.configure_static(*static_figure_config(cam))
         live = self.tracker.update(detections, now=now)
-        self.rt.live_track_count = sum(1 for t in live if t.confirmed)
+        self.rt.live_track_count = sum(1 for t in live if t.is_human)
 
         snapshot: list[dict] = []
         for t in live:
@@ -1169,6 +1207,8 @@ class CameraWorker(threading.Thread):
                 "confidence": round(float(t.confidence), 3),
                 "hits": t.hits,
                 "confirmed": t.confirmed,
+                # "pending" | "moving" | "static" (a poster or mannequin).
+                "motion_state": t.motion_state,
                 "age_seconds": round(t.age_seconds, 1),
                 # Only keypoints measured on this detection frame are shown;
                 # a coasting track keeps its box but not a stale skeleton.
@@ -1180,7 +1220,10 @@ class CameraWorker(threading.Thread):
                 "zone_id": None,
             }
             t.floor_xy = None
-            if t.confirmed:
+            if t.is_static and t.current_zone_id is not None:
+                # Turned out to be a static figure: finish its visit honestly.
+                self.engine.leave_zone(t, now)
+            if t.is_human:
                 fx, fy = t.foot_point
                 floor = floor_projector.to_floor(cam, fx, fy, frame_size=(w, h))
                 if floor is not None:
@@ -1206,9 +1249,9 @@ class CameraWorker(threading.Thread):
         # raw frame. The masks are burned in only if evidence is actually
         # taken (a copy of this frame), not on every analysed frame.
         evidence = deferred_privacy_masks(frame, cam, masks)
-        confirmed = [t for t in live if t.confirmed]
-        self._observe_pose(evidence, now, confirmed)
-        self._evaluate_zone_rules(evidence, now, confirmed, counting)
+        humans = [t for t in live if t.is_human]
+        self._observe_pose(evidence, now, humans)
+        self._evaluate_zone_rules(evidence, now, humans, counting)
 
         for finished in self.tracker.drain_finished():
             self.engine.close_track(finished, reason="track_lost", persist=counting)
@@ -1404,6 +1447,10 @@ class LiveAnalyticsEngine:
         track.current_zone_id = None
         track.zone_entered_at = None
 
+        if getattr(track, "is_static", False):
+            # A poster or mannequin is never a customer: no customer_tracks
+            # row, so no footfall, traffic or heatmap from it.
+            return
         if persist is None:
             persist = camera_flag(track.camera_id, "people_counting")
         if not persist:
@@ -1550,6 +1597,7 @@ class LiveAnalyticsEngine:
                             "y2": t["y2"],
                             "confidence": t["confidence"],
                             "confirmed": t["confirmed"],
+                            "motion_state": t.get("motion_state"),
                             "keypoints": t.get("keypoints"),
                         }
                         for t in tracks
@@ -1561,7 +1609,7 @@ class LiveAnalyticsEngine:
                 # already on the map from there (still in ``detections``).
                 continue
             for t in tracks:
-                if not t["confirmed"]:
+                if not t["confirmed"] or t.get("motion_state") == "static":
                     continue
                 if t["x_m"] is None or t["y_m"] is None:
                     uncalibrated_tracks += 1
@@ -1625,8 +1673,9 @@ def render_overlay(frame: np.ndarray, rt: CameraRuntime, scale: float = 1.0) -> 
     Uses only the snapshot the worker already produced -- no inference runs
     here -- so the overlay costs a few rectangles per frame and always shows
     exactly what the pipeline is counting. Confirmed tracks are drawn solid,
-    tentative ones (below the hit floor) thin, and a corner tag states
-    whether the camera is calibrated so nobody mistakes boxes for positions.
+    tentative ones (below the hit floor) thin, static figures (posters,
+    mannequins: not counted) thin grey and labelled "static", and a corner
+    tag states whether the camera is calibrated so nobody mistakes boxes for positions.
     When the pose model supplied keypoints on the latest detection frame, the
     visible limbs are drawn too (wrists marked larger).
 
@@ -1640,14 +1689,21 @@ def render_overlay(frame: np.ndarray, rt: CameraRuntime, scale: float = 1.0) -> 
     tracks = rt.get_tracks()
     confirmed_colour = (80, 220, 90)     # BGR green
     tentative_colour = (60, 200, 255)    # BGR amber
+    static_colour = (150, 150, 150)      # muted grey: a figure that never moves
 
     for t in tracks:
         x1, y1, x2, y2 = (int(t[k] * scale) for k in ("x1", "y1", "x2", "y2"))
-        colour = confirmed_colour if t["confirmed"] else tentative_colour
-        thickness = 2 if t["confirmed"] else 1
+        static = t.get("motion_state") == "static"
+        if static:
+            colour, thickness = static_colour, 1
+        else:
+            colour = confirmed_colour if t["confirmed"] else tentative_colour
+            thickness = 2 if t["confirmed"] else 1
         cv2.rectangle(out, (x1, y1), (x2, y2), colour, thickness)
         label = f"{t['track_id'][-4:]} {t['confidence']:.2f}"
-        if t["x_m"] is not None:
+        if static:
+            label = f"{t['track_id'][-4:]} static"
+        elif t["x_m"] is not None:
             label += f" ({t['x_m']:.1f},{t['y_m']:.1f})m"
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
         ty = max(th + 4, y1 - 4)
@@ -1661,8 +1717,11 @@ def render_overlay(frame: np.ndarray, rt: CameraRuntime, scale: float = 1.0) -> 
             _draw_skeleton(out, kpts, colour)
 
     tag = "calibrated" if rt.calibrated else "uncalibrated"
-    n_conf = sum(1 for t in tracks if t["confirmed"])
+    n_static = sum(1 for t in tracks if t.get("motion_state") == "static")
+    n_conf = sum(1 for t in tracks if t["confirmed"]) - n_static
     header = f"{rt.name} | {tag} | {n_conf} tracked"
+    if n_static:
+        header += f" | {n_static} static"
     cv2.rectangle(out, (0, 0), (10 + 8 * len(header), 22), (18, 20, 26), -1)
     cv2.putText(out, header, (6, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 224, 232), 1)
     return out

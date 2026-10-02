@@ -18,7 +18,22 @@ def test_feature_manager_hot_reload():
 
 
 def test_only_retail_flags_exist():
-    assert set(FEATURE_FLAGS) == {"people_counting", "shelf_interaction", "theft_detection"}
+    from app.services.feature_manager import ANALYTICS_FLAGS
+
+    # The analytics a camera can run are the three retail ones; the other
+    # switches are options of them (static-figure filter, theft evidence clip).
+    assert set(ANALYTICS_FLAGS) == {"people_counting", "shelf_interaction", "theft_detection"}
+    assert set(FEATURE_FLAGS) == set(ANALYTICS_FLAGS) | {"static_figure_filter", "theft_clip"}
+    assert set(ANALYTICS_FLAGS) <= set(FEATURE_FLAGS)
+
+
+def test_options_do_not_count_as_active_features():
+    fm = FeatureManager()
+    fm.set_camera_features("cam_opts", CameraFeatureConfig(people_counting=False, shelf_interaction=False,
+                                                           theft_detection=False, static_figure_filter=True,
+                                                           theft_clip=True))
+    assert fm.count_active_features() == 0
+    assert fm.is_enabled("cam_opts", "theft_clip") is True
 
 
 def test_legacy_stored_keys_are_ignored():
@@ -33,7 +48,8 @@ def test_legacy_stored_keys_are_ignored():
     cfg = CameraFeatureConfig.model_validate(legacy)
     assert cfg.model_dump() == {"people_counting": True, "shelf_interaction": False, "theft_detection": True,
                                 "person_max_frame_fraction": None, "night_watch": None,
-                                "decode_max_width": None, "stream_quality": None}
+                                "decode_max_width": None, "stream_quality": None,
+                                "static_figure_filter": True, "static_figure_seconds": None, "theft_clip": False}
 
     fm = FeatureManager()
     assert fm.get_camera_features("cam_old", stored=legacy).shelf_interaction is False

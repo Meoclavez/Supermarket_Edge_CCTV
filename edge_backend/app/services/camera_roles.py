@@ -264,6 +264,9 @@ def scaled_theft_thresholds(sensitivity: float = 1.0) -> Dict[str, Any]:
         "loiter_min_dwell_sec": float(settings.THEFT_LOITER_MIN_DWELL_SEC) / s,
         "loiter_min_reaches": max(1, int(round(settings.THEFT_LOITER_MIN_REACHES / s))),
         "loiter_min_head_turns": max(1, int(round(settings.THEFT_LOITER_MIN_HEAD_TURNS / s))),
+        # Behaviour-pattern fusion: the score needed; never below 0.6, and two
+        # distinct cue types stay required whatever the sensitivity.
+        "pattern_score_threshold": max(0.6, float(settings.THEFT_PATTERN_SCORE_THRESHOLD) / s),
     }
 
 

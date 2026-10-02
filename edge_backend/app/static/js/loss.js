@@ -8,6 +8,11 @@
  * false-alarm statistics. "Mark: staff sent" records who sent staff and shows
  * the real delivery report of the phone alert; nothing is invented.
  *
+ * The Patterns card renders GET /api/v1/theft/patterns (hotspots, day x hour,
+ * checks that fired with their false-alarm rate, weekly trend, bursts at one
+ * place). It shows only recorded incidents and never claims who a person is.
+ * The evidence viewer plays the incident's clip when the camera saved one.
+ *
  * Uses globals from analytics.js: DASH, escapeHtml, isNum, getJSON, showToast,
  * formatTimestamp, formatAgo, theftAuthUrl, switchTab. No prompt/confirm/alert.
  */
@@ -18,6 +23,7 @@
   const OPEN = ['ACTIVE', 'ACKNOWLEDGED', 'DISPATCHED'];
   const HANDLED = ['RESOLVED', 'FALSE_ALARM'];
   const POLL_MS = 5000;
+  const PATTERNS_MS = 60000;      // patterns change slowly: refreshed once a minute
 
   const D = (typeof DASH !== 'undefined') ? DASH : '—';
   const esc = (v) => (typeof escapeHtml === 'function' ? escapeHtml(v)
@@ -41,6 +47,12 @@
     lastAlertedId: null,
     dismissedBannerId: null,
     timer: null,
+    patterns: null,
+    patternDays: 28,
+    patternsAt: 0,
+    patternsFailed: false,
+    patternsBusy: false,
+    viewer: null,           // {still, clip, caption, mode}
   };
 
   // ------------------------------------------------------------ helpers
@@ -128,6 +140,26 @@
     renderKpis();
     renderRuleTable();
     renderList(force);
+    // Patterns only while someone looks at the page (or on an explicit refresh).
+    if (force || (tabVisible() && Date.now() - state.patternsAt > PATTERNS_MS)) loadPatterns();
+  }
+
+  async function loadPatterns() {
+    if (state.patternsBusy) return;
+    state.patternsBusy = true;
+    const days = state.patternDays;
+    try {
+      const data = typeof getJSON === 'function'
+        ? await getJSON(`${API}/patterns?days=${days}`, null)
+        : await fetch(`${API}/patterns?days=${days}`).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+      if (days !== state.patternDays) return;          // the period changed meanwhile
+      state.patternsAt = Date.now();
+      state.patternsFailed = !data;
+      if (data) state.patterns = data;
+    } finally {
+      state.patternsBusy = false;
+    }
+    renderPatterns();
   }
 
   async function loadOutcomes() {
@@ -345,6 +377,7 @@
     } else {
       b.push(`<button type="button" class="btn btn-sm" data-action="resolve" data-incident="${id}" title="Correct the recorded outcome">Change outcome</button>`);
     }
+    if (inc.clip_url) b.push(`<button type="button" class="btn btn-sm" data-action="play-clip" data-incident="${id}" title="About 5 s before to 10 s after">▶ Play clip</button>`);
     if (inc.studio_url) b.push(`<a class="btn btn-sm" href="${esc(inc.studio_url)}" target="_blank" rel="noopener">Watch camera now</a>`);
     return b.join('');
   }
@@ -363,12 +396,14 @@
       : (inc.evidence_expired_at
         ? '<div class="evidence-thumb-empty" title="Deleted by the evidence storage limit (oldest first)">Evidence expired</div>'
         : '<div class="evidence-thumb-empty">No evidence image recorded</div>');
+    const clipTag = inc.clip_url ? '<span class="badge loss-small-badge loss-clip-badge" title="A short clip was saved with this incident">clip</span>' : '';
     return `
       <div class="incident-head">
         <div class="loss-head-main">
           <span class="loss-rule">${esc(ruleLabel(inc))}</span>
           <span class="badge badge-neutral loss-small-badge">${esc(inc.camera_name || inc.camera_id)}</span>
           ${inc.department ? `<span class="badge loss-small-badge">${esc(inc.department)}</span>` : ''}
+          ${clipTag}
         </div>
         <div class="loss-head-side">
           <span class="loss-conf" title="How clearly the camera saw it: keypoint visibility, duration and how many signals agreed">confidence ${conf}</span>
@@ -406,7 +441,7 @@
 
   function listSignature() {
     return JSON.stringify([state.filter, state.unavailable, filtered().map((i) => [i.id, i.status, i.outcome, i.resolved_by,
-      i.recovered_value, i.notes, i.confidence, i.snapshot_url, (i.evidence || []).length, i.dispatch_details ? JSON.stringify(i.dispatch_details) : ''])]);
+      i.recovered_value, i.notes, i.confidence, i.snapshot_url, i.clip_url || '', (i.evidence || []).length, i.dispatch_details ? JSON.stringify(i.dispatch_details) : ''])]);
   }
 
   function renderList(force) {
@@ -639,24 +674,223 @@
 
   // ------------------------------------------------------------ evidence viewer
 
-  function openEvidence(url, caption) {
+  /** Full-size evidence: the image and, when the camera saved one, the clip. */
+  function openEvidence(url, caption, clipUrl, mode) {
     const viewer = $('theftEvidenceViewer');
-    const img = $('theftEvidenceFull');
-    if (!viewer || !img || !url) return;
-    const full = authUrl(url);
-    img.src = full;
-    const open = $('theftEvidenceOpen');
-    if (open) open.href = full;
-    const cap = $('theftEvidenceCaption');
-    if (cap) cap.textContent = `${caption || ''} · suspicious behaviour for staff review`;
+    if (!viewer || (!url && !clipUrl)) return;
+    state.viewer = { still: url || null, clip: clipUrl || null, caption: caption || '' };
+    // A newly opened viewer loads the clip afresh, so it plays from the start
+    // instead of resuming (or sitting ended) where it was last closed.
+    const video = $('theftEvidenceVideo');
+    if (video) delete video.dataset.src;
+    const sw = $('theftEvidenceSwitch');
+    if (sw) sw.hidden = !(url && clipUrl);
+    showEvidence(mode === 'clip' && clipUrl ? 'clip' : (url ? 'still' : 'clip'));
     viewer.style.display = 'flex';
     const close = $('theftEvidenceClose');
-    if (close) close.focus();
+    if (close) close.focus({ preventScroll: true });
+  }
+
+  function showEvidence(mode) {
+    const v = state.viewer;
+    if (!v) return;
+    v.mode = mode;
+    const img = $('theftEvidenceFull');
+    const video = $('theftEvidenceVideo');
+    const err = $('theftEvidenceVideoError');
+    const open = $('theftEvidenceOpen');
+    const cap = $('theftEvidenceCaption');
+    const clip = mode === 'clip';
+    if (err) { err.hidden = true; err.textContent = ''; }
+    if (img) {
+      img.hidden = clip;
+      if (!clip && v.still) img.src = authUrl(v.still);
+    }
+    if (video) {
+      video.hidden = !clip;
+      if (clip) {
+        const src = authUrl(v.clip);
+        // Reload after a failed load too: otherwise Image -> Clip shows an empty
+        // player with no message, because no new error event fires.
+        if (video.dataset.src !== src || video.error) { video.dataset.src = src; video.src = src; }
+        const p = video.play();
+        if (p && typeof p.catch === 'function') p.catch(() => { /* autoplay blocked: the controls remain */ });
+      } else if (!video.paused) {
+        video.pause();
+      }
+    }
+    if (open) open.href = authUrl(clip ? v.clip : v.still);
+    const st = $('theftEvidenceShowStill');
+    const cl = $('theftEvidenceShowClip');
+    if (st) st.setAttribute('aria-pressed', String(!clip));
+    if (cl) cl.setAttribute('aria-pressed', String(clip));
+    if (st) st.classList.toggle('active', !clip);
+    if (cl) cl.classList.toggle('active', clip);
+    if (cap) cap.textContent = `${v.caption}${clip ? ' · clip, about 5 s before to 10 s after' : ''} · suspicious behaviour for staff review`;
   }
 
   function closeEvidence() {
     const viewer = $('theftEvidenceViewer');
     if (viewer) viewer.style.display = 'none';
+    const video = $('theftEvidenceVideo');
+    if (video && !video.paused) video.pause();
+    state.viewer = null;
+  }
+
+  function onVideoError() {
+    const video = $('theftEvidenceVideo');
+    const err = $('theftEvidenceVideoError');
+    if (!video || video.hidden || !err) return;
+    err.hidden = false;
+    err.textContent = 'The clip could not be played. It may have been deleted by the evidence storage limit; refresh the review queue to check.';
+  }
+
+  function incidentCaption(inc) {
+    return inc ? `${ruleLabel(inc)} · ${inc.camera_name || ''} · ${formatWhen(inc.timestamp)}` : '';
+  }
+
+  // ------------------------------------------------------------ patterns
+
+  const pct = (v) => `${Math.round(v * 100)}%`;
+  const plural = (n, one, many) => `${n} ${n === 1 ? one : (many || `${one}s`)}`;
+
+  function rateCell(r) {
+    if (!num(r.false_alarm_rate)) {
+      return `<span class="fp-dash" title="No outcome recorded yet">${D}</span>`;
+    }
+    return `<span class="loss-rate ${r.false_alarm_rate >= 0.5 ? 'loss-rate-high' : ''}" title="${r.false_alarms} of ${r.reviewed} reviewed were false alarms">${pct(r.false_alarm_rate)}</span>`;
+  }
+
+  /** A single-series bar: length = share of the largest value. */
+  function bar(value, max, label) {
+    const w = max > 0 ? Math.max(2, Math.round((value / max) * 100)) : 0;
+    return `<span class="loss-bar" role="img" aria-label="${esc(label)}"><span class="loss-bar-fill" style="width:${w}%"></span></span>`;
+  }
+
+  function hotspotTable(rows, kind) {
+    if (!rows.length) {
+      return `<div class="fp-empty">${kind === 'zone'
+        ? 'No incident was tied to a drawn area in this period. Areas come from the product zones and floor zones drawn in Camera setup.'
+        : 'No incidents in this period.'}</div>`;
+    }
+    const max = Math.max(...rows.map((r) => r.incidents));
+    const top = rows.slice(0, 8);
+    const body = top.map((r) => {
+      const name = kind === 'zone'
+        ? `${esc(r.zone_name || r.zone_id)}<div class="loss-pattern-sub">${esc(r.camera_name || r.camera_id)}</div>`
+        : esc(r.camera_name || r.camera_id);
+      return `<tr>
+        <td>${name}</td>
+        <td class="loss-num">${r.incidents}</td>
+        <td class="loss-bar-cell">${bar(r.incidents, max, `${r.incidents} of ${max}`)}</td>
+        <td class="loss-num">${rateCell(r)}</td>
+        <td>${r.top_rule_label ? esc(r.top_rule_label) : D}</td>
+      </tr>`;
+    }).join('');
+    const more = rows.length > top.length ? `<div class="loss-pattern-note">${rows.length - top.length} more not shown.</div>` : '';
+    return `<div class="loss-table-wrap"><table class="friction-table loss-pattern-table">
+      <thead><tr><th>${kind === 'zone' ? 'Area' : 'Camera'}</th><th>Incidents</th><th><span class="sr-only">Share</span></th><th>False alarms</th><th>Most common check</th></tr></thead>
+      <tbody>${body}</tbody></table></div>${more}`;
+  }
+
+  function heatHtml(h) {
+    const m = (h && h.matrix) || [];
+    if (!m.length) return '<div class="fp-empty">No incidents in this period.</div>';
+    const max = h.max || 0;
+    const days = h.days || ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    const head = `<div class="loss-heat-corner"></div>${Array.from({ length: 24 }, (_, i) => `<div class="loss-heat-hour">${i % 3 === 0 ? String(i).padStart(2, '0') : ''}</div>`).join('')}`;
+    const rows = m.map((row, d) => `<div class="loss-heat-day">${esc(days[d])}</div>${row.map((n, hr) => {
+      const a = n > 0 && max > 0 ? (0.18 + 0.82 * (n / max)).toFixed(2) : 0;
+      const tip = `${days[d]} ${String(hr).padStart(2, '0')}:00-${String(hr).padStart(2, '0')}:59 · ${plural(n, 'incident')}`;
+      return `<div class="loss-heat-cell ${n ? 'has-value' : ''}" style="--a:${a}" title="${esc(tip)}" aria-label="${esc(tip)}" role="img"></div>`;
+    }).join('')}`).join('');
+    const peak = h.peak ? `Busiest: <b>${esc(h.peak.day)} ${String(h.peak.hour).padStart(2, '0')}:00</b> with ${plural(h.peak.incidents, 'incident')}.` : '';
+    return `<div class="loss-heat-scroll"><div class="loss-heat" role="group" aria-label="Incidents by day of week and hour">${head}${rows}</div></div>
+      <div class="loss-pattern-note">${peak} Darker = more incidents. Hover a square for the count.</div>`;
+  }
+
+  function rulesHtml(rows) {
+    if (!rows.length) return '<div class="fp-empty">No incidents in this period.</div>';
+    const max = Math.max(...rows.map((r) => r.incidents));
+    return `<div class="loss-table-wrap"><table class="friction-table loss-pattern-table">
+      <thead><tr><th>Check</th><th>Incidents</th><th><span class="sr-only">Share</span></th><th>Reviewed</th><th>False alarms</th></tr></thead>
+      <tbody>${rows.map((r) => `<tr>
+        <td>${esc(r.label || r.rule)}</td>
+        <td class="loss-num">${r.incidents}</td>
+        <td class="loss-bar-cell">${bar(r.incidents, max, `${pct(r.share)} of incidents`)}</td>
+        <td class="loss-num">${r.reviewed}</td>
+        <td class="loss-num">${rateCell(r)}</td>
+      </tr>`).join('')}</tbody></table></div>
+      <div class="loss-pattern-note">False alarms = outcomes recorded as false alarm, out of incidents reviewed.</div>`;
+  }
+
+  function weeklyHtml(rows) {
+    if (!rows.length) return '<div class="fp-empty">No incidents in this period.</div>';
+    const max = Math.max(...rows.map((w) => w.incidents));
+    return `<div class="loss-table-wrap"><table class="friction-table loss-pattern-table">
+      <thead><tr><th>Week of</th><th>Incidents</th><th><span class="sr-only">Trend</span></th><th>False alarms</th></tr></thead>
+      <tbody>${rows.map((w) => {
+        const d = new Date(`${w.week_start}T00:00:00`);
+        const label = Number.isNaN(d.getTime()) ? w.week_start : d.toLocaleDateString([], { day: 'numeric', month: 'short' });
+        return `<tr>
+          <td>${esc(label)}</td>
+          <td class="loss-num">${w.incidents}</td>
+          <td class="loss-bar-cell">${bar(w.incidents, max, plural(w.incidents, 'incident'))}</td>
+          <td class="loss-num">${rateCell(w)}</td>
+        </tr>`;
+      }).join('')}</tbody></table></div>`;
+  }
+
+  function burstsHtml(rows, p) {
+    if (!rows.length) {
+      return `<div class="fp-empty">No bursts: no camera and area had ${num(p.burst_min_incidents) ? p.burst_min_incidents : 3} or more incidents each within ${num(p.burst_window_minutes) ? p.burst_window_minutes : 30} minutes of the last.</div>`;
+    }
+    return `<ul class="loss-bursts">${rows.slice(0, 12).map((b) => {
+      const place = `${esc(b.camera_name || b.camera_id)}${b.zone_id ? ` · ${esc(b.zone_name || b.zone_id)}` : ''}`;
+      const span = b.duration_minutes >= 1 ? ` over ${Math.round(b.duration_minutes)} min` : '';
+      const rules = (b.rules || []).map((r) => `${esc(r.label || r.rule)} ×${r.incidents}`).join(', ');
+      const review = b.reviewed ? ` · ${b.false_alarms} of ${b.reviewed} reviewed were false alarms` : (b.open ? ` · ${b.open} waiting for review` : '');
+      const links = (b.incident_ids || []).slice(0, 6).map((id, i) =>
+        `<button type="button" class="btn btn-xs" data-focus-incident="${esc(id)}">#${i + 1}</button>`).join('');
+      return `<li class="loss-burst">
+        <div><b>${plural(b.incidents, 'incident')}</b> at ${place}${span}, ${esc(formatWhen(b.start))}</div>
+        <div class="loss-pattern-sub">${rules}${review}</div>
+        <div class="loss-burst-links" aria-label="Show these incidents">${links}</div>
+      </li>`;
+    }).join('')}</ul>`;
+  }
+
+  function renderPatterns() {
+    const sum = $('lossPatternsSummary');
+    if (!sum) return;
+    document.querySelectorAll('#lossPatternDays [data-pattern-days]').forEach((b) => {
+      const on = Number(b.dataset.patternDays) === state.patternDays;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-pressed', String(on));
+    });
+    const p = state.patterns;
+    const ids = ['lossPatternCameras', 'lossPatternZones', 'lossPatternHeat', 'lossPatternRules', 'lossPatternWeekly', 'lossPatternBursts'];
+    if (!p || p.days !== state.patternDays) {
+      sum.innerHTML = `<div class="fp-empty">${state.patternsFailed ? 'Patterns are not available right now: the loss-prevention service did not answer. They are retried every minute.' : 'Loading…'}</div>`;
+      ids.forEach((id) => { const n = $(id); if (n) n.innerHTML = ''; });
+      return;
+    }
+    const s = p.summary || {};
+    if (!s.incidents) {
+      sum.innerHTML = `<div class="fp-empty">No incidents recorded in the last ${plural(p.days, 'day')}, so there are no patterns to show.</div>`;
+    } else {
+      const fa = num(s.false_alarm_rate) ? `${pct(s.false_alarm_rate)} false alarms among ${s.reviewed} reviewed` : 'no outcomes recorded yet';
+      sum.innerHTML = `<b>${plural(s.incidents, 'incident')}</b> in the last ${plural(p.days, 'day')} · ${s.open} waiting for review · ${fa}${p.timezone ? ` · times in ${esc(p.timezone)}` : ''}`;
+    }
+    const hs = p.hotspots || {};
+    const set = (id, html) => { const n = $(id); if (n) n.innerHTML = html; };
+    set('lossPatternCameras', hotspotTable(hs.cameras || [], 'camera'));
+    set('lossPatternZones', hotspotTable(hs.zones || [], 'zone')
+      + (hs.unzoned_incidents ? `<div class="loss-pattern-note">${plural(hs.unzoned_incidents, 'incident')} not tied to an area.</div>` : ''));
+    set('lossPatternHeat', heatHtml(p.hour_dow));
+    set('lossPatternRules', rulesHtml(p.rules || []));
+    set('lossPatternWeekly', weeklyHtml(p.weekly || []));
+    set('lossPatternBursts', burstsHtml(p.bursts || [], p));
   }
 
   // ------------------------------------------------------------ public
@@ -673,7 +907,10 @@
       }
     }
     const node = document.getElementById(`incident-${id}`);
-    if (!node) return false;
+    if (!node) {
+      if (!inc) toast('That incident is older than the review queue shows (the newest 200).');
+      return false;
+    }
     node.scrollIntoView({ behavior: 'instant', block: 'center' });
     node.classList.remove('loss-flash');
     void node.offsetWidth;          // restart the highlight animation
@@ -699,7 +936,23 @@
       e.preventDefault();
       const card = thumb.closest('[data-incident-card]');
       const inc = card && state.incidents.find((i) => i.id === card.dataset.incidentCard);
-      openEvidence(thumb.dataset.evidenceUrl, inc ? `${ruleLabel(inc)} · ${inc.camera_name || ''} · ${formatWhen(inc.timestamp)}` : '');
+      openEvidence(thumb.dataset.evidenceUrl, incidentCaption(inc), inc && inc.clip_url, 'still');
+      return;
+    }
+    const days = e.target.closest('[data-pattern-days]');
+    if (days && days.closest('#lossPatternDays')) {
+      const n = Number(days.dataset.patternDays);
+      if (n && n !== state.patternDays) {
+        state.patternDays = n;
+        state.patterns = null;
+        renderPatterns();
+        loadPatterns();
+      }
+      return;
+    }
+    const jump = e.target.closest('[data-focus-incident]');
+    if (jump) {
+      focusIncident(jump.dataset.focusIncident);
       return;
     }
     const btn = e.target.closest('[data-action]');
@@ -710,6 +963,10 @@
     else if (action === 'dispatch') openDispatchForm(id);
     else if (action === 'cancel') { closeForm(); renderList(true); }
     else if (action === 'false-alarm' || action === 'acknowledge') quickAction(btn, id, action);
+    else if (action === 'play-clip') {
+      const inc = state.incidents.find((i) => i.id === id);
+      if (inc && inc.clip_url) openEvidence(inc.snapshot_url || inc.evidence_snapshot_url || null, incidentCaption(inc), inc.clip_url, 'clip');
+    }
     else if (action === 'refresh') { btn.disabled = true; load(true).finally(() => { btn.disabled = false; toast('Review queue refreshed'); }); }
   }
 
@@ -753,6 +1010,12 @@
     if (viewer) viewer.addEventListener('click', (e) => { if (e.target === viewer) closeEvidence(); });
     const close = $('theftEvidenceClose');
     if (close) close.addEventListener('click', closeEvidence);
+    const showStill = $('theftEvidenceShowStill');
+    if (showStill) showStill.addEventListener('click', () => showEvidence('still'));
+    const showClip = $('theftEvidenceShowClip');
+    if (showClip) showClip.addEventListener('click', () => showEvidence('clip'));
+    const video = $('theftEvidenceVideo');
+    if (video) video.addEventListener('error', onVideoError);
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeEvidence(); });
     window.addEventListener('edge:tab', (e) => {
       if (e.detail && e.detail.tab === 'loss') load(false);

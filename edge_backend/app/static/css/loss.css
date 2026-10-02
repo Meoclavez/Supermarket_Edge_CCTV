@@ -104,6 +104,52 @@
 .loss-viewer-actions { display: flex; gap: 6px; }
 .loss-viewer-img { display: block; max-width: 96vw; max-height: 86vh; object-fit: contain; background: var(--media-bg); border-radius: 6px; }
 
+.loss-viewer-img[hidden], .loss-viewer-video[hidden], .loss-viewer-error[hidden], .loss-viewer-switch[hidden] { display: none; }
+.loss-viewer-video { display: block; max-width: 96vw; max-height: 86vh; background: var(--media-bg); border-radius: 6px; }
+.loss-viewer-switch { display: inline-flex; gap: 4px; margin-right: 6px; }
+.loss-viewer-switch .btn.active { color: var(--accent-cyan); border-color: var(--accent-cyan); background: var(--accent-cyan-dim); }
+.loss-viewer-error { padding: 8px 12px; border-radius: 8px; font-size: 12px; color: var(--lightbox-text);
+  background: rgba(var(--rose-rgb), 0.25); border: 1px solid rgba(var(--rose-rgb), 0.5); }
+.loss-clip-badge { color: var(--accent-cyan); border: 1px solid rgba(var(--info-rgb), 0.35); }
+
+/* Patterns (GET /theft/patterns) */
+.loss-pattern-days { margin-bottom: 0; text-transform: none; letter-spacing: 0; }
+.loss-pattern-summary { margin: 0 0 12px; font-size: 12px; color: var(--text-2); line-height: 1.5; }
+.loss-pattern-summary .fp-empty { padding: 4px 2px; }
+.loss-pattern-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 14px; }
+.loss-pattern-block { min-width: 0; }
+.loss-pattern-wide { grid-column: 1 / -1; }
+.loss-pattern-title { font-size: 10.5px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; color: var(--text-dim);
+  margin-bottom: 6px; }
+.loss-pattern-sub { font-size: 10.5px; color: var(--text-dim); line-height: 1.4; overflow-wrap: anywhere; }
+.loss-pattern-note { margin-top: 6px; font-size: 10.5px; color: var(--text-dim); line-height: 1.45; }
+.loss-pattern-table td, .loss-pattern-table th { vertical-align: middle; }
+.loss-pattern-table td:first-child { min-width: 110px; overflow-wrap: anywhere; }
+.loss-num { text-align: right; white-space: nowrap; font-family: var(--font-mono); }
+.loss-bar-cell { width: 30%; min-width: 60px; }
+.loss-bar { display: block; height: 8px; border-radius: 4px; background: rgba(var(--slate-rgb), 0.12); overflow: hidden; }
+.loss-bar-fill { display: block; height: 100%; border-radius: 4px; background: rgb(var(--info-rgb)); }
+
+.loss-heat-scroll { overflow-x: auto; }
+.loss-heat { display: grid; grid-template-columns: 34px repeat(24, minmax(14px, 1fr)); gap: 2px; min-width: 420px; }
+.loss-heat-corner { min-height: 14px; }
+.loss-heat-hour { font-family: var(--font-mono); font-size: 9px; color: var(--text-faint); text-align: left; line-height: 14px; }
+.loss-heat-day { font-size: 10px; font-weight: 700; color: var(--text-dim); line-height: 18px; }
+.loss-heat-cell { height: 18px; border-radius: 3px; background: rgba(var(--slate-rgb), 0.08); }
+.loss-heat-cell.has-value { background: rgba(var(--info-rgb), var(--a, 0.5)); }
+.loss-heat-cell:hover { outline: 2px solid var(--text-strong); outline-offset: -1px; }
+
+.loss-bursts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.loss-burst { padding: 8px 10px; border-radius: 8px; font-size: 12px; color: var(--text-2); line-height: 1.45;
+  background: rgba(var(--tint-rgb), 0.03); border: 1px solid rgba(var(--slate-rgb), 0.15); }
+.loss-burst-links { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+
+/* Camera feature editor: theft clip and static-figure options (index.html camera modal) */
+.cam-feat-hint { font-size: 11px; color: var(--text-dim); margin-top: 6px; line-height: 1.45; }
+.cam-feat-hint.is-muted, .cam-feat-static.is-muted { opacity: 0.55; }
+.cam-feat-static { margin-top: 8px; }
+.checkbox-label.is-disabled { opacity: 0.55; cursor: not-allowed; }
+
 @media (max-width: 600px) {
   .loss-body .evidence-thumb, .loss-thumb-link { width: 100%; }
   .loss-outcomes { grid-template-columns: 1fr; }
@@ -112,5 +158,6 @@
 
 @media (pointer: coarse) {
   .loss-chip, .loss-outcome-opt, .loss-check, .loss-tech summary { min-height: 40px; }
+  .loss-burst-links .btn { min-width: 40px; }
   .loss-actions .btn, .loss-form-actions .btn { min-height: 40px; }
 }

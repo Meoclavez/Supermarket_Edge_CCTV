@@ -166,7 +166,9 @@ def test_uncalibrated_camera_reports_boxes_but_no_persons(worker, stub_detector)
     box = cam["boxes"][0]
     assert box["confirmed"] is True
     assert box["confidence"] == 0.91
-    assert set(box) == {"track_id", "x1", "y1", "x2", "y2", "confidence", "confirmed", "keypoints"}
+    assert set(box) == {"track_id", "x1", "y1", "x2", "y2", "confidence", "confirmed", "motion_state",
+                        "keypoints"}
+    assert box["motion_state"] == "pending"   # a few seconds still: not yet judged
     assert len(box["keypoints"]) == 17 and len(box["keypoints"][0]) == 3
 
 

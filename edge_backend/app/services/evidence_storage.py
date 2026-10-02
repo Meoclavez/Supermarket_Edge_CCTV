@@ -5,16 +5,19 @@ keeps is evidence for an alert: a still per detection and, where enabled, a
 short clip. Every kind of evidence lives in its own directory under
 ``STORAGE_DIR`` on this device's own disk:
 
-====================  ======================================  =================
+====================  ======================================  ========================
 kind                  directory                               written by
-====================  ======================================  =================
-theft_evidence        THEFT_EVIDENCE_DIR or theft_evidence/   pose_analytics
+====================  ======================================  ========================
+theft_evidence        THEFT_EVIDENCE_DIR or theft_evidence/   pose_analytics (+ clips)
 zone_alerts           ZONE_ALERT_EVIDENCE_DIR or zone_alerts/ tripwire_engine
 night_watch           NIGHT_WATCH_EVIDENCE_DIR or night_watch night_watch
 alert_snapshots       SNAPSHOTS_DIR                           events / cameras
 alert_clips           CLIPS_DIR                               clip_recorder
 shadow_trial          shadow_trial/                           shadow_trial
-====================  ======================================  =================
+====================  ======================================  ========================
+
+A theft incident's still and clip (``<id>.jpg``, ``<id>.mp4``) are aged out
+together: when one of them is due, both go.
 
 ``shadow_trial`` is not evidence: it holds the few review images of a
 developer's pose-model trial (services/shadow_trial.py). It is declared here
@@ -153,7 +156,7 @@ def _shadow_trial_cap() -> Optional[int]:
 
 
 KINDS: Tuple[EvidenceKind, ...] = (
-    EvidenceKind("theft_evidence", "Theft review stills",
+    EvidenceKind("theft_evidence", "Theft review stills and clips",
                  lambda: _dir_or(settings.THEFT_EVIDENCE_DIR, "theft_evidence"), "theft"),
     EvidenceKind("zone_alerts", "Restricted area / tripwire stills",
                  lambda: _dir_or(settings.ZONE_ALERT_EVIDENCE_DIR, "zone_alerts"), "event"),
@@ -306,6 +309,21 @@ class EvidenceStorage:
             logger.warning(f"could not delete old evidence {p}: {e}")
             return False
 
+    @staticmethod
+    def _add_siblings(files: List[_File], doomed: Dict[Path, Tuple[_File, str]]) -> None:
+        """Doom the other files of an incident whose evidence is going (theft kinds)."""
+        theft_kinds = {k.name for k in KINDS if k.link == "theft"}
+        stems = {(f.kind, f.path.name.split(".", 1)[0]): reason
+                 for f, reason in doomed.values() if f.kind in theft_kinds}
+        if not stems:
+            return
+        for f in files:
+            if f.path in doomed or f.kind not in theft_kinds:
+                continue
+            reason = stems.get((f.kind, f.path.name.split(".", 1)[0]))
+            if reason is not None:
+                doomed[f.path] = (f, reason)
+
     def _mark_expired(self, deleted: List[_File]) -> int:
         """Point every row that referenced a deleted file at 'evidence expired'."""
         if not deleted:
@@ -456,6 +474,10 @@ class EvidenceStorage:
                 break
             doomed[f.path] = (f, "total cap" if limited_by == "cap" else "disk limit")
             used -= f.size
+        # 4. An incident's evidence goes as a whole: a theft incident's still
+        # and its clip (<id>.jpg, <id>.mp4) are deleted together, so the row
+        # never points at half its evidence.
+        self._add_siblings(files, doomed)
 
         deleted: List[_File] = []
         reasons: Dict[str, int] = {}

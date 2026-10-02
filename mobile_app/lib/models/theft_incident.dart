@@ -1,5 +1,12 @@
 import '../core/server_time.dart';
 
+/// Rule codes whose words alone would read wrongly, used only when an
+/// incident arrives without the server's `rule_label`. BEHAVIOUR_PATTERN is a
+/// fusion of several weak cues (theft_detection_service.RULE_LABELS).
+const Map<String, String> kTheftRuleLabelOverrides = {
+  'BEHAVIOUR_PATTERN': 'Suspicious behaviour pattern',
+};
+
 /// A loss-prevention incident as returned by `GET /api/v1/theft/incidents`.
 ///
 /// Field names mirror `TheftIncidentOut` in edge_backend/app/routes/theft.py
@@ -108,6 +115,8 @@ class TheftIncident {
   /// e.g. `SHELF_SWEEPING` -> `Shelf sweeping`.
   String get ruleLabel {
     if (serverRuleLabel != null) return serverRuleLabel!;
+    final known = kTheftRuleLabelOverrides[ruleCode];
+    if (known != null) return known;
     final words = ruleCode.toLowerCase().split('_').where((w) => w.isNotEmpty).toList();
     if (words.isEmpty) return 'Unknown rule';
     final text = words.join(' ');

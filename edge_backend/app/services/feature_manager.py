@@ -16,9 +16,15 @@ from typing import Any, Dict, Optional
 
 from ..models.schemas import CameraFeatureConfig
 
+# Every on/off switch a pipeline stage checks through ``is_enabled``: the
+# analytics features plus the options that refine them (the static-figure
+# filter, the theft evidence clip).
 FEATURE_FLAGS = tuple(
     name for name, field in CameraFeatureConfig.model_fields.items() if field.annotation is bool
 )
+# The analytics a camera runs (what "active features" counts). Options such as
+# static_figure_filter (on by default) or theft_clip are not features of their own.
+ANALYTICS_FLAGS = ("people_counting", "shelf_interaction", "theft_detection")
 
 
 def _read_stored_features(camera_id: str) -> Optional[Dict[str, Any]]:
@@ -102,7 +108,7 @@ class FeatureManager:
     def count_active_features(self) -> int:
         with self._lock:
             return sum(
-                1 for cfg in self._camera_features.values() for flag in FEATURE_FLAGS if getattr(cfg, flag)
+                1 for cfg in self._camera_features.values() for flag in ANALYTICS_FLAGS if getattr(cfg, flag)
             )
 
 
