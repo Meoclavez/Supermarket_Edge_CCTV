@@ -86,6 +86,7 @@
     if (v == null) return DASH;
     if (s.type === 'bool') return v ? 'On' : 'Off';
     if (s.type === 'categories') return v.length ? v.join(', ') : 'None';
+    if (s.type === 'str') return v === '' ? DASH : String(v);
     if (s.type === 'timezone') return v || "This device's own time zone";
     if (s.key === 'THEFT_MIN_CONFIDENCE') return `${Math.round(v * 100)} %`;
     if (s.zero_means && Number(v) === 0) return s.zero_means;
