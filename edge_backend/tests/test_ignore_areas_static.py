@@ -710,3 +710,11 @@ def test_annotated_snapshot_labels_a_static_figure_grey():
     label, colour = snapshot_label(d, [], tr, (640, 480))
     assert label == "remembered static figure, not counted" and colour == lae.STATIC_COLOUR
     assert snapshot_label(d, [], tr, (1280, 960))[0].startswith("person ")   # memory is at another size
+
+
+def test_tracking_logs_reach_the_edge_handler():
+    # main.py attaches the journal handler to "edge" only; module-named loggers
+    # would drop the "treating it as static" INFO line under uvicorn.
+    from app.services import tracking_service
+
+    assert tracking_service.logger.name.startswith("edge.")

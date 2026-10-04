@@ -50,7 +50,8 @@ import numpy as np
 from app.config import settings
 from app.services.inference_backend import Detection, person_threshold
 
-logger = logging.getLogger(__name__)
+# Under "edge." so INFO lines reach the journal under uvicorn (main.py only configures "edge").
+logger = logging.getLogger("edge.pipeline.tracking")
 
 try:  # optional: optimal assignment when available
     from scipy.optimize import linear_sum_assignment as _hungarian
