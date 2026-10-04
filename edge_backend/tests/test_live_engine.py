@@ -55,6 +55,26 @@ def stub_detector(monkeypatch):
     return calls
 
 
+@pytest.fixture
+def walking_detector(monkeypatch):
+    """One person walking right, 20 px per analysed frame: seen moving, so visits open.
+
+    A track that never moved (the fixed stub above) opens no zone visit and is
+    never stored (tracking_service.Track.established).
+    """
+    calls = {"n": 0}
+
+    def detect(frame, conf_threshold=None, iou_threshold=None, camera_id=None, **_kw):
+        dx = 20.0 * calls["n"]
+        calls["n"] += 1
+        k = _skeleton().copy()
+        k[:, 0] += dx
+        return [Detection(x1=100.0 + dx, y1=50.0, x2=180.0 + dx, y2=300.0, confidence=0.91, keypoints=k)]
+
+    monkeypatch.setattr(lae.person_detector, "detect", detect)
+    return calls
+
+
 class _Result:
     def __init__(self, interactions=None):
         self.interactions = interactions or []
@@ -167,7 +187,7 @@ def test_uncalibrated_camera_reports_boxes_but_no_persons(worker, stub_detector)
     assert box["confirmed"] is True
     assert box["confidence"] == 0.91
     assert set(box) == {"track_id", "x1", "y1", "x2", "y2", "confidence", "confirmed", "motion_state",
-                        "keypoints"}
+                        "pending_static", "keypoints"}
     assert box["motion_state"] == "pending"   # a few seconds still: not yet judged
     assert len(box["keypoints"]) == 17 and len(box["keypoints"][0]) == 3
 
@@ -257,7 +277,7 @@ def test_pose_analytics_sees_only_confirmed_tracks_with_keypoints(worker, stub_d
     assert set(last) == {"camera_id", "ts", "shape", "tracks"}         # no object-model context
 
 
-def test_interaction_marks_the_open_zone_visit(worker, stub_detector, fake_pose, monkeypatch):
+def test_interaction_marks_the_open_zone_visit(worker, walking_detector, fake_pose, monkeypatch):
     w, rt, engine = worker
     frame = np.zeros((480, 640, 3), dtype=np.uint8)
     monkeypatch.setattr(settings, "ZONE_DWELL_MIN_SECONDS", 1.0)
@@ -380,7 +400,7 @@ def test_people_counting_off_records_no_visits_and_no_tracks(worker, stub_detect
     assert engine.drain() == ([], [])
 
 
-def test_switching_counting_off_mid_visit_closes_the_open_visit(worker, stub_detector, flags, monkeypatch):
+def test_switching_counting_off_mid_visit_closes_the_open_visit(worker, walking_detector, flags, monkeypatch):
     w, rt, engine = worker
     monkeypatch.setattr(settings, "ZONE_DWELL_MIN_SECONDS", 0.0)
     _calibrate_with_zone(engine)

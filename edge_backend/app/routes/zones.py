@@ -244,6 +244,13 @@ class RestrictedAreaUpdateReq(BaseModel):
 BGRColour = List[int]
 
 
+# ``ignore_box_fraction`` (AI_IGNORE only, 0.1..1.0, default 0.6 =
+# settings.IGNORE_BOX_FRACTION): a detection is dropped when its foot point is
+# inside the area OR at least this share of its box lies inside it. Stored
+# for other modes but returned as null there (the rule does not apply).
+IgnoreFraction = Optional[float]
+
+
 class ExclusionReq(BaseModel):
     id: Optional[str] = None
     name: Optional[str] = None
@@ -252,6 +259,7 @@ class ExclusionReq(BaseModel):
     mask_mode: MaskMode = MaskMode.BLUR
     mask_color_bgr: Optional[BGRColour] = Field(None, min_length=3, max_length=3)
     enabled: Optional[bool] = True
+    ignore_box_fraction: IgnoreFraction = Field(None, ge=0.1, le=1.0)
 
 
 class ExclusionUpdateReq(BaseModel):
@@ -259,11 +267,43 @@ class ExclusionUpdateReq(BaseModel):
     mask_mode: Optional[MaskMode] = None
     mask_color_bgr: Optional[BGRColour] = Field(None, min_length=3, max_length=3)
     enabled: Optional[bool] = None
+    ignore_box_fraction: IgnoreFraction = Field(None, ge=0.1, le=1.0)
+
+
+class ExclusionFromBoxReq(BaseModel):
+    """An ignore area around one detection box (e.g. a poster picked on the live view)."""
+
+    model_config = ConfigDict(extra="ignore")
+    camera_id: str = Field(min_length=1, max_length=64)
+    # [x1, y1, x2, y2] normalised 0..1 to the analysed frame.
+    box: List[float] = Field(min_length=4, max_length=4)
+    # Added on each side, as a share of the box's width / height.
+    pad: float = Field(0.1, ge=0.0, le=0.5)
+    name: Optional[str] = Field(None, max_length=80)
+    ignore_box_fraction: IgnoreFraction = Field(None, ge=0.1, le=1.0)
+
+    @field_validator("box")
+    @classmethod
+    def _box(cls, v):
+        import math
+
+        if any(not isinstance(c, (int, float)) or isinstance(c, bool) or not math.isfinite(float(c)) for c in v):
+            raise ValueError("box must be four numbers [x1, y1, x2, y2]")
+        x1, y1, x2, y2 = (float(c) for c in v)
+        if not (-0.5 <= x1 <= 1.5 and -0.5 <= x2 <= 1.5 and -0.5 <= y1 <= 1.5 and -0.5 <= y2 <= 1.5):
+            raise ValueError("box must be normalised 0..1 to the frame")
+        if x2 <= x1 or y2 <= y1:
+            raise ValueError("box must have x2 > x1 and y2 > y1")
+        return [x1, y1, x2, y2]
 
 
 def _mask_record(data: Dict[str, Any]) -> Dict[str, Any]:
     """JSON-ready mask: enum as its string value, colour clamped to 0..255."""
     out = dict(data)
+    if out.get("ignore_box_fraction") is None:
+        out.pop("ignore_box_fraction", None)
+    else:
+        out["ignore_box_fraction"] = round(float(out["ignore_box_fraction"]), 3)
     mode = out.get("mask_mode")
     if isinstance(mode, MaskMode):
         out["mask_mode"] = mode.value
@@ -419,6 +459,14 @@ def create_camera_zone(camera_id: str, payload: Dict[str, Any]):
             status_code=422,
             detail=f"Unknown mask_mode '{payload.get('mask_mode')}'. Use one of: {', '.join(m.value for m in MaskMode)}",
         )
+    frac = payload.get("ignore_box_fraction")
+    if frac is not None:
+        try:
+            ok = 0.1 <= float(frac) <= 1.0
+        except (TypeError, ValueError):
+            ok = False
+        if not ok:
+            raise HTTPException(status_code=422, detail="ignore_box_fraction must be between 0.1 and 1.0")
     return ai_zone_service.add_exclusion(_mask_record(payload))
 
 
@@ -494,6 +542,33 @@ def create_or_update_exclusion(req: ExclusionReq):
     return {"status": "success", "exclusion_mask": saved}
 
 
+@router.post("/api/zones/exclusion/from-box")
+def create_exclusion_from_box(req: ExclusionFromBoxReq):
+    """Create an AI_IGNORE rectangle around a box (padded, clamped to the frame).
+
+    Admin only (a setup write: not on auth_service's operator list). Returns
+    the same shape as ``POST /api/zones/exclusion``.
+    """
+    x1, y1, x2, y2 = req.box
+    px, py = (x2 - x1) * req.pad, (y2 - y1) * req.pad
+    x1, x2 = max(0.0, x1 - px), min(1.0, x2 + px)
+    y1, y2 = max(0.0, y1 - py), min(1.0, y2 + py)
+    if x2 - x1 < 0.005 or y2 - y1 < 0.005:
+        raise HTTPException(status_code=422, detail="box lies outside the frame (nothing left after clamping to 0..1)")
+    pts = [{"x": round(x, 4), "y": round(y, 4)} for x, y in ((x1, y1), (x2, y1), (x2, y2), (x1, y2))]
+    record = {
+        "name": (req.name or "").strip() or "Ignore area",
+        "camera_id": req.camera_id,
+        "points": pts,
+        "mask_mode": MaskMode.AI_IGNORE.value,
+        "enabled": True,
+    }
+    if req.ignore_box_fraction is not None:
+        record["ignore_box_fraction"] = round(float(req.ignore_box_fraction), 3)
+    saved = ai_zone_service.add_exclusion(record)
+    return {"status": "success", "exclusion_mask": saved}
+
+
 @router.patch("/api/zones/exclusion/{ex_id}")
 def update_exclusion(ex_id: str, req: ExclusionUpdateReq):
     """Change an existing mask's mode, colour, name or enabled flag in place."""
@@ -539,19 +614,44 @@ def delete_queue_area(qz_id: str):
     raise HTTPException(status_code=404, detail="Queue area not found")
 
 
-_CLEAR_KINDS = {"tripwires", "intrusion_zones", "exclusion_masks", "queue_zones"}
+_CLEAR_KINDS = {"tripwires", "intrusion_zones", "exclusion_masks", "queue_zones",
+                # mask subsets: privacy masks only / ignore (AI_IGNORE) areas only; everything
+                "privacy", "ignore", "all"}
+
+
+class ClearReq(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    kinds: Optional[Any] = None
+    camera_id: Optional[str] = Field(None, min_length=1, max_length=64)
+
+
+def _kinds_list(kinds: Any) -> Optional[List[str]]:
+    if kinds is None or kinds == "" or kinds == []:
+        return None
+    if isinstance(kinds, str):
+        items = kinds.split(",")
+    elif isinstance(kinds, list):
+        items = [str(k) for k in kinds]
+    else:
+        raise HTTPException(status_code=422, detail="kinds must be a string or a list of strings")
+    wanted = [k.strip().lower() for k in items if k.strip()]
+    bad = [k for k in wanted if k not in _CLEAR_KINDS]
+    if bad:
+        raise HTTPException(status_code=422, detail=f"Unknown kind(s): {', '.join(bad)}")
+    return wanted or None
 
 
 @router.post("/api/zones/clear")
 def clear_all_zones(kinds: Optional[str] = Query(None, description="Comma-separated subset of "
-                                                 "tripwires,intrusion_zones,exclusion_masks,queue_zones; default all")):
-    wanted = None
-    if kinds:
-        wanted = [k.strip() for k in kinds.split(",") if k.strip()]
-        bad = [k for k in wanted if k not in _CLEAR_KINDS]
-        if bad:
-            raise HTTPException(status_code=422, detail=f"Unknown kind(s): {', '.join(bad)}")
-    n = ai_zone_service.clear_all(wanted)
+                                                 "tripwires,intrusion_zones,exclusion_masks,queue_zones, or the "
+                                                 "mask subsets privacy (all masks but AI_IGNORE) / ignore "
+                                                 "(AI_IGNORE only), or all; default all"),
+                    camera_id: Optional[str] = Query(None, description="Only this camera's overlays"),
+                    body: Optional[ClearReq] = None):
+    """Delete overlays. ``kinds`` / ``camera_id`` as query parameters or a JSON body."""
+    wanted = _kinds_list(kinds if kinds else (body.kinds if body is not None else None))
+    cam = camera_id or (body.camera_id if body is not None else None)
+    n = ai_zone_service.clear_all(wanted, camera_id=cam)
     return {"status": "success", "removed": n, "message": "Zones cleared."}
 
 

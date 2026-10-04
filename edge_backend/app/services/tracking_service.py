@@ -19,7 +19,11 @@ This module supplies both:
   Each track is also classified "pending" / "moving" / "static" from joint
   micro-motion normalised by torso length: a poster or mannequin the pose
   model keeps recognising becomes "static" (``Track.is_human`` False) and is
-  remembered per camera, so its next track id is recognised within seconds.
+  remembered per camera (saved under STORAGE_DIR/static_memory, so it
+  survives restarts), so its next track id is recognised within seconds.
+  A new track on a remembered figure, or mostly inside an ignore area, is
+  "pending static" (not human) until it moves or the grace time decides.
+  Only a track that has moved (``Track.established``) may be persisted.
 * ``FloorProjector`` -- maps a detection's foot point into store metres using
   the camera's homography when one has been calibrated, and declines to guess
   when one has not.
@@ -31,8 +35,10 @@ reports it as uncalibrated rather than placing its shoppers at the origin.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
+import os
 import time
 import uuid
 from collections import deque
@@ -153,6 +159,15 @@ class Track:
     # A static track goes back to "moving" as soon as real motion resumes.
     motion_state: str = "pending"
     static_since: Optional[float] = None
+    # While "pending": why this track may be a static figure rather than a
+    # person -- "memory" (same box and pose as a remembered static figure) or
+    # "ignore_area" (box mostly inside an AI_IGNORE area). Such a track is not
+    # human until it moves (-> "moving") or the grace time passes (-> "static").
+    static_suspect: Optional[str] = None
+    # True once the track has shown real motion (or the static filter is off
+    # for its camera). Only an established track opens zone visits or becomes
+    # a customer_tracks row: a figure that never moved is never stored.
+    established: bool = False
     # Anchor pose the motion is measured against, and since when the track
     # has shown no motion beyond detector jitter.
     still_since: Optional[float] = None
@@ -161,6 +176,12 @@ class Track:
     _anchor_height: float = field(default=0.0, repr=False)
     _anchor_scale: float = field(default=0.0, repr=False)
     _anchor_n: int = field(default=0, repr=False)
+    _anchor_bbox: Optional[tuple] = field(default=None, repr=False)
+    # Since when motion on a remembered/static figure has been put down to
+    # occlusion (anchor box unchanged), see ByteTracker._occluded.
+    _occluded_since: Optional[float] = field(default=None, repr=False)
+    # Recent (centre x, centre y, height) for the box-motion jitter floor.
+    _box_hist: deque = field(default_factory=lambda: deque(maxlen=MOTION_JITTER_WINDOW + 1), repr=False)
     _motion_streak: int = field(default=0, repr=False)
     _motion_obs_at: Optional[float] = field(default=None, repr=False)
     # Recent poses (ByteTracker._observe_motion): per-joint jitter floor and
@@ -185,13 +206,19 @@ class Track:
         return self.motion_state == "static"
 
     @property
-    def is_human(self) -> bool:
-        """Confirmed and not a static figure: what counting and analytics may use.
+    def is_pending_static(self) -> bool:
+        """Pending, and on a remembered static figure or mostly inside an ignore area."""
+        return self.motion_state == "pending" and self.static_suspect is not None
 
-        A "pending" track (not enough history yet) counts as human, so the
-        filter fails open rather than hiding a real person.
+    @property
+    def is_human(self) -> bool:
+        """Confirmed and not a (suspected) static figure: what live analytics may use.
+
+        A plain "pending" track (not enough history yet) counts as human, so
+        the filter fails open rather than hiding a real person; one that is
+        pending static does not (it is decided within the grace time).
         """
-        return self.confirmed and not self.is_static
+        return self.confirmed and not self.is_static and not self.is_pending_static
 
     @property
     def age_seconds(self) -> float:
@@ -433,11 +460,52 @@ def joint_motion_over_floor(hist, anchor: Optional[np.ndarray], ref: float, frac
         h = np.stack(poses)
         seen = (h[1:, :, 2] >= thr_vis) & (h[:-1, :, 2] >= thr_vis)
         step = np.hypot(h[1:, :, 0] - h[:-1, :, 0], h[1:, :, 1] - h[:-1, :, 1]) / ref
-        for j in range(pos.shape[0]):
-            s = step[seen[:, j], j]
-            if s.size >= MOTION_JITTER_MIN_STEPS:
-                floor[j] = max(floor[j], MOTION_JITTER_K * float(np.percentile(s, MOTION_JITTER_PERCENTILE)))
+        pct = column_percentiles(step, seen, MOTION_JITTER_PERCENTILE)
+        ok = seen.sum(axis=0) >= MOTION_JITTER_MIN_STEPS
+        floor[ok] = np.maximum(floor[ok], MOTION_JITTER_K * pct[ok])
     return bool((dist[both] > floor[both]).any())
+
+
+def column_percentiles(values: np.ndarray, valid: np.ndarray, q: float) -> np.ndarray:
+    """Per column, ``np.percentile(values[valid[:, j], j], q)`` (linear method), vectorised.
+
+    One sort for all 17 joints instead of 17 np.percentile calls: the
+    per-joint loop was ~70 % of the tracker's time (10 people: ~1 ms per
+    track per frame). Columns without valid values give NaN.
+    """
+    v = np.where(valid, values, np.inf)
+    v.sort(axis=0)
+    n = valid.sum(axis=0)
+    pos = (np.maximum(n, 1) - 1) * (float(q) / 100.0)
+    lo = np.floor(pos).astype(np.int64)
+    hi = np.minimum(lo + 1, np.maximum(n - 1, 0))
+    cols = np.arange(values.shape[1])
+    a, b = v[lo, cols], v[hi, cols]
+    frac = pos - lo
+    with np.errstate(invalid="ignore"):
+        out = a + (b - a) * frac
+    out = np.where(hi == lo, a, out)
+    return np.where(n > 0, out, np.nan)
+
+
+def box_motion_floor(hist, ref: float, frac: float) -> float:
+    """Box-motion threshold in torso lengths: ``frac``, raised by the box's own jitter.
+
+    ``hist`` holds recent (centre x, centre y, height). Like the joints'
+    floor (MOTION_JITTER_K x the 75th percentile of the frame-to-frame step,
+    once MOTION_JITTER_MIN_STEPS steps are known), but capped at
+    STATIC_BOX_JITTER_MAX_FRAC so a walk just before stopping cannot hide later
+    sways. A poster's box edges jitter with the detector too; without a floor a
+    small figure's box alone restarted its stillness clock.
+    """
+    if len(hist) <= MOTION_JITTER_MIN_STEPS:
+        return float(frac)
+    h = np.asarray(hist, dtype=np.float64)
+    ref = max(float(ref), 1.0)
+    step = np.maximum(np.hypot(h[1:, 0] - h[:-1, 0], h[1:, 1] - h[:-1, 1]), np.abs(h[1:, 2] - h[:-1, 2])) / ref
+    floor = MOTION_JITTER_K * float(np.percentile(step, MOTION_JITTER_PERCENTILE))
+    cap = max(float(settings.STATIC_BOX_JITTER_MAX_FRAC), float(frac))
+    return max(float(frac), min(floor, cap))
 
 
 def poses_match(a: Optional[np.ndarray], b: Optional[np.ndarray], scale: float) -> Optional[bool]:
@@ -479,6 +547,19 @@ class ByteTracker:
         self.static_filter = True
         self.static_seconds: Optional[float] = None
         self.static_memory: list[StaticMemoryEntry] = []
+        # Pixel size of the frames the boxes are in (set_frame_size), the
+        # camera's AI_IGNORE polygons for this frame (set_ignore_regions) and
+        # the on-disk store of the memory (attach_static_store).
+        self.frame_size: Optional[tuple[int, int]] = None
+        self.ignore_regions: list = []
+        self._store_path: Optional[str] = None
+        self._loaded: Optional[list[dict]] = None      # normalised entries awaiting a frame size
+        self._dirty = False
+        self._urgent = False
+        self._last_save = -math.inf
+        self._announce_suppress = False
+        # Every detection box of the frame being associated (occlusion test).
+        self._frame_boxes: list[tuple] = []
 
     # ------------------------------------------------- static-figure filter
 
@@ -491,6 +572,146 @@ class ByteTracker:
     def static_after(self) -> float:
         s = self.static_seconds if self.static_seconds is not None else settings.STATIC_FIGURE_SECONDS
         return max(float(s), 0.0)
+
+    # ------------------------------------------- frame size and persistence
+
+    def set_ignore_regions(self, regions) -> None:
+        """This frame's AI_IGNORE polygons (privacy_mask.ignore_polygons), in frame pixels."""
+        self.ignore_regions = list(regions or [])
+
+    def set_frame_size(self, width: int, height: int) -> None:
+        """The pixel size of the frames boxes come from; rescales the memory when it changes."""
+        size = (int(width), int(height))
+        if size[0] <= 0 or size[1] <= 0 or size == self.frame_size:
+            return
+        old, self.frame_size = self.frame_size, size
+        if old is not None and self.static_memory:
+            sx, sy = size[0] / float(old[0]), size[1] / float(old[1])
+            for e in self.static_memory:
+                x1, y1, x2, y2 = e.bbox
+                e.bbox = (x1 * sx, y1 * sy, x2 * sx, y2 * sy)
+                if e.keypoints is not None:
+                    e.keypoints = e.keypoints.copy()
+                    e.keypoints[:, 0] *= sx
+                    e.keypoints[:, 1] *= sy
+                e.scale *= sy
+            logger.info(f"Camera {self.camera_id}: frame size {old[0]}x{old[1]} -> {size[0]}x{size[1]}; "
+                        f"{len(self.static_memory)} remembered static figure(s) rescaled")
+        if self._loaded is not None:
+            loaded, self._loaded = self._loaded, None
+            self._install_loaded(loaded)
+
+    def attach_static_store(self, path, now: Optional[float] = None) -> int:
+        """Load the remembered static figures saved at ``path`` and save changes there.
+
+        Entries unseen for STATIC_MEMORY_TTL_SEC (wall clock) are dropped. The
+        boxes are normalised on disk, so they are placed once the frame size
+        is known (``set_frame_size``). Returns the number loaded.
+        """
+        self._store_path = str(path)
+        now = time.time() if now is None else now
+        try:
+            with open(self._store_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return 0
+        except Exception as e:  # noqa: BLE001 - a broken file must not stop the camera
+            logger.warning(f"Camera {self.camera_id}: static-figure memory {self._store_path} unreadable ({e}); "
+                           "starting without it")
+            return 0
+        ttl = float(settings.STATIC_MEMORY_TTL_SEC)
+        entries = []
+        for raw in (data.get("entries") or [])[:STATIC_MEMORY_MAX]:
+            try:
+                box = [float(v) for v in raw["box"]]
+                last = float(raw["last_seen"])
+                if len(box) != 4 or now - last > ttl or not all(math.isfinite(v) for v in box):
+                    continue
+                entries.append({"box": box, "keypoints": raw.get("keypoints"), "scale": float(raw.get("scale") or 0.0),
+                                "first_seen": float(raw.get("first_seen") or last), "last_seen": last})
+            except (KeyError, TypeError, ValueError):
+                continue
+        if entries:
+            # "edge.*" logger: the only one main.py gives a handler under plain
+            # uvicorn, so this INFO line reaches the service log.
+            logging.getLogger("edge.pipeline").info(f"Camera {self.camera_id}: loaded {len(entries)} remembered static figure(s) "
+                        "(posters/mannequins); a track on one stays uncounted until it moves")
+            self._announce_suppress = True
+        if self.frame_size is not None:
+            self._install_loaded(entries)
+        else:
+            self._loaded = entries
+        return len(entries)
+
+    def _install_loaded(self, entries: list[dict]) -> None:
+        w, h = self.frame_size
+        for raw in entries:
+            x1, y1, x2, y2 = raw["box"]
+            bbox = (x1 * w, y1 * h, x2 * w, y2 * h)
+            kp = None
+            if raw.get("keypoints"):
+                try:
+                    kp = np.asarray(raw["keypoints"], dtype=np.float32).reshape(-1, 3)
+                    kp[:, 0] *= w
+                    kp[:, 1] *= h
+                except (TypeError, ValueError):
+                    kp = None
+            scale = raw["scale"] * h if raw["scale"] > 0 else body_scale(kp, bbox)
+            if self._memory_hit(bbox, kp, scale) is not None:
+                continue
+            self.static_memory.append(StaticMemoryEntry(bbox, kp, scale, raw["first_seen"], raw["last_seen"]))
+        del self.static_memory[: max(0, len(self.static_memory) - STATIC_MEMORY_MAX)]
+
+    def _mark_dirty(self, urgent: bool = False) -> None:
+        self._dirty = True
+        self._urgent = self._urgent or urgent
+
+    def save_static_memory(self, now: Optional[float] = None, force: bool = False) -> bool:
+        """Write the memory to the attached store when it changed (debounced). True if written."""
+        if self._store_path is None or self.frame_size is None or not self._dirty:
+            return False
+        now = time.time() if now is None else now
+        if not force and not self._urgent and now - self._last_save < float(settings.STATIC_MEMORY_SAVE_SEC):
+            return False
+        w, h = self.frame_size
+        entries = []
+        for e in self.static_memory:
+            x1, y1, x2, y2 = e.bbox
+            kp = None
+            if e.keypoints is not None:
+                k = np.asarray(e.keypoints, dtype=np.float64)
+                kp = [[round(float(r[0]) / w, 5), round(float(r[1]) / h, 5), round(float(r[2]), 3)] for r in k]
+            entries.append({"box": [round(x1 / w, 5), round(y1 / h, 5), round(x2 / w, 5), round(y2 / h, 5)],
+                            "keypoints": kp, "scale": round(e.scale / h, 5),
+                            "first_seen": round(e.first_seen, 2), "last_seen": round(e.last_seen, 2)})
+        if self._loaded:
+            # Never placed (no frame yet at this size): keep them as they were.
+            entries.extend(self._loaded)
+        payload = {"version": 1, "camera_id": self.camera_id, "saved_at": round(time.time(), 2),
+                   "entries": entries}
+        try:
+            os.makedirs(os.path.dirname(self._store_path) or ".", exist_ok=True)
+            tmp = f"{self._store_path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+            os.replace(tmp, self._store_path)
+        except Exception as e:  # noqa: BLE001 - memory still works in RAM
+            logger.warning(f"Camera {self.camera_id}: static-figure memory not saved ({e})")
+            self._last_save = now
+            return False
+        self._dirty = self._urgent = False
+        self._last_save = now
+        return True
+
+    def _memory_box_hit(self, bbox) -> Optional[StaticMemoryEntry]:
+        """A remembered static figure at this box (IoU >= STATIC_MEMORY_IOU), whatever the pose."""
+        thr = float(settings.STATIC_MEMORY_IOU)
+        best, best_iou = None, thr
+        for e in self.static_memory:
+            iou = _iou(tuple(bbox), e.bbox)
+            if iou >= best_iou:
+                best, best_iou = e, iou
+        return best
 
     def _memory_hit(self, bbox, keypoints, scale: float) -> Optional[StaticMemoryEntry]:
         """The remembered static figure at this box in this pose, if any."""
@@ -521,20 +742,43 @@ class ByteTracker:
         hit = self._memory_hit(tuple(float(v) for v in bbox), kp, body_scale(kp, tuple(bbox)))
         if hit is not None and refresh:
             hit.last_seen = now
+            self._mark_dirty()
         return hit is not None
+
+    def is_remembered_static(self, bbox, keypoints=None, frame_size: Optional[tuple] = None) -> bool:
+        """Read-only memory check for other threads (the annotated snapshot): no refresh, no expiry.
+
+        False when ``frame_size`` differs from the frame size the memory is in.
+        """
+        if not self.static_filter or not self.static_memory:
+            return False
+        if frame_size is not None and self.frame_size is not None and tuple(frame_size) != self.frame_size:
+            return False
+        kp = None if keypoints is None else np.asarray(keypoints, dtype=np.float32)
+        box = tuple(float(v) for v in bbox)
+        best, best_iou = None, float(settings.STATIC_MEMORY_IOU)
+        for e in list(self.static_memory):
+            if _iou(box, e.bbox) >= best_iou and poses_match(kp, e.keypoints, max(body_scale(kp, box), e.scale)) is not False:
+                return True
+        return False
 
     def _expire_memory(self, now: float) -> None:
         ttl = float(settings.STATIC_MEMORY_TTL_SEC)
-        self.static_memory = [e for e in self.static_memory if now - e.last_seen <= ttl]
+        kept = [e for e in self.static_memory if now - e.last_seen <= ttl]
+        if len(kept) != len(self.static_memory):
+            self._mark_dirty(urgent=True)
+        self.static_memory = kept
 
     def _remember_static(self, t: Track, now: float) -> None:
         scale = body_scale(t.keypoints, t.bbox)
         hit = self._memory_hit(t.bbox, t.keypoints, scale)
         if hit is not None:
             hit.bbox, hit.last_seen = t.bbox, now
+            self._mark_dirty()
             return
         kp = None if t.keypoints is None else t.keypoints.copy()
         self.static_memory.append(StaticMemoryEntry(t.bbox, kp, scale, now, now))
+        self._mark_dirty(urgent=True)
         if len(self.static_memory) > STATIC_MEMORY_MAX:
             self.static_memory.sort(key=lambda e: e.last_seen)
             del self.static_memory[: len(self.static_memory) - STATIC_MEMORY_MAX]
@@ -552,7 +796,14 @@ class ByteTracker:
         (smooth_keypoints): it lowers poster jitter while letting real limb
         motion through unsmoothed. A joint must also clear its own jitter
         floor (MOTION_JITTER_K) using the median of its last 3 positions, so
-        a wrist the model keeps flipping on a small poster is not motion.
+        a wrist the model keeps flipping on a small poster is not motion; the
+        box centre and height have the same kind of floor (box_motion_floor).
+
+        On a remembered static box (or an already static track): a detection
+        gap of up to STATIC_MEMORY_MAX_GAP_SEC is still time (not only
+        MOTION_MAX_OBS_GAP_SEC), and joint motion while the box stays on its
+        anchor (IoU >= STATIC_OCCLUSION_IOU) is put down to a passer-by
+        occluding it, for at most STATIC_OCCLUSION_MAX_SEC in a row.
         """
         kp = t.keypoints
         if kp is not None and (kp.ndim != 2 or kp.shape[1] < 3):
@@ -562,56 +813,113 @@ class ByteTracker:
         centre, height = ((x1 + x2) / 2.0, (y1 + y2) / 2.0), max(y2 - y1, 1.0)
         gap = None if t._motion_obs_at is None else now - t._motion_obs_at
         t._motion_obs_at = now
+        remembered = self.static_filter and (t.is_static or self._memory_box_hit(t.bbox) is not None)
+        max_gap = MOTION_MAX_OBS_GAP_SEC
+        if remembered:
+            max_gap = max(max_gap, float(settings.STATIC_MEMORY_MAX_GAP_SEC))
+        long_gap = gap is not None and gap > max_gap
 
         def reanchor() -> None:
             t._anchor_kpts = None if kp is None else kp.copy()
             t._anchor_centre, t._anchor_height, t._anchor_scale = centre, height, scale
+            t._anchor_bbox = tuple(t.bbox)
             t._anchor_n = 1
             t._motion_streak = 0
+            t._occluded_since = None
             t.still_since = now
 
-        if gap is not None and gap > MOTION_MAX_OBS_GAP_SEC:
+        if long_gap:
             t._pose_hist.clear()
+            t._box_hist.clear()
         if kp is not None:
             t._pose_hist.append(kp.copy())
             # The anchor is built from the same 3-frame median pose the
             # comparison uses, so a pose held after a move is not averaged
             # half-way back by the frame that is still in the median window.
             kp = recent_pose(t._pose_hist)
-        if t._anchor_centre is None or (gap is not None and gap > MOTION_MAX_OBS_GAP_SEC):
+        t._box_hist.append((centre[0], centre[1], height))
+        if t._anchor_centre is None or long_gap:
             reanchor()
         else:
             ref = max(t._anchor_scale, 1.0)
             frac = float(settings.STATIC_FIGURE_MOTION_FRAC)
             moved = float(np.hypot(centre[0] - t._anchor_centre[0], centre[1] - t._anchor_centre[1]))
             moved = max(moved, abs(height - t._anchor_height))
-            # Box motion as is; joints above their own jitter floor (MOTION_JITTER_K).
-            if moved > frac * ref or (kp is not None
-                                      and joint_motion_over_floor(t._pose_hist, t._anchor_kpts, ref, frac)):
+            # Box and joints, each above its own jitter floor (MOTION_JITTER_K).
+            if moved > box_motion_floor(t._box_hist, ref, frac) * ref or (
+                    kp is not None and joint_motion_over_floor(t._pose_hist, t._anchor_kpts, ref, frac)):
                 t._motion_streak += 1
             else:
                 t._motion_streak = 0
+                t._occluded_since = None
             if t._motion_streak >= MOTION_CONFIRM_FRAMES:
-                reanchor()
-                t.motion_state, t.static_since = "moving", None
+                if remembered and self._occluded(t, now):
+                    t._motion_streak = 0     # a passer-by in front of the figure: clock kept
+                else:
+                    reanchor()
+                    t.motion_state, t.static_since = "moving", None
+                    t.static_suspect = None
+                    t.established = True
             elif t._motion_streak == 0 and t._anchor_n < MOTION_ANCHOR_FRAMES:
                 self._average_anchor(t, kp, centre, height, scale)
 
         if not self.static_filter:
             if t.motion_state == "static":
                 t.motion_state, t.static_since = "pending", None
+            t.static_suspect = None
+            t.established = True     # filter off: every track counts, as before
             return
         if t.motion_state == "static":
             self._remember_static(t, now)
             return
+        if t.motion_state == "pending" and t.static_suspect is None:
+            if self._memory_hit(t.bbox, kp, scale) is not None:
+                t.static_suspect = "memory"
+                if self._announce_suppress:
+                    self._announce_suppress = False
+                    logger.info(f"Camera {self.camera_id}: new track at {tuple(round(v) for v in t.bbox)} is on a "
+                                "remembered static figure; not counted unless it moves")
+            elif self.ignore_regions:
+                from app.services.privacy_mask import max_ignore_coverage
+
+                if max_ignore_coverage(self.ignore_regions, t.bbox) >= float(settings.STATIC_PENDING_IGNORE_FRACTION):
+                    t.static_suspect = "ignore_area"
         still = now - (t.still_since if t.still_since is not None else now)
         need = self.static_after
-        if still < need and still >= float(settings.STATIC_FIGURE_GRACE_SEC) \
-                and self._memory_hit(t.bbox, kp, scale) is not None:
-            need = float(settings.STATIC_FIGURE_GRACE_SEC)
+        if t.static_suspect is not None:
+            need = min(need, float(settings.STATIC_FIGURE_GRACE_SEC))
         if still >= need and t.hits >= settings.TRACK_MIN_HITS:
             t.motion_state, t.static_since = "static", now
+            t.static_suspect = None
             self._remember_static(t, now)
+
+    def _occluded(self, t: Track, now: float) -> bool:
+        """Joint motion on a static/remembered figure whose box stays on its anchor box.
+
+        A passer-by in front of a poster disturbs its keypoints but not where
+        its box is. Kept as stillness for at most STATIC_OCCLUSION_MAX_SEC in a
+        row, so a real person who took the figure's place is a person again.
+        """
+        if t._anchor_bbox is None or _iou(tuple(t.bbox), t._anchor_bbox) < float(settings.STATIC_OCCLUSION_IOU):
+            return False
+        # Someone must actually be in front of it: another detection covering
+        # part of its box. Without one the motion is the figure's own.
+        bx1, by1, bx2, by2 = t.bbox
+        area = max((bx2 - bx1) * (by2 - by1), 1e-9)
+        occluder = False
+        for b in self._frame_boxes:
+            if b == tuple(t.bbox):
+                continue
+            iw = min(bx2, b[2]) - max(bx1, b[0])
+            ih = min(by2, b[3]) - max(by1, b[1])
+            if iw > 0 and ih > 0 and iw * ih / area >= 0.1:
+                occluder = True
+                break
+        if not occluder:
+            return False
+        if t._occluded_since is None:
+            t._occluded_since = now
+        return now - t._occluded_since <= float(settings.STATIC_OCCLUSION_MAX_SEC)
 
     @staticmethod
     def _average_anchor(t: Track, kp, centre, height: float, scale: float) -> None:
@@ -642,6 +950,7 @@ class ByteTracker:
         """Associate detections to tracks. Returns the currently live tracks."""
         now = time.time() if now is None else now
         self._expire_memory(now)
+        self._frame_boxes = [(d.x1, d.y1, d.x2, d.y2) for d in detections]
 
         for t in self.tracks.values():
             if t._mean is not None:
@@ -687,6 +996,7 @@ class ByteTracker:
             elif not t.confirmed and t.misses > settings.TRACK_TENTATIVE_MAX_MISSES:
                 self.tracks.pop(tid)
 
+        self.save_static_memory(now)
         return list(self.tracks.values())
 
     def _apply(self, t: Track, d: Detection, now: float) -> None:
@@ -732,6 +1042,7 @@ class ByteTracker:
         out = [t for t in self.tracks.values() if t.confirmed]
         self.tracks.clear()
         out.extend(self.drain_finished())
+        self.save_static_memory(force=True)
         return out
 
 

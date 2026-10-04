@@ -428,9 +428,10 @@ def test_static_tracks_are_excluded_from_every_consumer(
     t = next(iter(w.tracker.tracks.values()))
     assert t.motion_state == "pending" and rt.live_track_count == 1
     assert fake_pose.seen[-1] == [t.track_id] and tripwires[-1] == [t.track_id]
-    assert t.open_visit_id is not None
-    visit_id = t.open_visit_id
-    engine.drain()
+    # Pending and never moved: in the zone, but no visit is published yet.
+    assert t.current_zone_id == "zone_a" and t.open_visit_id is None and not t.established
+    visits, _ = engine.drain()
+    assert visits == []
     points_before = len(t.path_points), len(t.floor_points)
 
     now = _analyse_for(w, now, 7.0)
@@ -442,9 +443,9 @@ def test_static_tracks_are_excluded_from_every_consumer(
     frozen = len(t.path_points), len(t.floor_points)
     _analyse_for(w, now, 3.0)
     assert (len(t.path_points), len(t.floor_points)) == frozen
-    # Its visit was closed when it turned static.
+    # It left the zone when it turned static; no visit was ever written.
     visits, _ = engine.drain()
-    assert ("close", visit_id) in [(v.phase, v.visit_id) for v in visits]
+    assert visits == []
     assert t.current_zone_id is None
 
     # Still drawn on the overlay and listed in the snapshot as "static".

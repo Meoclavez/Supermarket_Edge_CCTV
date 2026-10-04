@@ -494,7 +494,7 @@
     if (a.type === 'calibrate') return item.done ? 'Recalibrate' : 'Calibrate on the map';
     if (a.type === 'config') return item.done ? 'Change register' : 'Link register';
     if (a.type === 'studio') {
-      const tool = { tripwire: 'counting line', product: 'shelf area', restricted: 'restricted area', mask: 'privacy mask', checkout: a.kind === 'queue' ? 'queue area' : 'checkout area' }[a.tool] || 'shape';
+      const tool = { tripwire: 'counting line', product: 'shelf area', restricted: 'restricted area', mask: 'privacy mask', ignore: 'ignore area', checkout: a.kind === 'queue' ? 'queue area' : 'checkout area' }[a.tool] || 'shape';
       return item.done ? `Edit ${tool}` : `Draw ${tool}`;
     }
     return 'Open';

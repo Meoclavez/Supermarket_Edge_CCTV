@@ -1,6 +1,6 @@
 # Edge AI CCTV: Dashboard Feature Reference
 
-Last updated: 2026-10-04 · Describes the working tree after a38b391 (accounts and roles, site settings, backups, till key, area & line alerts, masked remote video)
+Last updated: 2026-10-04 · Describes the working tree after 5c21d13 (accounts and roles, site settings, backups, till key, area & line alerts, masked remote video) plus ignore areas, "Not a person" and static-figure memory
 
 The Edge AI CCTV dashboard runs on the in-store edge device. It shows live cameras, counts shoppers,
 maps them onto a store plan, and flags suspicious behaviour for staff to review. It also produces
@@ -62,11 +62,13 @@ that is daily use (see "Roles" under Access and security).
 | Rotation and pins | With more than four cameras, tiles rotate. "Pin" keeps a camera in its tile. | "Previous" / "Pause" / "Next", "Change every" (seconds), tile "Pin" (per viewer) |
 | "Area:" filter and search | Filters tiles by camera purpose, or finds a camera by name. | Cameras toolbar |
 | "Video smoothness" | Tile refresh (Low 5 s, Normal 2 s, High 1 s) and enlarged-view frame rate, for store-network pictures. | Cameras toolbar (per viewer) |
-| Tile status | Shows online status, picture size, people seen, picture age, and wrong-password warnings. | Automatic; "Reconnect" on an offline tile |
+| Tile status | Shows online status, picture size, people seen ("N people in view", with "· N static ignored" when figures that never move are left out), picture age, and wrong-password warnings. | Automatic; "Reconnect" on an offline tile |
 | Camera on/off | "Turn off" stops a camera's video, analysis and network traffic until it is turned on again. | Tile "Turn off"; bar under the grid: "Turn on", or turn off all offline cameras |
 | Camera settings | Sets the name, channel, stream address, sign-in, capture FPS, resolution and placement. | Cameras → tile → "Settings" (per camera) |
 | "Camera purpose" | Eight presets, e.g. "Entrance / exit door", "Checkout / cashier", "High-value area"; sets default features and a checklist. | Tile → "Settings" → "Camera purpose" → "Use this purpose" (per camera) |
 | "AI features on this camera" | Turns "People counting & dwell", "Shelf interaction" and "Theft detection" on or off. | Tile → "Settings" (per camera) |
+| "Ignore figures that never move" | On by default. A person-shaped figure with no body or limb movement for "Treat a figure as static after (seconds without movement)" (default 60) is shown as "static" and not counted or analysed. A figure that never moved creates no visits, footfall or heatmap points. Shoppers walking past in front of it and short detection gaps do not restart its clock; anyone who really moves is counted at once. | Tile → "Settings" (per camera) |
+| Static-figure memory | The device remembers each static figure's spot per camera, also across restarts (`storage/static_memory/`). A figure that reappears at a remembered spot, or mostly inside an ignore area, is not counted while it is checked (about 5 s), then is static again unless it moved. | Automatic with "Ignore figures that never move"; timings are installer-level |
 | "Largest person size" | Rejects oversized false boxes; raise it for cameras mounted close to shoppers. | Tile → "Settings" (per camera); default is installer-level |
 | "Stream quality" | Which recorder stream a Dahua channel is analysed from. "Auto" (default) picks the smallest sub-stream of at least D1 (704x576) among sub-stream 1 and 2, measured once per camera (read-only); if none reaches D1 it keeps the current sub-stream and says "D1 not available". It never picks the main stream by itself. "Sub-stream" / "Main stream" force one. The chosen stream, its size and the reason show in the dialog and on the tile's picture-size badge. | Tile → "Settings" → "Stream quality", "Check sub-streams again" (per camera); automatic measuring is installer-level (`STREAM_AUTO_SELECT`) |
 | "Till / register for this lane" | Links a checkout camera to its POS register so its sales match its shoppers. | Tile → "Settings" (Checkout purpose) → "Link register" |
@@ -85,10 +87,12 @@ Opened from Cameras → tile → "Camera setup". All shapes are drawn on the cam
 | "Restricted area" | Alerts when someone is inside during set hours, e.g. after closing. | "Schedule", time windows, "Minimum dwell", "Alert severity", "Time zone" |
 | "Checkout / queue area" | Times how long people stand at a till or wait in line; no calibration needed. | "Kind": "Checkout lane" or "Queue line" |
 | "Product shelf" | Records hand reaches into a shelf (3+ points) and links them to a product. Only "Hand reaches" is measured; the other study metrics are greyed "Not measured yet". | Product name, SKU, "Product category (e.g. LIQUOR)" (high-value categories mark it high value), price, "Shelf level", "Value tier", "Placement" |
-| "Privacy mask" | Hides part of the picture, or excludes it from analysis. Applied to direct remote video too; a mask edit briefly restarts every remote viewer. | "Mask mode": Blur, Mosaic, Blackout, Solid colour, "Ignore for analysis (video unchanged)" |
-| Deleting a mask or shelf | 🗑️ asks "Delete?" inline ("Delete" / "Keep"). | Camera setup lists |
+| "Privacy mask" | Hides part of the picture for privacy; people there are still counted. Applied to direct remote video too; a mask edit briefly restarts every remote viewer. | "Mask mode": Blur, Mosaic, Blackout, Solid colour; "Clear all" in "🌫️ Privacy masks" removes privacy masks only |
+| "🚫 Ignore area (no AI)" | The AI does not look for people inside (3+ points): posters, mannequins, TV screens, a mirror. A detection is dropped when its foot point is inside, or at least the chosen share of its box is inside. The video is not changed and remote viewers are not interrupted. Masks made with the old "Ignore for analysis" mode are listed here. | "How much of a person must be inside": "Most of them (60%)" (default), "Half (50%)", "Any part touching (10%)"; "🚫 Ignore areas" list: "Person inside", "Enabled", "✎ Edit" (name and coverage), 🗑️, "Clear all" (ignore areas only) |
+| "Not a person — ignore this spot" | Live boxes on the Camera setup picture: moving (green), "confirming" (amber, first seconds), "static" (grey). Clicking a box shows what it is; the button makes an ignore area around the box (slightly padded), with "Undo" in the same pop-up. | Camera setup picture → click a box (admin) |
+| Deleting a mask, ignore area or shelf | 🗑️ asks "Delete?" inline ("Delete" / "Keep"). | Camera setup lists |
 | "Save snapshot" / "Export incident clip" | Saves a still or a short clip to the device's evidence storage. | Camera setup, below the video |
-| "Pipeline telemetry" | Shows capture FPS, detections, live tracks, frame size, frame age and calibration state. | Camera setup side panel (read-only) |
+| "Pipeline telemetry" | Shows capture FPS, detections, live tracks, frame size, frame age and calibration state, plus the false-detection filters: "Waiting to confirm (first seconds)", "Static figures ignored", "Remembered static figures", "Detections dropped by ignore areas". The store-network picture labels static, pending and ignored areas. | Camera setup side panel (read-only) |
 
 ## Store map and calibration
 
@@ -101,7 +105,7 @@ Opened from Cameras → tile → "Camera setup". All shapes are drawn on the cam
 | Layers | Shows or hides walls and shelves, areas, cameras, people, labels and grid. | Store map → "Show:" |
 | Camera placement | Sets camera position, bearing, field of view and mounting height on the plan. | "Cameras & devices" → "Place" / "Config", or drag on the map |
 | Calibration | Matches 4+ floor points in the camera picture to the map so people can be placed on it. | "Cameras & devices" → "Calibrate" → "Save calibration", "Test accuracy" |
-| Setup checklist | Lists what is still missing for a camera's purpose, with links to the right tool. | "Cameras & devices" → "Checklist" |
+| Setup checklist | Lists what is still missing for a camera's purpose, with links to the right tool. "Ignore areas (posters, mannequins, screens)" is an optional item for every purpose ("Draw ignore area"). | "Cameras & devices" → "Checklist" |
 | Add cameras | Finds and adds cameras by network scan, by address (RTSP, MJPEG, ONVIF, USB, file) or from a Dahua recorder. | "Scan network", "+ Add camera" ("Test connection" first), "Dahua recorder" |
 | Recorder channel names and purposes | "Scan recorder channels" lists each channel with the name read from the recorder (web port 80) and the stream size / frame rate it reported ("—" when not reported). Each ticked channel gets an editable name (empty: "Recorder channel N") and an optional purpose before "Add selected channels". | Store map → "Cameras & devices" → "Dahua recorder" |
 
@@ -191,7 +195,7 @@ These features have no dashboard screen. They are listed so they are not rebuilt
 
 | Feature | Purpose | Status | How it will be configured |
 |---|---|---|---|
-| False-detection checks | Rejects detections with too few visible joints (keypoint-count gate) and fixed objects mistaken for people. | Planned | Automatic, with installer-level thresholds |
+| False-detection checks | Rejects detections with too few visible joints (keypoint-count gate). Fixed objects mistaken for people are already handled by ignore areas and the static-figure filter. | Planned | Automatic, with installer-level thresholds |
 | Focus crops (ROI) | Finds distant people on high-resolution cameras by analysing chosen regions at full detail. | Planned | Drawn per camera in the dashboard |
 | Staff areas and uniform recognition | Separates staff from shoppers: staff / not staff / undetermined. Runs one week in shadow mode before alerts. IR at night falls back to schedule rules. | Planned | Draw staff-only areas; teach a uniform by clicking a staff member on a live tile |
 | Outside camera positions | Street front, rear / loading dock and car park positions, each with suggested feature presets. | Planned | Selected per camera in the dashboard |
@@ -214,6 +218,12 @@ Set once in `edge_backend/.env`; restart the service to apply. The full list wit
 | `DECODE_MAX_FPS`, `DECODE_MAX_WIDTH` | Decoded frame rate and width per camera; lowers CPU use. | `5`, `auto` |
 | `PERSON_CONF_THRESHOLD` (`_DARK`) | Detection confidence; lower in dark boxes. Tune against real footage. | `0.50` (`0.45`) |
 | `PERSON_MAX_FRAME_FRACTION` | Default largest person size (overridable per camera). | `0.35` |
+| `IGNORE_BOX_FRACTION` | Default share of a box that must lie inside an ignore area to drop it (each area's "How much of a person must be inside" overrides it). | `0.6` |
+| `STATIC_MEMORY_PERSIST`, `STATIC_MEMORY_SAVE_SEC` | Save remembered static figures to `storage/static_memory/` so they survive restarts; how often at most. | `1`, `30` |
+| `STATIC_MEMORY_MAX_GAP_SEC` | On a remembered static spot, a detection gap up to this long still counts as still time. | `60` |
+| `STATIC_PENDING_IGNORE_FRACTION` | A new figure with at least this share of its box in an ignore area is checked as a possible static figure before it is counted. | `0.5` |
+| `STATIC_OCCLUSION_IOU`, `STATIC_OCCLUSION_MAX_SEC` | A passer-by in front of a static figure does not restart its clock, for at most this long in a row. | `0.8`, `10` |
+| `STATIC_BOX_JITTER_MAX_FRAC` | Cap on the box-motion noise allowance (torso lengths) of the static-figure filter. | `0.35` |
 | `POSE_BUDGET_UTILISATION` | Share of the accelerator the live analysis plans to use. | `0.6` |
 | `STORAGE_DIR` | Evidence and database location; must stay on the device's own disk. | `<project>/storage` |
 | `WEBRTC_TRANSCODE_ENCODER` | Encoder for converted and masked direct video (NVENC, VA-API, libx264). | `auto` |

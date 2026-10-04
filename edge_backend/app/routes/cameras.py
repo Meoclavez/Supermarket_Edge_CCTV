@@ -38,7 +38,7 @@ from ..services.clip_recorder import clip_recorder_service
 from ..services.duplicate_cameras import delete_impact, duplicate_guard
 from ..services.feature_manager import feature_manager
 from ..services.inference_backend import person_detector
-from ..services.live_analytics_engine import _draw_skeleton, fit_width, live_engine, render_overlay
+from ..services.live_analytics_engine import _draw_skeleton, draw_ignore_areas, fit_width, live_engine, render_overlay
 from ..services.no_signal_slate import render_no_signal
 from ..services.privacy_mask import apply_privacy_masks, ignore_polygons, outside_ignore_regions
 
@@ -825,21 +825,28 @@ def get_camera_snapshot(camera_id: str, annotate: bool = True, overlay: bool = F
     if annotate:
         h, w = raw.shape[:2]
         max_frac = feature_manager.get_setting(camera_id, "person_max_frame_fraction")
+        polys = ignore_polygons(camera_id, w, h)
+        # Raw detections of this frame, after the camera's ignore areas, each
+        # labelled with what the live pipeline makes of it: a box on a static
+        # (or remembered static) figure is drawn grey and "not counted", so a
+        # poster is never shown as a green person.
         dets = outside_ignore_regions(
             person_detector.detect(raw, camera_id=camera_id,
                                    **({"max_frame_fraction": max_frac} if max_frac is not None else {})),
-            ignore_polygons(camera_id, w, h))
+            polys)
         if frame is raw:
             frame = raw.copy()
+        draw_ignore_areas(frame, polys)
+        rt = live_engine.runtimes.get(camera_id)
+        worker = live_engine.workers.get(camera_id)
+        live_tracks = rt.get_tracks() if rt is not None and (rt.frame_width, rt.frame_height) == (w, h) else []
         for det in dets:
+            label, colour = snapshot_label(det, live_tracks, getattr(worker, "tracker", None), (w, h))
             x1, y1, x2, y2 = int(det.x1), int(det.y1), int(det.x2), int(det.y2)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 157), 2)
-            cv2.putText(
-                frame, f"person {det.confidence:.2f}", (x1, max(y1 - 8, 14)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 157), 1,
-            )
+            cv2.rectangle(frame, (x1, y1), (x2, y2), colour, 2)
+            cv2.putText(frame, label, (x1, max(y1 - 8, 14)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, colour, 1)
             if det.keypoints is not None:
-                _draw_skeleton(frame, det.keypoints, (0, 255, 157))
+                _draw_skeleton(frame, det.keypoints, colour)
         frame, _ = fit_width(frame, max_width)
     else:
         # Scale first, then draw: boxes and labels keep a legible size.
@@ -858,6 +865,39 @@ def get_camera_snapshot(camera_id: str, annotate: bool = True, overlay: bool = F
         media_type="image/jpeg",
         headers={"X-Frame-Source": "live", "X-Frame-Size": f"{w}x{h}", "Cache-Control": "no-store"},
     )
+
+
+def snapshot_label(det, live_tracks: list, tracker, frame_size) -> tuple:
+    """(label, BGR colour) for a raw detection on the annotated snapshot.
+
+    Matched to the live track it overlaps most (IoU >= 0.5): static ->
+    "static figure, not counted" (grey); pending static -> "pending static,
+    not counted" (grey-blue); else a box on a remembered static figure ->
+    "remembered static figure, not counted" (grey); a track not yet seen
+    moving -> "person (pending)" (amber); otherwise "person" (green).
+    """
+    from ..services.live_analytics_engine import PENDING_COLOUR, PENDING_STATIC_COLOUR, STATIC_COLOUR
+    from ..services.tracking_service import _iou
+
+    box = (float(det.x1), float(det.y1), float(det.x2), float(det.y2))
+    best, best_iou = None, 0.5
+    for t in live_tracks:
+        iou = _iou(box, (t["x1"], t["y1"], t["x2"], t["y2"]))
+        if iou >= best_iou:
+            best, best_iou = t, iou
+    if best is not None and best.get("motion_state") == "static":
+        return "static figure, not counted", STATIC_COLOUR
+    if best is not None and best.get("pending_static"):
+        return "pending static, not counted", PENDING_STATIC_COLOUR
+    try:
+        remembered = tracker is not None and tracker.is_remembered_static(box, det.keypoints, frame_size)
+    except Exception:  # noqa: BLE001 - a label must never fail the snapshot
+        remembered = False
+    if remembered:
+        return "remembered static figure, not counted", STATIC_COLOUR
+    if best is not None and best.get("confirmed") and best.get("motion_state") == "pending":
+        return f"person (pending) {det.confidence:.2f}", PENDING_COLOUR
+    return f"person {det.confidence:.2f}", (0, 255, 157)
 
 
 # ---------------- Per-camera helpers ----------------
@@ -889,6 +929,12 @@ async def get_camera_live_status(camera_id: str, db: AsyncSession = Depends(get_
             "calibrated": bool(cam.homography_matrix),
             "frame_width": None,
             "frame_height": None,
+            # Static-figure telemetry: not measured without a worker.
+            "static_tracks": None,
+            "pending_tracks": None,
+            "ignored_detections_last": None,
+            "static_memory_count": None,
+            "boxes": [],
         }
 
     entry = dict(rt.to_dict())

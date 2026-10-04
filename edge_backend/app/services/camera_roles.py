@@ -59,6 +59,7 @@ SETUP_ITEM_IDS = (
     "queue_zone",
     "product_zones",
     "restricted_area",
+    "ignore_area",
     "privacy_mask",
     "pos_register_link",
 )
@@ -108,7 +109,7 @@ ROLE_PRESETS: Dict[str, RolePreset] = {
         features=_f(True, False, False),
         primary_footfall=True,
         required_setup=("entrance_tripwire",),
-        optional_setup=("calibrate", "privacy_mask"),
+        optional_setup=("calibrate", "ignore_area", "privacy_mask"),
         analytics=("Footfall in", "Hourly traffic", "Occupancy (with exit counts)"),
     ),
     "exit": RolePreset(
@@ -121,7 +122,7 @@ ROLE_PRESETS: Dict[str, RolePreset] = {
         # exit), so door lines of every kind are the preferred footfall source.
         primary_footfall=True,
         required_setup=("exit_tripwire",),
-        optional_setup=("calibrate", "privacy_mask"),
+        optional_setup=("calibrate", "ignore_area", "privacy_mask"),
         analytics=("Footfall out", "Occupancy (with entrance counts)", "Exit without checkout (same-camera)"),
     ),
     "entrance_exit": RolePreset(
@@ -132,7 +133,7 @@ ROLE_PRESETS: Dict[str, RolePreset] = {
         features=_f(True, False, True),
         primary_footfall=True,
         required_setup=("entrance_tripwire",),
-        optional_setup=("calibrate", "privacy_mask"),
+        optional_setup=("calibrate", "ignore_area", "privacy_mask"),
         analytics=("Footfall in and out", "Occupancy", "Hourly traffic"),
     ),
     "checkout": RolePreset(
@@ -145,7 +146,7 @@ ROLE_PRESETS: Dict[str, RolePreset] = {
         theft_sensitivity=1.25,
         person_max_frame_fraction=0.6,
         required_setup=("checkout_zone",),
-        optional_setup=("queue_zone", "pos_register_link", "product_zones", "calibrate", "privacy_mask"),
+        optional_setup=("queue_zone", "pos_register_link", "product_zones", "calibrate", "ignore_area", "privacy_mask"),
         analytics=("Queue length now", "Time at the lane / wait", "Lane sales per customer (POS)",
                    "Concealment at impulse racks"),
     ),
@@ -157,7 +158,7 @@ ROLE_PRESETS: Dict[str, RolePreset] = {
         features=_f(True, True, True),
         person_max_frame_fraction=0.6,
         required_setup=("product_zones",),
-        optional_setup=("calibrate", "privacy_mask"),
+        optional_setup=("calibrate", "ignore_area", "privacy_mask"),
         analytics=("Shelf interactions", "Product engagement", "Concealment", "Shelf sweeping"),
     ),
     "high_value": RolePreset(
@@ -170,7 +171,7 @@ ROLE_PRESETS: Dict[str, RolePreset] = {
         theft_sensitivity=1.5,
         person_max_frame_fraction=0.6,
         required_setup=("product_zones",),
-        optional_setup=("calibrate", "privacy_mask"),
+        optional_setup=("calibrate", "ignore_area", "privacy_mask"),
         alert_severity_floor="HIGH",
         all_zones_high_value=True,
         analytics=("Shelf interactions", "Concealment", "Shelf sweeping", "Loitering at high-value stock"),
@@ -185,7 +186,7 @@ ROLE_PRESETS: Dict[str, RolePreset] = {
         features=_f(True, False, False),
         counts_footfall=False,
         required_setup=("restricted_area",),
-        optional_setup=("privacy_mask",),
+        optional_setup=("ignore_area", "privacy_mask"),
         analytics=("After-hours / restricted-area alerts",),
     ),
     "overview": RolePreset(
@@ -195,7 +196,7 @@ ROLE_PRESETS: Dict[str, RolePreset] = {
                       "the floor plan."),
         features=_f(True, False, False),
         required_setup=("calibrate",),
-        optional_setup=("privacy_mask",),
+        optional_setup=("ignore_area", "privacy_mask"),
         analytics=("Presence heatmap", "Dwell heatmap", "Zone occupancy"),
     ),
 }
@@ -396,6 +397,7 @@ ITEM_LABELS = {
     "queue_zone": "Queue (waiting line) area",
     "product_zones": "Product shelf areas",
     "restricted_area": "Restricted area with a schedule",
+    "ignore_area": "Ignore areas (posters, mannequins, screens)",
     "privacy_mask": "Privacy masks",
     "pos_register_link": "Link the lane's POS register",
 }
@@ -408,6 +410,7 @@ ITEM_ACTIONS = {
     "queue_zone": {"type": "studio", "tool": "checkout", "kind": "queue"},
     "product_zones": {"type": "studio", "tool": "product"},
     "restricted_area": {"type": "studio", "tool": "restricted"},
+    "ignore_area": {"type": "studio", "tool": "ignore"},
     "privacy_mask": {"type": "studio", "tool": "mask"},
     "pos_register_link": {"type": "config", "field": "pos_register_id"},
 }
@@ -484,6 +487,12 @@ def _queue_areas(ctx: SetupContext, camera_id: str, kind: str) -> list:
             if a.get("enabled", True) and str(a.get("kind", "queue")) == kind]
 
 
+def _is_ignore(mask: dict) -> bool:
+    """An AI_IGNORE area (analysis exclusion), not a privacy mask."""
+    mode = mask.get("mask_mode") or "BLUR"
+    return str(getattr(mode, "value", mode)).upper() == "AI_IGNORE"
+
+
 def evaluate_item(item: str, cam, ctx: SetupContext) -> Tuple[bool, str]:
     """(done, hint) for one checklist item on one camera, from real state."""
     cid = cam.id
@@ -530,9 +539,17 @@ def evaluate_item(item: str, cam, ctx: SetupContext) -> Tuple[bool, str]:
             return False, ("The restricted area has no schedule, so it alerts around the clock, including "
                            "on staff during trading hours. Add schedule rows (for example after closing).")
         return False, "Draw a restricted area in Studio and set the hours it must be empty."
+    if item == "ignore_area":
+        areas = [m for m in ctx.cam(cid).get("exclusion_masks", [])
+                 if m.get("enabled", True) and _is_ignore(m)]
+        return ((True, f"{_plural(len(areas), 'ignore area')} on this camera: figures there are not counted.")
+                if areas else
+                (False, "Optional: draw an ignore area over posters, mannequins or screens showing people, "
+                        "so they are never counted as shoppers."))
     if item == "privacy_mask":
-        masks = [m for m in ctx.cam(cid).get("exclusion_masks", []) if m.get("enabled", True)]
-        return ((True, f"{_plural(len(masks), 'mask')} on this camera.") if masks else
+        masks = [m for m in ctx.cam(cid).get("exclusion_masks", [])
+                 if m.get("enabled", True) and not _is_ignore(m)]
+        return ((True, f"{_plural(len(masks), 'privacy mask')} on this camera.") if masks else
                 (False, "Optional: mask screens, keypads or neighbouring property in Studio."))
     if item == "pos_register_link":
         reg = getattr(cam, "pos_register_id", None)

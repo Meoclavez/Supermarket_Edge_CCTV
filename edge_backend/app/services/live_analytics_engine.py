@@ -153,6 +153,15 @@ def static_figure_config(camera_id: str) -> tuple[bool, Optional[float]]:
     return enabled, seconds
 
 
+def static_memory_path(camera_id: str):
+    """Where a camera's remembered static figures are saved (boxes normalised 0..1)."""
+    import re
+    from pathlib import Path
+
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(camera_id))[:120] or "camera"
+    return Path(settings.STORAGE_DIR) / "static_memory" / f"{safe}.json"
+
+
 def _append_path_point(t, fx: float, fy: float, w: int, h: int, floor, now: float) -> None:
     """Sample the track's path for the recorded heatmaps (services/heatmap_history.py).
 
@@ -218,6 +227,10 @@ class CameraRuntime:
     next_retry_at: Optional[float] = None
     frames_read: int = 0
     detections_last: int = 0
+    # People-confidence detections dropped by AI_IGNORE areas on the last
+    # analysed frame, and static figures this camera's tracker remembers.
+    ignored_detections_last: int = 0
+    static_memory_count: int = 0
     live_track_count: int = 0
     fps: float = 0.0
     last_frame_at: float = 0.0
@@ -283,6 +296,39 @@ class CameraRuntime:
     def calibrated(self) -> bool:
         return floor_projector.has_homography(self.camera_id)
 
+    def motion_summary(self) -> dict:
+        """Static-figure telemetry: counts by motion state and normalised boxes.
+
+        ``static_tracks`` / ``pending_tracks`` count confirmed tracks only
+        (as ``live_tracks`` does); ``boxes`` lists every live track, each
+        ``{track_id, box: [x1, y1, x2, y2] normalised 0..1 to the analysed
+        frame, motion_state: "pending" | "moving" | "static", confidence,
+        confirmed, pending_static}`` (``pending_static``: on a remembered
+        static figure or mostly inside an ignore area, not counted yet).
+        """
+        tracks = self.get_tracks()
+        w, h = self.frame_width, self.frame_height
+        boxes = []
+        if w and h:
+            for t in tracks:
+                boxes.append({
+                    "track_id": t["track_id"],
+                    "box": [round(min(max(t["x1"] / w, 0.0), 1.0), 4), round(min(max(t["y1"] / h, 0.0), 1.0), 4),
+                            round(min(max(t["x2"] / w, 0.0), 1.0), 4), round(min(max(t["y2"] / h, 0.0), 1.0), 4)],
+                    "motion_state": t.get("motion_state") or "pending",
+                    "confidence": t["confidence"],
+                    "confirmed": bool(t.get("confirmed")),
+                    "pending_static": bool(t.get("pending_static")),
+                })
+        conf = [t for t in tracks if t.get("confirmed")]
+        return {
+            "static_tracks": sum(1 for t in conf if t.get("motion_state") == "static"),
+            "pending_tracks": sum(1 for t in conf if t.get("motion_state", "pending") == "pending"),
+            "ignored_detections_last": int(self.ignored_detections_last),
+            "static_memory_count": int(self.static_memory_count),
+            "boxes": boxes,
+        }
+
     def to_dict(self) -> dict:
         return {
             "camera_id": self.camera_id,
@@ -292,6 +338,9 @@ class CameraRuntime:
             "frames_read": self.frames_read,
             "detections_last_frame": self.detections_last,
             "live_tracks": self.live_track_count,
+            # static_tracks, pending_tracks, ignored_detections_last,
+            # static_memory_count, boxes (motion_summary).
+            **self.motion_summary(),
             "fps": round(self.fps, 1),
             "has_frame": self._frame is not None,
             "frame_width": self.frame_width,
@@ -788,9 +837,21 @@ class CameraWorker(threading.Thread):
             self.rt.decoder = capture_backends.SOFTWARE
             self.rt.decoder_note = self._software_reason(source)
 
+    def _attach_static_store(self) -> None:
+        """Load this camera's remembered static figures (STORAGE_DIR/static_memory) and save there."""
+        if not settings.STATIC_MEMORY_PERSIST:
+            return
+        try:
+            n = self.tracker.attach_static_store(static_memory_path(self.rt.camera_id))
+            self.rt.static_memory_count = n
+        except Exception as e:  # noqa: BLE001 - the camera runs without it
+            _log_once(f"static_store:{self.rt.camera_id}",
+                      f"static-figure memory for {self.rt.camera_id} unavailable ({type(e).__name__}: {e})")
+
     def run(self) -> None:
         import cv2
 
+        self._attach_static_store()
         backoff = 1.0
         while not self._stop.is_set():
             cap = None
@@ -973,6 +1034,7 @@ class CameraWorker(threading.Thread):
                 self.rt.set_tracks([])
                 self.rt.live_track_count = 0
                 self.rt.detections_last = 0
+                self.rt.ignored_detections_last = 0
                 _reset_pose_camera(self.rt.camera_id)
                 if isinstance(e, CameraAuthError):
                     logger.warning(
@@ -1189,9 +1251,12 @@ class CameraWorker(threading.Thread):
         if max_frac is not None:
             kw["max_frame_fraction"] = max_frac
         dets = person_detector.detect(frame, camera_id=cam, **kw)
-        dets = outside_ignore_regions(dets, ignore_polygons(cam, w, h))
+        kept = outside_ignore_regions(dets, ignore_polygons(cam, w, h))
+        self.rt.ignored_detections_last = len(dets) - len(kept)
+        dets = kept
         # A remembered static figure (poster, mannequin: same box and pose as
         # one the tracker flagged) is not a person at night either.
+        self.tracker.set_frame_size(w, h)
         enabled, seconds = static_figure_config(cam)
         self.tracker.configure_static(enabled, seconds)
         if enabled:
@@ -1213,14 +1278,18 @@ class CameraWorker(threading.Thread):
             self.rt.set_tracks([], now)
             self.rt.live_track_count = 0
             self.rt.detections_last = 0
+            self.rt.ignored_detections_last = 0
             return
         counting = flags["people_counting"]
 
         # The detector sees the unmasked frame. AI_IGNORE regions then drop
-        # anything whose foot point falls inside them, before tracking.
+        # anything whose foot point falls inside them, or enough of whose box
+        # does (ignore_box_fraction), before tracking.
         masks = camera_masks(cam)
         h, w = frame.shape[:2]
         ignore = ignore_polygons(cam, w, h, masks)
+        self.tracker.set_frame_size(w, h)
+        self.tracker.set_ignore_regions(ignore)
 
         # Ask for boxes down to the tracker's low threshold: the tracker uses
         # the low band only to keep existing identities through occlusion.
@@ -1233,7 +1302,14 @@ class CameraWorker(threading.Thread):
         # ``camera_id`` gives the lighting measurement per-camera hysteresis
         # (low_light), reported in this camera's status as ``lighting``.
         detections = person_detector.detect(frame, camera_id=cam, **detect_kw)
-        detections = outside_ignore_regions(detections, ignore)
+        kept = outside_ignore_regions(detections, ignore)
+        if len(kept) != len(detections):
+            kept_ids = {id(d) for d in kept}
+            self.rt.ignored_detections_last = sum(
+                1 for d in detections if id(d) not in kept_ids and d.confidence >= person_threshold(d))
+        else:
+            self.rt.ignored_detections_last = 0
+        detections = kept
         # People by the per-box rule (a dark box needs less confidence), as
         # the detector itself keeps them when no explicit threshold is given.
         persons = [d for d in detections if d.confidence >= person_threshold(d)]
@@ -1249,6 +1325,7 @@ class CameraWorker(threading.Thread):
         self.tracker.configure_static(*static_figure_config(cam))
         live = self.tracker.update(detections, now=now)
         self.rt.live_track_count = sum(1 for t in live if t.is_human)
+        self.rt.static_memory_count = len(self.tracker.static_memory)
 
         snapshot: list[dict] = []
         for t in live:
@@ -1264,6 +1341,9 @@ class CameraWorker(threading.Thread):
                 "confirmed": t.confirmed,
                 # "pending" | "moving" | "static" (a poster or mannequin).
                 "motion_state": t.motion_state,
+                # Pending on a remembered static figure / mostly in an ignore
+                # area: not counted until it moves (tracking_service).
+                "pending_static": t.is_pending_static,
                 "age_seconds": round(t.age_seconds, 1),
                 # Only keypoints measured on this detection frame are shown;
                 # a coasting track keeps its box but not a stale skeleton.
@@ -1409,10 +1489,14 @@ class LiveAnalyticsEngine:
             # Still in the same zone. Once the dwell floor is cleared the visit
             # becomes real and is published immediately so live occupancy is
             # answerable while the person is still standing there.
+            # A track that has never moved (``established``) is not published
+            # yet: a poster must not open visits. Its entry time is kept, so a
+            # shopper who stood still first gets the whole dwell once they move.
             if (
                 zone_id
                 and track.open_visit_id is None
                 and track.zone_entered_at is not None
+                and getattr(track, "established", True)
                 and (now - track.zone_entered_at) >= settings.ZONE_DWELL_MIN_SECONDS
             ):
                 track.open_visit_id = f"zv_{uuid.uuid4().hex[:14]}"
@@ -1502,9 +1586,10 @@ class LiveAnalyticsEngine:
         track.current_zone_id = None
         track.zone_entered_at = None
 
-        if getattr(track, "is_static", False):
+        if getattr(track, "is_static", False) or not getattr(track, "established", True):
             # A poster or mannequin is never a customer: no customer_tracks
-            # row, so no footfall, traffic or heatmap from it.
+            # row, so no footfall, traffic or heatmap from it. Neither is a
+            # track that never moved at all (still "pending" at its end).
             return
         if persist is None:
             persist = camera_flag(track.camera_id, "people_counting")
@@ -1653,6 +1738,7 @@ class LiveAnalyticsEngine:
                             "confidence": t["confidence"],
                             "confirmed": t["confirmed"],
                             "motion_state": t.get("motion_state"),
+                            "pending_static": bool(t.get("pending_static")),
                             "keypoints": t.get("keypoints"),
                         }
                         for t in tracks
@@ -1664,7 +1750,7 @@ class LiveAnalyticsEngine:
                 # already on the map from there (still in ``detections``).
                 continue
             for t in tracks:
-                if not t["confirmed"] or t.get("motion_state") == "static":
+                if not t["confirmed"] or t.get("motion_state") == "static" or t.get("pending_static"):
                     continue
                 if t["x_m"] is None or t["y_m"] is None:
                     uncalibrated_tracks += 1
@@ -1722,17 +1808,61 @@ def fit_width(frame: np.ndarray, max_width: Optional[int]) -> tuple[np.ndarray, 
     return cv2.resize(frame, size, interpolation=cv2.INTER_AREA), scale
 
 
+IGNORE_AREA_COLOUR = (200, 90, 200)     # BGR violet: an AI_IGNORE area, drawn faintly
+STATIC_COLOUR = (150, 150, 150)          # muted grey: a figure that never moves
+PENDING_STATIC_COLOUR = (175, 160, 140)  # grey-blue: maybe a static figure, not counted yet
+PENDING_COLOUR = (60, 200, 255)          # amber: not yet seen moving
+
+
+def draw_ignore_areas(out: np.ndarray, polys, alpha: float = 0.16) -> None:
+    """AI_IGNORE areas (pixel polygons of ``out``): a faint fill, a thin outline and "ignored"."""
+    import cv2
+
+    h, w = out.shape[:2]
+    for p in polys:
+        pts = np.round(np.asarray(p, dtype=np.float64).reshape(-1, 2)).astype(np.int32)
+        if len(pts) < 3:
+            continue
+        x, y, bw, bh = cv2.boundingRect(pts)
+        x, y = max(0, x), max(0, y)
+        bw, bh = min(bw, w - x), min(bh, h - y)
+        if bw <= 0 or bh <= 0:
+            continue
+        roi = out[y: y + bh, x: x + bw]
+        tint = roi.copy()
+        cv2.fillPoly(tint, [pts - np.array([x, y], dtype=np.int32)], IGNORE_AREA_COLOUR)
+        cv2.addWeighted(tint, alpha, roi, 1.0 - alpha, 0, dst=roi)
+        cv2.polylines(out, [pts], True, IGNORE_AREA_COLOUR, 1)
+        cv2.putText(out, "ignored", (x + 4, min(h - 4, y + 14)), cv2.FONT_HERSHEY_SIMPLEX, 0.4,
+                    IGNORE_AREA_COLOUR, 1, cv2.LINE_AA)
+
+
+def _overlay_ignore_areas(out: np.ndarray, rt: CameraRuntime, scale: float) -> None:
+    try:
+        fw = rt.frame_width or int(round(out.shape[1] / max(scale, 1e-6)))
+        fh = rt.frame_height or int(round(out.shape[0] / max(scale, 1e-6)))
+        polys = ignore_polygons(rt.camera_id, fw, fh)
+        if polys:
+            draw_ignore_areas(out, [np.asarray(p, dtype=np.float64) * scale for p in polys])
+    except Exception as e:  # noqa: BLE001 - an overlay detail must never break the stream
+        _log_once(f"overlay_ignore:{type(e).__name__}", f"ignore areas not drawn on the overlay: {e}")
+
+
 def render_overlay(frame: np.ndarray, rt: CameraRuntime, scale: float = 1.0) -> np.ndarray:
     """Draw the worker's current track boxes onto a copy of ``frame``.
 
     Uses only the snapshot the worker already produced -- no inference runs
     here -- so the overlay costs a few rectangles per frame and always shows
-    exactly what the pipeline is counting. Confirmed tracks are drawn solid,
-    tentative ones (below the hit floor) thin, static figures (posters,
-    mannequins: not counted) thin grey and labelled "static", and a corner
-    tag states whether the camera is calibrated so nobody mistakes boxes for positions.
-    When the pose model supplied keypoints on the latest detection frame, the
-    visible limbs are drawn too (wrists marked larger).
+    exactly what the pipeline is counting. Confirmed moving tracks are drawn
+    solid green, confirmed tracks not yet seen moving amber and labelled
+    "pending", tentative ones (below the hit floor) thin amber, static
+    figures (posters, mannequins: not counted) thin grey and labelled
+    "static", pending tracks on a remembered static figure or mostly inside
+    an ignore area thin grey-blue "pending static" (not counted), and AI_IGNORE
+    areas faintly violet "ignored". A corner tag states whether the camera is
+    calibrated so nobody mistakes boxes for positions. When the pose model
+    supplied keypoints on the latest detection frame, the visible limbs are
+    drawn too (wrists marked larger).
 
     ``scale`` is the size of ``frame`` relative to the camera's frames (a
     preview from ``fit_width``): boxes are drawn scaled onto the small frame,
@@ -1741,25 +1871,28 @@ def render_overlay(frame: np.ndarray, rt: CameraRuntime, scale: float = 1.0) -> 
     import cv2
 
     out = frame if frame.flags.writeable else frame.copy()
+    _overlay_ignore_areas(out, rt, scale)
     tracks = rt.get_tracks()
     confirmed_colour = (80, 220, 90)     # BGR green
-    tentative_colour = (60, 200, 255)    # BGR amber
-    static_colour = (150, 150, 150)      # muted grey: a figure that never moves
 
     for t in tracks:
         x1, y1, x2, y2 = (int(t[k] * scale) for k in ("x1", "y1", "x2", "y2"))
-        static = t.get("motion_state") == "static"
-        if static:
-            colour, thickness = static_colour, 1
+        state = t.get("motion_state")
+        tid = t["track_id"][-4:]
+        label = f"{tid} {t['confidence']:.2f}"
+        if state == "static":
+            colour, thickness, label = STATIC_COLOUR, 1, f"{tid} static"
+        elif t.get("pending_static"):
+            colour, thickness, label = PENDING_STATIC_COLOUR, 1, f"{tid} pending static"
+        elif not t["confirmed"]:
+            colour, thickness = PENDING_COLOUR, 1
+        elif state == "pending":
+            colour, thickness, label = PENDING_COLOUR, 2, f"{tid} pending {t['confidence']:.2f}"
         else:
-            colour = confirmed_colour if t["confirmed"] else tentative_colour
-            thickness = 2 if t["confirmed"] else 1
-        cv2.rectangle(out, (x1, y1), (x2, y2), colour, thickness)
-        label = f"{t['track_id'][-4:]} {t['confidence']:.2f}"
-        if static:
-            label = f"{t['track_id'][-4:]} static"
-        elif t["x_m"] is not None:
+            colour, thickness = confirmed_colour, 2
+        if state != "static" and not t.get("pending_static") and t["x_m"] is not None:
             label += f" ({t['x_m']:.1f},{t['y_m']:.1f})m"
+        cv2.rectangle(out, (x1, y1), (x2, y2), colour, thickness)
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
         ty = max(th + 4, y1 - 4)
         cv2.rectangle(out, (x1, ty - th - 4), (x1 + tw + 4, ty + 2), colour, -1)
@@ -1773,10 +1906,14 @@ def render_overlay(frame: np.ndarray, rt: CameraRuntime, scale: float = 1.0) -> 
 
     tag = "calibrated" if rt.calibrated else "uncalibrated"
     n_static = sum(1 for t in tracks if t.get("motion_state") == "static")
-    n_conf = sum(1 for t in tracks if t["confirmed"]) - n_static
+    n_pstatic = sum(1 for t in tracks if t["confirmed"] and t.get("pending_static")
+                    and t.get("motion_state") != "static")
+    n_conf = sum(1 for t in tracks if t["confirmed"]) - n_static - n_pstatic
     header = f"{rt.name} | {tag} | {n_conf} tracked"
     if n_static:
         header += f" | {n_static} static"
+    if n_pstatic:
+        header += f" | {n_pstatic} pending static"
     cv2.rectangle(out, (0, 0), (10 + 8 * len(header), 22), (18, 20, 26), -1)
     cv2.putText(out, header, (6, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 224, 232), 1)
     return out

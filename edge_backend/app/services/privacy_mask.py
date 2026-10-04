@@ -16,10 +16,15 @@ Semantics, decided by ``mask_mode``:
   handed to pose_analytics. The detector still sees the unmasked frame, so a
   shopper walking through a masked area is still counted; only their image
   is hidden. An unknown mode is treated as ``BLACKOUT`` (fail closed).
-* ``AI_IGNORE`` -- an **analysis exclusion**. The picture is left alone, but
-  any person or object whose foot point (bottom-centre of the box) lies
-  inside the polygon is dropped before tracking, so it never reaches counts,
-  zone visits, shelf interactions or theft rules.
+* ``AI_IGNORE`` -- an **analysis exclusion** ("ignore area": a poster, a
+  mannequin, a screen showing people). The picture is left alone, but any
+  person or object whose foot point (bottom-centre of the box) lies inside
+  the polygon, OR at least ``ignore_box_fraction`` (default
+  ``settings.IGNORE_BOX_FRACTION``, 0.6) of whose box area lies inside it, is
+  dropped before tracking, so it never reaches counts, zone visits, shelf
+  interactions or theft rules. The area rule catches a wall poster whose
+  painted feet are below the drawn area; a shopper walking past in front of
+  the area has most of the box outside it and is kept.
 
 If a mask cannot be applied (malformed polygon, OpenCV error) the frame is
 blacked out entirely rather than shown unmasked.
@@ -217,29 +222,149 @@ def deferred_privacy_masks(frame: np.ndarray, camera_id: str, masks: Optional[li
     return DeferredMaskedFrame(frame, camera_id, masks)
 
 
+def ignore_fraction(mask: dict) -> float:
+    """The share of a box that must lie inside this AI_IGNORE area to drop it (0.1..1.0)."""
+    from app.config import settings
+
+    v = mask.get("ignore_box_fraction")
+    try:
+        v = float(v) if v is not None else float(settings.IGNORE_BOX_FRACTION)
+    except (TypeError, ValueError):
+        v = float(settings.IGNORE_BOX_FRACTION)
+    if v != v:  # NaN
+        v = float(settings.IGNORE_BOX_FRACTION)
+    return min(1.0, max(0.1, v))
+
+
+class IgnoreRegion(np.ndarray):
+    """An AI_IGNORE polygon: a float32 (N, 2) pixel array that also carries its rule.
+
+    It is an ndarray (OpenCV, shadow_trial and older callers use it as the
+    polygon itself) with two attributes: ``box_fraction`` (drop a box with at
+    least this share of its area inside) and ``mask_id``.
+    """
+
+    def __new__(cls, pts, box_fraction: Optional[float] = None, mask_id=None):
+        obj = np.asarray(pts, dtype=np.float32).view(cls)
+        obj.box_fraction = box_fraction
+        obj.mask_id = mask_id
+        return obj
+
+    def __array_finalize__(self, obj):
+        if obj is None:
+            return
+        self.box_fraction = getattr(obj, "box_fraction", None)
+        self.mask_id = getattr(obj, "mask_id", None)
+
+
 def ignore_polygons(camera_id: str, width: int, height: int, masks: Optional[list[dict]] = None) -> list[np.ndarray]:
+    """This camera's AI_IGNORE polygons in pixels of a ``width`` x ``height`` frame (IgnoreRegion)."""
     masks = camera_masks(camera_id) if masks is None else masks
     out = []
     for m in masks:
         if _mode(m) == IGNORE_MODE:
             try:
-                out.append(polygon_pixels(m, width, height).astype(np.float32))
+                out.append(IgnoreRegion(polygon_pixels(m, width, height), ignore_fraction(m), m.get("id")))
             except Exception as e:
                 _warn_once(f"ignore:{m.get('id')}", f"AI_IGNORE mask {m.get('id')} unusable: {e}")
     return out
 
 
-def outside_ignore_regions(items: Iterable, polys: list[np.ndarray], foot=lambda d: d.foot_point) -> list:
-    """Drop items whose foot point lies inside any AI_IGNORE polygon."""
+def _region_fraction(poly) -> float:
+    from app.config import settings
+
+    f = getattr(poly, "box_fraction", None)
+    return float(settings.IGNORE_BOX_FRACTION) if f is None else float(f)
+
+
+def _clip_area(poly: np.ndarray, x1: float, y1: float, x2: float, y2: float) -> float:
+    """Area of ``poly`` (pixels, any simple polygon) inside the box (Sutherland-Hodgman).
+
+    Clipping a concave polygon against a convex window can leave zero-width
+    "bridges", which add no area, so the shoelace area of the result is the
+    exact overlap. ~10-30 us in Python for a box and a 4-12 point polygon.
+    """
+    pts = [(float(p[0]), float(p[1])) for p in np.asarray(poly).reshape(-1, 2)]
+    for axis, bound, keep_greater in ((0, x1, True), (0, x2, False), (1, y1, True), (1, y2, False)):
+        if not pts:
+            return 0.0
+        out = []
+        prev = pts[-1]
+        prev_in = (prev[axis] >= bound) if keep_greater else (prev[axis] <= bound)
+        for cur in pts:
+            cur_in = (cur[axis] >= bound) if keep_greater else (cur[axis] <= bound)
+            if cur_in != prev_in:
+                d = cur[axis] - prev[axis]
+                t = (bound - prev[axis]) / d if d else 0.0
+                out.append((prev[0] + (cur[0] - prev[0]) * t, prev[1] + (cur[1] - prev[1]) * t))
+            if cur_in:
+                out.append(cur)
+            prev, prev_in = cur, cur_in
+        pts = out
+    if len(pts) < 3:
+        return 0.0
+    a = 0.0
+    for i in range(len(pts)):
+        xa, ya = pts[i - 1]
+        xb, yb = pts[i]
+        a += xa * yb - xb * ya
+    return abs(a) / 2.0
+
+
+def box_coverage(poly: np.ndarray, bbox) -> float:
+    """Share (0..1) of ``bbox`` (x1, y1, x2, y2 pixels) that lies inside ``poly``."""
+    x1, y1, x2, y2 = (float(v) for v in bbox)
+    area = max(x2 - x1, 0.0) * max(y2 - y1, 0.0)
+    if area <= 0.0:
+        return 0.0
+    p = np.asarray(poly).reshape(-1, 2)
+    # Disjoint bounding boxes: no overlap, no clipping.
+    if p[:, 0].max() <= x1 or p[:, 0].min() >= x2 or p[:, 1].max() <= y1 or p[:, 1].min() >= y2:
+        return 0.0
+    return min(1.0, _clip_area(p, x1, y1, x2, y2) / area)
+
+
+def max_ignore_coverage(polys: list[np.ndarray], bbox) -> float:
+    """The largest share of ``bbox`` inside any one AI_IGNORE polygon (0 when there are none)."""
+    return max((box_coverage(p, bbox) for p in polys), default=0.0)
+
+
+def in_ignore_region(poly: np.ndarray, foot_xy, bbox) -> bool:
+    """The AI_IGNORE rule for one polygon: foot point inside, or enough of the box inside."""
+    import cv2
+
+    fx, fy = foot_xy
+    if cv2.pointPolygonTest(np.asarray(poly, dtype=np.float32).reshape(-1, 1, 2),
+                            (float(fx), float(fy)), False) >= 0:
+        return True
+    return bbox is not None and box_coverage(poly, bbox) >= _region_fraction(poly) - 1e-9
+
+
+def _bbox_of(it):
+    b = getattr(it, "bbox", None)
+    if b is not None:
+        return b
+    try:
+        return (it.x1, it.y1, it.x2, it.y2)
+    except AttributeError:
+        return None
+
+
+def outside_ignore_regions(items: Iterable, polys: list[np.ndarray], foot=lambda d: d.foot_point,
+                           box=_bbox_of) -> list:
+    """Drop items inside any AI_IGNORE polygon (see ``in_ignore_region``).
+
+    ``polys`` are ``ignore_polygons`` (each with its own ``box_fraction``);
+    a plain array uses ``settings.IGNORE_BOX_FRACTION``. ``box`` gives an
+    item's (x1, y1, x2, y2), or None to test the foot point only.
+    """
     items = list(items)
     if not polys:
         return items
-    import cv2
-
     kept = []
     for it in items:
-        fx, fy = foot(it)
-        if any(cv2.pointPolygonTest(p, (float(fx), float(fy)), False) >= 0 for p in polys):
+        b = box(it) if box is not None else None
+        if any(in_ignore_region(p, foot(it), b) for p in polys):
             continue
         kept.append(it)
     return kept

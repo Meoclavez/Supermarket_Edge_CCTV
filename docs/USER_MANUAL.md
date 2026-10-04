@@ -2,7 +2,7 @@
 
 Setting up, mapping and using the store dashboard
 
-Last updated: 2026-10-04 · Describes the working tree after a38b391 (accounts and roles, site settings, backups, till key, area & line alerts, masked remote video)
+Last updated: 2026-10-04 · Describes the working tree after 5c21d13 (accounts and roles, site settings, backups, till key, area & line alerts, masked remote video) plus ignore areas, "Not a person" and static-figure memory
 
 This manual takes a store from a freshly installed edge device to daily use. Part 1 covers the device
 and the first sign-in. Part 2 is the store setup, in the order you should do it. Part 3 explains the
@@ -357,8 +357,15 @@ Open the camera settings: Cameras → tile → "⚙️ Settings", or "Config" in
    - "Theft detection": suspicious-behaviour checks.
    - "Theft evidence clip": also saves a clip from about 5 s before to 10 s after each theft alert.
      Needs theft detection. Clips count towards the evidence storage limit.
-   - "Ignore figures that never move": drops mannequins, posters and cut-outs that look like people.
-     "Treat a figure as static after (seconds…)" defaults to 60.
+   - "Ignore figures that never move" (on by default): drops mannequins, posters and cut-outs that
+     look like people. A figure with no body or limb movement for "Treat a figure as static after
+     (seconds without movement)" (default 60) is shown as "static" and is not counted or analysed.
+     A figure that never moved creates no visits, footfall or heatmap points, even before it is
+     marked static. The device remembers each static figure, also across restarts. When a figure
+     appears again at a remembered spot, or mostly inside an ignore area (2.8), it is not counted
+     while it is checked for about 5 s, then it is static again unless it moved. Shoppers walking
+     past in front of a static figure, and short gaps in its detection, do not restart its
+     60 s clock. Anyone who really moves is counted as a person at once.
    - "Largest person size (% of the frame)": rejects oversized false detections. Raise it for
      cameras mounted close to shoppers; the default is 35 %.
 4. **Stream quality.** "Stream quality (analysis)": keep "Auto". It picks the smallest sub-stream of
@@ -430,7 +437,14 @@ and type a name in "Label for the zone you are drawing".
 Pick a tool, then click points on the video. "Undo" removes the last point and "✕ Cancel" starts
 over. Shapes can't be dragged after saving: to change a tripwire, restricted area or checkout area
 press "✎ Edit" and click new points; to change a privacy mask or product shelf, delete it and draw
-it again. Changes take effect without a restart.
+it again. An ignore area's "✎ Edit" changes its name and coverage only; for a new shape, delete it
+and draw it again. Changes take effect without a restart.
+
+The picture also shows the AI's live boxes: a solid green box is a moving person, a dashed amber box
+marked "confirming" is a new detection still being checked (first seconds), and a dotted grey box
+marked "static" is a figure that never moves and is already left out of counts. Click a box to see
+what it is and, if it is not a person, to ignore it (see "A poster or mannequin is counted as a
+person" below).
 
 #### 🚪 Tripwire: counting lines (2 points)
 
@@ -491,24 +505,82 @@ placement test") are greyed out and marked "Not measured yet".
 
 #### 🌫️ Privacy mask (3+ points)
 
-Hides part of the picture, or excludes it from analysis. "Mask mode": Blur, Mosaic (pixelate),
-Blackout, Solid colour (with "Colour"), or "Ignore for analysis (video unchanged)". Use the last one
-for areas that cause false detections: a poster, a TV screen, the street through a window. Masks are
-applied to every picture shown and saved, including evidence and direct live video through online
-access (2.12). "Ignore for analysis" changes no picture.
+Hides part of the picture for privacy. "Mask mode": Blur, Mosaic (pixelate), Blackout or Solid
+colour (with "Colour"). People inside a privacy mask are still counted. To stop the AI seeing a
+poster, mannequin or screen, use "🚫 Ignore area (no AI)" instead (below). Masks are applied to every
+picture shown and saved, including evidence and direct live video through online access (2.12).
 
 Adding, changing or deleting a mask briefly interrupts every remote (direct) live video, on all
 cameras, for a few seconds while the device restarts its video service; the tiles reconnect by
 themselves with the new masks.
 
 **Deleting:** the 🗑️ button on a mask or product shelf asks "Delete?" first; press "Delete" to
-remove it or "Keep" to cancel. "Clear all" (every mask on every camera) also asks.
+remove it or "Keep" to cancel. "Clear all" in the "🌫️ Privacy masks" list (every privacy mask on
+every camera) also asks: "Yes, clear" or "Keep". It leaves ignore areas alone.
+
+#### 🚫 Ignore area (no AI) (3+ points)
+
+The AI does not look for people inside an ignore area. Use it for posters, mannequins, TV screens or
+a mirror. The video is not changed, and adding or changing an ignore area does not interrupt remote
+live video.
+
+1. Press "🚫 Ignore area (no AI)" and click at least three points around the poster, mannequin or
+   screen.
+2. Under "New ignore area" give it a "Name" (for example "Poster by the door").
+3. Choose "How much of a person must be inside":
+   - "Most of them (60%)" (default): right for most posters and mannequins.
+   - "Half (50%)".
+   - "Any part touching (10%)": for a screen or mirror right next to where shoppers walk; it also
+     drops real people who brush past it, so keep the area tight.
+4. Press "💾 Save ignore area".
+
+A detection is ignored when its feet are inside the area, or when at least the chosen share of its
+box is inside. Everything else on the camera is analysed as before.
+
+The "🚫 Ignore areas" list (side panel) shows each area of this camera:
+
+- "Person inside": change the coverage straight from the list.
+- "Enabled": untick to switch an area off without deleting it ("Turned off: people here are
+  detected again."); tick to turn it on again.
+- "✎ Edit": change the name or coverage. The shape can't be moved; delete it and draw a new one.
+- 🗑️: asks "Delete?" first ("Delete" / "Keep").
+- "Clear all" (every ignore area on every camera) asks "Delete every ignore area on every camera?":
+  "Yes, clear" or "Keep". It leaves privacy masks alone.
+
+Masks made earlier with the old "Ignore for analysis" mask mode appear in this list as ignore areas.
+
+#### A poster or mannequin is counted as a person
+
+Fastest way, from the live picture in Camera setup:
+
+1. Click the box around the poster or mannequin. The pop-up says what the AI thinks it is (for
+   example "Detected: moving person · 82% sure").
+2. Press "Not a person — ignore this spot". An ignore area is made around the box (slightly larger
+   than it), named "Not a person" with the time, and "Ignore area added. People are no longer
+   detected there." appears.
+3. Made a mistake? Press "Undo" in the same pop-up. Otherwise press "Close". You can rename the area
+   or change its coverage later in the "🚫 Ignore areas" list.
+
+Other ways:
+
+- Draw an ignore area yourself with "🚫 Ignore area (no AI)" (above), for example to cover a whole
+  screen or a row of mannequins.
+- Leave "Ignore figures that never move" on for the camera (2.4, on by default). A figure that has
+  not moved for 60 s is then shown as "static" and not counted, and the device remembers it.
 
 #### Also on this page
 
 - "📸 Save snapshot" saves a still to evidence storage.
 - "🎥 Export incident clip" saves a short clip from the camera's recent buffer.
-- "Pipeline telemetry" shows frame rate, detections, tracks and calibration state.
+- "📊 Pipeline telemetry" shows frame rate, detections, tracks and calibration state, and how the
+  false-detection filters are working:
+  - "Waiting to confirm (first seconds)": new detections not counted yet.
+  - "Static figures ignored": figures in view now that never move.
+  - "Remembered static figures": spots the device remembers as posters or mannequins.
+  - "Detections dropped by ignore areas": detections dropped in the last analysed picture.
+- On the store network the analysed picture marks static figures "static", figures still being checked "pending" or
+  "pending static", and ignore areas "ignored". Ignore areas are also outlined on the drawing layer
+  as "🚫 <name> · no AI" ("(off)" when switched off).
 
 ### 2.9 Night watch
 
@@ -611,7 +683,9 @@ store token once) and add the Cloudflare DNS records. Install the device with
 - Today → "Store setup" shows a percentage ("N% DONE") and the "Next step". Each camera shows "No
   purpose set", "n/m done" or "Ready".
 - Store map → "Cameras & devices" → "Checklist" lists what is missing for that camera's purpose,
-  with a button to each tool. It reads "✓ Ready" when the required steps are done.
+  with a button to each tool. It reads "✓ Ready" when the required steps are done. Optional items,
+  such as "Ignore areas (posters, mannequins, screens)" (button "Draw ignore area", or "Edit ignore
+  area" once one exists) and "Privacy masks", do not hold "Ready" back.
 - The per-analysis rows show Working, Partly, Needs setup or Not possible.
 
 ---
@@ -644,6 +718,9 @@ Refreshes every 15 seconds.
   or 1 s).
 - **Tile badges:** "● WORKING", "WRONG PASSWORD", "OFF" or "OFFLINE"; the live badge shows "● LIVE"
   or the picture's age; the resolution badge shows the stream size (for example "Sub 704x576").
+- **Tile status line:** people in view now, for example "3 people in view · 1 static ignored ·
+  on the map". "· N static ignored" appears when the camera sees figures that never move (posters,
+  mannequins); they are not counted (2.4).
 - **Tile buttons:** "⚙️ Settings", "Reconnect" (offline cameras only), "Turn off", "Camera setup".
   "Turn off" stops the camera's video, analysis and network traffic until it is turned on again.
 - **Under the grid:** "Turned off (n)" with "Turn on" per camera, "Turn all N on", and "Turn off N
@@ -929,7 +1006,7 @@ sudo -u edgecctv ../.venv/bin/python scripts/manage_operator.py reset-setup   # 
 | People counted but the map is empty | Camera not placed or not calibrated | Steps 2.6 and 2.7 |
 | "Visitors today" is an estimate | No entrance counting line | Draw a tripwire with "Counts store footfall (entrance line)" |
 | Far-away shoppers are missed | CIF sub-stream | Step 2.5; check the tile's resolution badge |
-| A poster or mannequin is counted | Static figure | Tick "Ignore figures that never move", or draw an "Ignore for analysis" mask |
+| A poster, mannequin or TV screen is counted as a person | The AI sees a person-shaped figure | In Camera setup click its box → "Not a person — ignore this spot", or draw a "🚫 Ignore area (no AI)"; keep "Ignore figures that never move" on (2.4, 2.8) |
 | Visitors counted twice | Same camera added twice | Resolve the duplicate banner (2.3) |
 | Sales figures show "—" | No till data | Step 2.10 |
 | No phone alerts | Push not configured, or quiet hours | Step 2.11, "Send test alert" |

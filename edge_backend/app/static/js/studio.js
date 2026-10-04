@@ -4,11 +4,17 @@
  * One camera at a time: its live MJPEG feed with the tracker's real boxes
  * (/stream?camera_id=..&overlay=1), the pipeline's telemetry for that camera,
  * snapshot / clip export, and the per-camera zone editor (tripwires,
- * restricted areas, checkout / queue areas, privacy masks and product shelves).
+ * restricted areas, checkout / queue areas, privacy masks, ignore areas and
+ * product shelves).
+ *
+ * Ignore areas are exclusion masks with mask_mode AI_IGNORE: the video is not
+ * changed, the AI drops detections inside them (feet inside, or at least
+ * ignore_box_fraction of the box). They have their own tool and list, and can
+ * be made in one step by clicking a live detected box ("Not a person").
  *
  * Deep links: ?camera_id= (alias ?camera=) picks the camera, ?tool=
- * tripwire|restricted|mask|product|checkout (+ ?kind=checkout|queue) opens
- * that tool, and ?from=checklist shows a way back to the setup checklist.
+ * tripwire|restricted|mask|ignore|product|checkout (+ ?kind=checkout|queue)
+ * opens that tool, and ?from=checklist shows a way back to the setup checklist.
  *
  * Zone coordinates are stored normalised (0..1) against the camera's own
  * frame. The feed is displayed with object-fit: contain, so a click has to
@@ -41,6 +47,12 @@ let savedZonesForCamera = { tripwires: [], intrusion_zones: [], exclusion_masks:
 // Tripwire / restricted area / queue area being edited in place: { kind: 'TRIPWIRE'|'INTRUSION'|'QUEUE', id }.
 let editingRule = null;
 let telemetryTimer = null;
+// Live detected boxes of the camera on screen (GET .../live-status `boxes`), refreshed about once a second.
+let liveBoxes = [];
+let liveBoxesCamera = null;
+let liveCache = null;          // { cameraId, at, data }: the newest live-status, shared with the telemetry panel
+let boxTimer = null;
+let selectedBox = null;        // { track_id, box } shown in the popover
 
 const MODE_STYLE = {
   TRIPWIRE: { stroke: '#00f0ff', fill: 'rgba(0, 240, 255, 0.2)', min: 2, max: 2, label: 'tripwire' },
@@ -48,16 +60,19 @@ const MODE_STYLE = {
   EXCLUSION: { stroke: '#a0aec0', fill: 'rgba(160, 174, 192, 0.35)', min: 3, max: Infinity, label: 'privacy mask' },
   PRODUCT_SHELF: { stroke: '#ffd700', fill: 'rgba(255, 215, 0, 0.22)', min: 3, max: Infinity, label: 'product shelf' },
   QUEUE: { stroke: '#c084fc', fill: 'rgba(192, 132, 252, 0.22)', min: 3, max: Infinity, label: 'checkout / queue area' },
+  IGNORE: { stroke: '#2dd4bf', fill: 'rgba(45, 212, 191, 0.22)', min: 3, max: Infinity, label: 'ignore area' },
 };
 
 // URL ?tool= value <-> draw mode, and the plain-language line under the tool buttons.
-const TOOL_MODES = { tripwire: 'TRIPWIRE', restricted: 'INTRUSION', mask: 'EXCLUSION', product: 'PRODUCT_SHELF', checkout: 'QUEUE' };
+const TOOL_MODES = { tripwire: 'TRIPWIRE', restricted: 'INTRUSION', mask: 'EXCLUSION', ignore: 'IGNORE', product: 'PRODUCT_SHELF', checkout: 'QUEUE' };
 const QUEUE_HELP = 'Draw around where customers stand at a till (Checkout lane) or wait in line (Queue line). The system times how long people stay there; it works without calibrating the camera.';
+const IGNORE_HELP = 'The AI does not look for people here. Use it for posters, mannequins, TV screens or a mirror. The video is not changed.';
 const TOOL_HELP = {
-  NONE: 'Choose a tool above to see what it does.',
+  NONE: 'Choose a tool above to see what it does. Is something that is not a person boxed on the picture? Click its box.',
   TRIPWIRE: 'Draw a line across a doorway; people crossing it are counted in or out.',
   INTRUSION: 'Draw around a staff-only area; people inside during its restricted hours raise an alert.',
-  EXCLUSION: 'Hide part of the picture (privacy) or tell the AI to ignore it.',
+  EXCLUSION: 'Hide part of the picture for privacy (blur, mosaic, blackout or a solid colour). People there are still counted. To stop the AI seeing a poster or mannequin, use Ignore area instead.',
+  IGNORE: IGNORE_HELP,
   PRODUCT_SHELF: 'Draw around a shelf to count hand reaches into it.',
   QUEUE: QUEUE_HELP,
 };
@@ -69,8 +84,29 @@ const MASK_MODES = {
   MOSAIC: { label: 'Mosaic', help: 'Pixelates this area in every live view, snapshot and clip. People here are still counted and analysed.' },
   BLACKOUT: { label: 'Blackout', help: 'Covers this area with solid black in every live view, snapshot and clip. People here are still counted and analysed.' },
   COLOR: { label: 'Solid colour', help: 'Covers this area with the chosen colour in every live view, snapshot and clip. People here are still counted and analysed.' },
-  AI_IGNORE: { label: 'Ignore for analysis', help: 'Video is left untouched, but people standing here are not analysed: no counts, visits, shelf or theft events.' },
 };
+// Masks with this mode are ignore areas: listed and edited in their own card, never as privacy masks.
+const IGNORE_MODE = 'AI_IGNORE';
+function isIgnoreMask(m) { return !!m && m.mask_mode === IGNORE_MODE; }
+// "How much of a person must be inside" -> ignore_box_fraction.
+const IGNORE_COVERAGE = [
+  { value: 0.6, label: 'Most of them (60%)' },
+  { value: 0.5, label: 'Half (50%)' },
+  { value: 0.1, label: 'Any part touching (10%)' },
+];
+const IGNORE_COVERAGE_DEFAULT = 0.6;
+function coverageLabel(v) {
+  if (!isNum(v)) return null;
+  const c = IGNORE_COVERAGE.find((o) => Math.abs(o.value - v) < 0.001);
+  return c ? c.label : `Custom (${Math.round(v * 100)}%)`;
+}
+/** Options for a saved area: a value the server does not report shows as a dash, never a guess. */
+function coverageOptions(v) {
+  let html = '';
+  if (!isNum(v)) html += `<option value="" selected disabled>${DASH} (not reported by this server)</option>`;
+  else if (!IGNORE_COVERAGE.some((o) => Math.abs(o.value - v) < 0.001)) html += `<option value="${v}" selected>${escapeHtml(coverageLabel(v))}</option>`;
+  return html + IGNORE_COVERAGE.map((o) => `<option value="${o.value}"${isNum(v) && Math.abs(o.value - v) < 0.001 ? ' selected' : ''}>${o.label}</option>`).join('');
+}
 
 function hexToBgr(hex) {
   const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex || '');
@@ -81,7 +117,7 @@ function bgrToHex(bgr) {
   return '#' + [bgr[2], bgr[1], bgr[0]].map((c) => Math.max(0, Math.min(255, c | 0)).toString(16).padStart(2, '0')).join('');
 }
 function maskSig(masks) {
-  return JSON.stringify(masks.map((m) => [m.id, m.name, m.mask_mode, m.mask_color_bgr, (m.points || []).length]));
+  return JSON.stringify(masks.map((m) => [m.id, m.name, m.mask_mode, m.mask_color_bgr, (m.points || []).length, m.enabled, m.ignore_box_fraction]));
 }
 function maskModeOptions(selected) {
   return Object.entries(MASK_MODES)
@@ -200,6 +236,8 @@ function resizeCanvas() {
   canvas.width = Math.max(1, Math.round(box.w));
   canvas.height = Math.max(1, Math.round(box.h));
   drawOverlay();
+  const pop = el('boxPopover');
+  if (pop && !pop.hidden && selectedBox) placeBoxPopover(pop, selectedBox);
 }
 window.addEventListener('resize', resizeCanvas);
 // Overlay colours are drawn onto the video, so they stay the same in the light
@@ -344,13 +382,35 @@ function setViewportEmpty(message) {
   e.style.display = message ? 'flex' : 'none';
 }
 
+/** Pointer position normalised 0..1 to the camera frame (the canvas covers the letterboxed content box). */
+function eventToNorm(e) {
+  const rect = canvas.getBoundingClientRect();
+  if (!rect.width || !rect.height) return null;
+  return {
+    x: Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width)),
+    y: Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height)),
+  };
+}
+
 if (canvas) {
   canvas.addEventListener('click', (e) => {
-    if (currentMode === 'NONE') { setDrawStatus('Pick a tool first (tripwire, restricted area, checkout / queue area, privacy mask or product shelf).', true); return; }
+    if (currentMode === 'NONE') {
+      const p = eventToNorm(e);
+      const hit = p ? liveBoxAt(p.x, p.y) : null;
+      if (hit) { openBoxPopover(hit); return; }
+      closeBoxPopover();
+      setDrawStatus('Pick a tool first (tripwire, restricted area, checkout / queue area, privacy mask, ignore area or product shelf), or click a detected box.', true);
+      return;
+    }
     if (!activeCameraId) { setDrawStatus('Select a camera first.', true); return; }
-    const rect = canvas.getBoundingClientRect();
-    const nx = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
-    const ny = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
+    if (currentMode === 'IGNORE' && editingRule && editingRule.kind === 'IGNORE') {
+      setRuleStatus('ignoreFormStatus', 'The shape of a saved ignore area cannot be moved. Change its name or coverage here, or delete it and draw a new one.', true);
+      return;
+    }
+    const p = eventToNorm(e);
+    if (!p) return;
+    const nx = p.x;
+    const ny = p.y;
     const style = MODE_STYLE[currentMode];
     if (drawnPoints.length >= style.max) drawnPoints = [];
     drawnPoints.push({ x: Number(nx.toFixed(4)), y: Number(ny.toFixed(4)) });
@@ -358,6 +418,12 @@ if (canvas) {
     const need = Math.max(0, style.min - drawnPoints.length);
     setDrawStatus(`${drawnPoints.length} point(s) placed for the ${style.label}.` +
       (need ? ` ${need} more needed.` : ' Press Save to store it.'), false);
+  });
+  // Pointer over a detected box (no tool chosen): it can be clicked.
+  canvas.addEventListener('mousemove', (e) => {
+    if (currentMode !== 'NONE') { canvas.style.cursor = ''; return; }
+    const p = eventToNorm(e);
+    canvas.style.cursor = p && liveBoxAt(p.x, p.y) ? 'pointer' : '';
   });
 }
 
@@ -381,11 +447,13 @@ function drawOverlay() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
   // Saved zones for this camera, drawn faintly so the operator sees what exists.
-  savedZonesForCamera.exclusion_masks.forEach((z) => (z.mask_mode === 'AI_IGNORE'
-    ? drawPolyline(z.points || [], 'rgba(0,240,255,0.6)', 'rgba(0,240,255,0.08)', true, 1.5)
-    : drawPolyline(z.points || [], 'rgba(160,174,192,0.55)', 'rgba(160,174,192,0.15)', true, 1.5)));
+  savedZonesForCamera.exclusion_masks.forEach((z) => {
+    if (!isIgnoreMask(z)) drawPolyline(z.points || [], 'rgba(160,174,192,0.55)', 'rgba(160,174,192,0.15)', true, 1.5);
+  });
   savedZonesForCamera.products.forEach((z) => drawPolyline(z.points || [], 'rgba(255,215,0,0.55)', 'rgba(255,215,0,0.10)', true, 1.5));
   drawSavedRules();
+  drawIgnoreAreas();
+  drawLiveBoxes();
 
   if (!drawnPoints.length || currentMode === 'NONE') return;
   const style = MODE_STYLE[currentMode];
@@ -403,6 +471,7 @@ function drawOverlay() {
 
 // ------------------------------------------------------------ drawing modes
 function setDrawMode(mode) {
+  closeBoxPopover();
   currentMode = mode;
   drawnPoints = [];
   editingRule = null;
@@ -576,6 +645,7 @@ async function saveDrawnZone() {
   if (currentMode === 'NONE') { setDrawStatus('Pick a tool first.', true); return; }
   if (currentMode === 'TRIPWIRE' || currentMode === 'INTRUSION') { await saveRule(); return; }
   if (currentMode === 'QUEUE') { await saveQueueArea(); return; }
+  if (currentMode === 'IGNORE') { await saveIgnoreArea(); return; }
   const style = MODE_STYLE[currentMode];
   if (drawnPoints.length < style.min) {
     setDrawStatus(`A ${style.label} needs at least ${style.min} points; ${drawnPoints.length} placed.`, true);
@@ -631,7 +701,10 @@ async function confirmDeleteZone(kind, id, btn) {
     if (actions) actions.style.display = 'inline-flex';
   }
   if (kind === 'PRODUCT') await deleteProductZone(id);
-  else await deleteExclusion(id);
+  else if (kind === 'IGNORE') {
+    if (editingRule && editingRule.kind === 'IGNORE' && editingRule.id === id) clearCanvasPoints();
+    await deleteZoneAt(`/api/zones/exclusion/${encodeURIComponent(id)}`, 'Ignore area');
+  } else await deleteExclusion(id);
   if (btn) { btn.disabled = false; btn.textContent = 'Delete'; }
 }
 
@@ -662,7 +735,7 @@ async function updateMaskMode(id) {
     // The row already shows the saved state; keep the periodic refresh from
     // rebuilding it and wiping this confirmation.
     const container = el('exclusionListContainer');
-    if (container) container.dataset.sig = maskSig(savedZonesForCamera.exclusion_masks);
+    if (container) container.dataset.sig = maskSig(savedZonesForCamera.exclusion_masks.filter((m) => !isIgnoreMask(m)));
     drawOverlay();
   } catch (e) {
     note.textContent = `Mode not changed: ${e.message}`;
@@ -676,13 +749,33 @@ function deleteProductZone(id) { return deleteZoneAt(`/api/v1/analytics/products
 function askClearAllZones() { el('btnClearAllAsk').style.display = 'none'; el('clearAllConfirm').style.display = 'inline-flex'; }
 function cancelClearAllZones() { el('btnClearAllAsk').style.display = ''; el('clearAllConfirm').style.display = 'none'; }
 async function confirmClearAllZones() {
-  try {
-    // Only privacy masks: tripwires and restricted areas have their own delete buttons.
-    const res = await fetch('/api/zones/clear?kinds=exclusion_masks', { method: 'POST' });
-    showToast(res.ok ? 'All privacy masks cleared.' : `Clear failed (HTTP ${res.status})`);
-  } catch (e) { showToast(`Clear failed: ${e.message}`); }
+  // Only real privacy masks: ignore areas, tripwires and restricted areas have their own buttons.
+  showToast(await clearMaskKind('privacy', 'All privacy masks cleared.'));
   cancelClearAllZones();
   loadZonesList();
+}
+
+function askClearIgnoreAreas() { el('btnClearIgnoreAsk').style.display = 'none'; el('clearIgnoreConfirm').style.display = 'inline-flex'; }
+function cancelClearIgnoreAreas() { el('btnClearIgnoreAsk').style.display = ''; el('clearIgnoreConfirm').style.display = 'none'; }
+async function confirmClearIgnoreAreas() {
+  showToast(await clearMaskKind('ignore', 'All ignore areas cleared.'));
+  cancelClearIgnoreAreas();
+  loadZonesList();
+}
+
+/**
+ * POST /api/zones/clear?kinds=privacy|ignore. An older server that only knows
+ * kinds=exclusion_masks (which removes both) answers 422: nothing is cleared
+ * then, rather than deleting the other kind too.
+ */
+async function clearMaskKind(kind, okMsg) {
+  try {
+    const res = await fetch(`/api/zones/clear?kinds=${encodeURIComponent(kind)}`, { method: 'POST' });
+    if (res.ok) return okMsg;
+    if (res.status === 422) return 'Not cleared: this server cannot clear privacy masks and ignore areas separately yet. Delete them one by one.';
+    const data = await res.json().catch(() => ({}));
+    return `Clear failed: ${formatApiError(data, res.status)}`;
+  } catch (e) { return `Clear failed: ${e.message}`; }
 }
 
 async function loadZonesList() {
@@ -730,6 +823,8 @@ async function loadZonesList() {
 
   const data = await getJSON('/api/zones', null);
   const exclusion = ((data && data.exclusion_masks) || []).filter(forCam);
+  const privacyMasks = exclusion.filter((m) => !isIgnoreMask(m));
+  const ignoreAreas = exclusion.filter(isIgnoreMask);
   const tripwires = ((data && data.tripwires) || []).filter(forCam);
   const intrusion = ((data && data.intrusion_zones) || []).filter(forCam);
   const queueZones = ((data && data.queue_zones) || []).filter(forCam);
@@ -745,11 +840,11 @@ async function loadZonesList() {
   // The list refreshes every few seconds; do not rebuild it under an operator
   // who is changing a mask's mode, or when nothing changed.
   const exContainer = el('exclusionListContainer');
-  const exSig = maskSig(exclusion);
+  const exSig = maskSig(privacyMasks);
   const busy = exContainer && ((exContainer.contains(document.activeElement) && document.activeElement !== document.body)
     || !!exContainer.querySelector('.rule-confirm[style*="inline-flex"]'));
   if (exContainer && !busy && (data === null || exContainer.dataset.sig !== exSig)) {
-    fill('exclusionListContainer', exclusion, 'No privacy masks on this camera.', (ex) => {
+    fill('exclusionListContainer', privacyMasks, 'No privacy masks on this camera.', (ex) => {
       const mode = MASK_MODES[ex.mask_mode] ? ex.mask_mode : 'BLUR';
       const id = escapeHtml(ex.id);
       return `
@@ -771,6 +866,7 @@ async function loadZonesList() {
   }
 
   savedZonesForCamera = { tripwires, intrusion_zones: intrusion, exclusion_masks: exclusion, products, queue_zones: queueZones };
+  renderIgnoreList(data === null, ignoreAreas);
   drawOverlay();
 }
 
@@ -846,16 +942,19 @@ function drawSavedRules() {
 }
 
 function showRuleForm(mode) {
-  const tw = el('tripwireFormRow'), ra = el('restrictedFormRow'), qa = el('queueFormRow');
+  const tw = el('tripwireFormRow'), ra = el('restrictedFormRow'), qa = el('queueFormRow'), ig = el('ignoreFormRow');
   if (tw) tw.style.display = mode === 'TRIPWIRE' ? 'flex' : 'none';
   if (ra) ra.style.display = mode === 'INTRUSION' ? 'flex' : 'none';
   if (qa) qa.style.display = mode === 'QUEUE' ? 'flex' : 'none';
+  if (ig) ig.style.display = mode === 'IGNORE' ? 'flex' : 'none';
   if (mode === 'TRIPWIRE' && !editingRule) fillTripwireForm(null);
   if (mode === 'INTRUSION' && !editingRule) fillRestrictedForm(null);
   if (mode === 'QUEUE' && !editingRule) fillQueueForm(null);
+  if (mode === 'IGNORE' && !editingRule) fillIgnoreForm(null);
   setRuleStatus('tripwireFormStatus', '');
   setRuleStatus('restrictedFormStatus', '');
   setRuleStatus('queueFormStatus', '');
+  setRuleStatus('ignoreFormStatus', '');
 }
 
 function setRuleStatus(id, msg, isError) {
@@ -1257,6 +1356,402 @@ function renderQueueList(unavailable, items) {
     : '<div class="fp-empty">No checkout or queue areas on this camera. Draw one with the Checkout / queue area tool.</div>';
 }
 
+// ------------------------------------------------------------ ignore areas (mask_mode AI_IGNORE)
+// /api/zones/exclusion with mask_mode AI_IGNORE: {id, name, camera_id, points,
+// enabled, ignore_box_fraction}. The video is not changed; the AI drops a
+// detection whose feet are inside, or whose box is at least
+// ignore_box_fraction inside. Shape changes need a new area (the PATCH takes
+// name, coverage and enabled only).
+
+// Inline result shown on a row after a change; survives the list rebuild briefly.
+let ignoreRowNote = null;
+
+function ignoreAreasForCamera() { return (savedZonesForCamera.exclusion_masks || []).filter(isIgnoreMask); }
+
+function drawIgnoreAreas() {
+  ignoreAreasForCamera().forEach((z) => {
+    const editing = editingRule && editingRule.kind === 'IGNORE' && editingRule.id === z.id;
+    const on = z.enabled !== false;
+    ctx.save();
+    ctx.setLineDash([6, 4]);
+    drawPolyline(z.points || [], editing ? '#ffffff' : (on ? 'rgba(45,212,191,0.9)' : 'rgba(45,212,191,0.4)'),
+      'rgba(45,212,191,0.10)', true, editing ? 3 : 1.8);
+    ctx.restore();
+    const p = (z.points || [])[0];
+    if (p) drawLabel(`🚫 ${z.name || 'Ignore area'} · no AI${on ? '' : ' (off)'}`, p.x * canvas.width + 4, p.y * canvas.height + 14, '#5eead4');
+  });
+}
+
+function fillIgnoreForm(area) {
+  el('ignoreFormTitle').textContent = area ? `Editing ignore area: ${area.name || area.id}` : 'New ignore area';
+  el('igName').value = area ? (area.name || '') : '';
+  const sel = el('igCoverage');
+  const v = area ? area.ignore_box_fraction : IGNORE_COVERAGE_DEFAULT;
+  sel.innerHTML = area ? coverageOptions(v) : coverageOptions(IGNORE_COVERAGE_DEFAULT);
+  const btn = el('btnSaveIgnore');
+  btn.textContent = area ? '💾 Save changes' : '💾 Save ignore area';
+  btn.dataset.label = btn.textContent;
+}
+
+function readCoverage(select) {
+  const v = parseFloat(select && select.value);
+  return Number.isFinite(v) && v >= 0.1 && v <= 1 ? v : null;
+}
+
+async function saveIgnoreArea() {
+  const statusId = 'ignoreFormStatus';
+  const editing = editingRule && editingRule.kind === 'IGNORE' ? editingRule : null;
+  const n = drawnPoints.length;
+  if (!editing && n < 3) {
+    setRuleStatus(statusId, `Click at least three points on the picture around the poster, mannequin or screen first (${n} placed).`, true);
+    return;
+  }
+  const name = el('igName').value.trim() || el('zoneNameInput').value.trim() || 'Ignore area';
+  const fraction = readCoverage(el('igCoverage'));
+  const body = { name };
+  if (fraction !== null) body.ignore_box_fraction = fraction;
+  const btn = el('btnSaveIgnore');
+  const idle = btn.dataset.label || btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  setRuleStatus(statusId, 'Saving…');
+  try {
+    let data;
+    if (editing) {
+      data = await sendRule('PATCH', `/api/zones/exclusion/${encodeURIComponent(editing.id)}`, body);
+    } else {
+      Object.assign(body, { camera_id: activeCameraId, points: drawnPoints, mask_mode: IGNORE_MODE, enabled: true });
+      data = await sendRule('POST', '/api/zones/exclusion', body);
+    }
+    const saved = (data && data.exclusion_mask) || body;
+    const reported = isNum(saved.ignore_box_fraction);
+    showToast(`Saved ignore area: ${saved.name}`);
+    el('zoneNameInput').value = '';
+    clearCanvasPoints();
+    announceSaved(reported
+      ? `Saved ignore area "${saved.name}". The AI no longer looks for people there.`
+      : `Saved ignore area "${saved.name}". This server does not report the coverage setting: it ignores people whose feet are inside.`);
+    await loadZonesList();
+  } catch (err) {
+    setRuleStatus(statusId, `Not saved: ${err.message}`, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = idle;
+  }
+}
+
+function editIgnoreArea(id) {
+  const area = ignoreAreasForCamera().find((z) => z.id === id);
+  if (!area) { showToast('That ignore area no longer exists.'); loadZonesList(); return; }
+  setDrawMode('IGNORE');
+  editingRule = { kind: 'IGNORE', id };
+  fillIgnoreForm(area);
+  el('zoneNameInput').value = '';
+  const label = el('drawModeLabel');
+  if (label) label.textContent = 'Editing: ignore area';
+  setDrawStatus(`Editing "${area.name || id}". Change its name or how much of a person must be inside, then press Save.`, false);
+  drawOverlay();
+  const form = el('ignoreFormRow');
+  if (form && form.scrollIntoView) form.scrollIntoView({ block: 'nearest' });
+}
+
+/** PATCH one ignore area from its row (coverage or enabled); the result is shown on the row. */
+async function patchIgnoreArea(id, changes, okMsg) {
+  const area = ignoreAreasForCamera().find((z) => z.id === id);
+  if (!area) { showToast('That ignore area no longer exists.'); loadZonesList(); return; }
+  try {
+    const data = await sendRule('PATCH', `/api/zones/exclusion/${encodeURIComponent(id)}`, changes);
+    const saved = (data && data.exclusion_mask) || {};
+    Object.assign(area, saved);
+    const lost = 'ignore_box_fraction' in changes && !isNum(saved.ignore_box_fraction);
+    ignoreRowNote = { id, msg: lost ? 'Not changed: this server does not support the coverage setting yet.' : okMsg, err: lost, until: Date.now() + 8000 };
+  } catch (e) {
+    ignoreRowNote = { id, msg: `Not changed: ${e.message}`, err: true, until: Date.now() + 8000 };
+  }
+  const c = el('ignoreListContainer');
+  if (c) c.dataset.sig = '';
+  if (document.activeElement && c && c.contains(document.activeElement)) document.activeElement.blur();
+  renderIgnoreList(false, ignoreAreasForCamera());
+  drawOverlay();
+}
+
+function updateIgnoreCoverage(id, select) {
+  const v = readCoverage(select);
+  if (v === null) return;
+  select.disabled = true;
+  patchIgnoreArea(id, { ignore_box_fraction: v }, `Saved: ignored when ${coverageLabel(v).toLowerCase()} of a person is inside.`);
+}
+
+function toggleIgnoreArea(id, box) {
+  const enabled = !!box.checked;
+  box.disabled = true;
+  patchIgnoreArea(id, { enabled }, enabled ? 'Turned on: the AI ignores people here.' : 'Turned off: people here are detected again.');
+}
+
+function ignoreRow(z) {
+  const id = escapeHtml(z.id);
+  const on = z.enabled !== false;
+  const note = ignoreRowNote && ignoreRowNote.id === z.id && Date.now() < ignoreRowNote.until ? ignoreRowNote : null;
+  const sub = `${(z.points || []).length} points · video not changed${on ? '' : ' · off'}`;
+  return `
+    <div class="zone-item ig-row${on ? '' : ' ig-row-off'}" data-ignore-id="${id}" data-enabled="${on}">
+      <div class="zone-info">
+        <span class="zone-name">🚫 ${escapeHtml(z.name || z.id)}${on ? '' : ' <span class="badge">off</span>'}</span>
+        <span class="zone-sub">${sub}</span>
+      </div>
+      <div class="ig-row-controls">
+        <label class="ig-coverage-label" for="igCov_${id}">Person inside</label>
+        <select id="igCov_${id}" class="form-select ig-coverage-select" title="How much of a person must be inside" onchange="updateIgnoreCoverage('${id}', this)">${coverageOptions(z.ignore_box_fraction)}</select>
+        <label class="checkbox-label ig-enabled" for="igOn_${id}"><input type="checkbox" id="igOn_${id}" ${on ? 'checked' : ''} onchange="toggleIgnoreArea('${id}', this)" /> Enabled</label>
+      </div>
+      <span class="rule-actions">
+        <button type="button" class="btn btn-sm rule-edit" onclick="editIgnoreArea('${id}')" title="Edit name or coverage">✎ Edit</button>
+        <button type="button" class="btn btn-danger btn-sm rule-delete" onclick="askDeleteRule(this)" title="Delete">🗑️</button>
+      </span>${deleteConfirmHtml('IGNORE', id)}
+      ${note ? `<div class="ig-row-status form-status${note.err ? ' form-status-error' : ''}" aria-live="polite">${escapeHtml(note.msg)}</div>` : ''}
+    </div>`;
+}
+
+function renderIgnoreList(unavailable, items) {
+  const c = el('ignoreListContainer');
+  if (!c) return;
+  // Do not rebuild under an open delete confirmation, a control in use, or when nothing changed.
+  if (c.querySelector('.rule-confirm[style*="inline-flex"]')) return;
+  if (c.contains(document.activeElement) && document.activeElement !== document.body) return;
+  const note = ignoreRowNote && Date.now() < ignoreRowNote.until ? ignoreRowNote : null;
+  const sig = unavailable ? 'x' : JSON.stringify([maskSig(items), note]);
+  if (c.dataset.sig === sig) return;
+  c.dataset.sig = sig;
+  if (unavailable) { c.innerHTML = '<div class="fp-empty">Zones unavailable: the zone service did not respond.</div>'; return; }
+  c.innerHTML = items.length ? items.map(ignoreRow).join('')
+    : '<div class="fp-empty">No ignore areas. Draw one around a poster, mannequin or screen that the AI mistakes for a person.</div>';
+}
+
+// ------------------------------------------------------------ live boxes: "Not a person"
+// GET /api/v1/cameras/{id}/live-status `boxes`: [{track_id, box:[x1,y1,x2,y2]
+// normalised 0..1 to the analysed frame, motion_state, confidence}]. The canvas
+// covers the letterboxed picture (contentBox), so the same normalised box fits
+// the store-network MJPEG picture and the direct video alike.
+
+const BOX_STYLE = {
+  moving: { stroke: 'rgba(0,255,157,0.9)', dash: [], label: null, text: '#7dffc8' },
+  pending: { stroke: 'rgba(255,170,0,0.95)', dash: [5, 4], label: 'confirming', text: '#ffcc66' },
+  static: { stroke: 'rgba(170,180,195,0.95)', dash: [3, 3], label: 'static', text: '#d0d7e2', fill: 'rgba(160,174,192,0.14)' },
+};
+const BOX_STATE_TEXT = {
+  moving: 'moving person',
+  pending: 'new detection, still being confirmed (first seconds)',
+  static: 'static figure: not moving, already left out of counts',
+};
+
+/** One box from the server, as {track_id, x1, y1, x2, y2, state, confidence}, or null. */
+function normaliseLiveBox(b, data) {
+  if (!b) return null;
+  const raw = Array.isArray(b.box) ? b.box : (Array.isArray(b.bbox) ? b.bbox : null);
+  if (!raw || raw.length < 4 || !raw.every(isNum)) return null;
+  let [x1, y1, x2, y2] = raw;
+  // Tolerate pixel coordinates from a server that does not normalise.
+  if (Math.max(x1, y1, x2, y2) > 1.5) {
+    const fw = (data && data.frame_width) || frameSize().w;
+    const fh = (data && data.frame_height) || frameSize().h;
+    if (!fw || !fh) return null;
+    x1 /= fw; x2 /= fw; y1 /= fh; y2 /= fh;
+  }
+  const c = (v) => Math.min(1, Math.max(0, v));
+  const lx = c(Math.min(x1, x2)), rx = c(Math.max(x1, x2)), ty = c(Math.min(y1, y2)), by = c(Math.max(y1, y2));
+  if (rx - lx < 0.002 || by - ty < 0.002) return null;
+  x1 = lx; x2 = rx; y1 = ty; y2 = by;
+  const state = BOX_STYLE[b.motion_state] ? b.motion_state : 'moving';
+  return { track_id: b.track_id, x1, y1, x2, y2, state, confidence: isNum(b.confidence) ? b.confidence : null };
+}
+
+function setLiveBoxes(cameraId, data) {
+  const fresh = !!(data && data.has_frame) && !(isNum(data.seconds_since_frame) && data.seconds_since_frame > 5);
+  const list = fresh && Array.isArray(data.boxes) ? data.boxes.map((b) => normaliseLiveBox(b, data)).filter(Boolean) : [];
+  const sig = JSON.stringify(list);
+  if (liveBoxesCamera === cameraId && setLiveBoxes._sig === sig) return;
+  setLiveBoxes._sig = sig;
+  liveBoxes = list;
+  liveBoxesCamera = cameraId;
+  drawOverlay();
+}
+
+let boxPollBusy = false;
+async function pollLiveBoxes() {
+  if (document.hidden || !activeCameraId || boxPollBusy) return;
+  const cam = activeCameraId;
+  boxPollBusy = true;
+  try {
+    const data = await getJSON(`/api/v1/cameras/${encodeURIComponent(cam)}/live-status`, null);
+    if (cam !== activeCameraId) return;
+    liveCache = { cameraId: cam, at: Date.now(), data };
+    setLiveBoxes(cam, data);
+  } finally {
+    boxPollBusy = false;
+  }
+}
+
+function resetLiveBoxes() {
+  liveBoxes = [];
+  liveBoxesCamera = null;
+  setLiveBoxes._sig = '';
+  liveCache = null;
+  closeBoxPopover();
+}
+
+function drawLiveBoxes() {
+  if (liveBoxesCamera !== activeCameraId) return;
+  const W = canvas.width, H = canvas.height;
+  const sel = selectedBox;
+  liveBoxes.forEach((b) => {
+    const st = BOX_STYLE[b.state];
+    const x = b.x1 * W, y = b.y1 * H, w = (b.x2 - b.x1) * W, h = (b.y2 - b.y1) * H;
+    ctx.save();
+    ctx.setLineDash(st.dash);
+    if (st.fill) { ctx.fillStyle = st.fill; ctx.fillRect(x, y, w, h); }
+    ctx.strokeStyle = st.stroke;
+    ctx.lineWidth = 1.6;
+    ctx.strokeRect(x, y, w, h);
+    ctx.restore();
+    if (st.label) drawLabel(st.label, x + 3, Math.max(13, y + 14), st.text);
+  });
+  if (sel) {
+    // The clicked box stays outlined even after its track moves on or ends.
+    ctx.save();
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2.6;
+    ctx.strokeRect(sel.x1 * W, sel.y1 * H, (sel.x2 - sel.x1) * W, (sel.y2 - sel.y1) * H);
+    ctx.restore();
+  }
+}
+
+/** The smallest live box under a normalised point (nested boxes: the inner one). */
+function liveBoxAt(x, y) {
+  if (liveBoxesCamera !== activeCameraId) return null;
+  let best = null;
+  liveBoxes.forEach((b) => {
+    if (x < b.x1 || x > b.x2 || y < b.y1 || y > b.y2) return;
+    const a = (b.x2 - b.x1) * (b.y2 - b.y1);
+    if (!best || a < best.a) best = { a, b };
+  });
+  return best ? best.b : null;
+}
+
+function placeBoxPopover(pop, b) {
+  const box = contentBox();
+  const W = viewport.clientWidth, H = viewport.clientHeight;
+  const pw = pop.offsetWidth || 260, ph = pop.offsetHeight || 90;
+  const left = Math.max(8, Math.min(W - pw - 8, box.ox + b.x1 * box.w));
+  const below = box.oy + b.y2 * box.h + 6;
+  const above = box.oy + b.y1 * box.h - ph - 6;
+  const top = below + ph <= H - 4 ? below : (above >= 4 ? above : Math.max(4, Math.min(H - ph - 4, box.oy + b.y1 * box.h)));
+  pop.style.left = `${left}px`;
+  pop.style.top = `${top}px`;
+}
+
+function openBoxPopover(b) {
+  const pop = el('boxPopover');
+  if (!pop) return;
+  selectedBox = { ...b };
+  const conf = isNum(b.confidence) ? ` · ${Math.round(b.confidence * 100)}% sure` : '';
+  pop.innerHTML = `
+    <div class="box-popover-title">Detected: ${escapeHtml(BOX_STATE_TEXT[b.state] || 'person')}${conf}</div>
+    <div class="box-popover-actions">
+      <button type="button" class="btn btn-warning btn-sm" id="btnNotPerson" onclick="ignoreSelectedBox(this)">Not a person — ignore this spot</button>
+      <button type="button" class="btn btn-sm" onclick="closeBoxPopover()">Cancel</button>
+    </div>
+    <div class="box-popover-status form-status" id="boxPopoverStatus" aria-live="polite"></div>`;
+  pop.hidden = false;
+  placeBoxPopover(pop, selectedBox);
+  drawOverlay();
+  const btn = el('btnNotPerson');
+  if (btn) btn.focus();
+}
+
+function closeBoxPopover() {
+  const pop = el('boxPopover');
+  clearTimeout(closeBoxPopover._timer);
+  if (pop && !pop.hidden) { pop.hidden = true; pop.innerHTML = ''; }
+  if (selectedBox) { selectedBox = null; if (ctx) drawOverlay(); }
+}
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && selectedBox) closeBoxPopover(); });
+
+function setBoxPopoverStatus(msg, isError) {
+  const s = el('boxPopoverStatus');
+  if (!s) return;
+  s.textContent = msg;
+  s.classList.toggle('form-status-error', !!isError);
+}
+
+async function ignoreSelectedBox(btn) {
+  const b = selectedBox;
+  if (!b || !activeCameraId) return;
+  const cam = activeCameraId;
+  if (btn) { btn.disabled = true; btn.textContent = 'Adding…'; }
+  setBoxPopoverStatus('');
+  const t = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  let res;
+  let data = {};
+  try {
+    res = await fetch('/api/zones/exclusion/from-box', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ camera_id: cam, box: [b.x1, b.y1, b.x2, b.y2], pad: 0.1, name: `Not a person ${t}` }),
+    });
+    data = await res.json().catch(() => ({}));
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Not a person — ignore this spot'; }
+    setBoxPopoverStatus(`Not added: ${e.message}`, true);
+    return;
+  }
+  if (!res.ok) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Not a person — ignore this spot'; }
+    const msg = (res.status === 404 || res.status === 405)
+      ? 'This server cannot make an ignore area from a box yet. Draw one with the Ignore area tool.'
+      : (res.status === 403 && typeof data.detail === 'string' ? data.detail : formatApiError(data, res.status));
+    setBoxPopoverStatus(`Not added: ${msg}`, true);
+    return;
+  }
+  const saved = data.exclusion_mask || data;
+  const newId = saved && saved.id;
+  const pop = el('boxPopover');
+  if (pop && selectedBox === b) {
+    pop.innerHTML = `
+      <div class="box-popover-msg">Ignore area added. People are no longer detected there.</div>
+      <div class="box-popover-actions">
+        ${newId ? `<button type="button" class="btn btn-sm" id="btnUndoBoxIgnore" onclick="undoBoxIgnore('${escapeHtml(newId)}', this)">Undo</button>` : ''}
+        <button type="button" class="btn btn-sm" onclick="closeBoxPopover()">Close</button>
+      </div>
+      <div class="box-popover-status form-status" id="boxPopoverStatus" aria-live="polite"></div>`;
+    placeBoxPopover(pop, b);
+  }
+  showToast('Ignore area added.');
+  await loadZonesList();
+}
+
+async function undoBoxIgnore(id, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Undoing…'; }
+  try {
+    const res = await fetch(`/api/zones/exclusion/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (!res.ok && res.status !== 404) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(formatApiError(data, res.status));
+    }
+    const pop = el('boxPopover');
+    if (pop && !pop.hidden) {
+      pop.innerHTML = `
+        <div class="box-popover-msg">Undone: the ignore area was removed. People there are detected again.</div>
+        <div class="box-popover-actions"><button type="button" class="btn btn-sm" onclick="closeBoxPopover()">Close</button></div>`;
+      clearTimeout(closeBoxPopover._timer);
+      closeBoxPopover._timer = setTimeout(closeBoxPopover, 5000);
+    }
+    showToast('Ignore area removed.');
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Undo'; }
+    setBoxPopoverStatus(`Not undone: ${e.message}`, true);
+  }
+  await loadZonesList();
+}
+
 // ------------------------------------------------------------ deep links (?tool=&kind=)
 let deepLinkApplied = false;
 function applyDeepLinkTool() {
@@ -1293,10 +1788,11 @@ function selectCamera(cameraId) {
     history.replaceState(null, '', url.toString());
   }
   syncChecklistLink();
+  resetLiveBoxes();
   startFeed(cameraId);
   drawnPoints = [];
   loadZonesList();
-  pollTelemetry();
+  pollLiveBoxes().then(() => pollTelemetry());
 }
 
 async function loadStudioSources() {
@@ -1341,6 +1837,7 @@ async function loadStudioSources() {
 }
 
 // ------------------------------------------------------------ telemetry
+const STATIC_TELEMETRY = ['tPending', 'tStatic', 'tStaticMemory', 'tIgnoredDet'];
 function setTelemetry(id, value, suffix = '') {
   const node = el(id);
   if (!node) return;
@@ -1363,19 +1860,23 @@ async function pollTelemetry() {
   }
 
   if (!activeCameraId) {
-    ['tStatus', 'tFps', 'tDetections', 'tTracks', 'tFrames', 'tFrameSize', 'tAge', 'tCalibrated', 'tError'].forEach((id) => setTelemetry(id, null));
+    ['tStatus', 'tFps', 'tDetections', 'tTracks', 'tFrames', 'tFrameSize', 'tAge', 'tCalibrated', 'tError', ...STATIC_TELEMETRY].forEach((id) => setTelemetry(id, null));
     setTelemetry('fpsBadge', null, ' FPS');
     return;
   }
 
   // Per-camera endpoint (Agent D); until it exists, the same entry is taken
   // from the pipeline status list so nothing here is ever invented.
-  let live = await getJSON(`/api/v1/cameras/${encodeURIComponent(activeCameraId)}/live-status`, null);
+  // The box poll fetches the same entry about once a second: reuse it while fresh.
+  const cam = activeCameraId;
+  let live = liveCache && liveCache.cameraId === cam && Date.now() - liveCache.at < 1500 ? liveCache.data : null;
+  if (!live) live = await getJSON(`/api/v1/cameras/${encodeURIComponent(cam)}/live-status`, null);
+  if (cam !== activeCameraId) return;
   if (!live && detector) live = (detector.cameras || []).find((c) => c.camera_id === activeCameraId) || null;
 
   if (!live) {
     setTelemetry('tStatus', 'NOT RUNNING');
-    ['tFps', 'tDetections', 'tTracks', 'tFrames', 'tFrameSize', 'tAge', 'tCalibrated'].forEach((id) => setTelemetry(id, null));
+    ['tFps', 'tDetections', 'tTracks', 'tFrames', 'tFrameSize', 'tAge', 'tCalibrated', ...STATIC_TELEMETRY].forEach((id) => setTelemetry(id, null));
     setTelemetry('tError', 'No pipeline worker for this camera.');
     setTelemetry('fpsBadge', null, ' FPS');
     return;
@@ -1387,6 +1888,11 @@ async function pollTelemetry() {
   const analysed = !!live.has_frame;
   setTelemetry('tDetections', analysed && isNum(live.detections_last_frame) ? live.detections_last_frame : null);
   setTelemetry('tTracks', analysed && isNum(live.live_tracks) ? live.live_tracks : null);
+  // Static-figure / ignore-area counters; an older server without them shows a dash.
+  setTelemetry('tPending', analysed && isNum(live.pending_tracks) ? live.pending_tracks : null);
+  setTelemetry('tStatic', analysed && isNum(live.static_tracks) ? live.static_tracks : null);
+  setTelemetry('tStaticMemory', isNum(live.static_memory_count) ? live.static_memory_count : null);
+  setTelemetry('tIgnoredDet', analysed && isNum(live.ignored_detections_last) ? live.ignored_detections_last : null);
   setTelemetry('tFrames', isNum(live.frames_read) ? live.frames_read.toLocaleString() : null);
   const fw = live.frame_width || (analysed && frameSize().w) || null;
   const fh = live.frame_height || (analysed && frameSize().h) || null;
@@ -1511,7 +2017,7 @@ async function runStudioSelfTest() {
   } else {
     check('empty viewport state shown', el('viewportEmpty').style.display !== 'none');
   }
-  check('zone lists rendered', ['exclusionListContainer', 'productShelfListContainer', 'tripwiresListContainer', 'intrusionListContainer', 'queueAreasListContainer'].every((id) => el(id).textContent.trim() && el(id).textContent.trim() !== 'Loading…'));
+  check('zone lists rendered', ['exclusionListContainer', 'ignoreListContainer', 'productShelfListContainer', 'tripwiresListContainer', 'intrusionListContainer', 'queueAreasListContainer'].every((id) => el(id).textContent.trim() && el(id).textContent.trim() !== 'Loading…'));
   check('queue tool button exists', !!el('btnToolQueue') && el('btnToolQueue').getBoundingClientRect().height >= 32);
   check('queue form fields exist', !!el('queueFormRow') && !!el('qaName') && !!el('btnSaveQueue')
     && !!el('qaKind') && ['checkout', 'queue'].every((v) => [...el('qaKind').options].some((o) => o.value === v)));
@@ -1522,6 +2028,17 @@ async function runStudioSelfTest() {
   askClearAllZones();
   check('inline clear-all confirm shown', el('clearAllConfirm').style.display !== 'none');
   cancelClearAllZones();
+  check('ignore tool button exists', !!el('btnToolIgnore') && el('btnToolIgnore').getBoundingClientRect().height >= 32);
+  check('privacy mask modes exclude ignore', ![...el('maskModeSelect').options].some((o) => o.value === IGNORE_MODE));
+  check('privacy list has no ignore areas', !document.querySelector('#exclusionListContainer .ig-row'));
+  setDrawMode('IGNORE');
+  check('ignore form shown by the tool', el('ignoreFormRow').style.display === 'flex' && el('toolHelp').textContent === IGNORE_HELP
+    && el('igCoverage').value === String(IGNORE_COVERAGE_DEFAULT));
+  if (prevMode === 'NONE') clearCanvasPoints(); else setDrawMode(prevMode);
+  askClearIgnoreAreas();
+  check('inline ignore clear-all confirm shown', el('clearIgnoreConfirm').style.display !== 'none');
+  cancelClearIgnoreAreas();
+  check('telemetry static rows present', STATIC_TELEMETRY.every((id) => !!el(id)));
   await new Promise((r) => setTimeout(r, 500));
   check('no page errors', errors.length === 0, errors.join(' | '));
   const failed = results.filter((x) => x.startsWith('FAIL')).length;
@@ -1537,6 +2054,7 @@ function initStudio() {
   populateZoneNames();
   loadStudioSources();
   telemetryTimer = setInterval(pollTelemetry, 2000);
+  boxTimer = setInterval(pollLiveBoxes, 1000);
   setInterval(loadZonesList, 6000);
 }
 

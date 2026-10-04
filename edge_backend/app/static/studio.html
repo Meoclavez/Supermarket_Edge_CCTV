@@ -8,10 +8,11 @@
   <title>Edge AI CCTV - Camera setup</title>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;800&family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap" rel="stylesheet">
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/static/css/style.css?v=2.5.0">
-  <link rel="stylesheet" href="/static/css/studio_tools.css?v=2.5.0">
-  <link rel="stylesheet" href="/static/css/live_video.css?v=2.5.0">
-  <script src="/static/js/auth.js?v=2.5.0"></script>
+  <link rel="stylesheet" href="/static/css/style.css?v=2.6.0">
+  <link rel="stylesheet" href="/static/css/studio_tools.css?v=2.6.0">
+  <link rel="stylesheet" href="/static/css/live_video.css?v=2.6.0">
+  <link rel="stylesheet" href="/static/css/ignore_areas.css?v=2.6.0">
+  <script src="/static/js/auth.js?v=2.6.0"></script>
 </head>
 <body>
   <div class="app-container">
@@ -19,7 +20,7 @@
       <div class="logo-group studio-logo-group">
         <div class="studio-title-block">
           <div class="logo-title">CAMERA SETUP</div>
-          <div class="logo-sub">Draw counting lines, staff-only areas, checkout and queue areas, privacy masks and product shelves on one camera</div>
+          <div class="logo-sub">Draw counting lines, staff-only areas, checkout and queue areas, privacy masks, ignore areas and product shelves on one camera</div>
         </div>
         <nav class="studio-nav" aria-label="Back to the dashboard">
           <a href="/dashboard#cameras" id="backToChecklist" class="btn btn-warning btn-sm studio-back-checklist" style="display:none;">← Back to setup checklist</a>
@@ -51,6 +52,8 @@
           <img id="streamImg" alt="Live camera feed with detector overlay" />
           <video id="streamVideo" class="studio-video" muted playsinline autoplay disablepictureinpicture aria-label="Live camera video (direct connection)"></video>
           <canvas id="interactiveCanvas"></canvas>
+          <!-- Opened by clicking a detected box: turn it into an ignore area. -->
+          <div id="boxPopover" class="box-popover" role="dialog" aria-label="Detected box" hidden></div>
           <div id="viewportEmpty" class="viewport-empty" style="display:none;"></div>
         </div>
 
@@ -67,6 +70,7 @@
           </div>
           <div class="studio-tool-row">
             <button type="button" class="btn btn-primary btn-sm studio-tool-btn" id="btnToolMask" data-tool="mask" aria-pressed="false" style="flex: 1;" onclick="setDrawMode('EXCLUSION')">🌫️ Privacy mask (3+ pts)</button>
+            <button type="button" class="btn btn-sm studio-tool-btn ig-tool-btn" id="btnToolIgnore" data-tool="ignore" aria-pressed="false" style="flex: 1.2;" onclick="setDrawMode('IGNORE')" title="Draw 3 or more points around something the AI mistakes for a person">🚫 Ignore area (no AI)</button>
             <button type="button" class="btn btn-warning btn-sm studio-tool-btn" id="btnToolProduct" data-tool="product" aria-pressed="false" style="flex: 1.2;" onclick="setDrawMode('PRODUCT_SHELF')">🛒 Product shelf (3+ pts)</button>
             <button type="button" class="btn btn-success btn-sm" id="btnSaveDrawn" style="flex: 0.8;" onclick="saveDrawnZone()">💾 Save</button>
             <button type="button" class="btn btn-sm" style="flex: 0.6;" onclick="undoPoint()">Undo</button>
@@ -82,12 +86,36 @@
                 <option value="MOSAIC">Mosaic (pixelate)</option>
                 <option value="BLACKOUT">Blackout</option>
                 <option value="COLOR">Solid colour</option>
-                <option value="AI_IGNORE">Ignore for analysis (video unchanged)</option>
               </select>
               <label for="maskColorInput" id="maskColorLabel" style="display: none; font-size: 11px;">Colour</label>
               <input type="color" id="maskColorInput" name="maskColor" value="#000000" style="display: none;" />
             </div>
             <div id="maskModeHelp" class="form-status" aria-live="polite"></div>
+          </div>
+          <!-- Ignore area settings (mask_mode AI_IGNORE): shown while drawing or editing one. -->
+          <div id="ignoreFormRow" class="rule-form ig-form" style="display: none;">
+            <div class="rule-form-title" id="ignoreFormTitle">New ignore area</div>
+            <div class="ig-explain" id="ignoreExplain">The AI does not look for people here. Use it for posters, mannequins, TV screens or a mirror. The video is not changed.</div>
+            <div class="rule-form-grid">
+              <div class="form-group">
+                <label for="igName">Name</label>
+                <input type="text" id="igName" name="igName" class="form-input" maxlength="80" placeholder="e.g. Poster by the door" />
+              </div>
+              <div class="form-group">
+                <label for="igCoverage">How much of a person must be inside</label>
+                <select id="igCoverage" name="igCoverage" class="form-select" aria-describedby="igCoverageHint">
+                  <option value="0.6" selected>Most of them (60%)</option>
+                  <option value="0.5">Half (50%)</option>
+                  <option value="0.1">Any part touching (10%)</option>
+                </select>
+              </div>
+            </div>
+            <span id="igCoverageHint" class="zone-sub">A detection is ignored when its feet are inside the area, or when at least this much of its box is inside.</span>
+            <div class="rule-form-actions">
+              <button type="button" class="btn btn-success btn-sm" id="btnSaveIgnore" onclick="saveDrawnZone()">💾 Save ignore area</button>
+              <button type="button" class="btn btn-sm" id="btnCancelIgnore" onclick="clearCanvasPoints()">Cancel</button>
+            </div>
+            <div id="ignoreFormStatus" class="form-status" aria-live="polite"></div>
           </div>
           <!-- Tripwire settings: shown while drawing or editing a tripwire. -->
           <div id="tripwireFormRow" class="rule-form" style="display: none;">
@@ -211,6 +239,10 @@
             <div class="telemetry-row"><span class="telemetry-label">Capture FPS</span><span class="telemetry-val" id="tFps">&mdash;</span></div>
             <div class="telemetry-row"><span class="telemetry-label">Detections (last frame)</span><span class="telemetry-val" id="tDetections">&mdash;</span></div>
             <div class="telemetry-row"><span class="telemetry-label">Live tracks</span><span class="telemetry-val" id="tTracks">&mdash;</span></div>
+            <div class="telemetry-row"><span class="telemetry-label">Waiting to confirm (first seconds)</span><span class="telemetry-val" id="tPending">&mdash;</span></div>
+            <div class="telemetry-row"><span class="telemetry-label">Static figures ignored</span><span class="telemetry-val" id="tStatic">&mdash;</span></div>
+            <div class="telemetry-row"><span class="telemetry-label">Remembered static figures</span><span class="telemetry-val" id="tStaticMemory">&mdash;</span></div>
+            <div class="telemetry-row"><span class="telemetry-label">Detections dropped by ignore areas</span><span class="telemetry-val" id="tIgnoredDet">&mdash;</span></div>
             <div class="telemetry-row"><span class="telemetry-label">Frames read</span><span class="telemetry-val" id="tFrames">&mdash;</span></div>
             <div class="telemetry-row"><span class="telemetry-label">Frame size</span><span class="telemetry-val" id="tFrameSize">&mdash;</span></div>
             <div class="telemetry-row"><span class="telemetry-label">Newest frame age</span><span class="telemetry-val" id="tAge">&mdash;</span></div>
@@ -252,6 +284,21 @@
             </span>
           </div>
           <div id="exclusionListContainer"><div class="fp-empty">Loading…</div></div>
+        </div>
+
+        <div class="glass-card">
+          <div class="card-title">
+            <span>🚫 Ignore areas</span>
+            <span id="clearIgnoreBlock">
+              <button type="button" class="btn btn-danger btn-sm" id="btnClearIgnoreAsk" onclick="askClearIgnoreAreas()">Clear all</button>
+              <span id="clearIgnoreConfirm" style="display:none; align-items:center; gap:6px;">
+                <span style="font-size:11px; color: var(--accent-red);">Delete every ignore area on every camera?</span>
+                <button type="button" class="btn btn-danger btn-sm" onclick="confirmClearIgnoreAreas()">Yes, clear</button>
+                <button type="button" class="btn btn-sm" onclick="cancelClearIgnoreAreas()">Keep</button>
+              </span>
+            </span>
+          </div>
+          <div id="ignoreListContainer"><div class="fp-empty">Loading…</div></div>
         </div>
       </div>
     </div>
@@ -340,8 +387,8 @@
 
   <div class="toast" id="toast">Notification</div>
 
-  <script src="/static/js/webrtc_live.js?v=2.5.0" defer></script>
-  <script src="/static/js/studio.js?v=2.5.0" defer></script>
-  <script src="/static/js/theme.js?v=2.5.0" defer></script>
+  <script src="/static/js/webrtc_live.js?v=2.6.0" defer></script>
+  <script src="/static/js/studio.js?v=2.6.0" defer></script>
+  <script src="/static/js/theme.js?v=2.6.0" defer></script>
 </body>
 </html>

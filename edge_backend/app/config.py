@@ -329,6 +329,38 @@ class Settings(BaseSettings):
     STATIC_MEMORY_IOU: float = float(os.getenv("STATIC_MEMORY_IOU", "0.7"))
     # A remembered static box is forgotten after this long unseen.
     STATIC_MEMORY_TTL_SEC: float = float(os.getenv("STATIC_MEMORY_TTL_SEC", "1800"))
+    # Remembered static figures are saved per camera (STORAGE_DIR/static_memory/
+    # <camera_id>.json, boxes normalised 0..1) so a restart does not make the
+    # poster a "person" again; expiry uses the wall-clock last_seen above.
+    # Saved at most every STATIC_MEMORY_SAVE_SEC (an added or dropped figure:
+    # on the next analysed frame).
+    STATIC_MEMORY_PERSIST: bool = os.getenv("STATIC_MEMORY_PERSIST", "1").strip().lower() not in ("0", "false", "no", "off")
+    STATIC_MEMORY_SAVE_SEC: float = float(os.getenv("STATIC_MEMORY_SAVE_SEC", "30"))
+    # A new track that matches a remembered static figure (box IoU >=
+    # STATIC_MEMORY_IOU and the same pose), or whose box lies at least
+    # STATIC_PENDING_IGNORE_FRACTION inside an ignore area, is "pending static":
+    # not counted, analysed or alerted on until it moves (then a person at
+    # once) or STATIC_FIGURE_GRACE_SEC passes without motion (then static).
+    STATIC_PENDING_IGNORE_FRACTION: float = float(os.getenv("STATIC_PENDING_IGNORE_FRACTION", "0.5"))
+    # Box centre / height motion has a jitter floor like the joints: K x the
+    # 75th percentile of its own frame-to-frame step (tracking_service), but
+    # never above this many torso lengths, so a walk just before stopping
+    # cannot raise it to where real sways are missed.
+    STATIC_BOX_JITTER_MAX_FRAC: float = float(os.getenv("STATIC_BOX_JITTER_MAX_FRAC", "0.35"))
+    # A static (or remembered) figure whose box still overlaps its anchor box
+    # by IoU >= STATIC_OCCLUSION_IOU while its joints "move" is being occluded
+    # by a passer-by: its stillness clock is kept, for at most
+    # STATIC_OCCLUSION_MAX_SEC in a row (then the motion counts, so a real
+    # person who stepped into the figure's place is a person again).
+    STATIC_OCCLUSION_IOU: float = float(os.getenv("STATIC_OCCLUSION_IOU", "0.8"))
+    STATIC_OCCLUSION_MAX_SEC: float = float(os.getenv("STATIC_OCCLUSION_MAX_SEC", "10"))
+    # A detection gap longer than MOTION_MAX_OBS_GAP_SEC (10 s) restarts a
+    # track's stillness clock, except on a remembered static box: there the
+    # gap counts as still time up to this long.
+    STATIC_MEMORY_MAX_GAP_SEC: float = float(os.getenv("STATIC_MEMORY_MAX_GAP_SEC", "60"))
+    # AI_IGNORE areas drop a detection whose foot point is inside, or whose box
+    # has at least this share of its area inside (per area: ignore_box_fraction).
+    IGNORE_BOX_FRACTION: float = float(os.getenv("IGNORE_BOX_FRACTION", "0.6"))
     # A person must linger this long inside a zone before it counts as dwell
     # rather than a pass-through.
     ZONE_DWELL_MIN_SECONDS: float = float(os.getenv("ZONE_DWELL_MIN_SECONDS", "3.0"))

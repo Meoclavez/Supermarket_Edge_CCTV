@@ -124,6 +124,34 @@ def _privacy_masks_changed() -> None:
         logger.warning(f"Live video was not told about the privacy mask change: {e}")
 
 
+def exclusion_view(mask: Dict[str, Any]) -> Dict[str, Any]:
+    """A mask record as returned by the API: ``ignore_box_fraction`` always present.
+
+    AI_IGNORE areas: the stored share, else settings.IGNORE_BOX_FRACTION
+    (0.6); every other mode: None (the rule does not apply to them).
+    """
+    out = dict(mask)
+    if is_ignore_mask(out):
+        v = out.get("ignore_box_fraction")
+        try:
+            v = float(v) if v is not None else float(settings.IGNORE_BOX_FRACTION)
+        except (TypeError, ValueError):
+            v = float(settings.IGNORE_BOX_FRACTION)
+        out["ignore_box_fraction"] = round(min(1.0, max(0.1, v)), 3)
+    else:
+        out["ignore_box_fraction"] = None
+    return out
+
+
+def is_ignore_mask(mask: Dict[str, Any]) -> bool:
+    mode = mask.get("mask_mode") or "BLUR"
+    return str(getattr(mode, "value", mode)).upper() == MaskMode.AI_IGNORE.value
+
+
+# ``clear_all`` mask subsets: "privacy" = every mode but AI_IGNORE, "ignore" = AI_IGNORE.
+MASK_SUBSETS = ("privacy", "ignore")
+
+
 class AIZoneService:
     def __init__(self):
         self.lock = threading.Lock()
@@ -244,10 +272,13 @@ class AIZoneService:
         with self.lock:
             ex_id = data.get("id") or f"ex_{int(time.time()*1000)}"
             data["id"] = ex_id
+            if not is_ignore_mask(data) and data.get("ignore_box_fraction") is None:
+                data.pop("ignore_box_fraction", None)
             self.exclusion_masks[ex_id] = data
             self._save_persistent_zones()
+            out = exclusion_view(data)
         _privacy_masks_changed()
-        return data
+        return out
 
     def update_exclusion(self, ex_id: str, changes: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Merge ``changes`` into an existing mask; None if it does not exist."""
@@ -257,7 +288,7 @@ class AIZoneService:
                 return None
             mask.update(changes)
             self._save_persistent_zones()
-            out = dict(mask)
+            out = exclusion_view(mask)
         _privacy_masks_changed()
         return out
 
@@ -304,10 +335,13 @@ class AIZoneService:
                 return True
             return False
 
-    def clear_all(self, kinds: Optional[List[str]] = None) -> int:
+    def clear_all(self, kinds: Optional[List[str]] = None, camera_id: Optional[str] = None) -> int:
         """Delete every overlay of the given kinds (default: all kinds).
 
-        kinds: any of "tripwires", "intrusion_zones", "exclusion_masks", "queue_zones".
+        kinds: any of "tripwires", "intrusion_zones", "exclusion_masks",
+        "queue_zones", plus the mask subsets "privacy" (every mask except
+        AI_IGNORE) and "ignore" (AI_IGNORE areas only); "all" = every kind.
+        ``camera_id``: only that camera's overlays (default: every camera).
         """
         stores = {
             "tripwires": self.tripwires,
@@ -315,14 +349,30 @@ class AIZoneService:
             "exclusion_masks": self.exclusion_masks,
             "queue_zones": self.queue_zones,
         }
+        if kinds is not None and "all" in kinds:
+            kinds = None
+
+        def wanted(kind: str, item: Dict[str, Any]) -> bool:
+            if camera_id is not None and str(item.get("camera_id", "cam_main")) != camera_id:
+                return False
+            if kinds is None or kind in kinds:
+                return True
+            if kind == "exclusion_masks":
+                ignore = is_ignore_mask(item)
+                return ("ignore" in kinds and ignore) or ("privacy" in kinds and not ignore)
+            return False
+
+        masks_touched = False
         with self.lock:
             n = 0
             for kind, store in stores.items():
-                if kinds is None or kind in kinds:
-                    n += len(store)
-                    store.clear()
+                gone = [k for k, item in store.items() if wanted(kind, item)]
+                for k in gone:
+                    del store[k]
+                n += len(gone)
+                masks_touched = masks_touched or (kind == "exclusion_masks" and bool(gone))
             self._save_persistent_zones()
-        if kinds is None or "exclusion_masks" in kinds:
+        if masks_touched:
             _privacy_masks_changed()
         return n
 
@@ -331,13 +381,14 @@ class AIZoneService:
             if camera_id:
                 tws = [tw for tw in self.tripwires.values() if tw.get("camera_id", "cam_main") == camera_id or camera_id == "all"]
                 izs = [iz for iz in self.intrusion_zones.values() if iz.get("camera_id", "cam_main") == camera_id or camera_id == "all"]
-                exs = [ex for ex in self.exclusion_masks.values() if ex.get("camera_id", "cam_main") == camera_id or camera_id == "all"]
+                exs = [exclusion_view(ex) for ex in self.exclusion_masks.values()
+                       if ex.get("camera_id", "cam_main") == camera_id or camera_id == "all"]
                 qzs = [qz for qz in self.queue_zones.values() if qz.get("camera_id") == camera_id or camera_id == "all"]
                 return {"tripwires": tws, "intrusion_zones": izs, "exclusion_masks": exs, "queue_zones": qzs}
             return {
                 "tripwires": list(self.tripwires.values()),
                 "intrusion_zones": list(self.intrusion_zones.values()),
-                "exclusion_masks": list(self.exclusion_masks.values()),
+                "exclusion_masks": [exclusion_view(ex) for ex in self.exclusion_masks.values()],
                 "queue_zones": list(self.queue_zones.values()),
             }
 

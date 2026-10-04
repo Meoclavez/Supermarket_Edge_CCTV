@@ -1180,7 +1180,9 @@ function updateMatrixHud(pipe) {
       if (!c.has_frame) {
         parts.push('no picture analysed yet');
       } else if (isNum(c.live_tracks)) {
-        parts.push(`${c.live_tracks} ${c.live_tracks === 1 ? 'person' : 'people'} in view`);
+        // static_tracks: posters / mannequins the static filter leaves out (newer servers only).
+        const still = isNum(c.static_tracks) && c.static_tracks > 0 ? ` · ${c.static_tracks} static ignored` : '';
+        parts.push(`${c.live_tracks} ${c.live_tracks === 1 ? 'person' : 'people'} in view${still}`);
       } else {
         parts.push(`${DASH} people in view`);
       }

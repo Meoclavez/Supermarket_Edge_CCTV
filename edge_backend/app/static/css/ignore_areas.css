@@ -1,0 +1,41 @@
+/* Camera setup: ignore areas (AI_IGNORE) tool, form, list rows and the
+   "Not a person" popover over a detected box. Colours via style.css variables
+   so the light and dark themes both work; the popover sits on the video, so it
+   keeps a dark backing in both themes like the other on-video labels. */
+
+.ig-tool-btn { background: rgba(45, 212, 191, 0.14); border-color: #2dd4bf; color: var(--text-main); }
+.ig-tool-btn:hover { background: rgba(45, 212, 191, 0.22); border-color: #2dd4bf; }
+.ig-tool-btn[aria-pressed="true"] { outline-color: #2dd4bf; }
+
+.ig-form { border-color: rgba(45, 212, 191, 0.55); min-width: 0; }
+.ig-form .rule-form-title { color: var(--text-main); }
+.ig-explain { font-size: 11.5px; line-height: 1.45; color: var(--text-main); overflow-wrap: anywhere; }
+.ig-form .rule-form-grid { grid-template-columns: repeat(auto-fit, minmax(min(190px, 100%), 1fr)); }
+.ig-form .form-input, .ig-form .form-select { min-width: 0; width: 100%; background: var(--input-bg); }
+
+/* Saved ignore-area rows. */
+.ig-row { flex-wrap: wrap; border-color: rgba(45, 212, 191, 0.3); }
+.ig-row .zone-info { flex: 1 1 160px; min-width: 0; }
+.ig-row .zone-name { overflow-wrap: anywhere; }
+.ig-row .rule-actions, .ig-row .rule-confirm { flex-wrap: wrap; }
+.ig-row .btn { min-height: 32px; }
+.ig-row-off { opacity: 0.7; }
+.ig-row-controls { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.ig-coverage-label { font-size: 10.5px; font-weight: 700; color: var(--text-dim); white-space: nowrap; }
+.ig-coverage-select { max-width: 190px; min-width: 0; font-size: 11px; }
+.ig-enabled { font-size: 11px; white-space: nowrap; }
+.ig-row-status { flex-basis: 100%; margin-top: 2px; }
+
+/* Popover opened by clicking a detected box on the picture. */
+.box-popover { position: absolute; z-index: 12; max-width: min(300px, calc(100% - 16px)); padding: 8px 10px;
+  border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.25); background: rgba(5, 7, 11, 0.92);
+  color: #e6edf3; font-size: 11.5px; line-height: 1.45; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  display: flex; flex-direction: column; gap: 6px; }
+.box-popover[hidden] { display: none; }
+.box-popover-title { font-weight: 700; overflow-wrap: anywhere; }
+.box-popover-msg { font-weight: 700; color: #5eead4; overflow-wrap: anywhere; }
+.box-popover-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.box-popover-actions .btn { min-height: 32px; white-space: normal; text-align: left; }
+.box-popover-status:empty { display: none; }
+.box-popover .form-status { color: #c9d1d9; }
+.box-popover .form-status.form-status-error { color: #ff8a95; }

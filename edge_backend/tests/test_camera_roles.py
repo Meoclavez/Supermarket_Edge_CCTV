@@ -240,7 +240,7 @@ def test_setup_items_flip_as_real_config_is_added(api):
         "points": [{"x": 0.7, "y": 0.1}, {"x": 0.9, "y": 0.1}, {"x": 0.9, "y": 0.4}, {"x": 0.7, "y": 0.4}]})
     assert r.status_code == 200, r.text
     setup = api.get("/api/v1/cameras/cr_checkout/setup").json()
-    assert all(i["done"] for i in setup["items"] if i["id"] != "privacy_mask")
+    assert all(i["done"] for i in setup["items"] if i["id"] not in ("privacy_mask", "ignore_area"))
     assert setup["complete"] and setup["required_done"] == setup["required_total"] == 1
 
     # A non-checkout camera cannot hold a register link, and changing the role drops it.
