@@ -184,6 +184,13 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         startup_log.exception(f"Evidence storage limit failed to start: {exc}")
 
+    # 4d2. Nightly database backup at 03:00 store time (deduplicated by content).
+    from .services.backup_service import daily_backup
+    try:
+        await daily_backup.start()
+    except Exception as exc:
+        startup_log.exception(f"Daily backup scheduler failed to start: {exc}")
+
     # 4e. Shadow pose-model trial (developer experiment, SHADOW_POSE_MODEL):
     # off unless configured; loads on its own thread and never feeds analytics.
     # Also deletes an old trial's files once SHADOW_TRIAL_RETAIN_DAYS passed.
@@ -233,6 +240,7 @@ async def lifespan(app: FastAPI):
             startup_log.exception(f"Live video shutdown failed: {exc}")
         await recommendations_service.stop()
         await evidence_storage.stop()
+        await daily_backup.stop()
         await asyncio.to_thread(shadow_trial.stop)
 
 
@@ -288,6 +296,9 @@ app.include_router(camera_roles_routes.router)
 from .routes import insights as insights_routes  # noqa: E402
 
 app.include_router(insights_routes.router)
+from .routes import pos_ingest as pos_ingest_routes  # noqa: E402
+
+app.include_router(pos_ingest_routes.router)
 from .routes import night_watch as night_watch_routes  # noqa: E402
 
 app.include_router(night_watch_routes.router)
@@ -295,6 +306,14 @@ from .routes import recorders as recorders_routes  # noqa: E402
 
 app.include_router(recorders_routes.router)
 app.include_router(recorders_routes.camera_stream_router)
+# Site settings (Store, Evidence storage, Alerts and detection); importing it
+# applies the saved values onto settings before the pipeline starts.
+from .routes import site_settings as site_settings_routes  # noqa: E402
+
+app.include_router(site_settings_routes.router)
+from .routes import users as users_routes  # noqa: E402
+
+app.include_router(users_routes.router)
 
 # Mount Static Files
 STATIC_DIR = Path(__file__).resolve().parent / "static"

@@ -12,19 +12,23 @@
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;800&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/static/css/style.css?v=2.4.0" />
-  <link rel="stylesheet" href="/static/css/floorplan.css?v=2.4.0" />
-  <link rel="stylesheet" href="/static/css/loss.css?v=2.4.0" />
-  <link rel="stylesheet" href="/static/css/insights.css?v=2.4.0" />
-  <link rel="stylesheet" href="/static/css/camera_roles.css?v=2.4.0" />
-  <link rel="stylesheet" href="/static/css/heatmap_history.css?v=2.4.0" />
-  <link rel="stylesheet" href="/static/css/night_watch.css?v=2.4.0" />
-  <link rel="stylesheet" href="/static/css/live_video.css?v=2.4.0" />
+  <link rel="stylesheet" href="/static/css/style.css?v=2.5.0" />
+  <link rel="stylesheet" href="/static/css/floorplan.css?v=2.5.0" />
+  <link rel="stylesheet" href="/static/css/loss.css?v=2.5.0" />
+  <link rel="stylesheet" href="/static/css/zone_alerts.css?v=2.5.0" />
+  <link rel="stylesheet" href="/static/css/insights.css?v=2.5.0" />
+  <link rel="stylesheet" href="/static/css/camera_roles.css?v=2.5.0" />
+  <link rel="stylesheet" href="/static/css/heatmap_history.css?v=2.5.0" />
+  <link rel="stylesheet" href="/static/css/night_watch.css?v=2.5.0" />
+  <link rel="stylesheet" href="/static/css/live_video.css?v=2.5.0" />
+  <link rel="stylesheet" href="/static/css/users.css?v=2.5.0" />
+  <link rel="stylesheet" href="/static/css/site_settings.css?v=2.5.0" />
+  <link rel="stylesheet" href="/static/css/backups.css?v=2.5.0" />
   <!-- auth.js stays a classic (blocking) script: it must wrap fetch before any
        module runs. Everything else is deferred and runs in document order after
        parsing; theme.js is listed last so it still runs after the modules.
        The server rewrites each ?v= to a hash of the file (web_delivery.py). -->
-  <script src="/static/js/auth.js?v=2.4.0"></script>
+  <script src="/static/js/auth.js?v=2.5.0"></script>
 
   <!-- Chart.js 4.4.1 for the visitors-by-hour charts (vendored: vendor/chartjs/SOURCE.txt) -->
   <script src="/static/vendor/chartjs/chart.umd.min.js" defer></script>
@@ -649,6 +653,20 @@
         <div id="theftIncidentsList" class="loss-list"><div class="fp-empty">Loading…</div></div>
       </div>
 
+      <!-- Area & line alerts (js/zone_alerts.js): restricted-area and line-crossing alerts from the alert log. -->
+      <div class="glass-card" id="zoneAlertsCard">
+        <div class="card-title">
+          <span>Area &amp; line alerts</span>
+          <button type="button" class="btn btn-sm" data-za="refresh">Refresh</button>
+        </div>
+        <p class="loss-intro">
+          Someone inside a restricted area during its hours, or crossing a line set to alert staff. These are
+          <b>prompts to check</b>, not theft findings. Times are the store's.
+        </p>
+        <div class="loss-chips" id="zoneAlertsChips" role="group" aria-label="Show area and line alerts"></div>
+        <div id="zoneAlertsList" class="loss-list"><div class="fp-empty">Loading…</div></div>
+      </div>
+
       <div class="glass-card">
         <div class="card-title"><span>False alarms by rule</span></div>
         <p class="loss-intro">How often each check was wrong, from the outcomes staff recorded. A high rate means the rule needs tuning for this store.</p>
@@ -752,15 +770,28 @@
     <section id="tab-settings" class="tab-view">
       <div class="settings-jump" aria-label="Settings sections">
         <button type="button" class="btn btn-sm" onclick="openDeviceManager()">Cameras &amp; recorders</button>
+        <a class="btn btn-sm" href="#settings-account" onclick="return jumpTo('settings-account')">Your account</a>
+        <a class="btn btn-sm" href="#settings-accounts" onclick="return jumpTo('settings-accounts')" data-admin-only>Accounts</a>
         <a class="btn btn-sm" href="#settings-recorder-streams" onclick="return jumpTo('settings-recorder-streams')">Recorder sub-streams</a>
         <a class="btn btn-sm" href="#settings-pairing" onclick="return jumpTo('settings-pairing')">Phones</a>
+        <a class="btn btn-sm" href="#settings-store" onclick="return jumpTo('settings-store')">Store</a>
+        <a class="btn btn-sm" href="#settings-evidence" onclick="return jumpTo('settings-evidence')">Evidence storage</a>
+        <a class="btn btn-sm" href="#settings-alerts" onclick="return jumpTo('settings-alerts')">Alerts and detection</a>
         <a class="btn btn-sm" href="#settings-remote" onclick="return jumpTo('settings-remote')">Online access</a>
         <a class="btn btn-sm" href="#settings-remote-video" onclick="return jumpTo('settings-remote-video')">Live video</a>
         <a class="btn btn-sm" href="#settings-pos" onclick="return jumpTo('settings-pos')">Sales data</a>
+        <a class="btn btn-sm" href="#settings-backups" onclick="return jumpTo('settings-backups')">Backups</a>
         <a class="btn btn-sm" href="#settings-health" onclick="return jumpTo('settings-health')">System health</a>
         <a class="btn btn-sm" href="#settings-appearance" onclick="return jumpTo('settings-appearance')">Appearance</a>
       </div>
       <div class="glass-card" id="settings-device"></div>
+      <!-- Your account (change password) and Accounts (owners/administrators only) (users.js). -->
+      <div class="glass-card" id="settings-account"></div>
+      <div class="glass-card" id="settings-accounts" data-admin-only hidden></div>
+      <!-- Site settings: Store, Evidence storage, Alerts and detection (site_settings.js). -->
+      <div class="glass-card" id="settings-store"></div>
+      <div class="glass-card" id="settings-evidence"></div>
+      <div class="glass-card" id="settings-alerts"></div>
       <div class="glass-card" id="settings-remote"></div>
       <!-- Online access · Live video: direct WebRTC settings and "Check remote video" (remote_video.js). -->
       <div class="glass-card" id="settings-remote-video"></div>
@@ -785,7 +816,12 @@
       <div class="glass-card" id="settings-pos">
         <div class="card-title"><span>Sales data (point of sale)</span><span class="badge metric-unobserved" id="posStatusBadge">&mdash;</span></div>
         <div id="posStatusBody"><div class="fp-empty">Loading…</div></div>
+        <!-- Till key for POST /pos/ingest: status, create/replace, revoke (pos_key.js). -->
+        <div id="posTillKey" class="tk-box"></div>
       </div>
+
+      <!-- Backups and reset: list, back up now, download, restore, upload, factory reset (backups.js). -->
+      <div class="glass-card" id="settings-backups"></div>
 
       <!-- System health: moved here from the page header (analytics.js). -->
       <div class="glass-card" id="settings-health">
@@ -1009,24 +1045,29 @@
 
   <!-- Scripts -->
   <!-- Direct peer-to-peer live video (WebRTC); used by the modules below. -->
-  <script src="/static/js/webrtc_live.js?v=2.4.0" defer></script>
-  <script src="/static/js/floorplan.js?v=2.4.0" defer></script>
-  <script src="/static/js/duplicates.js?v=2.4.0" defer></script>
-  <script src="/static/js/devices.js?v=2.4.0" defer></script>
-  <script src="/static/js/calibration.js?v=2.4.0" defer></script>
-  <script src="/static/js/analytics.js?v=2.4.0" defer></script>
-  <script src="/static/js/camera_roles.js?v=2.4.0" defer></script>
-  <script src="/static/js/today.js?v=2.4.0" defer></script>
-  <script src="/static/js/loss.js?v=2.4.0" defer></script>
-  <script src="/static/js/insights.js?v=2.4.0" defer></script>
-  <script src="/static/js/heatmap_history.js?v=2.4.0" defer></script>
-  <script src="/static/js/product_reach.js?v=2.4.0" defer></script>
-  <script src="/static/js/entrances.js?v=2.4.0" defer></script>
-  <script src="/static/js/remote_access.js?v=2.4.0" defer></script>
-  <script src="/static/js/remote_video.js?v=2.4.0" defer></script>
-  <script src="/static/js/pairing.js?v=2.4.0" defer></script>
-  <script src="/static/js/night_watch.js?v=2.4.0" defer></script>
-  <script src="/static/js/recorder_streams.js?v=2.4.0" defer></script>
-  <script src="/static/js/theme.js?v=2.4.0" defer></script>
+  <script src="/static/js/webrtc_live.js?v=2.5.0" defer></script>
+  <script src="/static/js/floorplan.js?v=2.5.0" defer></script>
+  <script src="/static/js/duplicates.js?v=2.5.0" defer></script>
+  <script src="/static/js/devices.js?v=2.5.0" defer></script>
+  <script src="/static/js/calibration.js?v=2.5.0" defer></script>
+  <script src="/static/js/analytics.js?v=2.5.0" defer></script>
+  <script src="/static/js/camera_roles.js?v=2.5.0" defer></script>
+  <script src="/static/js/today.js?v=2.5.0" defer></script>
+  <script src="/static/js/loss.js?v=2.5.0" defer></script>
+  <script src="/static/js/zone_alerts.js?v=2.5.0" defer></script>
+  <script src="/static/js/insights.js?v=2.5.0" defer></script>
+  <script src="/static/js/heatmap_history.js?v=2.5.0" defer></script>
+  <script src="/static/js/product_reach.js?v=2.5.0" defer></script>
+  <script src="/static/js/entrances.js?v=2.5.0" defer></script>
+  <script src="/static/js/remote_access.js?v=2.5.0" defer></script>
+  <script src="/static/js/remote_video.js?v=2.5.0" defer></script>
+  <script src="/static/js/pairing.js?v=2.5.0" defer></script>
+  <script src="/static/js/night_watch.js?v=2.5.0" defer></script>
+  <script src="/static/js/recorder_streams.js?v=2.5.0" defer></script>
+  <script src="/static/js/site_settings.js?v=2.5.0" defer></script>
+  <script src="/static/js/backups.js?v=2.5.0" defer></script>
+  <script src="/static/js/pos_key.js?v=2.5.0" defer></script>
+  <script src="/static/js/users.js?v=2.5.0" defer></script>
+  <script src="/static/js/theme.js?v=2.5.0" defer></script>
 </body>
 </html>

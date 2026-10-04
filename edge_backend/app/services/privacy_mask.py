@@ -24,8 +24,9 @@ Semantics, decided by ``mask_mode``:
 If a mask cannot be applied (malformed polygon, OpenCV error) the frame is
 blacked out entirely rather than shown unmasked.
 
-Not covered: video that bypasses this process, e.g. a browser playing the
-camera's RTSP stream directly through go2rtc/WebRTC.
+Direct live video (go2rtc/WebRTC) does not pass through this process; it
+burns the same masks in with an ffmpeg filter instead, and refuses to show a
+masked camera if that cannot be done (services/privacy_video.py).
 """
 
 from __future__ import annotations

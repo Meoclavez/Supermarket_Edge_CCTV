@@ -1,5 +1,5 @@
 /**
- * Entrances card (Analytics tab): today's in/out per Camera Studio tripwire,
+ * Entrances card (Analytics tab): today's in/out per Camera setup tripwire,
  * from GET /api/v1/analytics/footfall/tripwires. A tripwire with no crossing
  * today shows a dash, never 0. "Inside now" is entries minus exits on
  * footfall-counting lines since store-local midnight and is labelled as an
@@ -70,7 +70,7 @@
         ? lines.map((t) => `
             <tr data-tripwire-id="${esc(t.tripwire_id)}">
               <td>${esc(t.name || t.tripwire_id)}${t.counts_footfall ? '' : ' <span class="badge">not footfall</span>'}${t.configured === false ? ' <span class="badge">deleted</span>' : ''}${t.enabled === false ? ' <span class="badge">off</span>' : ''}</td>
-              <td>${esc(t.camera_id || DASH)}</td>
+              <td title="${esc(t.camera_id || '')}">${t.camera_name ? esc(t.camera_name) : (t.camera_id ? `${esc(t.camera_id)} <span class="badge">camera removed</span>` : DASH)}</td>
               <td class="entrances-in">${cell(t.in)}</td>
               <td class="entrances-out">${cell(t.out)}</td>
               <td>${cell(t.net)}</td>

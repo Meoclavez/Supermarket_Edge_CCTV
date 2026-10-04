@@ -92,7 +92,11 @@ remote to local).
 - 201: `{"session_id", "sdp": "<answer>", "heartbeat_s", "expires_at", "codec": "H264|H265", "transcoded": false}`
 - 404 unknown camera · 409 `{"code":"camera_off"}` · 429 `{"code":"video_session_limit","max_sessions":8}`
 - 503 `{"code":"webrtc_unavailable","reason":"go2rtc not running|no stream source|..."}`
-- 502 `{"code":"negotiation_failed","reason":"..."}`
+- 502 `{"code":"negotiation_failed","reason":"..."}` (also when a camera with privacy masks is asked for by a
+  browser whose offer has no H.264: the masked path only produces H.264)
+- 503 `{"code":"privacy_mask_unavailable","reason":"Hidden: this camera has privacy masks and the masked live view could not be started (<why>)."}`:
+  the camera has privacy masks and the masked pipeline could not be built or started. There is no raw
+  fallback. See "Privacy masks on direct video" below.
 
 `POST /api/v1/webrtc/sessions/{id}/heartbeat` returns 200 `{"expires_at"}`, or 404 if the session is gone (the page must close the connection).
 
@@ -176,8 +180,12 @@ Clarifications the dashboard relies on, where the contract left a choice open:
   camera/unavailable, 15 s doubling to 120 s for ICE failures, else 30 s; "Try again" retries at once.
 - **403 `video_direct_only`** from snapshot, `actions/snapshot` or `test-connection` is shown as a plain
   message and makes the page re-read the config; nothing falls back.
-- **Detector boxes** are not drawn on direct video (raw camera video). Follow-up: draw them client-side
-  from `/api/v1/layout/live` boxes; they are not frame-synchronised with the video.
+- **Detector boxes** are not drawn on direct video (the camera's video, with privacy masks burned in when the
+  camera has any). Follow-up: draw them client-side from `/api/v1/layout/live` boxes; they are not
+  frame-synchronised with the video.
+- **503 `privacy_mask_unavailable`** is shown as the tile state "Hidden: privacy masks" (code `privacy_hidden`
+  in `webrtc_live.js`) with the server's reason; the tile retries after 30 s or on "Try again" and never shows
+  another picture source.
 
 ## Deviations (VPS)
 
@@ -304,6 +312,52 @@ executables. They are fetched by default; skip with `--no-go2rtc` or `EDGE_GO2RT
   first live-video session). `routes/health.py` reports go2rtc as NOT_CHECKED ("starts on the first live-video
   session") until a session starts it, then HEALTHY, FAILED or NOT_PRESENT with the reason, and NOT_CHECKED
   again once it is stopped.
+
+## Privacy masks on direct video (2026-10-04)
+
+Owner rule: privacy masks apply to every picture, including direct remote video. Implemented in
+`services/privacy_video.py` and `services/webrtc_sessions.py` (working tree after a38b391). This
+replaces the earlier gap "direct video is the raw camera picture, without privacy masks".
+
+- **Which cameras.** A camera with at least one privacy mask in mode BLUR, MOSAIC, BLACKOUT or COLOR
+  (an unknown mode counts as BLACKOUT) is **always** sent through the masked path, whatever the
+  browser and the camera codec support. `AI_IGNORE` masks are analysis exclusions; they change no
+  picture and do not trigger the masked path. A camera without privacy masks keeps the normal path
+  (passthrough, or the plain H.264 transcode).
+- **Masked path.** The session's go2rtc source is an ffmpeg pipeline that burns the masks in before
+  encoding: `ffmpeg:<camera url>#video=-an#raw=<arg>#raw=<arg>...`. Every ffmpeg argument is its own
+  `#raw=` token because go2rtc refuses an API-added source containing whitespace; go2rtc's
+  `#hardware` is not used (it would move decoded frames to the GPU before the CPU filter). The video
+  is decoded, scaled to the camera's native frame size (learned by the camera worker, so the masks
+  always cover the same part of the picture), and each mask's bounding box is filtered:
+  - BLACKOUT / COLOR: an RGBA image of the box (black or the mask colour) is overlaid;
+  - BLUR: the box is cropped, shrunk to 1/4, box-blurred, scaled back and overlaid through a grey
+    alpha of the polygon;
+  - MOSAIC: the box is cropped, shrunk to 1/S (S = 16 by default) and scaled back with nearest-neighbour.
+
+  Only the boxes are filtered, so the cost follows the masked area. Mask images are content-addressed
+  PNGs (`<camera>_<signature>_<n>_<kind>.png`) under `STORAGE_DIR/go2rtc/masks`, mode 0600. Output is
+  always H.264. The encoder is probed at runtime like the plain transcode (NVENC, then VA-API, else
+  libx264; `WEBRTC_TRANSCODE_ENCODER` forces one); the exact argument list is run once on a synthetic
+  input and cached, and libx264 is tried if the chosen engine fails. The session reports
+  `"privacy_masked": true`, `"transcoded": true` and the encoder in `GET /api/v1/webrtc/sessions`.
+- **Cost.** About 6–9 % of one core per masked tile with hardware encoding (the filter runs on the CPU).
+- **Fail closed.** If the zone store cannot be read, the camera's frame size is not known yet, ffmpeg
+  is missing, a mask image cannot be written, the camera address contains a space or `#`, the probe
+  fails with every engine, or go2rtc does not start the stream, the session is refused with
+  **503 `privacy_mask_unavailable`** and the reason. The raw stream is never used for a camera that
+  has privacy masks. A browser offer without H.264 is refused with 502 `negotiation_failed`.
+- **Stills over direct video.** `WebRtcLive.grabFrame` opens a normal session, so remote stills
+  (floor-map thumbnail, heatmap background, calibration, zone studio) are masked the same way.
+- **Mask changes.** Each session stores the mask signature (canonical masks + frame size) it was
+  built with. Adding, changing, deleting or clearing a privacy mask makes `ai_zone_service` call
+  `privacy_video.notify_masks_changed()`; the session registry then compares every ready session's
+  signature with the current one, ends the changed ones with end reason **`privacy_masks_changed`**,
+  and **restarts go2rtc at once** (`_force_restart`), because a page only notices an ended session at
+  its next heartbeat and go2rtc cannot drop a single consumer. The restart ends every other live
+  session too (end reason `gateway_restart`), so every remote viewer, on every camera, reconnects
+  within a few seconds and the reopened sessions are built with the current masks. The reaper repeats
+  the signature comparison on every pass as a backstop if a notification is missed.
 
 ## Integration run (2026-09-29)
 

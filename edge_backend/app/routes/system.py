@@ -174,3 +174,311 @@ def get_shadow_trial_sample(filename: str):
     if path is None:
         raise HTTPException(status_code=404, detail="no such trial sample")
     return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "private, no-store"})
+
+
+# --------------------------------------------------------------------------
+# Backups, restore and factory reset (Settings -> "Backups and reset", backups.js).
+# All of it is for an owner or administrator only.
+# --------------------------------------------------------------------------
+
+import asyncio
+import logging
+import signal
+import uuid
+from pathlib import Path
+
+from fastapi import HTTPException, Request
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+from sqlalchemy import delete as _sa_delete, func as _sa_func, select as _sa_select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ..database import get_db
+from ..services.auth_service import require_admin
+from ..services.backup_service import (
+    MAX_UPLOAD_BYTES,
+    backup_kind,
+    backup_service,
+)
+
+_backup_log = logging.getLogger("SystemBackups")
+
+# Restore replaces the database under a running process that caches layout,
+# cameras, site settings and sessions in memory, so it finishes with a restart.
+RESTART_DELAY_S = 2.0
+
+
+def restart_supported() -> bool:
+    """True when a service manager brings this process back after it exits.
+
+    systemd (``deploy/edge-cctv.service``, Restart=always): the main process has
+    INVOCATION_ID and is a child of PID 1. Docker (``restart: unless-stopped``):
+    /.dockerenv exists and the app is the container's PID 1 (entrypoint execs
+    uvicorn). Anything else (``./run.sh`` in a terminal, tests) is not
+    restarted automatically, so the dashboard says a manual restart is needed.
+    """
+    try:
+        if os.environ.get("INVOCATION_ID") and os.getppid() == 1:
+            return True
+        if Path("/.dockerenv").exists() and os.getpid() == 1:
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
+def _schedule_restart() -> None:
+    """SIGTERM this process shortly after the response is sent (graceful uvicorn stop)."""
+    loop = asyncio.get_running_loop()
+    loop.call_later(RESTART_DELAY_S, lambda: os.kill(os.getpid(), signal.SIGTERM))
+
+
+def _store_time(iso_utc: Optional[str]) -> dict:
+    """Backup time (ISO, UTC) -> store time (SITE_TIMEZONE / host zone) for display."""
+    from datetime import datetime, timezone
+
+    from ..services.timeutil import to_local
+
+    if not iso_utc:
+        return {"time_local": None, "time_label": None}
+    try:
+        dt = datetime.fromisoformat(iso_utc)
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        local = to_local(dt)
+        return {"time_local": local.isoformat(), "time_label": local.strftime("%Y-%m-%d %H:%M")}
+    except Exception:  # noqa: BLE001
+        return {"time_local": None, "time_label": None}
+
+
+def _public_entry(b: dict) -> dict:
+    out = {k: v for k, v in b.items() if k != "filepath"}
+    out["kind"] = backup_kind(b.get("tag", ""))
+    out.update(_store_time(b.get("timestamp")))
+    return out
+
+
+def backups_payload() -> dict:
+    items = [_public_entry(b) for b in backup_service.list_backups()]
+    return {
+        "backups": items,
+        "total": len(items),
+        "restart_supported": restart_supported(),
+        "max_upload_bytes": MAX_UPLOAD_BYTES,
+        "contents": ("The database: store layout, cameras, settings, user accounts and recorded figures. "
+                     "Evidence images and clips are not included."),
+    }
+
+
+class BackupNowRequest(BaseModel):
+    tag: str = "manual"
+
+
+@router.get("/backups", dependencies=[Depends(require_admin)])
+def list_backups():
+    """Every backup, newest first, with its kind and time in store time."""
+    return backups_payload()
+
+
+@router.post("/backup", dependencies=[Depends(require_admin)])
+def backup_now(req: Optional[BackupNowRequest] = None):
+    """Take a backup now (tag ``manual`` unless one is given). Never deduplicated."""
+    tag = (req.tag if req and req.tag else "manual")
+    try:
+        res = backup_service.create_backup(tag=tag, dedupe=False)
+    except Exception as e:  # noqa: BLE001
+        _backup_log.error(f"Manual backup failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Backup failed: {e}")
+    return {**_public_entry(res), "status": res.get("status", "success")}
+
+
+@router.get("/backups/{filename}/download", dependencies=[Depends(require_admin)])
+def download_backup(filename: str):
+    """Stream one listed backup file (.db or .db.gz) as an attachment."""
+    try:
+        path = backup_service.resolve_backup_path(filename)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="No such backup.")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid backup name.")
+    media = "application/gzip" if path.name.endswith(".gz") else "application/vnd.sqlite3"
+    return FileResponse(path, media_type=media, filename=path.name,
+                        headers={"Cache-Control": "private, no-store"})
+
+
+async def _stop_pipeline_for_restore() -> None:
+    """Stop camera workers and the heatmap recorder so they flush now, not into the restored file."""
+    try:
+        from ..services.heatmap_history import heatmap_recorder
+
+        await heatmap_recorder.stop()
+    except Exception as e:  # noqa: BLE001
+        _backup_log.warning(f"restore: heatmap recorder stop failed: {e}")
+    try:
+        from ..services.pipeline_supervisor import pipeline_supervisor
+
+        await pipeline_supervisor.stop()
+    except Exception as e:  # noqa: BLE001
+        _backup_log.warning(f"restore: pipeline stop failed: {e}")
+
+
+async def restore_backup_safely(filename: str) -> dict:
+    """Validate, take a safety backup, restore, then restart (when supervised)."""
+    try:
+        info = await asyncio.to_thread(backup_service.inspect_snapshot, filename)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Backup file not found: {filename}")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    try:
+        safety = await asyncio.to_thread(backup_service.create_backup, "pre-restore", False)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Nothing was changed: the safety backup failed ({e}).")
+
+    supervised = restart_supported()
+    if supervised:
+        await _stop_pipeline_for_restore()
+    try:
+        await asyncio.to_thread(backup_service.restore_backup, filename)
+    except Exception as e:  # noqa: BLE001
+        _backup_log.error(f"Restore of {filename} failed: {e}")
+        if supervised:
+            _schedule_restart()  # bring the stopped cameras back on the unchanged database
+        code = 400 if isinstance(e, ValueError) else 500
+        raise HTTPException(status_code=code, detail=f"Restore failed: {e}")
+
+    _backup_log.warning(f"Database restored from {filename}; safety backup {safety.get('filename')}")
+    if supervised:
+        _schedule_restart()
+        message = ("Restored. The service is restarting now to load it; this page reconnects when it is back. "
+                   "You may need to sign in again.")
+    else:
+        message = ("Restored. Restart the server to finish: until then some screens still show the "
+                   "old settings. You may need to sign in again.")
+    return {
+        "status": "success",
+        "filename": filename,
+        "message": message,
+        "safety_backup": safety.get("filename"),
+        "restart": "scheduled" if supervised else "manual",
+        "schema_version": info.get("schema_version"),
+    }
+
+
+@router.post("/backups/{filename}/restore", dependencies=[Depends(require_admin)])
+async def restore_backup(filename: str):
+    """Restore a listed backup. A safety backup of the current database is taken first."""
+    return await restore_backup_safely(filename)
+
+
+@router.post("/restore/{filename}", dependencies=[Depends(require_admin)])
+async def restore_backup_legacy(filename: str):
+    """Older path for the same safe restore."""
+    return await restore_backup_safely(filename)
+
+
+@router.post("/backups/upload", dependencies=[Depends(require_admin)])
+async def upload_backup(request: Request, filename: str = ""):
+    """Add a downloaded backup (raw request body: .db or .db.gz) to the list.
+
+    It is checked (SQLite, integrity, this system's tables, database version not
+    newer than this release) and saved as an ``uploaded`` backup. Restoring it
+    is a separate, confirmed step.
+    """
+    import shutil
+
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="The file is larger than the 2 GB limit.")
+    backup_service.backups_dir.mkdir(parents=True, exist_ok=True)
+    free = shutil.disk_usage(str(backup_service.backups_dir)).free
+    need = int(declared) * 3 if declared and declared.isdigit() else 0
+    if need and free < need:
+        raise HTTPException(status_code=507, detail="Not enough free disk space to check this backup.")
+    tmp = backup_service.backups_dir / f".upload_{uuid.uuid4().hex}.tmp"
+    size = 0
+    try:
+        with open(tmp, "wb") as fh:
+            os.fchmod(fh.fileno(), 0o600)
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > MAX_UPLOAD_BYTES:
+                    raise HTTPException(status_code=413, detail="The file is larger than the 2 GB limit.")
+                fh.write(chunk)
+        if size == 0:
+            raise HTTPException(status_code=400, detail="The upload was empty.")
+        try:
+            entry = await asyncio.to_thread(backup_service.import_upload, tmp, filename)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        tmp.unlink(missing_ok=True)
+    return {"status": "success", **_public_entry(entry)}
+
+
+class FactoryResetRequest(BaseModel):
+    confirm: str = ""
+
+
+# What a factory reset deletes on top of POST /api/v1/layout/reset: recorded
+# data in tables that reset leaves alone.
+def _extra_reset_tables():
+    from ..models.db_models import (
+        AnalysisRunModel,
+        HeatmapSnapshotModel,
+        QueueVisitModel,
+        TripwireEventModel,
+    )
+
+    return [
+        ("tripwire_events", TripwireEventModel),
+        ("queue_visits", QueueVisitModel),
+        ("heatmap_snapshots", HeatmapSnapshotModel),
+        ("analysis_runs", AnalysisRunModel),
+    ]
+
+
+FACTORY_RESET_KEEPS = [
+    "user accounts and passwords",
+    "site settings",
+    "saved recorder passwords",
+    "paired phones",
+    "online access",
+    "device settings (.env)",
+    "saved evidence images and clips (removed by the storage limit as usual)",
+    "all backups",
+]
+
+
+@router.post("/factory-reset", dependencies=[Depends(require_admin)])
+async def factory_reset(req: FactoryResetRequest, db: AsyncSession = Depends(get_db)):
+    """Back up, then delete the layout, cameras and every recorded figure.
+
+    Needs ``{"confirm": "RESET"}``. Aborts without changing anything if the
+    backup fails.
+    """
+    if (req.confirm or "") != "RESET":
+        raise HTTPException(status_code=400, detail='Type RESET to confirm the factory reset.')
+    try:
+        backup = await asyncio.to_thread(backup_service.create_backup, "pre-reset", False)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Nothing was deleted: the backup failed ({e}).")
+
+    from .layout import _reset_store
+
+    removed = await _reset_store(db)
+    for label, model in _extra_reset_tables():
+        count = await db.scalar(_sa_select(_sa_func.count()).select_from(model))
+        if count:
+            await db.execute(_sa_delete(model))
+        removed[label] = int(count or 0)
+    await db.commit()
+    _backup_log.warning(f"Factory reset done (backup {backup.get('filename')}): {removed}")
+    return {
+        "reset": True,
+        "backup": backup.get("filename"),
+        "removed": removed,
+        "total_rows": sum(removed.values()),
+        "kept": FACTORY_RESET_KEEPS,
+    }

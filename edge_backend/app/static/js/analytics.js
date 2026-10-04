@@ -655,8 +655,14 @@ function setDecimationFPS(fps) {
   });
   if (tileFeed.focusId) openFocusStream(tileFeed.focusId);
   pumpTiles();
-  const every = (TILE_REFRESH_MS[fps] || 2000) / 1000;
-  showToast(`Video smoothness: ${FPS_LABEL[fps] || `${fps} pictures per second`} (tiles every ${every} s)`, 'ok');
+  const level = FPS_LABEL[fps] || `${fps} pictures per second`;
+  if (liveTransport() === 'webrtc') {
+    // Direct video plays at the camera's own frame rate; tiles are not refreshed as pictures.
+    showToast(`Video smoothness: ${level}. Direct video plays at the camera's own frame rate; this setting applies to pictures on the store network.`, 'ok');
+  } else {
+    const every = (TILE_REFRESH_MS[fps] || 2000) / 1000;
+    showToast(`Video smoothness: ${level} (tiles every ${every} s)`, 'ok');
+  }
 }
 
 function streamUrl(cameraId, maxWidth) {
@@ -2023,6 +2029,15 @@ function renderConversionFunnel(stages) {
   `<div class="fp-empty">Stages showing ${DASH} were not measured. "Bought" needs sales data from the tills.</div>`;
 }
 
+/** Lost sales of one area: a figure only when the server measured one, otherwise why not. */
+function lostSalesCell(z) {
+  if (isNum(z.lost_sales)) return `$${z.lost_sales.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  if (z.lost_sales_status === 'not_attributable') {
+    return `<span class="fp-dash" title="${escapeHtml(z.lost_sales_reason || 'Not measured')}">${DASH}</span>`;
+  }
+  return '<span class="fp-dash" title="Needs sales data from the tills (Settings > Sales data)">needs sales data</span>';
+}
+
 function renderFrictionZones(zones) {
   const tbody = el('frictionZonesTableBody');
   if (!tbody) return;
@@ -2041,7 +2056,7 @@ function renderFrictionZones(zones) {
       <td>${isNum(z.engagement_rate_pct) ? `${z.engagement_rate_pct} % of visitors` : `<span class="fp-dash">${DASH}</span>`}</td>
       <td>${isNum(z.avg_dwell_seconds) ? escapeHtml(formatDuration(z.avg_dwell_seconds)) : `<span class="fp-dash">${DASH}</span>`}</td>
       <td>${isNum(z.visits) ? z.visits.toLocaleString() : DASH}</td>
-      <td><span class="fp-dash" title="Needs sales data from the tills">needs sales data</span></td>
+      <td>${lostSalesCell(z)}</td>
     </tr>`).join('');
 }
 
@@ -2151,7 +2166,6 @@ async function openCameraConfigModal(cameraId) {
   safeSet('configFloorX', num(placed.floor_x ?? cam.floor_x));
   safeSet('configFloorY', num(placed.floor_y ?? cam.floor_y));
   safeSet('configFloorZ', num(placed.floor_z ?? cam.floor_z));
-  safeSet('configHeightZ', num(placed.floor_z ?? cam.floor_z));
   safeSet('configFovDeg', num(placed.fov_deg ?? cam.fov_deg));
   const azimuth = Math.round(isNum(placed.azimuth_deg) ? placed.azimuth_deg : (isNum(cam.azimuth_deg) ? cam.azimuth_deg : 0));
   safeSet('configAzimuthSlider', azimuth);
@@ -2182,6 +2196,8 @@ async function openCameraConfigModal(cameraId) {
     setCameraConfigStatus(`Editing ${cam.id}.${bounds}`, false);
   }
   cancelDeleteCurrentCamera();
+  hideCameraConfigDuplicate();
+  cameraConfigAllowDuplicate = false;
   modal.style.display = 'flex';
   modal.setAttribute('data-camera-object', JSON.stringify(cam));
 }
@@ -2232,8 +2248,33 @@ async function afterCameraChange() {
   }
 }
 
+// "Save anyway" after a duplicate refusal: the next save sends allow_duplicate.
+let cameraConfigAllowDuplicate = false;
+
+/** The "Same camera already added" panel of the Settings dialog (duplicates.js renders it). */
+function cameraConfigDuplicateBox() {
+  let box = el('cameraConfigDupConflict');
+  if (!box) {
+    const statusNode = el('cameraConfigStatus');
+    if (!statusNode || !statusNode.parentNode) return null;
+    box = document.createElement('div');
+    box.id = 'cameraConfigDupConflict';
+    box.hidden = true;
+    statusNode.parentNode.insertBefore(box, statusNode);
+  }
+  return box;
+}
+
+function hideCameraConfigDuplicate() {
+  const box = el('cameraConfigDupConflict');
+  if (box) { box.hidden = true; box.innerHTML = ''; }
+}
+
 async function handleCameraConfigSubmit(event) {
-  event.preventDefault();
+  if (event && typeof event.preventDefault === 'function') event.preventDefault();
+  hideCameraConfigDuplicate();
+  const allowDuplicate = cameraConfigAllowDuplicate;
+  cameraConfigAllowDuplicate = false;
   const modal = el('modalCameraConfig');
   const camId = el('configCameraId').value;
   let existing = {};
@@ -2313,6 +2354,8 @@ async function handleCameraConfigSubmit(event) {
     fov_deg: Number.isFinite(fov) ? fov : existing.fov_deg,
     features,
   });
+  if (allowDuplicate) feed.allow_duplicate = true;
+  else delete feed.allow_duplicate;
 
   const saveBtn = el('btnCameraSave');
   if (saveBtn) saveBtn.disabled = true;
@@ -2321,6 +2364,23 @@ async function handleCameraConfigSubmit(event) {
     const res = await fetch(`/api/v1/cameras/${encodeURIComponent(camId)}`, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(feed),
     });
+    const dup = window.edgeDuplicates ? await window.edgeDuplicates.conflictOf(res) : null;
+    if (dup) {
+      // The new stream address is a camera that is already added: nothing was saved.
+      setCameraConfigStatus('Nothing was saved yet: this stream address is already added as another camera.', true);
+      const resubmit = () => handleCameraConfigSubmit(null);
+      window.edgeDuplicates.showConflict(cameraConfigDuplicateBox(), dup, {
+        use: () => {
+          // Keep the camera's current stream; save the other changes.
+          const urlField = el('configRtspUrl');
+          if (urlField) urlField.value = existing.rtsp_url || '';
+          setCameraConfigStatus('Stream address change cancelled. Saving the other changes…', false);
+          resubmit();
+        },
+        anyway: () => { cameraConfigAllowDuplicate = true; resubmit(); },
+      }, { useLabel: 'Use existing camera', anywayLabel: 'Save anyway' });
+      return;
+    }
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       setCameraConfigStatus(`Save failed (HTTP ${res.status}): ${JSON.stringify(err.detail || err)}`, true);

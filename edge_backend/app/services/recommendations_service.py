@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models.db_models import AIDecisionRecommendationModel, AnalysisRunModel
-from app.services.timeutil import to_local, utcnow
+from app.services.timeutil import local_now, to_local, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -172,7 +172,7 @@ class RecommendationsService:
         """Store each finding's cited metrics on today's recommendation row."""
         if not findings:
             return
-        today = date.today().isoformat()   # the key business_analysis_service._persist uses
+        today = local_now().date().isoformat()   # the key business_analysis_service._persist uses
         rows = (await db.execute(select(AIDecisionRecommendationModel).where(
             AIDecisionRecommendationModel.date == today))).scalars().all()
         by_key = {(r.zone, r.category): r for r in rows}
@@ -251,7 +251,7 @@ class RecommendationsService:
     async def consolidated(self, db: AsyncSession, *, status: Optional[str] = None, days: int = 7,
                            include_dismissed: bool = False) -> dict:
         """One list: persisted rule findings (with status) + the latest AI summary."""
-        since = (date.today() - timedelta(days=max(1, days) - 1)).isoformat()
+        since = (local_now().date() - timedelta(days=max(1, days) - 1)).isoformat()
         stmt = select(AIDecisionRecommendationModel).where(AIDecisionRecommendationModel.date >= since)
         want = (status or "").strip().upper() or None
         if want:

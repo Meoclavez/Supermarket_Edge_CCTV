@@ -50,7 +50,7 @@
     const products = data.products || [];
     if (!products.length) {
       host.innerHTML = `<div class="fp-empty">${esc(data.message || 'No product shelf areas are mapped.')} `
-        + 'Map shelves in <a href="/dashboard/studio">Camera Studio</a> with the Product shelf tool.</div>';
+        + 'Map shelves in <a href="/dashboard/studio">Camera setup</a> with the Product shelf tool.</div>';
       return;
     }
     const levels = (data.shelf_levels || []).map((l) => `

@@ -177,3 +177,33 @@ def test_stats_come_from_the_database_and_survive_a_restart(db_rows):
             assert empty["totals"]["reaches"] == 0 and empty["observed"] is False and empty["message"]
     finally:
         shelf_interaction_service.delete_zone("si_db_zone")
+
+
+def test_new_shelf_stores_unmeasured_studies_off_and_keeps_stored_rows(tmp_path):
+    import json as _json
+
+    # A new shelf: only hand reaches are measured, the rest default to off.
+    sm = _zone("new_shelf").study_metrics
+    assert sm.track_hand_reach is True
+    assert (sm.track_dwell_time, sm.track_put_back_friction, sm.track_pos_conversion, sm.ab_test_mode) == (
+        False, False, False, False)
+    # Stored rows are read as they were: explicit values kept, missing keys get
+    # the values they were read with before (True), not the new defaults.
+    pts = [{"x": 0.1, "y": 0.1}, {"x": 0.4, "y": 0.1}, {"x": 0.4, "y": 0.3}]
+    row = {"camera_id": "cam_x", "name": "P", "points": pts, "sku_id": "S", "category": "Snacks"}
+    cfg = tmp_path / "zones.json"
+    cfg.write_text(_json.dumps({"zones": [
+        {**row, "id": "explicit", "study_metrics": {"track_hand_reach": True, "track_dwell_time": False,
+                                                     "track_put_back_friction": True,
+                                                     "track_pos_conversion": False, "ab_test_mode": True}},
+        {**row, "id": "partial", "study_metrics": {"track_hand_reach": False}},
+        {**row, "id": "missing"},
+    ]}))
+    svc = ShelfInteractionService(config_path=cfg)
+    e = svc.zones["explicit"].study_metrics
+    assert (e.track_dwell_time, e.track_put_back_friction, e.track_pos_conversion, e.ab_test_mode) == (
+        False, True, False, True)
+    p = svc.zones["partial"].study_metrics
+    assert p.track_hand_reach is False and p.track_dwell_time and p.track_put_back_friction and p.track_pos_conversion
+    m = svc.zones["missing"].study_metrics
+    assert m.track_hand_reach and m.track_dwell_time and m.track_pos_conversion and not m.ab_test_mode

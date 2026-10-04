@@ -640,7 +640,7 @@ tailscale0 only; plain HTTP, WireGuard encrypts; no Tailscale text in the dashbo
   stored evidence stills/clips still open on click. Remote stills (floor-map thumbnail,
   heatmap background, calibration) are one frame over a direct connection ("Take a new
   picture"). Store NAT is endpoint-independent, so mode `auto` needs no port forward.
-- Builds: 05e6215 (direct P2P video), 6557217 (VA-API device up front), e451706 (go2rtc
+- Builds: a38b391 (2026-10-03: static-figure filter, pose-only theft, clips, patterns), 05e6215 (direct P2P video), 6557217 (VA-API device up front), e451706 (go2rtc
   ffmpeg template fix; H.265 resolved). 30/31 NVR sub-streams are H.265 -> h264_vaapi, ~3 %
   of a core per tile, first frame ~4 s (H.264 ch25 passthrough ~1.5 s).
 - Measured on the public path: pair srflx<->srflx (box 58.179.142.243), 4 tiles ≈ 3.2 Mbit/s
@@ -677,13 +677,15 @@ storage with oldest-first cap, DVR recorder removed (da529fc); CPU -47% (OpenCV 
 NV12 reader, DECODE_MAX_FPS=5, DECODE_MAX_WIDTH=auto, resolution-independent geometry) (e3bdc30).
 Measured at 5f2dc0f: CPU ~478% (box ~30%), GPU ~57% (budget 0.6), yolo26n-pose ~2.7 fps/camera.
 
+**Fix round 2026-10-04 (uncommitted, not deployed):** closes the important gaps from docs/USER_MANUAL.md. Area & line alerts card (zone_alerts.js, routes/events.py); accounts + enforced roles + change password (routes/users.py, users.js; auth_service.py `require_admin`, operator writes allowlisted in `_OPERATOR_ONLY` / `@operator_allowed`); 15 site settings in the dashboard, live (services/site_settings.py, system_setup key `site_settings`); backups/restore/upload/factory reset UI + nightly 03:00 store-time backup (DailyBackupScheduler) + till key (till_key.py, pos_ingest.py, header X-Edge-API-Key); privacy masks burned into direct WebRTC video, fail closed, 503 privacy_mask_unavailable (services/privacy_video.py); evidence links stored as paths, absolute only per caller (evidence_urls.py); file test cameras loop; STORAGE_DIR now also moves db/backups/media when set to a non-default dir; UI bug fixes; store-time-zone date fixes. Assets v=2.5.0. Full pytest 1217 passed; headless-Chrome check as owner, operator and stale-token states all PASS on a scratch copy. Docs updated (USER_MANUAL, FEATURES, REMOTE_VIDEO_CONTRACT, DEPLOYMENT). Before deploy: `grep STORAGE_DIR /opt/edge-cctv/edge_backend/.env` on the box (paths move if it is non-default); verify VA-API masked path and the live dashboard with the owner account after deploy.
+
 **Pending/owner decisions:** gaze/attention beam plan; online-access items listed in the
 block above; store manager switches
 the 16 CIF channels to D1 sub-stream (needed by RTMO); body7 training-data legal check for
-the RTMO/RTMPose weights; deploy of the 2026-10-01 static-filter / pose-only theft / patterns build to the box (not yet committed or deployed); confirm on the box that only RTMO is loaded (no `SHADOW_POSE_MODEL`); phone push (FCM)
+the RTMO/RTMPose weights; (done 2026-10-03 00:30 AEST: a38b391 static-filter / pose-only theft / patterns build deployed; box verified RTMO-only: models/ holds manifest + rtmo-s + rtmpose-s (refiner, off), startup logs `provider=MIGraphXExecutionProvider model=rtmo-s-body7-640x640-static.onnx`, no YOLO; first live static flag on cam_a36424087a within ~2 min); phone push (FCM)
 not configured; skeleton-rotation report parked until reproduced.
 
-**Client docs:** `docs/client/Edge_AI_CCTV_Features.pdf` (plain-language feature overview for customers, A4, 3 pages; last rebuilt 2026-10-01 with "Secure online access" + "Private live video" rows; rebuild with `uv run --no-project --with reportlab python docs/client/build_features_pdf.py`). Operator reference with configuration paths: `docs/FEATURES.md`.
+**Client docs:** `docs/client/Edge_AI_CCTV_Features.pdf` (plain-language feature overview for customers, A4, 3 pages; last rebuilt 2026-10-01 with "Secure online access" + "Private live video" rows; rebuild with `uv run --no-project --with reportlab python docs/client/build_features_pdf.py`). Operator reference with configuration paths: `docs/FEATURES.md`. Step-by-step user manual (install, first sign-in, store mapping/commissioning order, daily use, maintenance, troubleshooting, "Not available yet" gap list): `docs/USER_MANUAL.md` (written 2026-10-03 against a38b391; UI labels checked against static/). Keep it in step with UI label changes.
 
 **RTMO trial result (2026-09-28, brain #324):** RTMO-s better on D1/720p/>=1440p cameras (keeps 96-98% of YOLO's people, +25-33% more, fewer fixture false positives); worse on CIF 352x288 (keeps ~60%); IR/low-light inconclusive (night review samples were overwritten: sampler keeps only the newest 200). Decided 2026-09-28: switch to RTMO-s only (YOLO removed, CIF channels to D1); see the "RTMO only" block under Inference.
 

@@ -75,6 +75,54 @@
     try { window.dispatchEvent(new CustomEvent('edge:auth', { detail: { state } })); } catch (_) {}
   }
 
+  // --- who is signed in ------------------------------------------------------
+  //
+  // window.EdgeAuth: the signed-in person, from /api/v1/auth/status.
+  //   { username, displayName, role, isAdmin, canChangeSetup, known }
+  // role is 'owner' | 'admin' | 'operator' (null until known). It is set before
+  // edgeAuth.ready resolves, and announced with the 'edge:account' event.
+  // Scripts may hide setup controls for operators, but the server decides.
+  // <html data-edge-role="..."> lets CSS do the same (users.css).
+  function setAccount(user, fallbackRole) {
+    const role = (user && user.role) || fallbackRole || null;
+    const isAdmin = role === 'owner' || role === 'admin';
+    window.EdgeAuth = Object.freeze({
+      known: !!role,
+      id: (user && user.id) || null,
+      username: (user && user.username) || null,
+      displayName: (user && (user.display_name || user.username)) || null,
+      role,
+      isAdmin,
+      canChangeSetup: isAdmin,
+      canManageAccounts: isAdmin,
+    });
+    try {
+      if (role) document.documentElement.setAttribute('data-edge-role', role);
+      else document.documentElement.removeAttribute('data-edge-role');
+    } catch (_) {}
+    try { window.dispatchEvent(new CustomEvent('edge:account', { detail: window.EdgeAuth })); } catch (_) {}
+  }
+  setAccount(null, null);
+
+  // A role refusal (403 with X-Edge-Role-Denied) gets one readable sentence on
+  // screen, whatever the calling script does with the response.
+  // Word for word the server's SETUP_FORBIDDEN_DETAIL (services/auth_service.py).
+  const ROLE_DENIED_TEXT = "Your account can't change setup. Ask an administrator.";
+  let lastDeniedAt = 0;
+  function showRoleDenied(text) {
+    const now = Date.now();
+    if (now - lastDeniedAt < 1500) return;
+    lastDeniedAt = now;
+    const msg = text || ROLE_DENIED_TEXT;
+    if (typeof window.showToast === 'function') { window.showToast(msg, 'error'); return; }
+    const t = document.getElementById('toast');
+    if (!t) return;
+    t.textContent = msg;
+    t.classList.add('toast-error');
+    t.style.display = 'block';
+    setTimeout(() => { t.style.display = 'none'; }, 6000);
+  }
+
   // Requests allowed out before the stored token has been checked.
   const PRE_AUTH_PATHS = ['/api/v1/auth/status', '/api/v1/auth/refresh'];
   function pathOf(url) {
@@ -129,6 +177,10 @@
     if (res.status === 401 && isApi && !isAuthOrSetup) {
       setToken(null);
       showGate();
+    }
+    if (res.status === 403 && isApi && res.headers && res.headers.get('X-Edge-Role-Denied')) {
+      res.clone().json().then((d) => showRoleDenied(d && typeof d.detail === 'string' ? d.detail : null))
+        .catch(() => showRoleDenied(null));
     }
     return res;
   };
@@ -410,6 +462,26 @@
     },
     // The stored token, only once the server has accepted it.
     token: usableToken,
+    // After "Change password" the server signs out every older session of the
+    // account and returns a fresh one for this browser: keep using that.
+    replaceSession(accessToken) {
+      if (accessToken) setToken(accessToken);
+    },
+    // Re-read who is signed in (e.g. after an administrator changed a role).
+    async refreshAccount() {
+      const t = getToken();
+      if (!t) return window.EdgeAuth;
+      try {
+        const res = await nativeFetch('/api/v1/auth/status', {
+          headers: { Authorization: `Bearer ${t}` }, credentials: 'omit',
+        });
+        if (res.ok) {
+          const s = await res.json();
+          if (s.authenticated && s.user) setAccount(s.user);
+        }
+      } catch (_) { /* keep what is known */ }
+      return window.EdgeAuth;
+    },
     state() { return authState; },
     ready,
     // Run fn once the DOM is parsed and the stored token has been checked.
@@ -476,6 +548,8 @@
     if (s.authenticated) {
       // Valid session: refresh the cookie (MJPEG <img> and websocket use it).
       try { document.cookie = `${TOKEN_KEY}=${encodeURIComponent(currentToken)}; ${COOKIE_ATTRS}`; } catch (_) {}
+      // An older server without "user" in the status: role unknown (null).
+      setAccount(s.user || null, null);
       settleAuth('valid');
       mountSignOut();
       return;
@@ -488,6 +562,7 @@
       // no account has been created yet, so do not block the dashboard.
       // Driven by the server's AUTH_DISABLED switch (never by DEBUG).
       console.warn('AUTH_DISABLED is set on the server: the API is currently unauthenticated.');
+      setAccount(null, 'owner');
       settleAuth('bypass');
       return;
     }

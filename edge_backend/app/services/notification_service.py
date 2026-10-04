@@ -90,6 +90,7 @@ class NotificationService:
     async def dispatch_event_notification(self, event: SecurityEvent) -> dict:
         """Push an alert that the caller already logged and broadcast (``/events/trigger``)."""
         from app.services.alert_dispatcher import alert_dispatcher
+        from app.services.evidence_urls import evidence_path
 
         title = f"{_label(event.event_type)} - {event.camera_name}"
         body = event.description or f"Review {event.location} ({event.camera_name})."
@@ -98,8 +99,9 @@ class NotificationService:
             "camera_id": event.camera_id,
             "camera_name": event.camera_name,
             "location": event.location,
-            "snapshot_url": event.snapshot_url or "",
-            "clip_url": event.clip_url or "",
+            # Same-origin paths (services/evidence_urls.py), never EDGE_BASE_URL links.
+            "snapshot_url": evidence_path(event.snapshot_url) or "",
+            "clip_url": evidence_path(event.clip_url) or "",
             "timestamp": event.timestamp.isoformat(),
         }
         if event.metadata:

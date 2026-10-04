@@ -143,18 +143,39 @@ sudo -u edgecctv .venv/bin/pip install onnxruntime-gpu
 ```bash
 cd /opt/edge-cctv/edge_backend
 sudo -u edgecctv cp .env.example .env
-sudo -u edgecctv python3 -c "import secrets; print('JWT_SECRET=' + secrets.token_urlsafe(64))"
 sudo -u edgecctv nano .env
 ```
 
-Three values **must** change before the system goes on a store network:
+**Secrets are generated, not typed.** `JWT_SECRET`, `AUTH_SECRET_KEY`,
+`INTERNAL_SERVICE_KEY`, `COTURN_SECRET` and `NVR_CREDENTIAL_KEY` have no
+default in code. Each resolves from the process environment, then `.env`, then
+`storage/secrets/device_secrets.json`; a missing value, or a placeholder such
+as `CHANGE_ME`, is generated on first start (`secrets.token_urlsafe(64)`) and
+saved there (directory 0700, file 0600), so every machine gets its own and
+later starts reuse them. Leave them commented out in `.env` unless you have a
+reason to supply your own (then at least 32 characters).
 
-- `DEBUG=false` — `true` disables authentication on every API route.
-- `JWT_SECRET` — otherwise anyone can mint a valid session.
-- `INTERNAL_SERVICE_KEY` — the machine-to-machine key.
+**Authentication.** Only `AUTH_DISABLED=true` turns authentication off on
+every API route; keep it `false` on any store machine. `DEBUG=true` only makes
+logging more verbose and serves the API docs on the local address; it never
+disables authentication.
 
-The service logs `INSECURE CONFIGURATION:` at startup for each of these that is
-still at its default. Check the journal after first start.
+The service logs `INSECURE CONFIGURATION:` at startup when `AUTH_DISABLED` is
+on, when a secret supplied through the environment or `.env` is shorter than
+32 characters, or when a generated secret could not be saved under
+`STORAGE_DIR/secrets` (it would then change on every restart). Check the
+journal after first start.
+
+**Store settings are in the dashboard.** The store name, time zone, evidence
+limits and alert tuning (15 values: `STORE_NAME`, `SITE_TIMEZONE`,
+`EVIDENCE_MAX_GB`, `STORAGE_RETENTION_DAYS`, `STORAGE_MAX_DISK_PERCENT`,
+`NIGHT_WATCH_EVIDENCE_MAX_MB`, `NIGHT_WATCH_CLIP`,
+`THEFT_HIGH_VALUE_CATEGORIES`, `THEFT_HIGH_VALUE_MIN_PRICE`,
+`TRIPWIRE_ALERT_COOLDOWN_SEC`, `RESTRICTED_AREA_COOLDOWN_SEC`,
+`THEFT_INCIDENT_COOLDOWN_SEC`, `THEFT_MIN_CONFIDENCE`,
+`THEFT_EXIT_RULE_ENABLED`, `QUEUE_CONGESTED_WAIT_SEC`) are set in Settings →
+"Store", "Evidence storage" and "Alerts and detection". They are saved in the
+database and apply without a restart; the `.env` values are only defaults.
 
 **Where things live, and who can read them.** Code and `.env` are under
 `/opt/edge-cctv`; the database (`storage/cctv_core.db`), secrets, recordings,
@@ -216,6 +237,14 @@ To get a code again:
 
   `manage_operator.py reset-password --username <name>` changes one password
   instead, and `list` shows the accounts.
+
+While someone can still sign in as an owner or administrator, manage accounts
+in the dashboard instead: Settings → "Accounts" ("Add account", "Change role",
+"Reset password", "Remove") and Settings → "Your account" → "Change password".
+Roles are enforced: Owner and Administrator can change setup and accounts;
+Operator is daily use only and gets 403 "Your account can't change setup. Ask
+an administrator." for setup changes. The command line stays the fallback for
+a forgotten owner password.
 
 ### Viewing the dashboard from off-site
 
@@ -330,7 +359,13 @@ recorded visits at query time.
 ### 5.6 Connect the POS (optional)
 Without it, footfall and dwell are live but revenue and conversion stay blank —
 the dashboard says so rather than showing zero. Post real transactions to
-`POST /api/v1/analytics/pos/ingest`.
+`POST /api/v1/analytics/pos/ingest` with a **till key** in the
+`X-Edge-API-Key` header. Create it in Settings → "Sales data" → "Till key" →
+"Create till key" (owner/administrator). It is shown once, opens only the
+ingest route, and is stored only as a SHA-256 hash in
+`storage/secrets/till_key.json`; "Replace till key" and "Revoke" are in the
+same place. The device's `INTERNAL_SERVICE_KEY` still works there for older
+till set-ups, but it opens every API, so give tills the till key.
 
 ---
 
@@ -419,9 +454,18 @@ the floor right now (positions only from calibrated cameras), and
 `GET /stream?camera_id=<id>&overlay=1` draws the tracker's boxes on a feed so
 you can see what the detector is doing.
 
-**Backups.** A snapshot is taken at every startup into `storage/backups/`,
-pruned to 7 days. To keep copies, pull that directory to another machine;
-do not point the service at the store NAS (it must not write there).
+**Backups.** Database snapshots go to `storage/backups/`: one at every
+startup and one every night at 03:00 store time (both skipped when nothing
+changed since the newest backup). Retention deletes only these automatic
+snapshots: it keeps the 7 newest plus the newest one of each day for 14 days.
+Manual ("Back up now"), uploaded, `pre-restore`, `pre-reset` and pre-migration
+(`pre-vNNNN`) snapshots are never deleted automatically. Settings → "Backups
+and reset" (owner/administrator) lists them and has "Back up now",
+"Download", "Restore" (takes a safety backup, then restarts the service under
+systemd or Docker), "Upload a backup" and "Factory reset". Nothing copies
+backups off the device by itself: download one regularly from the dashboard,
+or pull `storage/backups/` to another machine (as root or `edgecctv`); do not
+point the service at the store NAS (it must not write there).
 
 **Updating a running device.** Install the new release and restart the
 service: on start the database migrates itself (versioned migrations in
@@ -432,7 +476,15 @@ to start on a database written by a newer release. Inspect with
 
 **Resetting to a fresh install.** To wipe the store and start again — for
 example after a misconfigured camera recorded false shoppers, or to hand a
-machine to a different store:
+machine to a different store — use Settings → "Backups and reset" → type
+`RESET` → "Factory reset". It takes a backup first and keeps accounts, site
+settings, saved recorder passwords, paired phones, online access, `.env`,
+evidence and backups. From the command line the same reset is
+`POST /api/v1/system/factory-reset` with `{"confirm":"RESET"}` (owner or
+administrator token; it aborts without deleting anything if the backup
+fails). The older layout endpoint below takes **no backup** first and leaves
+line crossings, queue visits, heatmap history and analysis runs, which the
+factory reset also clears:
 
 ```bash
 curl -X POST localhost:8000/api/v1/layout/reset \
@@ -693,8 +745,13 @@ When the box moves from the installer's test domain to the customer's own:
 3. Wait for *Connected since …*, press **Verify now**, confirm *Verified*.
 4. Revoke the old store ID/token: `manage disable <id>`, then
    `manage remove <id>` on the VPS, and delete its Cloudflare DNS record.
-5. Dashboard: **change the operator password** (and remove installer
-   accounts); the customer sets their own.
+5. Dashboard: create the customer's accounts in **Settings → Accounts**
+   (an Owner or Administrator for the manager, Operators for staff); the
+   customer changes their password in **Settings → Your account → Change
+   password**; then remove the installer accounts under **Accounts**. If the
+   tills were connected with an installer-held key, **Replace till key**
+   under **Settings → Sales data** and update the till system. Press **Back up
+   now** and **Download** a copy for the customer.
 6. **Rotate phone pairing**: revoke every paired phone under **Settings →
    Paired phones** and pair the customer's phones afresh with new codes.
 7. Remove the installer's VPN access to the box, if any.
@@ -800,8 +857,16 @@ still asks for MJPEG through the tunnel for remote viewing, which is refused
 it can show live video off-site. The list of fixes is
 `mobile_app/UPCOMING_FIXES.md` (talk-back was removed on 2026-09-29).
 
-**Known gaps.** Detector boxes are not drawn on direct video (it is the raw
-camera picture, also without privacy masks). With the default 10 s rotation, a
+**Privacy masks.** A camera with privacy masks is always sent through an
+ffmpeg pipeline that burns the masks in on the box and encodes H.264 (about
+6–9 % of one core per masked tile with hardware encoding). If that pipeline
+cannot be built the session is refused (503 `privacy_mask_unavailable`) and
+the tile shows "Hidden: privacy masks"; the raw stream is never used. A mask
+edit ends the affected sessions (`privacy_masks_changed`) and restarts go2rtc,
+so every remote viewer reconnects within seconds. Details:
+`docs/REMOTE_VIDEO_CONTRACT.md` → "Privacy masks on direct video".
+
+**Known gaps.** Detector boxes are not drawn on direct video. With the default 10 s rotation, a
 converted tile shows video for about half its time on screen because the first
 frame takes about 4 s; a longer remote rotation or opening the next camera
 early is an open owner decision. `stun.ikorex.com.au` has no AAAA record, so a

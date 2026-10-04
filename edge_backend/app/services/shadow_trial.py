@@ -69,6 +69,7 @@ from typing import Callable, Optional
 import numpy as np
 
 from app.config import settings
+from app.services.timeutil import to_local, utc_from_ts
 
 logger = logging.getLogger(__name__)
 
@@ -367,7 +368,8 @@ class ShadowTrial:
         return min(max(float(settings.SHADOW_POSE_SHARE), 0.0), 0.9)
 
     def _window_open(self) -> bool:
-        return in_window(parse_window(settings.SHADOW_TRIAL_WINDOW), datetime.fromtimestamp(self._wall()))
+        # The window is the store's clock (SITE_TIMEZONE), read on every call.
+        return in_window(parse_window(settings.SHADOW_TRIAL_WINDOW), to_local(utc_from_ts(self._wall())))
 
     # ------------------------------------------------------------ lifecycle
 
@@ -779,7 +781,7 @@ class ShadowTrial:
                      f"shadow: {self.model_path.name if self.model_path else '?'}  ({len(shadow)} people)")
         sheet = np.concatenate([left, right], axis=1)
         footer = np.zeros((20, sheet.shape[1], 3), np.uint8)
-        cv2.putText(footer, f"{cam}  {datetime.fromtimestamp(now).strftime('%Y-%m-%d %H:%M:%S')}  "
+        cv2.putText(footer, f"{cam}  {to_local(utc_from_ts(now)).strftime('%Y-%m-%d %H:%M:%S %Z')}  "
                             f"lighting {light}  green = found by both, orange = only this model",
                     (6, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (220, 220, 220), 1, cv2.LINE_AA)
         sheet = np.concatenate([sheet, footer], axis=0)

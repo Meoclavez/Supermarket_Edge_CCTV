@@ -135,10 +135,17 @@ def validate_prefs(prefs: Optional[dict]) -> dict:
 
 
 def in_quiet_hours(quiet: Optional[dict], now: Optional[datetime] = None) -> bool:
-    """True when ``now`` (device local time) is inside ``[start, end)``; wraps midnight."""
+    """True when ``now`` (store-local time) is inside ``[start, end)``; wraps midnight.
+
+    The times are entered on the dashboard, which shows the store's clock
+    (SITE_TIMEZONE, else the host zone), so ``now`` defaults to that clock.
+    """
     if not quiet:
         return False
-    now = now or datetime.now()
+    if now is None:
+        from app.services.timeutil import local_now
+
+        now = local_now()
     cur = now.hour * 60 + now.minute
     sh, sm = map(int, quiet["start"].split(":"))
     eh, em = map(int, quiet["end"].split(":"))

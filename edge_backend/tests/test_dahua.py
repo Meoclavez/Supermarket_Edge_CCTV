@@ -160,7 +160,8 @@ class TestDahuaProbeService:
 
         with patch.object(probe_svc, "check_tcp", return_value=True), \
              patch.object(probe_svc, "probe_rtsp_auth", return_value=(True, None)), \
-             patch.object(probe_svc, "_test_channel_worker", side_effect=mock_worker):
+             patch.object(probe_svc, "_test_channel_worker", side_effect=mock_worker), \
+             patch.object(probe_svc, "read_channel_titles", return_value=({}, None)):
             res = asyncio.run(probe_svc.probe_nvr("192.168.1.108", max_channels=2))
             assert res.reachable is True
             assert res.authenticated is True

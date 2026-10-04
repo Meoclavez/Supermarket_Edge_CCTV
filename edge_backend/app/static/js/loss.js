@@ -13,6 +13,11 @@
  * place). It shows only recorded incidents and never claims who a person is.
  * The evidence viewer plays the incident's clip when the camera saved one.
  *
+ * Area & line alerts (zone_alerts.js, window.edgeZoneAlerts) share the banner,
+ * the nav badge and the evidence viewer: an unacknowledged restricted-area or
+ * line-crossing alert raises the banner as a prompt to check, never as a
+ * theft finding, and counts in the badge.
+ *
  * Uses globals from analytics.js: DASH, escapeHtml, isNum, getJSON, showToast,
  * formatTimestamp, formatAgo, theftAuthUrl, switchTab. No prompt/confirm/alert.
  */
@@ -177,38 +182,75 @@
     return state.incidents.filter(isOpen).length;
   }
 
+  const zoneAlerts = () => (window.edgeZoneAlerts && typeof window.edgeZoneAlerts.pending === 'function'
+    ? window.edgeZoneAlerts : null);
+
   function renderBadge() {
     const b = $('tabTheftCountBadge');
     if (!b) return;
-    const n = openCount();
+    const theft = openCount();
+    const za = zoneAlerts();
+    const zones = za ? za.pendingCount() : 0;
+    const n = theft + zones;
     b.textContent = String(n);
     b.hidden = !n;
+    const parts = [`${theft} incident${theft === 1 ? '' : 's'} waiting for review`];
+    if (zones) parts.push(`${zones} area or line alert${zones === 1 ? '' : 's'} not acknowledged`);
+    b.title = parts.join(', ');
+  }
+
+  /** The newest of: the newest ACTIVE theft incident, the newest unacknowledged area/line alert. */
+  function bannerItem() {
+    const active = state.incidents.find((i) => i.status === 'ACTIVE');
+    const za = zoneAlerts();
+    const zone = za ? za.pending()[0] : null;
+    const t = (x) => { const d = x && toDate(x.timestamp); return d ? d.getTime() : 0; };
+    if (zone && (!active || t(zone) > t(active))) return { kind: 'zone', id: zone.id, item: zone };
+    return active ? { kind: 'theft', id: active.id, item: active } : null;
   }
 
   function renderBanner() {
     const banner = $('theftAlertBanner');
     if (!banner) return;
-    const active = state.incidents.find((i) => i.status === 'ACTIVE');
-    if (!active) { banner.style.display = 'none'; return; }
-    if (state.lastAlertedId !== active.id) {
-      state.lastAlertedId = active.id;
+    const pick = bannerItem();
+    if (!pick) { banner.style.display = 'none'; return; }
+    if (state.lastAlertedId !== pick.id) {
+      state.lastAlertedId = pick.id;
       playSound();
     }
-    if (state.dismissedBannerId === active.id) { banner.style.display = 'none'; return; }
+    if (state.dismissedBannerId === pick.id) { banner.style.display = 'none'; return; }
     const set = (id, t) => { const n = $(id); if (n) n.textContent = t; };
-    set('theftBannerHeadline', `Please check: ${ruleLabel(active)} on ${active.camera_name || active.camera_id}`);
-    set('theftBannerConfidence', num(active.confidence) ? `Confidence ${Math.round(active.confidence * 100)}%` : `Confidence ${D}`);
-    set('theftBannerTime', when(active.timestamp));
-    set('theftBannerDetails', 'Suspicious behaviour for staff review, not a finding of theft.');
-    banner.dataset.incident = active.id;
+    const it = pick.item;
+    if (pick.kind === 'zone') {
+      const restricted = it.event_type === 'RESTRICTED_AREA';
+      set('theftBannerHeadline', zoneAlerts().bannerHeadline(it));
+      set('theftBannerConfidence', restricted ? 'Restricted area alert' : 'Line alert');
+      set('theftBannerTime', when(it.timestamp));
+      set('theftBannerDetails', restricted
+        ? 'Someone is in an area set as restricted at this time. A prompt to check, not a theft finding.'
+        : 'A line set to alert staff was crossed. A prompt to check, not a theft finding.');
+    } else {
+      set('theftBannerHeadline', `Please check: ${ruleLabel(it)} on ${it.camera_name || it.camera_id}`);
+      set('theftBannerConfidence', num(it.confidence) ? `Confidence ${Math.round(it.confidence * 100)}%` : `Confidence ${D}`);
+      set('theftBannerTime', when(it.timestamp));
+      set('theftBannerDetails', 'Suspicious behaviour for staff review, not a finding of theft.');
+    }
+    banner.dataset.incident = pick.id;
+    banner.dataset.kind = pick.kind;
     banner.style.display = 'flex';
   }
 
   function bannerReview() {
     const banner = $('theftAlertBanner');
     const id = banner && banner.dataset.incident;
+    const kind = banner && banner.dataset.kind;
     if (typeof switchTab === 'function') switchTab('loss');
-    if (id) setTimeout(() => focusIncident(id), 60);
+    if (!id) return;
+    setTimeout(() => {
+      const za = zoneAlerts();
+      if (kind === 'zone' && za) za.focus(id);
+      else focusIncident(id);
+    }, 60);
   }
 
   function bannerDismiss() {
@@ -675,10 +717,11 @@
   // ------------------------------------------------------------ evidence viewer
 
   /** Full-size evidence: the image and, when the camera saved one, the clip. */
-  function openEvidence(url, caption, clipUrl, mode) {
+  function openEvidence(url, caption, clipUrl, mode, note) {
     const viewer = $('theftEvidenceViewer');
     if (!viewer || (!url && !clipUrl)) return;
-    state.viewer = { still: url || null, clip: clipUrl || null, caption: caption || '' };
+    state.viewer = { still: url || null, clip: clipUrl || null, caption: caption || '',
+      note: note || 'suspicious behaviour for staff review' };
     // A newly opened viewer loads the clip afresh, so it plays from the start
     // instead of resuming (or sitting ended) where it was last closed.
     const video = $('theftEvidenceVideo');
@@ -726,7 +769,7 @@
     if (cl) cl.setAttribute('aria-pressed', String(clip));
     if (st) st.classList.toggle('active', !clip);
     if (cl) cl.classList.toggle('active', clip);
-    if (cap) cap.textContent = `${v.caption}${clip ? ' · clip, about 5 s before to 10 s after' : ''} · suspicious behaviour for staff review`;
+    if (cap) cap.textContent = `${v.caption}${clip ? ' · clip, about 5 s before to 10 s after' : ''} · ${v.note}`;
   }
 
   function closeEvidence() {
@@ -1020,6 +1063,8 @@
     window.addEventListener('edge:tab', (e) => {
       if (e.detail && e.detail.tab === 'loss') load(false);
     });
+    // zone_alerts.js polls the area/line alerts; they share the badge and banner.
+    window.addEventListener('edge:zone-alerts', () => { renderBadge(); renderBanner(); });
     document.addEventListener('visibilitychange', () => { if (!document.hidden && tabVisible()) load(false); });
 
     const canPollNow = typeof canPoll === 'function' ? canPoll() : true;
@@ -1028,7 +1073,7 @@
     schedule();
   }
 
-  window.edgeLoss = { refresh, focusIncident, closeEvidence };
+  window.edgeLoss = { refresh, focusIncident, closeEvidence, openEvidence };
 
   if (window.edgeAuth && typeof window.edgeAuth.onReady === 'function') {
     window.edgeAuth.onReady(init);

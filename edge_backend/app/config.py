@@ -33,6 +33,23 @@ def get_default_dir(name: str) -> Path:
         p.mkdir(parents=True, exist_ok=True)
     return p
 
+# Paths that live under STORAGE_DIR unless set on their own: field -> path
+# relative to STORAGE_DIR. With STORAGE_DIR unset (or set to the default root)
+# they keep the defaults above, so the default layout is unchanged.
+STORAGE_DERIVED_PATHS = {
+    "SNAPSHOTS_DIR": "snapshots",
+    "CLIPS_DIR": "clips",
+    "DVR_DIR": "dvr",
+    "ARCHIVES_DIR": "archives",
+    "DATA_DIR": "data",
+    "DATABASE_PATH": "cctv_core.db",
+    "BACKUPS_DIR": "backups",
+    "TRT_ENGINE_CACHE_DIR": "trt_cache",
+    "MIGRAPHX_CACHE_DIR": "migraphx_cache",
+}
+_STORAGE_DERIVED_FILES = {"DATABASE_PATH"}
+
+
 class Settings(BaseSettings):
     # Absolute path: a relative ".env" was only found when the process started in
     # edge_backend/, and a launch from anywhere else silently fell back to the
@@ -316,6 +333,18 @@ class Settings(BaseSettings):
     # rather than a pass-through.
     ZONE_DWELL_MIN_SECONDS: float = float(os.getenv("ZONE_DWELL_MIN_SECONDS", "3.0"))
 
+    # Site settings. These 15 values are only DEFAULTS: the dashboard
+    # (Settings > Store / Evidence storage / Alerts and detection) saves the
+    # store's own values in the database and services/site_settings.py writes
+    # them onto this object at start-up and on every change, so they apply
+    # without a restart. Read them as settings.X when needed, never copy one
+    # into a module-level constant: STORE_NAME, SITE_TIMEZONE,
+    # EVIDENCE_MAX_GB, STORAGE_RETENTION_DAYS, STORAGE_MAX_DISK_PERCENT,
+    # NIGHT_WATCH_EVIDENCE_MAX_MB, NIGHT_WATCH_CLIP, THEFT_HIGH_VALUE_CATEGORIES,
+    # THEFT_HIGH_VALUE_MIN_PRICE, TRIPWIRE_ALERT_COOLDOWN_SEC,
+    # RESTRICTED_AREA_COOLDOWN_SEC, THEFT_INCIDENT_COOLDOWN_SEC,
+    # THEFT_MIN_CONFIDENCE, THEFT_EXIT_RULE_ENABLED, QUEUE_CONGESTED_WAIT_SEC.
+    #
     # Store identity & default premises extent (metres) for a fresh blueprint.
     STORE_ID: str = os.getenv("STORE_ID", "store_main")
     STORE_NAME: str = os.getenv("STORE_NAME", "Store")
@@ -331,7 +360,8 @@ class Settings(BaseSettings):
     # aged out by services/evidence_storage.py, oldest first across all kinds:
     # older than STORAGE_RETENTION_DAYS (0 = no age limit), above
     # EVIDENCE_MAX_GB in total (0 = automatic: 10% of the disk, 1-50 GB), or
-    # when the disk passes STORAGE_MAX_DISK_PERCENT.
+    # when the disk passes STORAGE_MAX_DISK_PERCENT. Defaults only: Settings >
+    # Evidence storage overrides these (services/site_settings.py).
     STORAGE_RETENTION_DAYS: int = int(os.getenv("STORAGE_RETENTION_DAYS", "7"))
     STORAGE_MAX_DISK_PERCENT: float = float(os.getenv("STORAGE_MAX_DISK_PERCENT", "85.0"))
     EVIDENCE_MAX_GB: float = float(os.getenv("EVIDENCE_MAX_GB", "0"))
@@ -390,6 +420,35 @@ class Settings(BaseSettings):
     # the ICE lists contain stun: URLs only (docs/REMOTE_VIDEO_CONTRACT.md).
     # TURN_ENABLED is ignored (a warning is logged); COTURN_SECRET stays a
     # managed secret only so existing secret stores keep their layout.
+    def _derive_storage_paths(self) -> None:
+        """STORAGE_DIR set to another place moves the database, backups and media with it.
+
+        Before, only STORAGE_DIR moved: the database, backups, snapshots and
+        clips stayed under the default root although the docs say STORAGE_DIR
+        holds the evidence and the database. A path set on its own (e.g.
+        DATABASE_PATH in .env) still wins.
+        """
+        explicit = set(self.model_fields_set)
+        storage = Path(self.STORAGE_DIR)
+        if "STORAGE_DIR" in explicit:
+            try:
+                moved = storage.resolve() != get_storage_root().resolve()
+            except OSError:
+                moved = True
+            if moved:
+                for key, rel in STORAGE_DERIVED_PATHS.items():
+                    if key in explicit:
+                        continue
+                    path = storage / rel
+                    try:
+                        (path.parent if key in _STORAGE_DERIVED_FILES else path).mkdir(parents=True, exist_ok=True)
+                    except OSError:
+                        pass     # reported by preflight / the service that uses it
+                    setattr(self, key, path)
+        if "SQLITE_DB_PATH" not in explicit:
+            # One database: the legacy name follows DATABASE_PATH.
+            self.SQLITE_DB_PATH = Path(self.DATABASE_PATH)
+
     TURN_ENABLED: bool = False
     COTURN_SECRET: str = ""
     COTURN_REALM: str = os.getenv("COTURN_REALM", "cctv.local")
@@ -397,8 +456,9 @@ class Settings(BaseSettings):
     COTURN_PORT: int = int(os.getenv("COTURN_PORT", "3478"))
 
     def model_post_init(self, __context) -> None:
-        """Fill every secret left unset (or set to a placeholder) from the store."""
+        """Paths under a moved STORAGE_DIR; every secret left unset (or a placeholder) from the store."""
         super().model_post_init(__context)
+        self._derive_storage_paths()
         from .services.secret_store import SECRET_NAMES, resolve_secrets
 
         provided = {name: getattr(self, name, "") for name in SECRET_NAMES}
@@ -551,7 +611,9 @@ class Settings(BaseSettings):
     # Shelf sweeping: this many reaches into one zone inside the window.
     THEFT_SWEEP_WINDOW_SEC: float = float(os.getenv("THEFT_SWEEP_WINDOW_SEC", "10.0"))
     THEFT_SWEEP_MIN_REACHES: int = int(os.getenv("THEFT_SWEEP_MIN_REACHES", "4"))
-    # Suspicious loitering near high-value product zones.
+    # Suspicious loitering near high-value product zones. Default only:
+    # Settings > Alerts and detection overrides it (and the four THEFT_ values
+    # below marked "dashboard").
     THEFT_HIGH_VALUE_CATEGORIES: str = os.getenv(
         "THEFT_HIGH_VALUE_CATEGORIES",
         "ALCOHOL,SPIRITS,LIQUOR,WINE,ELECTRONICS,COSMETICS,BEAUTY,FRAGRANCE,BABY_FORMULA,RAZORS,TOBACCO,MEDICINE,PHARMACY",
@@ -599,13 +661,13 @@ class Settings(BaseSettings):
     # high_value_dwell cue: dwell by a high-value zone of this fraction of
     # THEFT_LOITER_MIN_DWELL_SEC (the loitering rule needs all of it).
     THEFT_PATTERN_DWELL_FRAC: float = float(os.getenv("THEFT_PATTERN_DWELL_FRAC", "0.5"))
-    # Exit without checkout (needs a calibrated camera and ENTRANCE/EXIT + CHECKOUT zones).
+    # Exit without checkout (needs a calibrated camera and ENTRANCE/EXIT + CHECKOUT zones). Dashboard.
     THEFT_EXIT_RULE_ENABLED: bool = os.getenv("THEFT_EXIT_RULE_ENABLED", "true").lower() in ("1", "true", "yes")
     # Sweethearting: seconds between a checkout hand pass and a POS scan to count as matched.
     THEFT_POS_MATCH_TOLERANCE_SEC: float = float(os.getenv("THEFT_POS_MATCH_TOLERANCE_SEC", "2.0"))
-    # One incident per track and rule inside this window.
+    # One incident per track and rule inside this window. Dashboard.
     THEFT_INCIDENT_COOLDOWN_SEC: float = float(os.getenv("THEFT_INCIDENT_COOLDOWN_SEC", "120.0"))
-    # Incidents below this evidence-derived confidence are not raised.
+    # Incidents below this evidence-derived confidence are not raised. Dashboard.
     THEFT_MIN_CONFIDENCE: float = float(os.getenv("THEFT_MIN_CONFIDENCE", "0.3"))
     # Reference durations (seconds) at which a rule's duration evidence saturates to ~63%.
     THEFT_CONFIDENCE_DURATION_REF_SEC: float = float(os.getenv("THEFT_CONFIDENCE_DURATION_REF_SEC", "1.5"))
@@ -625,15 +687,16 @@ class Settings(BaseSettings):
     # A crossing is recorded once the person has stayed on the new side this
     # long (or left the view there); crossing straight back sooner cancels it.
     TRIPWIRE_MIN_REPEAT_SEC: float = float(os.getenv("TRIPWIRE_MIN_REPEAT_SEC", "1.0"))
-    # Per (tripwire, track) cooldown between TRIPWIRE_ALERT notifications.
+    # Per (tripwire, track) cooldown between TRIPWIRE_ALERT notifications. Dashboard.
     TRIPWIRE_ALERT_COOLDOWN_SEC: float = float(os.getenv("TRIPWIRE_ALERT_COOLDOWN_SEC", "60"))
-    # Per (area, track) cooldown between RESTRICTED_AREA alerts.
+    # Per (area, track) cooldown between RESTRICTED_AREA alerts. Dashboard.
     RESTRICTED_AREA_COOLDOWN_SEC: float = float(os.getenv("RESTRICTED_AREA_COOLDOWN_SEC", "300"))
     # A foot point may leave an area this long (boundary jitter) without resetting its dwell.
     RESTRICTED_AREA_EXIT_GRACE_SEC: float = float(os.getenv("RESTRICTED_AREA_EXIT_GRACE_SEC", "1.5"))
     # The store's IANA time zone (e.g. Australia/Melbourne): "today", hourly
     # curves, restricted-area and night-watch schedules and alert times are
-    # store-local. Empty = the host's own time zone.
+    # store-local. Empty = the host's own time zone. Default only: Settings >
+    # Store > Time zone overrides it.
     SITE_TIMEZONE: str = os.getenv("SITE_TIMEZONE", "")
     # Where alert snapshots are written; empty means <STORAGE_DIR>/zone_alerts.
     ZONE_ALERT_EVIDENCE_DIR: str = os.getenv("ZONE_ALERT_EVIDENCE_DIR", "")
@@ -657,11 +720,12 @@ class Settings(BaseSettings):
     NIGHT_WATCH_RECONFIRM_SEC: float = float(os.getenv("NIGHT_WATCH_RECONFIRM_SEC", "10"))
     # At most this many night-watch events (alerts + motion) per camera per hour.
     NIGHT_WATCH_MAX_EVENTS_PER_HOUR: int = int(os.getenv("NIGHT_WATCH_MAX_EVENTS_PER_HOUR", "12"))
-    # Save a short clip (pre-event buffer + NIGHT_WATCH_CLIP_POST_SEC) with a person alert.
+    # Save a short clip (pre-event buffer + NIGHT_WATCH_CLIP_POST_SEC) with a person alert. Dashboard.
     NIGHT_WATCH_CLIP: bool = os.getenv("NIGHT_WATCH_CLIP", "false").lower() in ("1", "true", "yes", "on")
     NIGHT_WATCH_CLIP_POST_SEC: float = float(os.getenv("NIGHT_WATCH_CLIP_POST_SEC", "5"))
     # Evidence stills/clips; empty = <STORAGE_DIR>/night_watch. Oldest deleted first above the
     # cap, a sub-cap inside the total evidence limit (EVIDENCE_MAX_GB, services/evidence_storage.py).
+    # NIGHT_WATCH_EVIDENCE_MAX_MB: dashboard (Settings > Evidence storage).
     NIGHT_WATCH_EVIDENCE_DIR: str = os.getenv("NIGHT_WATCH_EVIDENCE_DIR", "")
     NIGHT_WATCH_EVIDENCE_MAX_MB: float = float(os.getenv("NIGHT_WATCH_EVIDENCE_MAX_MB", "1024"))
 
@@ -671,7 +735,7 @@ class Settings(BaseSettings):
     # Studio checkout / queue areas: a foot point may leave the area this long
     # (boundary jitter, brief occlusion) without ending the person's visit.
     QUEUE_AREA_EXIT_GRACE_SEC: float = float(os.getenv("QUEUE_AREA_EXIT_GRACE_SEC", "2.0"))
-    # Average time at a lane above which it is reported CONGESTED.
+    # Average time at a lane above which it is reported CONGESTED. Dashboard.
     QUEUE_CONGESTED_WAIT_SEC: float = float(os.getenv("QUEUE_CONGESTED_WAIT_SEC", "270"))
 
     # Network camera open / read timeouts for the live workers (live_analytics_engine._open).

@@ -1,16 +1,19 @@
 # Edge AI CCTV: Dashboard Feature Reference
 
-Last updated: 2026-10-01 · Describes main at e451706 (RTMO-s pose model; online access live; direct peer-to-peer live video)
+Last updated: 2026-10-04 · Describes the working tree after a38b391 (accounts and roles, site settings, backups, till key, area & line alerts, masked remote video)
 
 The Edge AI CCTV dashboard runs on the in-store edge device. It shows live cameras, counts shoppers,
 maps them onto a store plan, and flags suspicious behaviour for staff to review. It also produces
-recommendations from what it measured. Operators do all site-specific setup in the dashboard, while
-the installer sets a small number of device-level options once in `edge_backend/.env`. This document
+recommendations from what it measured. Owners and administrators do all site-specific setup in the
+dashboard, including the store name, time zone, evidence limits and alert settings, while the
+installer sets a small number of device-level options once in `edge_backend/.env`. This document
 lists what exists today, grouped by dashboard area, followed by features that are planned or in trial.
 
 **How to read this:** paths use the exact UI labels, e.g. Cameras → tile → "Settings". "(per camera)"
 marks settings saved for one camera; "(per viewer)" marks preferences kept in that browser only; anything
 else is site-wide. "Installer-level" means the setting is in `edge_backend/.env`, not in the dashboard.
+"(admin)" marks controls only an Owner or Administrator can use; Operators can use everything else
+that is daily use (see "Roles" under Access and security).
 
 > **Principles**
 > - **Honest data.** Every figure is measured. When a value is not measured, the dashboard shows a dash
@@ -18,14 +21,15 @@ else is site-wide. "Installer-level" means the setting is in `edge_backend/.env`
 > - **Evidence-only storage.** The device never records continuously; the store's NAS does that, and this
 >   software never writes to it. The device keeps only alert evidence (a still per alert, optionally a
 >   short clip) on its own disk, and deletes the oldest first when the limit is reached.
-> - **Site setup in the dashboard.** Cameras, purposes, lines, areas, masks, calibration and schedules are
->   all configured in the dashboard, not in files.
+> - **Site setup in the dashboard.** Cameras, purposes, lines, areas, masks, calibration, schedules, the
+>   store name and time zone, evidence limits and alert tuning are all configured in the dashboard, not
+>   in files. The matching `.env` values are only defaults.
 > - **Store time.** Schedules and alert times are in the store's time zone. Night watch also shows the
 >   viewer's own time when it differs.
-> - **Privacy masks.** Masks are burned into every picture that is shown or saved, including evidence.
->   If a mask cannot be applied, the whole frame is blacked out.
->   Exception: direct live video (see "Live video" under Access and security), and pictures taken over it, show the camera's own
->   picture: privacy masks and detector boxes are not drawn on them.
+> - **Privacy masks.** Masks are burned into every picture that is shown or saved, including evidence
+>   and direct live video through online access (burned in on the device before the video leaves it).
+>   If a mask cannot be applied, the whole frame is blacked out; a direct live tile that cannot be
+>   masked shows "Hidden: privacy masks" instead. Detector boxes are not drawn on direct video.
 
 ## Sign-in and navigation
 
@@ -33,9 +37,11 @@ else is site-wide. "Installer-level" means the setting is in `edge_backend/.env`
 |---|---|---|
 | First-run account | Creates the owner account; needs the one-time setup code the device prints at start. | Shown automatically on first visit (store network or a private VPN only; refused through online access) |
 | Sign in / "Sign out" | Every page and API call needs a signed-in operator. | Sign-in form; "Sign out" in the header |
-| "Forgot password?" | Explains how to reset access on the device. | Link on the sign-in form |
+| "Forgot password?" | Explains how to reset access on the device when nobody can sign in. An administrator can also reset a password in Settings → "Accounts". | Link on the sign-in form |
+| "Your account" | Shows your username, name and role; "Change password" (other browsers of the account are signed out, this one stays signed in). | Settings → "Your account" |
+| "Accounts" | Lists accounts with role and last sign-in; "Add account", "Change role", "Reset password", "Remove" (inline confirmations). The last owner cannot be removed or demoted. | Settings → "Accounts" (admin; only an owner changes owner accounts) |
 | Main tabs | "Today", "Cameras", "Store map", "Insights", "Loss prevention", plus "Settings" (gear). | Header; phones get a bottom tab bar |
-| Theft alert banner | Shows the newest suspicious-behaviour alert on every page. | Banner → "Review now" / "Dismiss" |
+| Alert banner | Shows the newest suspicious-behaviour incident or unacknowledged area / line alert on every page; the Loss prevention badge counts both. | Banner → "Review now" / "Dismiss" |
 | Colour theme | Light, dark, or follow the device. | Header switch, or Settings → "Appearance" |
 
 ## Today
@@ -67,7 +73,7 @@ else is site-wide. "Installer-level" means the setting is in `edge_backend/.env`
 | "Department label" | Groups a camera's alerts in reports. | Tile → "Settings" (per camera) |
 | "Remove camera" | Removes the camera and stops its pipeline, after an inline confirmation. | Tile → "Settings" → "Remove camera" |
 | "Same camera added twice" | Warns when one physical camera is configured more than once: the same recorder channel on two streams (e.g. typed as a main-stream URL and added again from the recorder's channel list), or a recorder channel and the camera's own IP address (matched through the Dahua recorder's connected-camera list, read once a day or on request). A setup warning, not a failure. One camera per group counts in store totals (visitors, in store now, dwell, areas, funnel, floor heatmaps, forecast); the others show "Duplicate — excluded from store totals" and stay viewable. The primary is the NVR-channel sub-stream (an enabled camera first), else the oldest. Actions: "Keep A, turn off B", "Keep A, remove B" (shows what is deleted and kept, with counts, before the inline confirm), "Make B primary", "They're different cameras" (remembered). | Banner in Cameras and in Store map → "Cameras & devices"; "Read its camera list now" when a recorder's list is not read |
-| Duplicate check on add | Adding a camera that is already configured (by address, scan, or Dahua recorder channels) is stopped before anything is stored, naming the existing camera and recommending its NVR channel. "Use existing camera" keeps things as they are; "Add anyway" is for a genuine second stream (e.g. a main-stream close-up), which is then excluded from store totals. | "+ Add camera", scan "Add", "Dahua recorder" → "Adopt Selected" ("Leave those channels out" / "Add anyway") |
+| Duplicate check on add | Adding a camera that is already configured (by address, scan, or Dahua recorder channels) is stopped before anything is stored, naming the existing camera and recommending its NVR channel. "Use existing camera" keeps things as they are; "Add anyway" is for a genuine second stream (e.g. a main-stream close-up), which is then excluded from store totals. Changing a camera's stream address in its settings is checked the same way. | "+ Add camera", scan "Add", "Dahua recorder" → "Add selected channels" ("Leave those channels out" / "Add anyway"); tile → "Settings" → "💾 Save" ("Use existing camera" / "Save anyway") |
 
 ### Camera setup (per camera drawing tools)
 
@@ -78,8 +84,9 @@ Opened from Cameras → tile → "Camera setup". All shapes are drawn on the cam
 | "Tripwire" | Counts people crossing a line in or out; an entrance line counts store footfall. | In side ("Flip"), "Counts store footfall (entrance line)", optional "Alert staff on crossing" |
 | "Restricted area" | Alerts when someone is inside during set hours, e.g. after closing. | "Schedule", time windows, "Minimum dwell", "Alert severity", "Time zone" |
 | "Checkout / queue area" | Times how long people stand at a till or wait in line; no calibration needed. | "Kind": "Checkout lane" or "Queue line" |
-| "Product shelf" | Records hand reaches into a shelf and links them to a product. | Product name, SKU, price, "Shelf level", "Value tier", "Placement", study metrics |
-| "Privacy mask" | Hides part of the picture, or excludes it from analysis. | "Mask mode": Blur, Mosaic, Blackout, Solid colour, "Ignore for analysis (video unchanged)" |
+| "Product shelf" | Records hand reaches into a shelf (3+ points) and links them to a product. Only "Hand reaches" is measured; the other study metrics are greyed "Not measured yet". | Product name, SKU, "Product category (e.g. LIQUOR)" (high-value categories mark it high value), price, "Shelf level", "Value tier", "Placement" |
+| "Privacy mask" | Hides part of the picture, or excludes it from analysis. Applied to direct remote video too; a mask edit briefly restarts every remote viewer. | "Mask mode": Blur, Mosaic, Blackout, Solid colour, "Ignore for analysis (video unchanged)" |
+| Deleting a mask or shelf | 🗑️ asks "Delete?" inline ("Delete" / "Keep"). | Camera setup lists |
 | "Save snapshot" / "Export incident clip" | Saves a still or a short clip to the device's evidence storage. | Camera setup, below the video |
 | "Pipeline telemetry" | Shows capture FPS, detections, live tracks, frame size, frame age and calibration state. | Camera setup side panel (read-only) |
 
@@ -96,6 +103,7 @@ Opened from Cameras → tile → "Camera setup". All shapes are drawn on the cam
 | Calibration | Matches 4+ floor points in the camera picture to the map so people can be placed on it. | "Cameras & devices" → "Calibrate" → "Save calibration", "Test accuracy" |
 | Setup checklist | Lists what is still missing for a camera's purpose, with links to the right tool. | "Cameras & devices" → "Checklist" |
 | Add cameras | Finds and adds cameras by network scan, by address (RTSP, MJPEG, ONVIF, USB, file) or from a Dahua recorder. | "Scan network", "+ Add camera" ("Test connection" first), "Dahua recorder" |
+| Recorder channel names and purposes | "Scan recorder channels" lists each channel with the name read from the recorder (web port 80) and the stream size / frame rate it reported ("—" when not reported). Each ticked channel gets an editable name (empty: "Recorder channel N") and an optional purpose before "Add selected channels". | Store map → "Cameras & devices" → "Dahua recorder" |
 
 ## Loss prevention and alerts
 
@@ -107,6 +115,7 @@ Opened from Cameras → tile → "Camera setup". All shapes are drawn on the cam
 | Figures | "Waiting for review", "Flagged today", "Value in confirmed incidents", "False-alarm rate". | Automatic, from recorded outcomes |
 | "False alarms by rule" | Shows which checks are often wrong and need tuning. | Automatic |
 | Evidence viewer | Full-size annotated frame and person crop; expired evidence is labelled. | Click an evidence image |
+| "Area & line alerts" | Restricted-area and tripwire alerts (lines set to "Alert staff on crossing") with evidence still, camera, severity and store time. "Acknowledge" records who saw it (operators may); unacknowledged ones raise the banner and the tab badge. | Loss prevention → "Area & line alerts"; filters "Needs attention", "Acknowledged", "All" |
 | Phone alerts | Sends alerts to paired phones, including tripwire and restricted-area alerts. | Settings → "Phones" (see Settings) |
 
 ## Night watch
@@ -128,7 +137,7 @@ Opened from Cameras → tile → "Camera setup". All shapes are drawn on the cam
 | "Visitors by hour" | Hourly visitors against yesterday and the same day last week. | Insights → "Shoppers & footfall" |
 | "Shopper journey" | Stages from visit to purchase; "BOUGHT" needs sales data. | Insights → "Shoppers & footfall" |
 | "Entrances today" | In and out per counting line, and an estimate of people inside now. | Tripwires in Camera setup |
-| "Areas where shoppers leave without engaging" | Areas with visits but few shelf reaches. | Needs store areas, calibration and product shelves |
+| "Areas where shoppers leave without engaging" | Areas with visits but few shelf reaches. "Lost sales" shows "needs sales data" without till data and "—" with the reason otherwise (receipts are not linked to areas, so it is never estimated). | Needs store areas, calibration and product shelves |
 | "Product shelf reaches today" | Reaches per product and shelf level; conversion appears only with sales data. | Product shelves in Camera setup |
 | "Heatmap history" | Recorded hourly heatmaps: play a day, compare periods, record the current hour now. | Insights → "Shoppers & footfall" → "Play day", "Compare with…", "Record now" |
 | "Shopper profile" | States that no age or basket classifier is enabled; no figures are shown. | Not available (see Principles) |
@@ -141,8 +150,13 @@ Opened from Cameras → tile → "Camera setup". All shapes are drawn on the cam
 | "Cameras & recorders" | Shortcut to camera management on the Store map. | Settings → "Cameras & recorders" |
 | "Recorder sub-streams" | Upgrades a Dahua recorder's CIF (352x288) sub-streams to D1 (704x480 on NTSC) so analysis sees far shoppers. "Check sub-streams" reads each channel (read-only) and lists what would change; ticked channels are switched one at a time after an inline confirmation. Each channel's settings are saved first; the change is kept only if the recorder accepts it and the camera really sends D1, otherwise they are put back. Per channel it reports "switched to D1", "already D1 or higher", "kept CIF: D1 not supported by this camera", "kept CIF: NVR refused (…)" or "restored after failure (…)". A rejected recorder sign-in stops at once (no retries). Every change is logged (who, when, before/after). | Settings → "Recorder sub-streams" → "Check sub-streams" → "Upgrade CIF sub-streams to D1"; "Restore" per channel or "Restore previous stream settings" |
 | "Sub-stream bit rate" | Raises the recorder sub-stream bit rate (default 768 kbps) of channels below the target, e.g. D1 channels left at a CIF-era 512 kbps. Only the bit rate changes (size, codec, frame rate and GOP stay); channels at or above the target are left alone; the camera's maximum is respected ("capped at N kbps by the camera"). Same safety as the D1 upgrade: settings saved first, re-read, the live sub-stream must still deliver video at the same size, put back on any failure, stop on a rejected sign-in, one channel at a time, logged. Per channel: "raised 512→768 kbps (stream verified)", "already ≥ 768 kbps", "kept 512 kbps: NVR refused (…)", "restored after failure (…)". "Restore previous stream settings" puts the old bit rate back. | Settings → "Recorder sub-streams" → "Check sub-streams" → "Sub-stream bit rate" → "Raise to N kbps" (inline confirm) |
-| Device | Shows the device ID and sets the device name. | Settings → "Device" → "Rename" |
+| Device | Shows the device ID and sets the device name (the name paired phones see). | Settings → "Device" → "Rename" |
+| "Store" | "Store name" (page header, tab title, daily report) and "Time zone" (searchable, with a "Store time now" preview; empty = the device's own zone). "Today", schedules, alert times, digest, recommendations, quiet hours and the nightly backup use it. | Settings → "Store" (admin); `.env` value is the default |
+| "Evidence storage" | Evidence used vs limit and free disk; "Evidence size limit" (Automatic 10% of disk or fixed GB), "Keep evidence for (days)", "Never fill the disk beyond (%)", "Night watch evidence limit (MB)", "Save a clip with each night-watch event". Lowering a limit asks "Yes, save" / "Keep editing" because it deletes the oldest evidence at once. | Settings → "Evidence storage" (admin); "Reset to default" per field |
+| "Alerts and detection" | "High-value categories", "High value from price", repeat-alert times for line crossing, restricted area and theft, "Theft minimum confidence (%)", "Check for exit without passing checkout", "Queue congested after (seconds)". Applies at once. | Settings → "Alerts and detection" (admin); "Reset to default" per field |
 | "Sales data (point of sale)" | Shows whether till data is arriving and how to connect the tills. | Settings → "Sales data" → "How to connect your tills" |
+| "Till key" | A key that only lets the till send sales (`X-Edge-API-Key` header); shown once at "Create till key", then only its last characters, created and last-used times. "Replace till key", "Revoke" (inline confirm). | Settings → "Sales data" → "Till key" (admin) |
+| "Backups and reset" | Backups at every start and nightly at 03:00 store time (skipped when unchanged; 7 newest automatic plus one per day for 14 days kept; manual, uploaded and before-restore/reset/upgrade kept). "Back up now", "Download" (the only way to get a copy off the device), "Restore" (safety backup first, then the service restarts), "Upload a backup" (checked, then listed). "Factory reset" after typing RESET: deletes layout, cameras and recorded figures; keeps accounts, settings, phones, online access, evidence and backups; backs up first. | Settings → "Backups and reset" (admin) |
 | "System health" | Video decoding, detection engine and speed, processor, memory, uptime, evidence storage use. | Settings → "System health" (read-only) |
 | Person detection model | RTMO-s (Apache-2.0) finds each person and 17 body points in one pass. Needs camera streams of D1 (704x576) or larger; on CIF (352x288) it misses far and partly hidden people. | Automatic; model and speed shown in Settings → "System health" |
 | "Pose model trial (shadow only)" | Compares a candidate pose model with the live one; never changes counts or alerts. Off unless the installer sets one. | Settings → "System health"; trial is installer-level |
@@ -154,7 +168,8 @@ Opened from Cameras → tile → "Camera setup". All shapes are drawn on the cam
 |---|---|---|
 | "Online access" | Publishes the dashboard at `https://<store>-cctv.ikorex.com.au` (e.g. pearcedale-cctv) through the iKorex server: the device dials out, so no router port forward. The server only passes pages, data and video set-up; it never carries live video. Live status Stopped / Connecting / Connected since / Error. | Settings → "Online access": "Public address", "Tunnel server" (`wss://tunnel.ikorex.com.au`), "Store ID", "Store token" and optional "Server key" (write-only), "Proxies in front of your server" = One (Cloudflare), "Enable online access". Installer: `sudo EDGE_TUNNEL=1 bash deploy/install.sh` fetches the tunnel program. Server side: `~/Projects-1/Server/cctv-tunnel` (DEPLOYMENT.md §7a) |
 | Access check | Confirms the public address really reaches this device. | Settings → "Online access" → "Verify now" |
-| "Live video" (direct) | Remote viewers get live video straight from the device to their browser (peer-to-peer WebRTC), never through the server. Video runs only while a tile is on screen and stops on rotate, enlarging another tile, view switch, hidden tab or page close (a vanished viewer is cut within about 45 s). H.265 cameras are converted to H.264 on the device's GPU (about 3% of a core per tile). Pictures needed by other remote views (floor-map thumbnail, heatmap background, calibration) are taken once over a direct connection; press "Take a new picture" to refresh. Stored evidence still opens on click. | Settings → "Online access · Live video": "STUN servers" (default `stun:stun.ikorex.com.au:3478`), "Connection mode" (Automatic: no router change / Fixed port: forwarded on the store router), "Most live videos at once" (8), "Live video on the store network (every viewer)", "Live video on this network" (per viewer), "Watching now" |
+| Roles | Owner and Administrator: everything, including setup and accounts. Operator: daily use (cameras, alerts and outcomes, recommendations, snapshots/clips, reconnect, own password); setup changes are refused by the server with "Your account can't change setup. Ask an administrator." | Settings → "Accounts" → "Change role" (admin) |
+| "Live video" (direct) | Remote viewers get live video straight from the device to their browser (peer-to-peer WebRTC), never through the server. Cameras with privacy masks are sent with the masks burned in on the device (H.264, about 6–9% of a core per masked tile with hardware encoding); if that cannot be built the tile shows "Hidden: privacy masks", never the raw picture. Video runs only while a tile is on screen and stops on rotate, enlarging another tile, view switch, hidden tab or page close (a vanished viewer is cut within about 45 s). H.265 cameras are converted to H.264 on the device's GPU (about 3% of a core per tile). Pictures needed by other remote views (floor-map thumbnail, heatmap background, calibration) are taken once over a direct connection; press "Take a new picture" to refresh. Stored evidence still opens on click. | Settings → "Online access · Live video": "STUN servers" (default `stun:stun.ikorex.com.au:3478`), "Connection mode" (Automatic: no router change / Fixed port: forwarded on the store router), "Most live videos at once" (8), "Live video on the store network (every viewer)", "Live video on this network" (per viewer), "Watching now" |
 | "Check remote video" | Tests the browser's and the device's STUN results, the store router's NAT type and recent connections, and says in plain words whether direct video works and what to change. | Settings → "Online access · Live video" → "Check remote video" (administrators) |
 | "Pair a phone" | Pairs the mobile app with a one-time code and QR. | Settings → "Phones" → "Pair a phone" |
 | "Push notifications" | Firebase key for phone pushes; test sends and delivery log. | Settings → "Push notifications" → "Upload", "Send test alert" |
@@ -167,10 +182,9 @@ These features have no dashboard screen. They are listed so they are not rebuilt
 
 | Feature | What it's for | Access |
 |---|---|---|
-| Sales ingest | Till systems push each sale to the device. | `POST` endpoint shown in Settings → "Sales data" |
+| Sales ingest | Till systems push each sale to the device with the till key. | `POST /api/v1/analytics/pos/ingest` (shown in Settings → "Sales data") |
 | Queue and checkout times | Wait and service times from checkout / queue areas. | `GET /api/v1/analytics/queues` |
-| Backups | A database snapshot is taken at every start (kept 7 days); on-demand backups are also possible. | `GET /api/v1/system/backups`, `POST /api/v1/system/backup` |
-| Factory reset | Deletes all layout, cameras and recorded data; keeps the account and `.env`. | `POST /api/v1/layout/reset` with `{"confirm":"RESET"}` |
+| Muting one camera's phone pushes | Holds pushes for a camera, e.g. during restocking. | `POST /api/v1/cameras/{id}/mute` |
 | Pose trial detail | Trial figures by camera, lighting and person size. | `GET /api/v1/system/shadow-trial` |
 
 ## Upcoming
@@ -184,7 +198,7 @@ These features have no dashboard screen. They are listed so they are not rebuilt
 | Outdoor features | Perimeter lines and areas for night watch, loitering, dock activity log, camera tamper alerts, vehicle dwell (exterior only), left objects (experimental). | Planned | Drawn and switched on per camera in the dashboard |
 | Shopper attention ("eye-sight beam") | Phase 0: full camera calibration. Phase 1: aisle-side / 1 m shelf-bay attention from the skeleton, attention heatmap and looked→reached funnel. | Planned | Calibration and shelf bays in the dashboard |
 | Shopper attention, later phases | Head-pose model and planogram. Product-level attention is not expected from CCTV. | Planned | In the dashboard |
-| Detector boxes on direct video | Draw the detector's boxes over remote (direct) live video; today it shows the raw camera picture. | Planned | Automatic |
+| Detector boxes on direct video | Draw the detector's boxes over remote (direct) live video; today it shows the (masked) camera picture without boxes. | Planned | Automatic |
 | Faster remote rotation | Converted (H.265) cameras take about 4 s to show a first frame, so with the default 10 s rotation remote tiles show video about half the time. Options: a longer rotation for remote viewers, or opening the next camera before the switch. | Owner to decide | "Change every" on the Cameras toolbar |
 | Phone app live video away from the store | The app still asks for the old picture stream, which online access refuses; it needs the direct-video session API (fixes listed in `mobile_app/UPCOMING_FIXES.md`). Talk-back was removed on 2026-09-29. | Planned (not built until the owner asks) | Phone app |
 | Licence inventory | Third-party notices for every bundled component before commercial sale. | Started: models and key libraries in `THIRD_PARTY_NOTICES.md`; body7 training-data legal check pending | Not a setting |
@@ -196,14 +210,35 @@ Set once in `edge_backend/.env`; restart the service to apply. The full list wit
 
 | Setting | What it controls | Default |
 |---|---|---|
-| `STORE_NAME`, `SITE_TIMEZONE` | Store name in the header; store time zone for "today", schedules and alerts. | Host's time zone |
 | `DECODE_BACKEND`, `DECODE_DEVICE` | GPU video decoding (NVDEC, VA-API) with software fallback. | `auto` |
 | `DECODE_MAX_FPS`, `DECODE_MAX_WIDTH` | Decoded frame rate and width per camera; lowers CPU use. | `5`, `auto` |
 | `PERSON_CONF_THRESHOLD` (`_DARK`) | Detection confidence; lower in dark boxes. Tune against real footage. | `0.50` (`0.45`) |
 | `PERSON_MAX_FRAME_FRACTION` | Default largest person size (overridable per camera). | `0.35` |
 | `POSE_BUDGET_UTILISATION` | Share of the accelerator the live analysis plans to use. | `0.6` |
 | `STORAGE_DIR` | Evidence and database location; must stay on the device's own disk. | `<project>/storage` |
-| `EVIDENCE_MAX_GB`, `STORAGE_RETENTION_DAYS` | Evidence size limit and maximum age; oldest deleted first. | Automatic (10% of disk), 7 days |
-| `NIGHT_WATCH_CLIP` | Also save a short clip with each night-watch event. | `false` |
+| `WEBRTC_TRANSCODE_ENCODER` | Encoder for converted and masked direct video (NVENC, VA-API, libx264). | `auto` |
 | `HOST`, `PORT` | Network address the dashboard listens on. | `0.0.0.0`, `8000` |
 | `OLLAMA_BASE_URL` | Local AI model used for the optional written summary. | `http://localhost:11434` |
+
+**Dashboard settings with `.env` defaults.** These 15 values are set in Settings → "Store",
+"Evidence storage" and "Alerts and detection", saved in the database (so they are in every backup) and
+applied without a restart. The `.env` value is only the default, used until a value is saved and
+restored by "Reset to default":
+
+| Setting | Dashboard field | Default |
+|---|---|---|
+| `STORE_NAME` | "Store name" | `Store` |
+| `SITE_TIMEZONE` | "Time zone" | Host's time zone |
+| `EVIDENCE_MAX_GB` | "Evidence size limit" | `0` (automatic: 10% of disk, 1–50 GB) |
+| `STORAGE_RETENTION_DAYS` | "Keep evidence for (days)" | `7` |
+| `STORAGE_MAX_DISK_PERCENT` | "Never fill the disk beyond (%)" | `85` |
+| `NIGHT_WATCH_EVIDENCE_MAX_MB` | "Night watch evidence limit (MB)" | `1024` |
+| `NIGHT_WATCH_CLIP` | "Save a clip with each night-watch event" | `false` |
+| `THEFT_HIGH_VALUE_CATEGORIES` | "High-value categories" | ALCOHOL, SPIRITS, LIQUOR, WINE, ELECTRONICS, COSMETICS, BEAUTY, FRAGRANCE, BABY_FORMULA, RAZORS, TOBACCO, MEDICINE, PHARMACY |
+| `THEFT_HIGH_VALUE_MIN_PRICE` | "High value from price" | `0` (price not used) |
+| `TRIPWIRE_ALERT_COOLDOWN_SEC` | "Line crossing: repeat alert after (seconds)" | `60` |
+| `RESTRICTED_AREA_COOLDOWN_SEC` | "Restricted area: repeat alert after (seconds)" | `300` |
+| `THEFT_INCIDENT_COOLDOWN_SEC` | "Theft: repeat alert after (seconds)" | `120` |
+| `THEFT_MIN_CONFIDENCE` | "Theft minimum confidence (%)" | `0.3` (30 %) |
+| `THEFT_EXIT_RULE_ENABLED` | "Check for exit without passing checkout" | `true` |
+| `QUEUE_CONGESTED_WAIT_SEC` | "Queue congested after (seconds)" | `270` |

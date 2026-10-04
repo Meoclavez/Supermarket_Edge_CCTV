@@ -169,13 +169,20 @@ async def get_auth_status(request: Request, session: AsyncSession = Depends(get_
             _setup_log.error("Could not issue a setup code: %s", exc)
 
     authenticated = False
+    payload = None
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
-        authenticated = auth_service.verify_session_token(auth_header.split(" ", 1)[1]) is not None
+        payload = auth_service.verify_session_token(auth_header.split(" ", 1)[1])
+        authenticated = payload is not None
+
+    from app.services.auth_service import describe_account
 
     return {
         "admin_exists": admin_exists,
         "authenticated": authenticated,
+        # The signed-in person (username, display name, role); null when not
+        # signed in. Only ever about the caller's own account.
+        "user": describe_account(payload) if authenticated else None,
         "setup_code_required": not admin_exists,
         # Name kept for the dashboard/mobile clients; it now reflects the
         # explicit AUTH_DISABLED switch, never DEBUG.
@@ -432,11 +439,36 @@ async def change_password(
     session: AsyncSession = Depends(get_db),
     has_access: bool = Depends(auth_service.verify_api_access)
 ):
-    if not hasattr(request.state, "user") or "sub" not in request.state.user:
+    """Change your own password.
+
+    Every other browser session of this account is signed out; the caller's
+    own dashboard session is replaced by the returned tokens (paired phones
+    stay paired). A wrong current password counts toward the sign-in lockout.
+    """
+    user = getattr(request.state, "user", None)
+    if not user or "sub" not in user or user.get("type") != "user_session":
         raise HTTPException(status_code=401, detail="User context missing")
-        
-    await auth_service.change_password(session, request.state.user["sub"], req.old_password, req.new_password)
-    return {"status": "success"}
+    ip = _client_ip(request)
+    _raise_if_locked_out(ip)
+    try:
+        await auth_service.change_password(session, user["sub"], req.old_password, req.new_password)
+    except HTTPException as exc:
+        if exc.status_code == 403:
+            intrusion_detector.record_failure(ip)
+            _raise_if_locked_out(ip)
+        raise
+    cutoff = await asyncio.to_thread(auth_service.sign_out_account, user["sub"], False)
+    _setup_log.warning("Password changed for account %s from %s; its other browser sessions were signed out.",
+                       user["sub"], ip)
+    result = {"status": "success", "other_sessions_signed_out": True}
+    if not user.get("pd"):
+        # This browser's session was issued before the cutoff too: replace it.
+        from app.services.auth_service import effective_role
+
+        tokens = auth_service.issue_session_tokens(user["sub"], effective_role(user),
+                                                   not_before_ms=cutoff + 1)
+        result.update(token_type="bearer", **tokens)
+    return result
 
 # The old in-memory 6-digit pairing code (/auth/pairing-code, /auth/pair) issued
 # owner tokens bound to no device and impossible to revoke. It is replaced by

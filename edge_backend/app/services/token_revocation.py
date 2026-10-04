@@ -12,7 +12,12 @@ Keys (``revoked_tokens.jti``, at most 64 characters):
 * ``jti:<jti>``  -- a token carrying a ``jti`` claim (every token issued now);
 * ``h:<sha256>`` -- a token issued before ``jti`` existed (48 hex chars of the
   token's SHA-256), so sessions from an older build can be revoked too;
-* ``sid:<sid>``  -- a whole login session (access + refresh tokens).
+* ``sid:<sid>``  -- a whole login session (access + refresh tokens);
+* ``usr:<sub>``  -- every dashboard (browser) session of one account issued
+  at or before ``revoked_at`` (password changed or reset, account removed);
+* ``usp:<sub>``  -- the same for phone tokens (``pd`` claim) bound to that
+  account (account removed or disabled). Tokens issued later are unaffected,
+  so the person can sign in again with the new password.
 
 Rows are written by this process and cached in memory; the cache is reloaded
 from the table every ``RELOAD_SEC`` (another worker or a restart sees them).
@@ -50,6 +55,41 @@ def session_key(payload: Mapping[str, Any]) -> Optional[str]:
     return f"sid:{sid[:56]}" if isinstance(sid, str) and sid else None
 
 
+ACCOUNT_BROWSER_PREFIX = "usr:"
+ACCOUNT_PHONE_PREFIX = "usp:"
+_TS_FORMAT = "%Y-%m-%d %H:%M:%S.%f"
+
+
+def _account_key(payload: Mapping[str, Any]) -> Optional[str]:
+    sub = payload.get("sub") if payload else None
+    if not isinstance(sub, str) or not sub:
+        return None
+    phone = "pd" in payload or "dev" in payload
+    return (ACCOUNT_PHONE_PREFIX if phone else ACCOUNT_BROWSER_PREFIX) + sub[:56]
+
+
+def _issued_ms(payload: Mapping[str, Any]) -> int:
+    """Issue time in ms: the ``iam`` claim, else the start of the ``iat`` second."""
+    try:
+        iam = payload.get("iam")
+        if iam is not None:
+            return int(iam)
+        return int(payload.get("iat") or 0) * 1000
+    except (TypeError, ValueError):
+        return 0
+
+
+def _parse_ms(value: Any) -> Optional[int]:
+    try:
+        dt = datetime.strptime(str(value), _TS_FORMAT).replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        try:
+            dt = datetime.fromisoformat(str(value)).replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            return None
+    return int(dt.timestamp() * 1000)
+
+
 def keys_for(raw_token: str, payload: Mapping[str, Any]) -> List[str]:
     keys = [token_key(raw_token, payload)]
     sk = session_key(payload)
@@ -62,6 +102,7 @@ class TokenRevocations:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._revoked: Dict[str, int] = {}      # key -> expires_at (unix seconds)
+        self._cutoffs: Dict[str, Tuple[int, int]] = {}   # usr:/usp: key -> (cutoff ms, expires_at)
         self._loaded_at = 0.0
         self._db_path: Optional[str] = None
 
@@ -78,24 +119,34 @@ class TokenRevocations:
         if db != self._db_path:
             # Another database (tests): nothing cached applies to it.
             self._revoked.clear()
+            self._cutoffs.clear()
             self._db_path = db
         self._loaded_at = time.monotonic()
         self._revoked = {k: e for k, e in self._revoked.items() if e > now_wall}
+        self._cutoffs = {k: v for k, v in self._cutoffs.items() if v[1] > now_wall}
         if not Path(db).exists():
             return
         try:
             with closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2.0)) as conn:
                 rows = conn.execute(
-                    "SELECT jti, expires_at FROM revoked_tokens WHERE expires_at > ?", (now_wall,)
+                    "SELECT jti, expires_at, revoked_at FROM revoked_tokens WHERE expires_at > ?", (now_wall,)
                 ).fetchall()
         except sqlite3.Error:
             # Table not migrated yet or the file is busy: keep what is cached.
             return
-        for key, exp in rows:
+        for key, exp, revoked_at in rows:
+            key = str(key)
             try:
-                self._revoked[str(key)] = max(int(exp), self._revoked.get(str(key), 0))
+                exp = int(exp)
             except (TypeError, ValueError):
                 continue
+            if key.startswith((ACCOUNT_BROWSER_PREFIX, ACCOUNT_PHONE_PREFIX)):
+                cut = _parse_ms(revoked_at)
+                if cut is not None:
+                    prev = self._cutoffs.get(key, (0, 0))
+                    self._cutoffs[key] = (max(cut, prev[0]), max(exp, prev[1]))
+                continue
+            self._revoked[key] = max(exp, self._revoked.get(key, 0))
 
     def _maybe_reload(self) -> None:
         now_wall = int(time.time())
@@ -115,7 +166,45 @@ class TokenRevocations:
                 exp = self._revoked.get(key)
                 if exp is not None and exp > now_wall:
                     return True
+            akey = _account_key(payload)
+            cut = self._cutoffs.get(akey) if akey else None
+            if cut is not None and cut[1] > now_wall and _issued_ms(payload) <= cut[0]:
+                return True
         return False
+
+    def revoke_account(self, sub: str, phones: bool = False, ttl_s: int = 31 * 24 * 3600) -> int:
+        """Sign out every session of account ``sub`` issued up to now.
+
+        Browser sessions always; phone tokens bound to the account too when
+        ``phones``. Returns the cutoff in ms: a token issued for this account
+        afterwards must carry ``iam`` greater than it.
+        """
+        if not sub:
+            return 0
+        cut = int(time.time() * 1000)
+        exp = int(time.time()) + int(ttl_s)
+        keys = [ACCOUNT_BROWSER_PREFIX + sub[:56]]
+        if phones:
+            keys.append(ACCOUNT_PHONE_PREFIX + sub[:56])
+        self._maybe_reload()
+        with self._lock:
+            for k in keys:
+                prev = self._cutoffs.get(k, (0, 0))
+                self._cutoffs[k] = (max(cut, prev[0]), max(exp, prev[1]))
+        stamp = datetime.fromtimestamp(cut / 1000, tz=timezone.utc).replace(tzinfo=None).strftime(_TS_FORMAT)
+        try:
+            with closing(sqlite3.connect(self._current_db(), timeout=5.0)) as conn:
+                with conn:
+                    conn.executemany(
+                        "INSERT INTO revoked_tokens (jti, token_type, expires_at, revoked_at) VALUES (?, 'account', ?, ?) "
+                        "ON CONFLICT(jti) DO UPDATE SET expires_at = MAX(expires_at, excluded.expires_at), "
+                        "revoked_at = MAX(revoked_at, excluded.revoked_at)",
+                        [(k, exp, stamp) for k in keys],
+                    )
+        except sqlite3.Error as exc:
+            logger.error(f"Could not persist an account sign-out ({type(exc).__name__}: {exc}); "
+                         "it holds in memory until restart")
+        return cut
 
     def revoke(self, entries: Iterable[Tuple[str, str, int]]) -> int:
         """Record ``(key, token_type, expires_at)`` entries. Returns how many.
@@ -149,6 +238,7 @@ class TokenRevocations:
     def clear_cache(self) -> None:
         with self._lock:
             self._revoked.clear()
+            self._cutoffs.clear()
             self._loaded_at = 0.0
             self._db_path = None
 

@@ -9,6 +9,7 @@ Provides dedicated endpoints for Dahua NVR/DVR multi-channel systems:
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -28,6 +29,9 @@ from app.services.pipeline_supervisor import pipeline_supervisor
 from app.services.store_layout_service import store_layout_service
 
 logger = logging.getLogger(__name__)
+
+# Same rule as a camera added by URL (routes/cameras.py).
+_DEPARTMENT_RE = re.compile(r"^[A-Z0-9 _&/-]{1,40}$")
 
 router = APIRouter(
     prefix="/api/v1/dahua",
@@ -50,13 +54,22 @@ class NVRProbePayload(BaseModel):
     password: Optional[str] = Field(default=None, description="Optional override password")
     port: int = Field(default=554, description="RTSP port")
     max_channels: int = Field(default=16, ge=1, le=64, description="Number of channels to scan")
+    http_port: int = Field(default=80, ge=1, le=65535,
+                           description="The recorder's web (HTTP) port, used read-only for channel names")
     save_credentials: bool = Field(default=True, description="Persist these credentials on disk if successful")
 
 
 class ChannelAdoptItem(BaseModel):
-    channel: int
-    name: Optional[str] = None
-    department: str = "GENERAL"
+    channel: int = Field(..., ge=1, le=256)
+    # The operator's name for the camera (the dashboard pre-fills the channel
+    # name read from the recorder). Empty: "Recorder channel <N>".
+    name: Optional[str] = Field(default=None, max_length=120)
+    # Optional label. Empty is stored as GENERAL, the camera table's "no
+    # department" value (the same as a camera added by URL).
+    department: Optional[str] = None
+    # Camera purpose (services/camera_roles.py). None: no purpose; nothing is
+    # assigned automatically.
+    role: Optional[str] = None
     quality: str = "sub"  # "sub" (subtype=1) or "main" (subtype=0)
 
 
@@ -123,6 +136,7 @@ async def probe_dahua_nvr(payload: NVRProbePayload):
         password=p,
         port=payload.port,
         max_channels=payload.max_channels,
+        http_port=payload.http_port,
     )
 
     return {
@@ -142,6 +156,23 @@ async def adopt_dahua_channels(
         raise HTTPException(status_code=400, detail="NVR host is required")
     if not payload.channels:
         raise HTTPException(status_code=400, detail="At least one channel must be specified")
+
+    from app.models.schemas import CameraFeatureConfig
+    from app.services import camera_roles
+
+    # Validate every channel before anything (credentials included) is stored.
+    roles: Dict[int, Optional[str]] = {}
+    departments: Dict[int, str] = {}
+    for idx, item in enumerate(payload.channels):
+        try:
+            roles[idx] = camera_roles.normalise_role(item.role)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"Channel {item.channel}: {exc}") from None
+        dept = (item.department or "").strip().upper() or "GENERAL"
+        if not _DEPARTMENT_RE.match(dept):
+            raise HTTPException(status_code=422, detail=(
+                f"Channel {item.channel}: department may only contain letters, digits, spaces and _&/-."))
+        departments[idx] = dept
 
     # Resolve credentials: payload -> saved on disk -> empty
     saved_u, saved_p = nvr_credential_service.get_auth_for_host(host)
@@ -220,7 +251,8 @@ async def adopt_dahua_channels(
         floor_x = min((col_idx + 1) * spacing_x, layout.width_m - 1.0)
         floor_y = min((row_idx + 1) * spacing_y, layout.height_m - 1.0)
 
-        name = item.name.strip() if item.name and item.name.strip() else f"Dahua NVR Ch {ch}"
+        name = " ".join((item.name or "").split())[:120] or f"Recorder channel {ch}"
+        role = roles[i]
 
         cam = CameraModel(
             id=cam_id,
@@ -229,7 +261,7 @@ async def adopt_dahua_channels(
             rtsp_url=stream_url,
             status="STARTING",
             channel_number=current_channel_num,
-            department=item.department.upper() if item.department else "GENERAL",
+            department=departments[i],
             floor_x=round(floor_x, 2),
             floor_y=round(floor_y, 2),
             floor_z=3.2,
@@ -238,12 +270,18 @@ async def adopt_dahua_channels(
             is_ai_enabled=True,
             ai_models=["person_detection"],
         )
+        if role:
+            # The purpose the operator picked, with its default analysis
+            # switches (as when a camera is added with a purpose).
+            cam.role = role
+            cam.features = CameraFeatureConfig.model_validate(camera_roles.default_features(role)).model_dump()
         db.add(cam)
         adopted.append({
             "camera_id": cam_id,
             "channel": ch,
             "name": name,
             "department": cam.department,
+            "role": role,
             "stream_url": redact_url(stream_url),
             "quality": "sub" if subtype == 1 else "main",
             "floor_x": cam.floor_x,
@@ -257,6 +295,7 @@ async def adopt_dahua_channels(
             camera_source.delete_credentials(done)
         raise
     duplicate_guard.invalidate()
+    camera_roles.role_cache.invalidate()
 
     # Reconcile supervisor so feeds start immediately
     try:

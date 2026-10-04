@@ -4,7 +4,7 @@ import os
 from datetime import datetime
 from typing import Optional
 from pathlib import Path
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from fastapi.responses import FileResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, desc
@@ -24,6 +24,7 @@ from app.models.schemas import (
 )
 from app.services.dvr_recorder import dvr_recorder_service
 from app.services.auth_service import auth_service, general_rate_limiter
+from app.services.evidence_urls import absolute_for, request_base
 from app.routes import ResilientRoute
 
 router = APIRouter(
@@ -39,6 +40,7 @@ router = APIRouter(
 @router.get("/cameras/{camera_id}/timeline", response_model=CameraTimelineResponse)
 async def get_camera_timeline(
     camera_id: str,
+    request: Request,
     date_str: str = Query(..., alias="date", pattern=r"^\d{4}-\d{2}-\d{2}$", description="Date in YYYY-MM-DD format"),
     db: AsyncSession = Depends(get_db)
 ):
@@ -67,6 +69,9 @@ async def get_camera_timeline(
     )
     db_events = (await db.execute(evt_stmt)).scalars().all()
     token = auth_service.generate_stream_token(camera_id)
+    # Links on the address this caller used (not EDGE_BASE_URL), so they work
+    # from a phone, another address and online access.
+    base = request_base(request)
 
     timeline_segments = [
         TimelineSegment(
@@ -76,7 +81,7 @@ async def get_camera_timeline(
             end_time=s.end_time,
             duration_seconds=s.duration_seconds,
             file_size_bytes=s.file_size_bytes,
-            stream_url=f"{settings.EDGE_BASE_URL}/api/v1/dvr/segments/{s.id}/video?token={token}"
+            stream_url=f"{base}/api/v1/dvr/segments/{s.id}/video?token={token}"
         )
         for s in segments
     ]
@@ -88,15 +93,15 @@ async def get_camera_timeline(
             severity=e.severity,
             confidence=e.confidence,
             timestamp=e.timestamp,
-            snapshot_url=e.snapshot_url,
-            clip_url=e.clip_url,
+            snapshot_url=absolute_for(request, e.snapshot_url),
+            clip_url=absolute_for(request, e.clip_url),
             bounding_box=e.bounding_box
         )
         for e in db_events
     ]
 
     timeline_gaps = [TimelineGap(**g) for g in gaps]
-    hls_master = f"{settings.EDGE_BASE_URL}/api/v1/dvr/cameras/{camera_id}/hls/{date_str}/index.m3u8?token={token}"
+    hls_master = f"{base}/api/v1/dvr/cameras/{camera_id}/hls/{date_str}/index.m3u8?token={token}"
 
     return CameraTimelineResponse(
         camera_id=camera.id,

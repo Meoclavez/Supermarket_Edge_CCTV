@@ -480,6 +480,39 @@ def decode_threads_for(width: Optional[int], height: Optional[int]) -> int:
 _source_sizes: dict[str, tuple[int, int]] = {}
 
 
+def is_file_source(src: Optional[str]) -> bool:
+    """A local video file ("Local video file (testing)"), not a URL or a /dev/video device."""
+    import os
+
+    if not src or "://" in src or src.startswith("/dev/"):
+        return False
+    try:
+        return os.path.isfile(src)
+    except (OSError, ValueError):
+        return False
+
+
+def file_frame_interval(cap) -> float:
+    """Seconds between frames of a video file at its own rate (0: rate unknown)."""
+    import cv2
+
+    try:
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+    except Exception:  # noqa: BLE001
+        return 0.0
+    return 1.0 / fps if 1.0 <= fps <= 120.0 else 0.0
+
+
+def rewind_file(cap) -> bool:
+    """Back to the first frame of a video file capture (it plays in a loop)."""
+    import cv2
+
+    try:
+        return bool(cap.set(cv2.CAP_PROP_POS_FRAMES, 0))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _resolve_host_bounded(url: str, timeout_s: float) -> None:
     """Raise if the URL's host cannot be resolved within ``timeout_s`` (IP literals pass)."""
     import ipaddress
@@ -828,16 +861,38 @@ class CameraWorker(threading.Thread):
                 frames_in_window = 0
                 sized = False
                 self._clip_n = self._clip_every(cap)
+                # A test video file plays in a loop at its own frame rate, like
+                # a camera: its end is not the camera going offline, and
+                # unpaced it was read at decode speed and ended in seconds.
+                file_src = is_file_source(active_source)
+                file_step = file_frame_interval(cap) if file_src else 0.0
+                file_due = time.monotonic()
+                file_frames = 0
 
                 while not self._stop.is_set():
                     # A Frame: a GPU capture's stays NV12 until something
                     # needs BGR (analysis, the clip ring, a snapshot).
                     ok, frame = capture_backends.read_frame(cap)
+                    if (not ok or frame is None) and file_src and file_frames and not self._stop.is_set():
+                        # End of the file: start it again from the first frame.
+                        file_frames = 0
+                        if rewind_file(cap):
+                            ok, frame = capture_backends.read_frame(cap)
                     if not ok or frame is None:
                         if self._stop.is_set():
                             break   # stop() ended the capture
                         why = getattr(cap, "error_summary", "")
                         raise RuntimeError("Stream ended or frame read failed" + (f" ({why})" if why else ""))
+                    if file_src:
+                        file_frames += 1
+                        if file_step:
+                            file_due += file_step
+                            ahead = file_due - time.monotonic()
+                            if ahead > 0:
+                                if self._stop.wait(ahead):
+                                    break
+                            elif ahead < -1.0:
+                                file_due = time.monotonic()   # fell behind (slow analysis): no burst
                     if not sized:
                         sized = True
                         reopened = self._after_first_frame(cap, active_source, frame)

@@ -8,10 +8,10 @@
   <title>Edge AI CCTV - Camera setup</title>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;800&family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap" rel="stylesheet">
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/static/css/style.css?v=2.4.0">
-  <link rel="stylesheet" href="/static/css/studio_tools.css?v=2.4.0">
-  <link rel="stylesheet" href="/static/css/live_video.css?v=2.4.0">
-  <script src="/static/js/auth.js?v=2.4.0"></script>
+  <link rel="stylesheet" href="/static/css/style.css?v=2.5.0">
+  <link rel="stylesheet" href="/static/css/studio_tools.css?v=2.5.0">
+  <link rel="stylesheet" href="/static/css/live_video.css?v=2.5.0">
+  <script src="/static/js/auth.js?v=2.5.0"></script>
 </head>
 <body>
   <div class="app-container">
@@ -37,7 +37,7 @@
     </header>
 
     <div class="controls-strip" id="cameraBar">
-      <div style="display: flex; align-items: center; gap: 8px; overflow-x: auto; flex: 1;">
+      <div style="display: flex; align-items: center; gap: 8px; overflow-x: auto; flex: 1; min-width: 0; max-width: 100%;">
         <span style="font-size: 11px; font-weight: 700; color: var(--accent-cyan); white-space: nowrap;">📷 Camera:</span>
         <div id="cameraButtonsList" style="display: flex; gap: 6px;"></div>
       </div>
@@ -67,7 +67,7 @@
           </div>
           <div class="studio-tool-row">
             <button type="button" class="btn btn-primary btn-sm studio-tool-btn" id="btnToolMask" data-tool="mask" aria-pressed="false" style="flex: 1;" onclick="setDrawMode('EXCLUSION')">🌫️ Privacy mask (3+ pts)</button>
-            <button type="button" class="btn btn-warning btn-sm studio-tool-btn" id="btnToolProduct" data-tool="product" aria-pressed="false" style="flex: 1.2;" onclick="setDrawMode('PRODUCT_SHELF')">🛒 Product shelf (4+ pts)</button>
+            <button type="button" class="btn btn-warning btn-sm studio-tool-btn" id="btnToolProduct" data-tool="product" aria-pressed="false" style="flex: 1.2;" onclick="setDrawMode('PRODUCT_SHELF')">🛒 Product shelf (3+ pts)</button>
             <button type="button" class="btn btn-success btn-sm" id="btnSaveDrawn" style="flex: 0.8;" onclick="saveDrawnZone()">💾 Save</button>
             <button type="button" class="btn btn-sm" style="flex: 0.6;" onclick="undoPoint()">Undo</button>
             <button type="button" class="btn btn-danger btn-sm" style="flex: 0.6;" onclick="clearCanvasPoints()">✕ Cancel</button>
@@ -160,7 +160,7 @@
               </div>
               <div class="form-group">
                 <label for="raTimezone">Time zone</label>
-                <input type="text" id="raTimezone" name="raTimezone" class="form-input" placeholder="Server local time" />
+                <input type="text" id="raTimezone" name="raTimezone" class="form-input" placeholder="Store time zone (leave empty)" />
               </div>
               <label class="checkbox-label" for="raEnabled"><input type="checkbox" id="raEnabled" name="raEnabled" checked /> Enabled</label>
             </div>
@@ -257,7 +257,7 @@
     </div>
   </div>
 
-  <!-- Product shelf mapping form (shown after a 4+ point polygon is drawn) -->
+  <!-- Product shelf mapping form (shown after a 3+ point polygon is drawn) -->
   <div class="modal-overlay" id="productModal">
     <div class="modal-card" style="max-width: 520px;">
       <div style="display:flex; justify-content:space-between; align-items:center;">
@@ -275,9 +275,10 @@
             <input type="text" id="modalProductSku" name="productSku" class="form-input" required />
           </div>
           <div class="form-group">
-            <label for="modalProductCategory">Zone / category (from the blueprint)</label>
-            <input type="text" id="modalProductCategory" name="productCategory" class="form-input" list="layoutZoneNames" required placeholder="Pick a blueprint zone" />
+            <label for="modalProductCategory">Product category (e.g. LIQUOR)</label>
+            <input type="text" id="modalProductCategory" name="productCategory" class="form-input" list="layoutZoneNames" required placeholder="e.g. LIQUOR" aria-describedby="modalProductCategoryHint" />
             <datalist id="layoutZoneNames"></datalist>
+            <span id="modalProductCategoryHint" class="zone-sub">One word for what is on the shelf. Categories such as LIQUOR or COSMETICS mark it as high value for theft cues.</span>
           </div>
         </div>
         <div class="form-grid-2col">
@@ -321,11 +322,12 @@
           <label>Study metrics</label>
           <div class="checkbox-group-grid">
             <label class="checkbox-label" for="chkHandReach"><input type="checkbox" id="chkHandReach" name="chkHandReach" checked /> Hand reaches</label>
-            <label class="checkbox-label" for="chkDwellTime"><input type="checkbox" id="chkDwellTime" name="chkDwellTime" checked /> Dwell inspection</label>
-            <label class="checkbox-label" for="chkPutBack"><input type="checkbox" id="chkPutBack" name="chkPutBack" checked /> Put-back / friction</label>
-            <label class="checkbox-label" for="chkPosSales"><input type="checkbox" id="chkPosSales" name="chkPosSales" /> Correlate with POS</label>
-            <label class="checkbox-label" for="chkAbTest"><input type="checkbox" id="chkAbTest" name="chkAbTest" /> A/B placement test</label>
+            <label class="checkbox-label study-not-measured" for="chkDwellTime" style="opacity: 0.55; cursor: not-allowed;" title="Not measured yet"><input type="checkbox" id="chkDwellTime" name="chkDwellTime" disabled aria-describedby="studyNotMeasuredNote" /> Dwell inspection</label>
+            <label class="checkbox-label study-not-measured" for="chkPutBack" style="opacity: 0.55; cursor: not-allowed;" title="Not measured yet"><input type="checkbox" id="chkPutBack" name="chkPutBack" disabled aria-describedby="studyNotMeasuredNote" /> Put-back / friction</label>
+            <label class="checkbox-label study-not-measured" for="chkPosSales" style="opacity: 0.55; cursor: not-allowed;" title="Not measured yet"><input type="checkbox" id="chkPosSales" name="chkPosSales" disabled aria-describedby="studyNotMeasuredNote" /> Correlate with POS</label>
+            <label class="checkbox-label study-not-measured" for="chkAbTest" style="opacity: 0.55; cursor: not-allowed;" title="Not measured yet"><input type="checkbox" id="chkAbTest" name="chkAbTest" disabled aria-describedby="studyNotMeasuredNote" /> A/B placement test</label>
           </div>
+          <span id="studyNotMeasuredNote" class="zone-sub">Not measured yet: only hand reaches are counted. The greyed options do nothing for now.</span>
         </div>
         <div id="productModalStatus" class="form-status" aria-live="polite"></div>
         <div style="display:flex; gap:8px;">
@@ -338,8 +340,8 @@
 
   <div class="toast" id="toast">Notification</div>
 
-  <script src="/static/js/webrtc_live.js?v=2.4.0" defer></script>
-  <script src="/static/js/studio.js?v=2.4.0" defer></script>
-  <script src="/static/js/theme.js?v=2.4.0" defer></script>
+  <script src="/static/js/webrtc_live.js?v=2.5.0" defer></script>
+  <script src="/static/js/studio.js?v=2.5.0" defer></script>
+  <script src="/static/js/theme.js?v=2.5.0" defer></script>
 </body>
 </html>

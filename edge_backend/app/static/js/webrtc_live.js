@@ -257,6 +257,10 @@
     // the online-access server (frps answers 404 while the box is unreachable):
     // it is not "camera not found" and not a video-service failure.
     if (code === 'unknown_camera') return codedError('not_found', 'Camera not found on the box', why);
+    // The box refuses rather than send a camera's raw picture when its privacy masks cannot be burned in.
+    if (code === 'privacy_mask_unavailable') {
+      return codedError('privacy_hidden', 'Hidden: privacy masks', why || 'Hidden: this camera has privacy masks and the masked live view could not be started.');
+    }
     if (code === 'camera_off' || status === 409) return codedError('camera_off', 'Camera is turned off', why || 'Turn it on to watch it.');
     if (code === 'video_session_limit') {
       const max = data && Number.isFinite(Number(data.max_sessions)) ? Number(data.max_sessions) : null;

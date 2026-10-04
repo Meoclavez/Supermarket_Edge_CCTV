@@ -622,3 +622,82 @@ def test_clip_stride_of_a_thinned_software_camera_keeps_the_native_clip_rate():
     n = settings.ANALYTICS_DETECT_EVERY_N_FRAMES
     w.rt.fps = 10.0
     assert w._clip_every(cb.ThinnedCapture(_StreamCap(fps=25.0), 10)) == max(1, round(n * 10 / 25))
+
+
+# ------------------------------------------------- local video file (testing)
+
+def test_local_video_file_loops_at_its_end_and_stays_online(monkeypatch, tmp_path):
+    """"Local video file (testing)" plays in a loop: the end of the file is not
+    the camera going offline ("Stream ended... retrying")."""
+    video = tmp_path / "footage.mp4"
+    video.write_bytes(b"not decoded by the fake capture")
+    statuses = []
+
+    class FileCap:
+        def __init__(self):
+            self.pos, self.reads, self.rewinds = 0, 0, 0
+
+        def isOpened(self):
+            return True
+
+        def get(self, prop):
+            return 0.0                       # rate unknown: unpaced (keeps the test fast)
+
+        def set(self, prop, value):
+            import cv2
+
+            if prop == cv2.CAP_PROP_POS_FRAMES and value == 0:
+                self.pos = 0
+                self.rewinds += 1
+                return True
+            return False
+
+        def read(self):
+            self.reads += 1
+            statuses.append(w.rt.status)
+            if self.reads > 40:
+                w._stop.set()
+            if self.pos >= 5:                # a 5-frame file
+                return False, None
+            self.pos += 1
+            return True, np.zeros((48, 64, 3), np.uint8)
+
+        def release(self):
+            pass
+
+    cap = FileCap()
+    w = lae.CameraWorker(lae.CameraRuntime(camera_id="cam_file", name="c", source=str(video)),
+                         lae.LiveAnalyticsEngine())
+    monkeypatch.setattr(w, "_open", lambda src=None: cap)
+    monkeypatch.setattr(w, "_push_clip_buffer", lambda f: None)
+    monkeypatch.setattr(w, "_analyse", lambda f, now: None)
+    monkeypatch.setattr(w, "_after_first_frame", lambda c, src, frame: c)
+    w.run()
+    assert cap.rewinds >= 5 and w.rt.frames_read >= 30
+    assert set(statuses) == {"ONLINE"}, statuses       # never OFFLINE while it loops
+    assert w.rt.last_error is None
+
+
+def test_file_source_helpers_with_a_real_video_file(tmp_path):
+    import cv2
+
+    path = tmp_path / "loop.avi"
+    out = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), 10.0, (64, 48))
+    if not out.isOpened():
+        pytest.skip("no OpenCV video writer here")
+    for i in range(3):
+        out.write(np.full((48, 64, 3), i * 40, np.uint8))
+    out.release()
+    assert lae.is_file_source(str(path))
+    assert not lae.is_file_source("rtsp://10.0.0.1/x") and not lae.is_file_source("/dev/video0")
+    assert not lae.is_file_source(str(tmp_path / "missing.mp4"))
+    cap = cv2.VideoCapture(str(path))
+    try:
+        assert lae.file_frame_interval(cap) == pytest.approx(0.1)
+        n = 0
+        while cap.read()[0]:
+            n += 1
+        assert n == 3
+        assert lae.rewind_file(cap) and cap.read()[0]      # plays again from the start
+    finally:
+        cap.release()

@@ -1,0 +1,26 @@
+/* Settings: Store, Evidence storage, Alerts and detection (js/site_settings.js). */
+
+.ss-intro { margin: 0 0 10px; }
+.ss-form { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px 18px; }
+.ss-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.ss-field > label { font-size: 12px; font-weight: 700; color: var(--text-soft); }
+.ss-field .checkbox-label { font-size: 12px; font-weight: 700; color: var(--text-soft); }
+.ss-inline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ss-inline .form-select { flex: 1 1 160px; min-width: 0; }
+.ss-num { flex: 0 1 140px; min-width: 80px; }
+.ss-unit { font-size: 12px; color: var(--text-dim); }
+.ss-default { font-size: 11px; color: var(--text-dim); line-height: 1.5; }
+.ss-default .link-btn { font-size: 11px; margin-left: 4px; }
+.ss-err { margin-top: 0; min-height: 0; }
+.ss-err:empty { display: none; }
+.ss-preview { font-size: 12px; color: var(--text-soft); margin-top: 2px; }
+.ss-preview.form-status-error { color: var(--rose); }
+.ss-actions, .ss-form > .form-status, .ss-form > .ra-hint { grid-column: 1 / -1; }
+.ss-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.ss-confirm { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; font-size: 12px; color: var(--text-soft); }
+.ss-usage { display: flex; gap: 6px 22px; flex-wrap: wrap; font-size: 12px; color: var(--text-soft); margin-bottom: 12px; }
+.ss-usage .telemetry-label { margin-right: 4px; }
+
+@media (max-width: 600px) {
+  .ss-form { grid-template-columns: 1fr; }
+}

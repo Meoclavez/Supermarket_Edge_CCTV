@@ -41,6 +41,9 @@ class ChannelProbeResult:
     height: Optional[int] = None
     fps: Optional[float] = None
     error: Optional[str] = None
+    # The channel's name as set on the recorder (ChannelTitle); None when the
+    # recorder did not report one.
+    title: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -61,6 +64,9 @@ class NVRProbeSummary:
     active_channels_count: int
     channels: List[ChannelProbeResult]
     error: Optional[str] = None
+    # Channel names read from the recorder's web (HTTP) API, read-only.
+    titles_read: bool = False
+    titles_error: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -72,6 +78,8 @@ class NVRProbeSummary:
             "channel_count_scanned": self.channel_count_scanned,
             "active_channels_count": self.active_channels_count,
             "error": self.error,
+            "titles_read": self.titles_read,
+            "titles_error": self.titles_error,
             "channels": [c.to_dict() for c in self.channels],
         }
 
@@ -89,8 +97,74 @@ def build_dahua_url(host: str, port: int, channel: int, subtype: int, username: 
     return f"rtsp://{auth}{host}:{port}/cam/realmonitor?channel={channel}&subtype={subtype}"
 
 
+_TITLE_KEY_RE = re.compile(r"^(?:table\.)?ChannelTitle\[(\d+)\]\.Name$")
+MAX_TITLE_LEN = 120
+
+
+def parse_channel_titles(kv: Dict[str, str]) -> Dict[int, str]:
+    """``table.ChannelTitle[<idx>].Name=<name>`` lines -> {1-based channel: name}.
+
+    Empty names are left out (the recorder reported none). Control characters
+    are dropped and the name is cut to the camera-name limit.
+    """
+    out: Dict[int, str] = {}
+    for key, value in (kv or {}).items():
+        m = _TITLE_KEY_RE.match(str(key).strip())
+        if not m:
+            continue
+        name = "".join(ch for ch in str(value or "") if ch.isprintable()).strip()[:MAX_TITLE_LEN].strip()
+        if name:
+            out[int(m.group(1)) + 1] = name
+    return out
+
+
+def _measured_fps(value: Any) -> Optional[float]:
+    """The stream's frame rate as reported by the decoder; None when it reported none."""
+    try:
+        fps = float(value or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if not (0.0 < fps <= 240.0):
+        return None
+    return round(fps, 1)
+
+
 class DahuaProbeService:
     """Probes Dahua NVR devices, tests authentication, and enumerates channels."""
+
+    # Factory for the recorder's HTTP client (tests replace it).
+    http_client_factory = None
+
+    def read_channel_titles(
+        self, host: str, username: str, password: str, http_port: int = 80, timeout: float = 4.0,
+    ) -> Tuple[Dict[int, str], Optional[str]]:
+        """Channel names from ``configManager.cgi?action=getConfig&name=ChannelTitle``.
+
+        Blocking (call from a worker thread). Read-only, one request over HTTP
+        Digest with the recorder sign-in. A rejected sign-in stops at the first
+        401 without a retry (Dahua locks the account after a few failures).
+        Returns ({channel: name}, error or None).
+        """
+        from app.services import dahua_config as dc
+
+        if not username or not password:
+            return {}, "no recorder sign-in to read channel names with"
+        factory = self.http_client_factory or dc.DahuaHttpClient
+        client = factory(host, username, password, port=http_port, timeout=timeout)
+        try:
+            return parse_channel_titles(client.get_config("ChannelTitle")), None
+        except dc.DahuaAuthError:
+            return {}, ("the recorder's web page refused the sign-in (HTTP 401); "
+                        "not retried, to avoid locking the account")
+        except dc.DahuaHttpError as exc:
+            return {}, f"channel names not read: {exc}"
+        except Exception as exc:  # noqa: BLE001
+            return {}, f"channel names not read ({type(exc).__name__})"
+        finally:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     @staticmethod
     async def check_tcp(host: str, port: int, timeout: float = 1.2) -> bool:
@@ -155,7 +229,8 @@ class DahuaProbeService:
         used_subtype = 1
         active = False
         frame = None
-        w, h, fps = 0, 0, 0.0
+        w, h = 0, 0
+        fps: Optional[float] = None
 
         try:
             if cap.isOpened():
@@ -163,7 +238,7 @@ class DahuaProbeService:
                 if ok and frame is not None:
                     active = True
                     h, w = frame.shape[:2]
-                    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+                    fps = _measured_fps(cap.get(cv2.CAP_PROP_FPS))
             cap.release()
 
             # If substream failed, fallback to test mainstream
@@ -175,7 +250,7 @@ class DahuaProbeService:
                         active = True
                         used_subtype = 0
                         h, w = frame.shape[:2]
-                        fps = cap_main.get(cv2.CAP_PROP_FPS) or 25.0
+                        fps = _measured_fps(cap_main.get(cv2.CAP_PROP_FPS))
                 cap_main.release()
 
         except Exception as e:
@@ -191,10 +266,10 @@ class DahuaProbeService:
                 main_url=main_url,
                 preferred_url=pref_url,
                 preferred_subtype=used_subtype,
-                resolution=f"{w}x{h}",
-                width=w,
-                height=h,
-                fps=round(fps, 1),
+                resolution=f"{w}x{h}" if w > 0 and h > 0 else None,
+                width=w or None,
+                height=h or None,
+                fps=fps,
                 error=None,
             )
         else:
@@ -217,6 +292,8 @@ class DahuaProbeService:
         port: int = RTSP_PORT,
         max_channels: int = 16,
         concurrency: int = 4,
+        http_port: int = 80,
+        read_titles: bool = True,
     ) -> NVRProbeSummary:
         """Full probe of a Dahua NVR: check connectivity, auth, and scan channels."""
         host = host.strip()
@@ -258,7 +335,15 @@ class DahuaProbeService:
                 error=auth_err or "RTSP authentication failed (401 Unauthorized)",
             )
 
-        # 3. Channel scan with bounded concurrency
+        # 3. Channel names as set on the recorder (read-only, one HTTP request;
+        #    a refused sign-in is not retried).
+        titles: Dict[int, str] = {}
+        titles_error: Optional[str] = None
+        if read_titles:
+            titles, titles_error = await asyncio.to_thread(
+                self.read_channel_titles, host, username, password, http_port)
+
+        # 4. Channel scan with bounded concurrency
         max_ch = max(1, min(int(max_channels or 16), 64))
         sem = asyncio.Semaphore(concurrency)
 
@@ -278,6 +363,8 @@ class DahuaProbeService:
 
         # Sort by channel number
         sorted_results = sorted(results, key=lambda x: x.channel)
+        for r in sorted_results:
+            r.title = titles.get(r.channel)
         active_count = sum(1 for c in sorted_results if c.active)
 
         return NVRProbeSummary(
@@ -290,6 +377,8 @@ class DahuaProbeService:
             active_channels_count=active_count,
             channels=sorted_results,
             error=None,
+            titles_read=read_titles and titles_error is None,
+            titles_error=titles_error,
         )
 
 

@@ -440,6 +440,9 @@ class BackupService:
                 check.close()
             if not result or result[0] != "ok":
                 raise ValueError(f"Backup {safe_name} failed integrity_check: {result}")
+            # A snapshot written by a newer release would stop the next start
+            # (SchemaTooNewError), so it is refused before anything is replaced.
+            validate_sqlite_snapshot(source, require_schema=False)
 
             logger.info(f"Restoring database from snapshot {backup_path} to {self.db_path}...")
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -461,6 +464,219 @@ class BackupService:
         logger.info(f"Database successfully restored from {safe_name}")
         return True
 
+    # ------------------------------------------------------------------ dashboard helpers
+
+    def resolve_backup_path(self, filename: str) -> Path:
+        """Path of a listed backup, or ValueError/FileNotFoundError.
+
+        Only a plain name of a regular file directly inside the backups
+        directory is accepted: no separators, no ``..``, no hidden temp files
+        and no symlink that points elsewhere.
+        """
+        if not isinstance(filename, str) or not filename or filename.startswith("."):
+            raise ValueError(f"Invalid or unsafe backup filename: {filename!r}")
+        if "/" in filename or "\\" in filename or "\x00" in filename:
+            raise ValueError(f"Invalid or unsafe backup filename: {filename!r}")
+        safe = self._sanitize_filename(filename)
+        base = self.backups_dir.resolve()
+        path = self.backups_dir / safe
+        if path.is_symlink() or not path.is_file():
+            raise FileNotFoundError(f"Backup file not found: {safe}")
+        if path.resolve().parent != base:
+            raise ValueError(f"Invalid or unsafe backup filename: {filename!r}")
+        return path
+
+    def inspect_snapshot(self, filename: str) -> Dict[str, Any]:
+        """Validate a listed backup for restore without touching the live database."""
+        path = self.resolve_backup_path(filename)
+        if path.name.endswith(".gz"):
+            tmp = self.backups_dir / f".inspect_{os.getpid()}_{path.name[:-3]}"
+            try:
+                with open(path, "rb") as f:
+                    if not f.read(2).startswith(_GZIP_MAGIC):
+                        raise ValueError(f"File {path.name} is not a gzip archive.")
+                with gzip.open(path, "rb") as fin, open(tmp, "wb") as fout:
+                    shutil.copyfileobj(fin, fout)
+                return validate_sqlite_snapshot(tmp, require_schema=False)
+            finally:
+                tmp.unlink(missing_ok=True)
+                self._remove_sidecars(tmp)
+        return validate_sqlite_snapshot(path, require_schema=False)
+
+    def import_upload(self, tmp_file: Path, original_name: str = "") -> Dict[str, Any]:
+        """Turn an uploaded file (plain SQLite or gzip) into a listed ``uploaded`` backup.
+
+        The upload must be a SQLite database of this application: integrity ok,
+        a ``schema_migrations`` table, the core tables, and a schema version not
+        newer than this release. Nothing is restored here; the caller only adds
+        it to the list. ``tmp_file`` is always consumed (moved or deleted).
+        """
+        tmp_file = Path(tmp_file)
+        plain = tmp_file
+        decompressed: Optional[Path] = None
+        try:
+            with open(tmp_file, "rb") as f:
+                magic = f.read(16)
+            if magic.startswith(_GZIP_MAGIC):
+                decompressed = tmp_file.with_name(tmp_file.name + ".plain")
+                written = 0
+                try:
+                    with gzip.open(tmp_file, "rb") as fin, open(decompressed, "wb") as fout:
+                        for chunk in iter(lambda: fin.read(1 << 20), b""):
+                            written += len(chunk)
+                            if written > MAX_UPLOAD_EXPANDED_BYTES:
+                                raise ValueError("The uploaded archive expands to more than the allowed size.")
+                            fout.write(chunk)
+                except (OSError, EOFError, gzip.BadGzipFile) as e:
+                    raise ValueError(f"The uploaded file is not a readable gzip archive ({e}).")
+                plain = decompressed
+            info = validate_sqlite_snapshot(plain, require_schema=True)
+            ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            dest = self._unique_dest(ts, "uploaded")
+            os.replace(plain, dest)
+            self._remove_sidecars(plain)
+            entry = self._parse(dest)
+            entry.pop("_ts", None)
+            entry.pop("_mtime", None)
+            entry["schema_version"] = info["schema_version"]
+            entry["original_name"] = os.path.basename(original_name or "")[:200]
+            logger.info(f"Uploaded backup accepted as {dest.name} (schema v{info['schema_version']})")
+            return entry
+        finally:
+            tmp_file.unlink(missing_ok=True)
+            if decompressed is not None:
+                decompressed.unlink(missing_ok=True)
+                self._remove_sidecars(decompressed)
+
+
+# Uploaded backups: hard caps so an upload cannot fill the disk.
+MAX_UPLOAD_BYTES = 2 * 1024 ** 3
+MAX_UPLOAD_EXPANDED_BYTES = 8 * 1024 ** 3
+
+# Tables every database of this application has (m0001 baseline onwards).
+CORE_TABLES = frozenset({"admin_users", "cameras", "store_layouts", "store_zones"})
+
+
+def validate_sqlite_snapshot(path: Path, require_schema: bool = True) -> Dict[str, Any]:
+    """Check that ``path`` is an intact SQLite file this release can open.
+
+    Raises ValueError with a plain reason. ``require_schema`` (uploads) also
+    demands the ``schema_migrations`` table and the core tables; a backup this
+    device wrote itself may predate versioning (pre-v0001 snapshots) and is
+    migrated on the next start like any old database.
+    """
+    path = Path(path)
+    with open(path, "rb") as f:
+        magic = f.read(16)
+    if not magic.startswith(b"SQLite format 3"):
+        raise ValueError("The file is not an SQLite database.")
+    conn = sqlite3.connect(f"file:{path.resolve()}?mode=ro&immutable=1", uri=True)
+    try:
+        try:
+            result = conn.execute("PRAGMA integrity_check").fetchone()
+        except sqlite3.DatabaseError as e:
+            raise ValueError(f"The database cannot be read ({e}).")
+        if not result or result[0] != "ok":
+            raise ValueError(f"The database failed its integrity check: {result}")
+        tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
+        versions: List[int] = []
+        if "schema_migrations" in tables:
+            versions = [int(r[0]) for r in conn.execute("SELECT version FROM schema_migrations")]
+    finally:
+        conn.close()
+
+    from app.migrations.runner import head_version
+
+    head = head_version()
+    newest = max(versions) if versions else 0
+    if newest > head:
+        raise ValueError(
+            f"This backup comes from a newer release (database version {newest}); this device "
+            f"runs version {head}. Update the device software first.")
+    if require_schema:
+        if "schema_migrations" not in tables:
+            raise ValueError("The file is not a backup of this system (it has no schema version).")
+        missing = sorted(CORE_TABLES - tables)
+        if missing:
+            raise ValueError(f"The file is not a backup of this system (missing tables: {', '.join(missing)}).")
+    return {"schema_version": newest, "head_version": head, "tables": len(tables)}
+
+
+_KIND_LABELS = {
+    "startup": "At start",
+    "auto": "Automatic",
+    "manual": "Manual",
+    "pre-restore": "Before restore",
+    "pre-reset": "Before reset",
+    "uploaded": "Uploaded",
+}
+
+
+def backup_kind(tag: str) -> str:
+    """Plain-language kind of a backup from its tag."""
+    tag = tag or ""
+    if is_pre_migration_tag(tag):
+        return "Before upgrade"
+    base = re.sub(r"-\d+$", "", tag)
+    return _KIND_LABELS.get(base, "Other")
+
+
+def seconds_until_daily_backup(now_local: datetime, hour: int = 3) -> float:
+    """Seconds from ``now_local`` (store time) to the next ``hour``:00 store time."""
+    target = now_local.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if target <= now_local:
+        target += timedelta(days=1)
+    return max(60.0, (target - now_local).total_seconds())
+
+
+class DailyBackupScheduler:
+    """Takes an automatic snapshot every night at 03:00 store time.
+
+    Uses the "auto" tag, so an unchanged database is skipped (content dedupe)
+    and retention keeps one per day for BACKUP_KEEP_DAILY_DAYS. The store
+    time zone is read at each wait, so a zone changed in the dashboard applies
+    from the next night.
+    """
+
+    def __init__(self, service: "BackupService"):
+        self._service = service
+        self._task = None
+
+    async def start(self) -> None:
+        import asyncio
+
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._run(), name="daily-backup")
+
+    async def stop(self) -> None:
+        import asyncio
+
+        task, self._task = self._task, None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    async def _run(self) -> None:
+        import asyncio
+        from app.services.timeutil import local_now
+
+        while True:
+            await asyncio.sleep(seconds_until_daily_backup(local_now()))
+            try:
+                res = await asyncio.to_thread(self._service.create_backup, "auto")
+                if res.get("status") == "skipped":
+                    logger.info(f"Daily backup skipped ({res.get('reason')})")
+                else:
+                    logger.info(f"Daily backup created: {res.get('filename')}")
+                await asyncio.to_thread(self._service.apply_retention)
+            except Exception as exc:  # a failed night must not stop later nights
+                logger.error(f"Daily backup failed: {exc}")
+
 
 # Global singleton instance
 backup_service = BackupService()
+daily_backup = DailyBackupScheduler(backup_service)

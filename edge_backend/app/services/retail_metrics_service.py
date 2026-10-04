@@ -26,7 +26,7 @@ from sqlalchemy import Float, and_, case, func, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.services.timeutil import local_day_bounds_utc, to_local, utcnow
+from app.services.timeutil import local_day_bounds_utc, local_now, to_local, utcnow
 
 from app.models.db_models import (
     CameraModel,
@@ -937,7 +937,7 @@ class RetailMetricsService:
 
         return {
             "store_name": store_name,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": local_now().isoformat(),
             "window": {"start": start.isoformat(), "end": end.isoformat()},
             # None means not observed. The UI must render a dash, never a zero.
             "today_footfall": footfall,

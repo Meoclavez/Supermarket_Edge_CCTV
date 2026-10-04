@@ -190,11 +190,19 @@ class ClipRecorderService:
 
         filename = f"{event_id}.jpg"
         filepath = settings.SNAPSHOTS_DIR / filename
-        if cv2.imwrite(str(filepath), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 90]):
-            note_evidence_written(filepath)
+        try:
+            filepath.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        if not cv2.imwrite(str(filepath), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 90]):
+            # Nothing was saved: no link to a still that does not exist.
+            return None
+        note_evidence_written(filepath)
 
         token = auth_service.generate_clip_token(event_id)
-        return f"{settings.EDGE_BASE_URL}/api/v1/events/snapshots/{filename}?token={token}"
+        # A same-origin path, not EDGE_BASE_URL: right on every address the
+        # dashboard or phone uses (services/evidence_urls.py).
+        return f"/api/v1/events/snapshots/{filename}?token={token}"
 
     async def record_event_clip(
         self,
@@ -242,7 +250,7 @@ class ClipRecorderService:
             note_evidence_written(output_path)
 
         token = auth_service.generate_clip_token(event_id)
-        clip_url = f"{settings.EDGE_BASE_URL}/api/v1/events/clips/{output_filename}?token={token}"
+        clip_url = f"/api/v1/events/clips/{output_filename}?token={token}"
         return clip_url
 
     def record_incident_clip(

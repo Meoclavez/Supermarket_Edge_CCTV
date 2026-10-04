@@ -114,6 +114,16 @@ class PolygonGeometry:
         return LineCrossingResult("", crossed=False)
 
 
+def _privacy_masks_changed() -> None:
+    """Direct live video burns privacy masks in per session (services/privacy_video.py): tell it."""
+    try:
+        from app.services.privacy_video import notify_masks_changed
+
+        notify_masks_changed()
+    except Exception as e:  # never fail a zone edit; the live-video reaper re-checks every few seconds
+        logger.warning(f"Live video was not told about the privacy mask change: {e}")
+
+
 class AIZoneService:
     def __init__(self):
         self.lock = threading.Lock()
@@ -236,7 +246,8 @@ class AIZoneService:
             data["id"] = ex_id
             self.exclusion_masks[ex_id] = data
             self._save_persistent_zones()
-            return data
+        _privacy_masks_changed()
+        return data
 
     def update_exclusion(self, ex_id: str, changes: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Merge ``changes`` into an existing mask; None if it does not exist."""
@@ -246,15 +257,18 @@ class AIZoneService:
                 return None
             mask.update(changes)
             self._save_persistent_zones()
-            return dict(mask)
+            out = dict(mask)
+        _privacy_masks_changed()
+        return out
 
     def delete_exclusion(self, ex_id: str) -> bool:
         with self.lock:
-            if ex_id in self.exclusion_masks:
-                del self.exclusion_masks[ex_id]
-                self._save_persistent_zones()
-                return True
-            return False
+            if ex_id not in self.exclusion_masks:
+                return False
+            del self.exclusion_masks[ex_id]
+            self._save_persistent_zones()
+        _privacy_masks_changed()
+        return True
 
     # Checkout / queue areas (camera roles, m0012): polygons whose dwell is
     # recorded in queue_visits by tripwire_engine.
@@ -308,7 +322,9 @@ class AIZoneService:
                     n += len(store)
                     store.clear()
             self._save_persistent_zones()
-            return n
+        if kinds is None or "exclusion_masks" in kinds:
+            _privacy_masks_changed()
+        return n
 
     def get_all_zones(self, camera_id: Optional[str] = None) -> Dict[str, Any]:
         with self.lock:

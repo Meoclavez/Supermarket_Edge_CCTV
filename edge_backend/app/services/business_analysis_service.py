@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.models.db_models import AIDecisionRecommendationModel
 from app.services.retail_metrics_service import ZoneMetrics, day_bounds, retail_metrics_service
+from app.services.timeutil import local_now
 
 logger = logging.getLogger(__name__)
 
@@ -902,7 +903,7 @@ class BusinessAnalysisService:
 
         engagement_tracked = any(z.interactions > 0 for z in zones)
         result = {
-            "generated_at": datetime.now().isoformat(),
+            "generated_at": local_now().isoformat(),
             "findings": [f.to_dict() for f in findings],
             "findings_count": len(findings),
             "zones_assessed": assessable,
@@ -947,7 +948,7 @@ class BusinessAnalysisService:
         than accumulate near-duplicates, but an operator's status changes on a
         finding that still applies are preserved.
         """
-        today = date.today().isoformat()
+        today = local_now().date().isoformat()   # the store's trading day
         existing = (
             await db.execute(
                 select(AIDecisionRecommendationModel).where(

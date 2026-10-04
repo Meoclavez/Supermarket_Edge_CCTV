@@ -69,11 +69,20 @@ class PointCoord(BaseModel):
 
 
 class StudyMetricsConfig(BaseModel):
+    # Only hand reaches are measured. The other studies are not measured yet,
+    # so a new shelf stores them off (the dashboard shows them greyed and off).
     track_hand_reach: bool = True
-    track_dwell_time: bool = True
-    track_put_back_friction: bool = True
-    track_pos_conversion: bool = True
+    track_dwell_time: bool = False
+    track_put_back_friction: bool = False
+    track_pos_conversion: bool = False
     ab_test_mode: bool = False
+
+
+# Defaults before the unmeasured studies defaulted to off. A stored shelf that
+# lacks a key keeps the value it was read with before, so existing rows are unchanged.
+_LEGACY_STUDY_DEFAULTS = {"track_hand_reach": True, "track_dwell_time": True,
+                          "track_put_back_friction": True, "track_pos_conversion": True,
+                          "ab_test_mode": False}
 
 
 class ProductShelfZone(BaseModel):
@@ -212,6 +221,9 @@ class ShelfInteractionService:
                     with open(self.config_path, "r", encoding="utf-8") as f:
                         data = json.load(f)
                     for z_dict in data.get("zones", []):
+                        sm = z_dict.get("study_metrics")
+                        z_dict = {**z_dict, "study_metrics": {**_LEGACY_STUDY_DEFAULTS,
+                                                              **(sm if isinstance(sm, dict) else {})}}
                         zone = ProductShelfZone(**z_dict)
                         self.zones[zone.id] = zone
                     logger.info(f"Loaded {len(self.zones)} product shelf zones from {self.config_path}")

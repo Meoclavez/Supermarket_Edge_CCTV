@@ -354,3 +354,35 @@ def test_health_and_system_stats_report_usage_honestly(store, monkeypatch):
     assert block["deleted_files_total"] == 1 and block["last_cleanup_at"]
     stats = _evidence_summary()
     assert stats["used_bytes"] == 250 and stats["cap_source"].startswith("EVIDENCE_MAX_GB")
+
+
+def test_moved_storage_dir_moves_database_backups_and_media(monkeypatch, tmp_path):
+    """STORAGE_DIR holds the evidence and the database (docs/DEPLOYMENT.md, .env.example):
+    moving it moves every path not set on its own; unset, the default layout is unchanged."""
+    from app import config as cfg
+    from app.services import secret_store
+
+    # Not the real secret store under the default root.
+    monkeypatch.setattr(secret_store, "resolve_secrets", lambda storage, provided: {})
+    for key in ["STORAGE_DIR", "SQLITE_DB_PATH", *cfg.STORAGE_DERIVED_PATHS]:
+        monkeypatch.delenv(key, raising=False)
+    root = cfg.get_storage_root()
+    default = cfg.Settings(_env_file=None)
+    assert Path(default.STORAGE_DIR) == root
+    assert Path(default.DATABASE_PATH) == root / "cctv_core.db" == Path(default.SQLITE_DB_PATH)
+    assert Path(default.BACKUPS_DIR) == root / "backups" and Path(default.CLIPS_DIR) == root / "clips"
+
+    # STORAGE_DIR naming the default root: exactly the same paths.
+    monkeypatch.setenv("STORAGE_DIR", str(root))
+    same = cfg.Settings(_env_file=None)
+    for key in cfg.STORAGE_DERIVED_PATHS:
+        assert Path(getattr(same, key)) == Path(getattr(default, key)), key
+
+    moved = tmp_path / "ssd"
+    monkeypatch.setenv("STORAGE_DIR", str(moved))
+    monkeypatch.setenv("BACKUPS_DIR", str(tmp_path / "elsewhere"))      # set on its own: kept
+    s = cfg.Settings(_env_file=None)
+    assert Path(s.DATABASE_PATH) == moved / "cctv_core.db" == Path(s.SQLITE_DB_PATH)
+    assert Path(s.SNAPSHOTS_DIR) == moved / "snapshots" and Path(s.CLIPS_DIR) == moved / "clips"
+    assert Path(s.DATA_DIR) == moved / "data" and (moved / "snapshots").is_dir()
+    assert Path(s.BACKUPS_DIR) == tmp_path / "elsewhere"

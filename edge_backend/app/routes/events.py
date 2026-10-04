@@ -10,15 +10,16 @@ import uuid
 from datetime import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, WebSocket
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, WebSocket
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse
-from sqlalchemy import desc, select
+from pydantic import BaseModel
+from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import async_session_factory, get_db
-from app.models.db_models import CameraModel, SecurityEventModel
+from app.models.db_models import AdminUserModel, CameraModel, SecurityEventModel
 from app.models.schemas import (
     BoundingBox,
     EventSeverity,
@@ -26,12 +27,13 @@ from app.models.schemas import (
     Keypoint,
     SecurityEvent,
     SecurityEventCreate,
-    SecurityEventListResponse,
 )
 from app.routes import ResilientRoute
 from app.services.auth_service import auth_service, general_rate_limiter
 from app.services.clip_recorder import clip_recorder_service
+from app.services.evidence_urls import absolute_for, evidence_path
 from app.services.notification_service import alert_hub, notification_service
+from app.services.timeutil import to_local
 
 logger = logging.getLogger("EventRoutes")
 router = APIRouter(
@@ -62,8 +64,9 @@ def _row_to_event(e: SecurityEventModel) -> SecurityEvent:
         confidence=e.confidence if measured else None,
         description=meta.get("body"),
         timestamp=e.timestamp,
-        clip_url=e.clip_url,
-        snapshot_url=e.snapshot_url,
+        # Same-origin paths; rows from older builds hold EDGE_BASE_URL links.
+        clip_url=evidence_path(e.clip_url),
+        snapshot_url=evidence_path(e.snapshot_url),
         bounding_box=BoundingBox(**e.bounding_box) if e.bounding_box else None,
         keypoints=[Keypoint(**k) for k in e.keypoints] if e.keypoints else None,
         metadata=meta or None,
@@ -71,6 +74,102 @@ def _row_to_event(e: SecurityEventModel) -> SecurityEvent:
         acknowledged_at=e.acknowledged_at,
         evidence_expired_at=e.evidence_expired_at,
     )
+
+
+class AlertEntry(SecurityEvent):
+    """One alert as the dashboard lists it.
+
+    ``camera_name`` is the camera's current name (the name stored with the
+    alert when the camera no longer exists). ``zone_name`` is the restricted
+    area or line the alert is about, ``store_time`` the alert time in the
+    store's zone, ``evidence_url`` the saved still (null when none was saved or
+    the storage limit removed it: then ``evidence_expired_at`` is set) and
+    ``acknowledged_by`` the name of the person who acknowledged it, when known
+    (``acknowledged_store_time``: when, in the store's zone).
+    """
+    zone_name: Optional[str] = None
+    store_time: Optional[dict] = None
+    evidence_url: Optional[str] = None
+    acknowledged_by: Optional[str] = None
+    acknowledged_store_time: Optional[dict] = None
+
+
+class AlertListResponse(BaseModel):
+    events: List[AlertEntry]
+    total: int
+    # Every row matching the filters, not only the ``limit`` returned.
+    matching: int
+
+
+def _store_time(ts: Optional[datetime]) -> Optional[dict]:
+    if ts is None:
+        return None
+    try:
+        local = to_local(ts)
+    except Exception:
+        return None
+    return {
+        "local": local.isoformat(),
+        "date": local.date().isoformat(),
+        "hhmm": local.strftime("%H:%M"),
+        "abbr": local.tzname(),
+        "label": f"{local.strftime('%H:%M')} {local.tzname() or ''}".strip(),
+    }
+
+
+def _row_to_entry(e: SecurityEventModel, camera_names: dict) -> AlertEntry:
+    base = _row_to_event(e)
+    meta = e.metadata_json or {}
+    acker = meta.get("acknowledged_by")
+    if isinstance(acker, dict):
+        acker = acker.get("name") or acker.get("user_id")
+    zone = meta.get("area_name") or meta.get("tripwire_name") or meta.get("zone_name")
+    return AlertEntry(
+        **base.model_dump(exclude={"camera_name"}),
+        camera_name=camera_names.get(e.camera_id) or e.camera_name,
+        zone_name=zone if isinstance(zone, str) and zone else None,
+        store_time=_store_time(e.timestamp),
+        # The storage limit nulls snapshot_url when it deletes the still.
+        evidence_url=evidence_path(e.snapshot_url) or None,
+        acknowledged_by=acker if isinstance(acker, str) and acker else None,
+        acknowledged_store_time=_store_time(e.acknowledged_at) if e.acknowledged else None,
+    )
+
+
+def _for_caller(entry: AlertEntry, request: Request) -> AlertEntry:
+    """``clip_url`` / ``snapshot_url`` absolute on the address the caller used.
+
+    The phone app plays ``clip_url`` exactly as given, so it must be absolute;
+    building it from this request (not EDGE_BASE_URL) makes it right on the
+    LAN, another address and online access. ``evidence_url`` (dashboard) stays
+    a same-origin path.
+    """
+    entry.clip_url = absolute_for(request, entry.clip_url)
+    entry.snapshot_url = absolute_for(request, entry.snapshot_url)
+    return entry
+
+
+def _signed_in_person(request: Request) -> None:
+    """Alerts are for signed-in people: a dashboard or phone session (or the
+    internal key / AUTH_DISABLED, which set no user). A camera-scoped live
+    video or clip token, which can travel in a URL, does not open the alert log."""
+    user = getattr(request.state, "user", None)
+    if user and user.get("type") != "user_session":
+        raise HTTPException(status_code=403, detail="Sign in to see alerts")
+
+
+def _parse_types(types: Optional[str], event_type: Optional[EventType]) -> Optional[List[str]]:
+    wanted: List[str] = []
+    if types:
+        for t in (x.strip().upper() for x in types.split(",")):
+            if not t:
+                continue
+            if t not in _RETAIL_TYPES:
+                raise HTTPException(status_code=422, detail=f"Unknown alert type '{t}'")
+            wanted.append(t)
+    if event_type:
+        wanted.append(event_type.value)
+    return sorted(set(wanted)) or None
 
 
 @router.post("/trigger", response_model=SecurityEvent)
@@ -214,35 +313,46 @@ async def unregister_device_gone(device_token: str):
     raise HTTPException(status_code=410, detail=_DEVICES_GONE)
 
 
-@router.get("", response_model=SecurityEventListResponse)
+@router.get("", response_model=AlertListResponse, dependencies=[Depends(_signed_in_person)])
 async def list_events(
+    request: Request,
     limit: int = Query(50, ge=1, le=500),
     severity: Optional[EventSeverity] = None,
     event_type: Optional[EventType] = None,
+    types: Optional[str] = Query(None, description="Comma-separated alert types, e.g. RESTRICTED_AREA,TRIPWIRE_ALERT"),
     acknowledged: Optional[bool] = None,
     db: AsyncSession = Depends(get_db),
 ):
     """Alert history, newest first.
 
-    Rows left by older builds with non-retail types (e.g. fall detection) are
-    not served; they have no meaning in this product.
+    ``types`` (comma-separated) and ``event_type`` narrow the alert types;
+    ``acknowledged`` picks alerts that still need attention (false) or were
+    seen (true). Rows left by older builds with non-retail types (e.g. fall
+    detection) are not served; they have no meaning in this product.
     """
+    wanted = _parse_types(types, event_type)
+    conds = [SecurityEventModel.event_type.in_(wanted or _RETAIL_TYPES)]
+    if severity:
+        conds.append(SecurityEventModel.severity == severity.value)
+    if acknowledged is not None:
+        conds.append(SecurityEventModel.acknowledged == acknowledged)
+
     stmt = (
         select(SecurityEventModel)
-        .where(SecurityEventModel.event_type.in_(_RETAIL_TYPES))
-        .order_by(desc(SecurityEventModel.timestamp))
+        .where(*conds)
+        .order_by(desc(SecurityEventModel.timestamp), desc(SecurityEventModel.id))
         .limit(limit)
     )
-    if severity:
-        stmt = stmt.where(SecurityEventModel.severity == severity.value)
-    if event_type:
-        stmt = stmt.where(SecurityEventModel.event_type == event_type.value)
-    if acknowledged is not None:
-        stmt = stmt.where(SecurityEventModel.acknowledged == acknowledged)
-
     rows = (await db.execute(stmt)).scalars().all()
-    events = [_row_to_event(e) for e in rows]
-    return SecurityEventListResponse(events=events, total=len(events))
+    matching = (await db.execute(select(func.count()).select_from(SecurityEventModel).where(*conds))).scalar_one()
+    cam_ids = {r.camera_id for r in rows}
+    names = {}
+    if cam_ids:
+        names = dict((await db.execute(
+            select(CameraModel.id, CameraModel.name).where(CameraModel.id.in_(cam_ids))
+        )).all())
+    events = [_for_caller(_row_to_entry(e, names), request) for e in rows]
+    return AlertListResponse(events=events, total=len(events), matching=int(matching or 0))
 
 
 @router.get("/clips/{filename}")
@@ -269,16 +379,46 @@ async def _get_retail_event(event_id: str, db: AsyncSession) -> SecurityEventMod
     return row
 
 
-@router.get("/{event_id}", response_model=SecurityEvent)
-async def get_event(event_id: str, db: AsyncSession = Depends(get_db)):
-    return _row_to_event(await _get_retail_event(event_id, db))
-
-
-@router.post("/{event_id}/acknowledge")
-async def acknowledge_event(event_id: str, db: AsyncSession = Depends(get_db)):
-    """Mark an alert as seen by staff."""
+@router.get("/{event_id}", response_model=AlertEntry, dependencies=[Depends(_signed_in_person)])
+async def get_event(event_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     row = await _get_retail_event(event_id, db)
-    row.acknowledged = True
-    row.acknowledged_at = datetime.utcnow()
-    await db.commit()
-    return {"status": "success", "event_id": event_id, "acknowledged_at": row.acknowledged_at}
+    cam = (await db.execute(select(CameraModel.name).where(CameraModel.id == row.camera_id))).scalar_one_or_none()
+    return _for_caller(_row_to_entry(row, {row.camera_id: cam} if cam else {}), request)
+
+
+async def _acknowledger(request: Request, db: AsyncSession) -> Optional[dict]:
+    user = getattr(request.state, "user", None) or {}
+    uid = user.get("sub")
+    if not uid:
+        return None
+    name = None
+    try:
+        acct = (await db.execute(select(AdminUserModel).where(AdminUserModel.id == str(uid)))).scalar_one_or_none()
+        if acct is not None:
+            name = acct.display_name or acct.username
+    except Exception as exc:
+        logger.warning("Acknowledging account lookup failed: %s", exc)
+    return {"user_id": str(uid), "name": name or str(uid)}
+
+
+@router.post("/{event_id}/acknowledge", dependencies=[Depends(_signed_in_person)])
+async def acknowledge_event(event_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    """Mark an alert as seen by staff (any signed-in person, operators included).
+
+    The first acknowledgement is kept: a second one changes nothing, so the
+    log keeps who saw the alert first and when. Who acknowledged is stored in
+    the alert's metadata (``acknowledged_by``) when the request carries a
+    signed-in session.
+    """
+    row = await _get_retail_event(event_id, db)
+    if not row.acknowledged or row.acknowledged_at is None:
+        row.acknowledged = True
+        row.acknowledged_at = datetime.utcnow()
+        who = await _acknowledger(request, db)
+        if who:
+            # A new dict: SQLAlchemy does not track in-place JSON mutation.
+            row.metadata_json = {**(row.metadata_json or {}), "acknowledged_by": who}
+        await db.commit()
+    acker = (row.metadata_json or {}).get("acknowledged_by")
+    return {"status": "success", "event_id": event_id, "acknowledged_at": row.acknowledged_at,
+            "acknowledged_by": acker.get("name") if isinstance(acker, dict) else None}

@@ -17,7 +17,7 @@ from app.config import settings
 from app.database import get_db, async_session_factory
 from app.services.auth_service import auth_service, general_rate_limiter
 from app.services.shelf_interaction_service import shelf_interaction_service, ProductShelfZone
-from app.services.timeutil import to_utc, utcnow
+from app.services.timeutil import local_now, to_utc, utcnow
 from app.models.db_models import (
     PlanogramItemModel,
     POSTransactionModel,
@@ -55,6 +55,7 @@ from app.models.schemas import (
     RestoreResponse
 )
 from app.services.backup_service import backup_service
+from app.services.auth_service import require_admin
 from app.services.business_analysis_service import business_analysis_service
 from app.services.retail_metrics_service import day_bounds, retail_metrics_service
 from app.services.store_layout_service import store_layout_service
@@ -144,6 +145,14 @@ async def get_tripwire_footfall(
         raise HTTPException(status_code=422, detail="window is limited to 93 days")
     out = await tripwire_footfall(db, start, end, bucket)
     out["footfall_source"] = await retail_metrics_service.footfall_source(db, start, end)
+    # The camera's name for each line (None when the camera was removed).
+    cam_ids = {t.get("camera_id") for t in out.get("tripwires") or [] if t.get("camera_id")}
+    names: Dict[str, str] = {}
+    if cam_ids:
+        rows = (await db.execute(select(CameraModel.id, CameraModel.name).where(CameraModel.id.in_(cam_ids)))).all()
+        names = {r[0]: r[1] for r in rows}
+    for t in out.get("tripwires") or []:
+        t["camera_name"] = names.get(t.get("camera_id"))
     return out
 
 
@@ -335,15 +344,39 @@ async def post_heatmap_record_now():
     return await hh.heatmap_recorder.record_now()
 
 
+LOST_SALES_NEEDS_POS = "needs sales data"
+LOST_SALES_NOT_ATTRIBUTABLE = (
+    "Not estimated: till sales are recorded per receipt, not per store area, and nothing links a "
+    "shopper who left this area to a purchase, so what they would have bought is not measured."
+)
+
+
+def _with_zone_lost_sales(zones: List[Dict[str, Any]], pos_connected: bool) -> List[Dict[str, Any]]:
+    """Per-area lost sales: never estimated from invented spend.
+
+    A money figure would need the sales of this area's products and which of
+    its visitors bought them. Till rows carry receipts and SKUs but no store
+    area, and no shopper link, so the value is always null with the reason:
+    "needs sales data" while no till data exists for the day, otherwise why
+    it cannot be computed even with till data.
+    """
+    for z in zones:
+        z["lost_sales"] = None
+        z["lost_sales_status"] = "needs_pos" if not pos_connected else "not_attributable"
+        z["lost_sales_reason"] = LOST_SALES_NEEDS_POS if not pos_connected else LOST_SALES_NOT_ATTRIBUTABLE
+    return zones
+
+
 @router.get("/funnels")
 async def get_funnels_data(db: AsyncSession = Depends(get_db)):
     """Conversion funnel derived from tracked visits and real POS rows."""
     layout = await _active_layout(db)
     start, end = day_bounds()
     funnel = await retail_metrics_service.funnel(db, layout.id, start, end)
-    funnel["zones"] = [
-        m.to_dict() for m in await retail_metrics_service.zone_metrics(db, layout.id, start, end)
-    ]
+    funnel["zones"] = _with_zone_lost_sales(
+        [m.to_dict() for m in await retail_metrics_service.zone_metrics(db, layout.id, start, end)],
+        bool(funnel.get("pos_connected")),
+    )
     # Demographics require an age/gender classifier that is not part of this
     # build. The field is declared absent rather than filled with invented
     # percentages, which is what previously shipped here.
@@ -471,7 +504,7 @@ async def get_daily_executive_report(
     specific aisles and dollar figures that no measurement supported.
     """
     layout = await _active_layout(db)
-    target_date = date_str or date.today().isoformat()
+    target_date = date_str or local_now().date().isoformat()
 
     overview = await retail_metrics_service.overview(db, layout.id, settings.STORE_NAME)
     funnel = await retail_metrics_service.funnel(db, layout.id, *day_bounds())
@@ -487,7 +520,7 @@ async def get_daily_executive_report(
     report = {
         "report_title": f"Daily Intelligence Digest - {overview['store_name']}",
         "date": target_date,
-        "generated_at": datetime.now().isoformat(),
+        "generated_at": local_now().isoformat(),
         "data_available": overview["has_data"],
         "kpi_scorecard": {
             "total_footfall": fmt(overview["today_footfall"]),
@@ -555,11 +588,10 @@ async def get_daily_executive_report(
     return report
 
 
-@router.post("/pos/ingest")
-async def ingest_pos_transactions(
-    payload: Any = Body(...),
-    db: AsyncSession = Depends(get_db)
-):
+# POST /api/v1/analytics/pos/ingest is registered in routes/pos_ingest.py: it
+# also accepts the till key (Settings > Sales data > Till key), which the
+# router-wide verify_analytics_access here does not. The body handling stays here.
+async def ingest_pos_transactions(payload: Any, db: AsyncSession):
     """Ingest POS sales receipts to drive real-time checkout conversion metrics."""
     transactions_to_save = []
     
@@ -630,7 +662,7 @@ async def sync_edge_telemetry(
 ):
     """Synchronize aggregated edge analytics telemetry to Cloud."""
     batch_id = f"sync_{uuid.uuid4().hex[:10]}"
-    target_date = sync_req.date or date.today().isoformat()
+    target_date = sync_req.date or local_now().date().isoformat()
 
     # Query local summaries
     summary_stmt = select(RetailAnalyticsSummaryModel).where(RetailAnalyticsSummaryModel.date == target_date)
@@ -697,9 +729,18 @@ async def list_planogram_items(
 async def get_product_shelf_zones(camera_id: Optional[str] = Query(None, description="Filter by camera ID")):
     """List all interactive product shelf zones mapped to camera feeds."""
     zones = shelf_interaction_service.get_zones(camera_id)
+    # Product category suggestions for the shelf form: category words already
+    # used on product areas, plus the high-value categories the theft rules
+    # match (THEFT_HIGH_VALUE_CATEGORIES), all upper case as they are compared.
+    high_value = sorted({c.strip().upper() for c in str(settings.THEFT_HIGH_VALUE_CATEGORIES or "").split(",")
+                         if c.strip()})
+    used = sorted({(z.category or "").strip().upper() for z in shelf_interaction_service.get_zones(None)
+                   if (z.category or "").strip()})
     return {
         "camera_id": camera_id or "all",
         "total_zones": len(zones),
+        "high_value_categories": high_value,
+        "category_suggestions": used + [c for c in high_value if c not in used],
         # Stored fields plus effective_shelf_level / effective_value_tier and
         # their source (operator, derived from geometry/price, or unknown).
         "zones": [shelf_interaction_service.zone_dict(z) for z in zones]
@@ -920,50 +961,35 @@ system_router = APIRouter(
 )
 
 
-@system_router.get("/backups", response_model=BackupListResponse)
-@router.get("/system/backups", response_model=BackupListResponse)
+# The backup endpoints live in routes/system.py (GET /api/v1/system/backups,
+# POST /backup, /backups/{file}/download, /backups/{file}/restore, /backups/upload,
+# /factory-reset), owner/admin only. The /api/v1/analytics/system/* paths below
+# are older aliases that run the same code, so a restore through them also takes
+# a safety backup first and restarts the service when it can.
+
+
+@router.get("/system/backups", dependencies=[Depends(require_admin)])
 async def list_system_backups():
-    """List all available SQLite database backups with size and timestamps."""
-    try:
-        raw_backups = backup_service.list_backups()
-        items = [BackupItem(**b) for b in raw_backups]
-        return BackupListResponse(backups=items, total=len(items))
-    except Exception as e:
-        logger.error(f"Failed to list system backups: {e}")
-        raise HTTPException(status_code=500, detail="Failed to list database backups")
+    """Alias of GET /api/v1/system/backups."""
+    from app.routes.system import backups_payload
+
+    return backups_payload()
 
 
-@system_router.post("/backup", response_model=BackupCreateResponse)
-@router.post("/system/backup", response_model=BackupCreateResponse)
+@router.post("/system/backup", dependencies=[Depends(require_admin)])
 async def create_system_backup(req: Optional[BackupCreateRequest] = None):
-    """Trigger a manual or tagged online SQLite backup."""
-    tag = req.tag if req and req.tag else "manual"
-    try:
-        res = backup_service.create_backup(tag=tag)
-        return BackupCreateResponse(**res)
-    except Exception as e:
-        logger.error(f"Failed to create database backup: {e}")
-        raise HTTPException(status_code=500, detail=f"Database backup failed: {str(e)}")
+    """Alias of POST /api/v1/system/backup."""
+    from app.routes.system import BackupNowRequest, backup_now
+
+    return backup_now(BackupNowRequest(tag=req.tag) if req and req.tag else None)
 
 
-@system_router.post("/restore/{filename}", response_model=RestoreResponse)
-@router.post("/system/restore/{filename}", response_model=RestoreResponse)
+@router.post("/system/restore/{filename}", dependencies=[Depends(require_admin)])
 async def restore_system_backup(filename: str):
-    """Restore database from a specified backup snapshot safely."""
-    try:
-        backup_service.restore_backup(filename)
-        return RestoreResponse(
-            status="success",
-            message=f"Database successfully restored from snapshot {filename}",
-            filename=filename
-        )
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.error(f"Failed to restore database from {filename}: {e}")
-        raise HTTPException(status_code=500, detail=f"Database restore failed: {str(e)}")
+    """Alias of POST /api/v1/system/backups/{filename}/restore."""
+    from app.routes.system import restore_backup_safely
+
+    return await restore_backup_safely(filename)
 
 
 

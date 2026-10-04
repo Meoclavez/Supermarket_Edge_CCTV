@@ -377,7 +377,8 @@ class AuthService:
             return None
         return payload
 
-    def issue_session_tokens(self, user_id: str, role: str, sid: Optional[str] = None) -> Dict[str, str]:
+    def issue_session_tokens(self, user_id: str, role: str, sid: Optional[str] = None,
+                             not_before_ms: Optional[int] = None) -> Dict[str, str]:
         """Access + refresh token for one login session.
 
         Both carry the same ``sid`` (refreshed access tokens keep it) and their
@@ -386,13 +387,17 @@ class AuthService:
         import uuid
 
         now = int(time.time())
+        # "iam": issue time in milliseconds, so a per-account sign-out
+        # (token_revocation.revoke_account) can tell a token issued just
+        # before it from one issued just after, within the same second.
+        iam = max(int(time.time() * 1000), int(not_before_ms or 0))
         ep = current_auth_epoch(force=True)
         sid = sid or uuid.uuid4().hex
         access_payload = {"sub": user_id, "type": "user_session", "role": role,
-                          "ep": ep, "iat": now, "exp": now + 24 * 3600,
+                          "ep": ep, "iat": now, "iam": iam, "exp": now + 24 * 3600,
                           "sid": sid, "jti": uuid.uuid4().hex}
         refresh_payload = {"sub": user_id, "type": "refresh", "role": role,
-                           "ep": ep, "iat": now, "exp": now + 30 * 24 * 3600,
+                           "ep": ep, "iat": now, "iam": iam, "exp": now + 30 * 24 * 3600,
                            "sid": sid, "jti": uuid.uuid4().hex}
         return {
             "access_token": jwt.encode(access_payload, self.secret, algorithm=self.algorithm),
@@ -544,6 +549,8 @@ class AuthService:
             if payload and payload.get("type") in ("user_session", "stream_access", "clip_access"):
                 intrusion_detector.record_success(ip, "bearer_token")
                 request.state.user = payload
+                # Operators (and stream/clip tokens) may not change setup.
+                enforce_write_role(request, payload)
                 return True
 
         if settings.AUTH_DISABLED:
@@ -680,6 +687,26 @@ class AuthService:
                 entries.append((key, "session", now + session_ttl))
         return token_revocations.revoke(entries)
 
+    @staticmethod
+    def sign_out_account(user_id: Optional[str], phones: bool = False) -> int:
+        """Revoke every session of one account issued until now (see token_revocation).
+
+        Browser sessions always; with ``phones`` also the phone tokens bound to
+        the account. Returns the cutoff in ms (0 when nothing to do); a session
+        issued afterwards for the same account passes ``not_before_ms=cutoff + 1``.
+        """
+        if not user_id:
+            return 0
+        from app.services.token_revocation import token_revocations
+
+        ttl = 31 * 24 * 3600
+        try:
+            from app.services import pairing_service
+            ttl = max(ttl, int(pairing_service.REFRESH_TTL_S) + int(pairing_service.ACCESS_TTL_S))
+        except Exception:
+            pass
+        return token_revocations.revoke_account(str(user_id), phones=phones, ttl_s=ttl)
+
     async def change_password(self, session, user_id, old_password, new_password):
         from app.models.db_models import AdminUserModel
         from sqlalchemy import select
@@ -689,7 +716,7 @@ class AuthService:
         user = result.scalar_one_or_none()
 
         if not user or not verify_password(old_password, user.password_hash):
-            raise HTTPException(status_code=403, detail="Invalid old password")
+            raise HTTPException(status_code=403, detail="Current password is incorrect.")
         problem = password_policy_error(new_password, user.username)
         if problem:
             raise HTTPException(status_code=400, detail=problem)
@@ -700,3 +727,236 @@ class AuthService:
 
 general_rate_limiter = RateLimiter(requests=100, window=60)
 auth_service = AuthService()
+
+
+# --- roles ---------------------------------------------------------------------
+#
+# Accounts carry one of three roles (admin_users.role):
+#
+# * ``owner``    -- everything, including setup and accounts;
+# * ``admin``    -- the same, except it cannot create, change or remove owners;
+# * ``operator`` -- daily use: read everything, watch live video, handle theft
+#                   incidents and alerts, act on recommendations, change their
+#                   own password. It may not change setup or settings.
+#
+# The role is read from the database on every check (cached for
+# ``_ACCOUNTS_TTL_S``), not from the token's ``role`` claim, so a role change
+# takes effect on the next request without signing anybody out. A token whose
+# ``sub`` is not an account (tests, a phone paired before accounts existed)
+# falls back to its claim; a token without a role claim is treated as owner,
+# as /auth/refresh always has. Stream and clip tokens are viewers.
+#
+# Enforcement is central: :meth:`AuthService.verify_api_access` (which every
+# API route depends on, directly or through the analytics/setup wrappers)
+# refuses a non-admin's write request unless the route is on
+# ``OPERATOR_WRITE_ROUTES`` or its endpoint is marked with
+# :func:`operator_allowed`. Reads are never restricted here. The internal
+# service key and ``AUTH_DISABLED`` are not subject to roles.
+
+OWNER = "owner"
+ADMIN = "admin"
+OPERATOR = "operator"
+VIEWER = "viewer"
+ASSIGNABLE_ROLES = (OWNER, ADMIN, OPERATOR)
+ADMIN_ROLES = (OWNER, ADMIN)
+SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
+
+SETUP_FORBIDDEN_DETAIL = "Your account can't change setup. Ask an administrator."
+ADMIN_REQUIRED_DETAIL = "Only an owner or administrator can do this. Ask an administrator."
+# Lets the dashboard tell a role refusal from any other 403 without parsing text.
+ROLE_DENIED_HEADER = "X-Edge-Role-Denied"
+
+_ACCOUNTS_TTL_S = 2.0
+_accounts_cache: Dict[str, Any] = {"at": 0.0, "db": None, "rows": {}}
+
+
+def _load_accounts() -> Dict[str, Dict[str, Any]]:
+    import sqlite3
+
+    db_path = Path(settings.DATABASE_PATH)
+    db = str(db_path.resolve()) if db_path.exists() else str(db_path)
+    now = time.monotonic()
+    if _accounts_cache["db"] == db and now - _accounts_cache["at"] < _ACCOUNTS_TTL_S:
+        return _accounts_cache["rows"]
+    rows = _accounts_cache["rows"] if _accounts_cache["db"] == db else {}
+    if db_path.exists():
+        try:
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2.0)
+            try:
+                fetched = conn.execute(
+                    "SELECT id, username, display_name, role, is_active FROM admin_users"
+                ).fetchall()
+            finally:
+                conn.close()
+            rows = {
+                str(r[0]): {"id": str(r[0]), "username": r[1], "display_name": r[2],
+                            "role": (r[3] or OPERATOR), "is_active": r[4] is None or bool(r[4])}
+                for r in fetched
+            }
+        except Exception:
+            pass  # table not created yet or file busy: keep the last known rows
+    else:
+        rows = {}
+    _accounts_cache.update(at=now, db=db, rows=rows)
+    return rows
+
+
+def invalidate_account_cache() -> None:
+    _accounts_cache.update(at=0.0)
+
+
+def account_record(user_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The account row for ``user_id`` (id, username, display_name, role, is_active), or None."""
+    if not user_id or not isinstance(user_id, str):
+        return None
+    return _load_accounts().get(user_id)
+
+
+def effective_role(payload: Optional[Dict[str, Any]]) -> str:
+    """The role a verified token acts with. None (internal key / AUTH_DISABLED) is owner."""
+    if payload is None:
+        return OWNER
+    kind = payload.get("type")
+    if kind in ("stream_access", "clip_access"):
+        return VIEWER
+    rec = account_record(payload.get("sub"))
+    if rec is not None:
+        return rec["role"] if rec["is_active"] else VIEWER
+    role = payload.get("role")
+    return role if isinstance(role, str) and role else OWNER
+
+
+def is_admin_role(role: Optional[str]) -> bool:
+    return role in ADMIN_ROLES
+
+
+def describe_account(payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """What the dashboard shows about the signed-in person (never the password hash)."""
+    if not payload:
+        return None
+    rec = account_record(payload.get("sub"))
+    role = effective_role(payload)
+    return {
+        "id": payload.get("sub"),
+        "username": rec["username"] if rec else None,
+        "display_name": (rec["display_name"] if rec else None) or (rec["username"] if rec else None),
+        "role": role,
+        "can_change_setup": is_admin_role(role),
+        "can_manage_accounts": is_admin_role(role),
+        "phone": bool(payload.get("pd")),
+    }
+
+
+# Writes an operator may make. (method, path regex, which roles). Everything
+# else that is not GET/HEAD/OPTIONS requires owner/admin. Viewer (stream/clip
+# token) writes are limited to the live-video signalling routes.
+_ID = r"[^/]+"
+_LIVE_VIDEO = (
+    ("POST", r"/api/v1/webrtc/sessions"),
+    ("POST", rf"/api/v1/webrtc/sessions/{_ID}/heartbeat"),
+    ("DELETE", rf"/api/v1/webrtc/sessions/{_ID}"),
+    ("POST", rf"/api/v1/webrtc/sessions/{_ID}/report"),
+    ("POST", r"/api/v1/webrtc/offer"),
+)
+_OPERATOR_ONLY = (
+    # own account
+    ("POST", r"/api/v1/auth/change-password"),
+    ("POST", r"/api/v1/auth/logout"),
+    # theft incidents
+    ("POST", rf"/api/v1/theft/incidents/{_ID}/acknowledge"),
+    ("POST", rf"/api/v1/theft/incidents/{_ID}/dispatch"),
+    ("POST", rf"/api/v1/theft/incidents/{_ID}/resolve"),
+    # area / line alerts and phone push registration
+    ("POST", rf"/api/v1/events/{_ID}/acknowledge"),
+    ("POST", r"/api/v1/events/devices"),
+    ("DELETE", rf"/api/v1/events/devices/{_ID}"),
+    # recommendations and analysis
+    ("POST", rf"/api/v1/analytics/decisions/{_ID}/action"),
+    ("PUT", rf"/api/v1/analytics/actions/{_ID}"),
+    ("POST", r"/api/v1/analytics/business/analysis/run"),
+    ("POST", r"/api/v1/analytics/market/llm-optimize"),
+    ("POST", r"/api/v1/analytics/heatmaps/record-now"),
+    # sales receipts from the till (data, not setup)
+    ("POST", r"/api/v1/analytics/pos/ingest"),
+    # evidence: snapshot / clip of what is on screen, clip export
+    ("POST", rf"/api/v1/cameras/{_ID}/actions/snapshot"),
+    ("POST", rf"/api/v1/cameras/{_ID}/actions/clip"),
+    ("POST", rf"/api/v1/cameras/{_ID}/export"),
+    # hold phone pushes for a camera (e.g. restocking); retry a dropped camera
+    ("POST", rf"/api/v1/cameras/{_ID}/mute"),
+    ("POST", rf"/api/v1/cameras/{_ID}/reconnect"),
+    # a phone's own push token (PATCH/DELETE of its own paired device: below)
+    ("PUT", r"/api/v1/pairing/devices/me/push"),
+)
+
+
+def _compile(entries):
+    return tuple((m, re.compile(rf"^{p}/?$")) for m, p in entries)
+
+
+OPERATOR_WRITE_ROUTES = _compile(_LIVE_VIDEO + _OPERATOR_ONLY)
+VIEWER_WRITE_ROUTES = _compile(_LIVE_VIDEO)
+_OWN_PHONE_RE = re.compile(r"^/api/v1/pairing/devices/([^/]+)/?$")
+
+
+def operator_allowed(fn):
+    """Mark an endpoint as an operator-permitted write (alternative to the route table)."""
+    setattr(fn, "__edge_operator_allowed__", True)
+    return fn
+
+
+def write_allowed(method: str, path: str, role: str, payload: Optional[Dict[str, Any]] = None,
+                  endpoint=None) -> bool:
+    method = (method or "GET").upper()
+    if method in SAFE_METHODS or is_admin_role(role):
+        return True
+    table = VIEWER_WRITE_ROUTES if role == VIEWER else OPERATOR_WRITE_ROUTES
+    if any(m == method and rx.match(path or "") for m, rx in table):
+        return True
+    if role == VIEWER:
+        return False
+    if endpoint is not None and getattr(endpoint, "__edge_operator_allowed__", False):
+        return True
+    # A paired phone may change its own alert settings or unpair itself.
+    hit = _OWN_PHONE_RE.match(path or "")
+    if hit and method in ("PATCH", "DELETE") and payload and payload.get("pd") == hit.group(1) \
+            and hit.group(1) != "me":
+        return True
+    return False
+
+
+def enforce_write_role(request, payload: Optional[Dict[str, Any]]) -> None:
+    """Raise 403 when this verified caller may not make this write request."""
+    method = getattr(request, "method", "GET")
+    if not isinstance(method, str) or method.upper() in SAFE_METHODS:
+        return
+    scope = getattr(request, "scope", None) or {}
+    path = scope.get("path") if isinstance(scope, dict) else None
+    if not isinstance(path, str):
+        try:
+            path = request.url.path
+        except Exception:
+            path = ""
+    role = effective_role(payload)
+    endpoint = scope.get("endpoint") if isinstance(scope, dict) else None
+    if write_allowed(method, path, role, payload, endpoint):
+        return
+    logger.info(f"[Auth] {role} refused {method} {path}")
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=SETUP_FORBIDDEN_DETAIL,
+                        headers={ROLE_DENIED_HEADER: "1"})
+
+
+def require_admin(request: Request, _auth: bool = Depends(auth_service.verify_api_access)) -> Dict[str, Any]:
+    """FastAPI dependency: a signed-in owner or administrator (or the internal service key).
+
+    Returns the token claims, or ``{"sub": None, "role": "owner", "internal": True}``
+    for the internal key / AUTH_DISABLED.
+    """
+    user = getattr(request.state, "user", None)
+    if user is None:
+        return {"sub": None, "role": OWNER, "internal": True}
+    role = effective_role(user)
+    if user.get("type") != "user_session" or not is_admin_role(role):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ADMIN_REQUIRED_DETAIL,
+                            headers={ROLE_DENIED_HEADER: "1"})
+    return user

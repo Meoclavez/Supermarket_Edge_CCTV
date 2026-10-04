@@ -128,7 +128,9 @@ async def get_pos_status(db: AsyncSession = Depends(get_db)):
         "ingest": {
             "method": "POST",
             "path": "/api/v1/analytics/pos/ingest",
-            "auth": "Bearer session token or X-Edge-API-Key header",
+            "auth": ("send the till key in the X-Edge-API-Key header (create it under Till key "
+                     "below; the device's internal service key also still works)"),
+            "header": "X-Edge-API-Key",
             "body_example": {"transactions": [{
                 "transaction_id": "T-1001", "register_id": "LANE-1", "sku_id": "SKU123",
                 "quantity": 1, "amount": 4.5, "timestamp": "2026-09-24T10:15:00+10:00"}]},

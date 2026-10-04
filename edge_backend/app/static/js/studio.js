@@ -46,7 +46,7 @@ const MODE_STYLE = {
   TRIPWIRE: { stroke: '#00f0ff', fill: 'rgba(0, 240, 255, 0.2)', min: 2, max: 2, label: 'tripwire' },
   INTRUSION: { stroke: '#ff5b6b', fill: 'rgba(255, 91, 107, 0.22)', min: 3, max: Infinity, label: 'restricted area' },
   EXCLUSION: { stroke: '#a0aec0', fill: 'rgba(160, 174, 192, 0.35)', min: 3, max: Infinity, label: 'privacy mask' },
-  PRODUCT_SHELF: { stroke: '#ffd700', fill: 'rgba(255, 215, 0, 0.22)', min: 4, max: Infinity, label: 'product shelf' },
+  PRODUCT_SHELF: { stroke: '#ffd700', fill: 'rgba(255, 215, 0, 0.22)', min: 3, max: Infinity, label: 'product shelf' },
   QUEUE: { stroke: '#c084fc', fill: 'rgba(192, 132, 252, 0.22)', min: 3, max: Infinity, label: 'checkout / queue area' },
 };
 
@@ -450,6 +450,14 @@ function clearCanvasPoints() {
 // edited (null while mapping a newly drawn polygon).
 let productZonesById = {};
 let editingProductZone = null;
+// Study metrics the pipeline does not measure yet (only track_hand_reach is
+// used): [checkbox id, stored key]. Kept as stored, never offered as working.
+const NOT_MEASURED_STUDY = [
+  ['chkDwellTime', 'track_dwell_time'],
+  ['chkPutBack', 'track_put_back_friction'],
+  ['chkPosSales', 'track_pos_conversion'],
+  ['chkAbTest', 'ab_test_mode'],
+];
 
 function openProductModal(zone = null) {
   const modal = el('productModal');
@@ -467,10 +475,9 @@ function openProductModal(zone = null) {
   el('modalProductTier').value = legacyPlacement;
   const sm = z.study_metrics || {};
   el('chkHandReach').checked = sm.track_hand_reach !== false;
-  el('chkDwellTime').checked = sm.track_dwell_time !== false;
-  el('chkPutBack').checked = sm.track_put_back_friction !== false;
-  el('chkPosSales').checked = !!sm.track_pos_conversion;
-  el('chkAbTest').checked = !!sm.ab_test_mode;
+  // Not measured yet: shown greyed and unticked whatever is stored, and the
+  // stored values are sent back unchanged on save (submitProductModal).
+  NOT_MEASURED_STUDY.forEach(([id]) => { const c = el(id); if (c) { c.checked = false; c.disabled = true; } });
   const title = el('productModalTitle');
   if (title) title.textContent = zone ? `🛒 Edit product shelf area: ${zone.name}` : '🛒 Map product shelf area';
   el('productModalStatus').textContent = zone && zone.shelf_level_source === 'derived' && !zone.shelf_level
@@ -489,14 +496,14 @@ function editProductZone(id) {
   openProductModal(zone);
 }
 
+/** Category words for the product form: ones already used on shelves, then the high-value ones. */
 async function populateZoneNames() {
-  const layout = await getJSON('/api/v1/layout', null);
+  const data = await getJSON('/api/v1/analytics/products/zones', null);
   const list = el('layoutZoneNames');
   if (!list) return;
-  const names = ((layout && layout.zones) || []).map((z) => z.name).filter(Boolean);
-  list.innerHTML = names.map((n) => `<option value="${escapeHtml(n)}"></option>`).join('');
-  const input = el('modalProductCategory');
-  if (input) input.placeholder = names.length ? 'Pick a blueprint zone' : 'No zones drawn on the blueprint yet; type a name';
+  const words = (data && Array.isArray(data.category_suggestions)) ? data.category_suggestions : [];
+  const high = new Set((data && data.high_value_categories) || []);
+  list.innerHTML = words.map((n) => `<option value="${escapeHtml(n)}">${high.has(n) ? 'high value' : ''}</option>`).join('');
 }
 
 async function submitProductModal(event) {
@@ -505,7 +512,7 @@ async function submitProductModal(event) {
   const name = el('modalProductName').value.trim();
   const sku = el('modalProductSku').value.trim();
   const category = el('modalProductCategory').value.trim();
-  if (!name || !sku || !category) { status.textContent = 'Name, SKU and zone are required.'; return; }
+  if (!name || !sku || !category) { status.textContent = 'Name, SKU and product category are required.'; return; }
   const price = parseFloat(el('modalProductPrice').value);
   const facing = parseInt(el('modalProductFacing').value, 10);
 
@@ -522,13 +529,14 @@ async function submitProductModal(event) {
     shelf_tier: el('modalProductTier').value,
     shelf_level: el('modalProductLevel').value || null,
     value_tier: el('modalProductValueTier').value || null,
-    study_metrics: {
-      track_hand_reach: el('chkHandReach').checked,
-      track_dwell_time: el('chkDwellTime').checked,
-      track_put_back_friction: el('chkPutBack').checked,
-      track_pos_conversion: el('chkPosSales').checked,
-      ab_test_mode: el('chkAbTest').checked,
-    },
+    study_metrics: (() => {
+      // Only hand reaches are measured. The other keys keep their stored
+      // value (an edit) or are off (a new shelf: not measured yet).
+      const stored = (editing && editing.study_metrics) || {};
+      const sm = { track_hand_reach: el('chkHandReach').checked };
+      NOT_MEASURED_STUDY.forEach(([, key]) => { sm[key] = typeof stored[key] === 'boolean' ? stored[key] : false; });
+      return sm;
+    })(),
     enabled: true,
   };
   try {
@@ -555,7 +563,10 @@ async function postZone(url, body) {
   const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error(`HTTP ${res.status}: ${JSON.stringify(err.detail || err)}`);
+    const d = err.detail || err;
+    // A role refusal is one readable sentence; other errors keep the status code.
+    if (res.status === 403 && typeof d === 'string') throw new Error(d);
+    throw new Error(`HTTP ${res.status}: ${typeof d === 'string' ? d : JSON.stringify(d)}`);
   }
   return res.json();
 }
@@ -598,6 +609,31 @@ async function deleteZoneAt(url, label) {
   loadZonesList();
 }
 function deleteExclusion(id) { return deleteZoneAt(`/api/zones/exclusion/${encodeURIComponent(id)}`, 'Mask'); }
+
+// Inline two-step delete for privacy masks and product shelves, like the
+// tripwire / restricted area rows (askDeleteRule / cancelDeleteRule).
+function deleteConfirmHtml(kind, id) {
+  return `
+      <span class="rule-confirm" style="display:none;">
+        <span class="zone-sub">Delete?</span>
+        <button type="button" class="btn btn-danger btn-sm rule-delete-yes" onclick="confirmDeleteZone('${kind}', '${id}', this)">Delete</button>
+        <button type="button" class="btn btn-sm rule-delete-no" onclick="cancelDeleteRule(this)">Keep</button>
+      </span>`;
+}
+async function confirmDeleteZone(kind, id, btn) {
+  const row = btn ? btn.closest('.zone-item') : null;
+  if (btn) { btn.disabled = true; btn.textContent = 'Deleting…'; }
+  // Close the confirmation first: the list refresh skips a list with one open.
+  if (row) {
+    const confirmBox = row.querySelector('.rule-confirm');
+    const actions = row.querySelector('.rule-actions');
+    if (confirmBox) confirmBox.style.display = 'none';
+    if (actions) actions.style.display = 'inline-flex';
+  }
+  if (kind === 'PRODUCT') await deleteProductZone(id);
+  else await deleteExclusion(id);
+  if (btn) { btn.disabled = false; btn.textContent = 'Delete'; }
+}
 
 // Change an existing mask's mode (and colour) in place; result shown inline on the row.
 async function updateMaskMode(id) {
@@ -649,17 +685,6 @@ async function confirmClearAllZones() {
   loadZonesList();
 }
 
-function zoneItem(icon, name, sub, onDelete, color) {
-  return `
-    <div class="zone-item"${color ? ` style="border-color:${color}"` : ''}>
-      <div class="zone-info">
-        <span class="zone-name">${icon} ${escapeHtml(name)}</span>
-        <span class="zone-sub">${sub}</span>
-      </div>
-      <button type="button" class="btn btn-danger btn-sm" onclick="${onDelete}" title="Remove">🗑️</button>
-    </div>`;
-}
-
 async function loadZonesList() {
   const forCam = (z) => !activeCameraId || z.camera_id === activeCameraId;
 
@@ -668,7 +693,13 @@ async function loadZonesList() {
     : { zones: [] };
   const prodContainer = el('productShelfListContainer');
   const products = (prodData && prodData.zones) || [];
-  if (prodContainer) {
+  // Do not rebuild under an open delete confirmation.
+  const prodConfirmOpen = !!(prodContainer && prodContainer.querySelector('.rule-confirm[style*="inline-flex"]'));
+  if (prodConfirmOpen) {
+    productZonesById = {};
+    products.forEach((pz) => { productZonesById[pz.id] = pz; });
+  }
+  if (prodContainer && !prodConfirmOpen) {
     prodContainer.innerHTML = prodData === null
       ? '<div class="fp-empty">Product areas unavailable: the analytics service did not respond.</div>'
       : (products.length ? '' : '<div class="fp-empty">No product shelf areas on this camera. Draw one with the Product shelf tool.</div>');
@@ -689,10 +720,10 @@ async function loadZonesList() {
             <span class="zone-name">🛒 ${escapeHtml(pz.name)}</span>
             <span class="zone-sub">${sub}</span>
           </div>
-          <span style="display:flex; gap:6px; flex-shrink:0;">
+          <span class="rule-actions">
             <button type="button" class="btn btn-sm" onclick="editProductZone('${id}')" title="Edit product, SKU, shelf level">✏️</button>
-            <button type="button" class="btn btn-danger btn-sm" onclick="deleteProductZone('${id}')" title="Remove">🗑️</button>
-          </span>
+            <button type="button" class="btn btn-danger btn-sm rule-delete" onclick="askDeleteRule(this)" title="Delete">🗑️</button>
+          </span>${deleteConfirmHtml('PRODUCT', id)}
         </div>`);
     });
   }
@@ -715,7 +746,8 @@ async function loadZonesList() {
   // who is changing a mask's mode, or when nothing changed.
   const exContainer = el('exclusionListContainer');
   const exSig = maskSig(exclusion);
-  const busy = exContainer && exContainer.contains(document.activeElement) && document.activeElement !== document.body;
+  const busy = exContainer && ((exContainer.contains(document.activeElement) && document.activeElement !== document.body)
+    || !!exContainer.querySelector('.rule-confirm[style*="inline-flex"]'));
   if (exContainer && !busy && (data === null || exContainer.dataset.sig !== exSig)) {
     fill('exclusionListContainer', exclusion, 'No privacy masks on this camera.', (ex) => {
       const mode = MASK_MODES[ex.mask_mode] ? ex.mask_mode : 'BLUR';
@@ -729,7 +761,9 @@ async function loadZonesList() {
           <label class="sr-only" for="maskMode_${id}" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);">Mode for ${escapeHtml(ex.name)}</label>
           <select id="maskMode_${id}" class="form-select mask-mode-select" style="max-width: 170px; font-size: 11px;" onchange="updateMaskMode('${id}')">${maskModeOptions(mode)}</select>
           <input type="color" class="mask-colour-input" aria-label="Mask colour" value="${bgrToHex(ex.mask_color_bgr)}" style="${mode === 'COLOR' ? '' : 'display:none;'}" onchange="updateMaskMode('${id}')" />
-          <button type="button" class="btn btn-danger btn-sm" onclick="deleteExclusion('${id}')" title="Remove">🗑️</button>
+          <span class="rule-actions">
+            <button type="button" class="btn btn-danger btn-sm rule-delete" onclick="askDeleteRule(this)" title="Delete">🗑️</button>
+          </span>${deleteConfirmHtml('MASK', id)}
           <div class="mask-row-status form-status" aria-live="polite" style="flex-basis: 100%; margin-top: 2px;">${escapeHtml((MASK_MODES[mode] || {}).help || '')}</div>
         </div>`;
     });
@@ -1279,7 +1313,7 @@ async function loadStudioSources() {
     closeStudioVideo('no-cameras');
     setViewportEmpty(data === null
       ? 'Camera list unavailable: the API did not respond.'
-      : 'No camera has been adopted yet. Use "Find & adopt cameras" to scan the network and USB ports from the Blueprint tab.');
+      : 'No camera has been added yet. Add one on the Store map, in "Cameras & devices".');
     activeCameraId = null;
     loadZonesList();
     pollTelemetry();

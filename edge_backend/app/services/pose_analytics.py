@@ -71,7 +71,7 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 import numpy as np
 
 from app.config import settings
-from app.services.timeutil import utc_from_ts  # stored times are naive UTC
+from app.services.timeutil import to_local, utc_from_ts  # stored times are naive UTC
 from app.services import theft_detection_service as rules
 
 logger = logging.getLogger(__name__)
@@ -1797,7 +1797,7 @@ class PoseAnalytics:
             img = render_evidence(snap["frame"], snap.get("bbox"), snap.get("keypoints"),
                                   f"SUSPICIOUS BEHAVIOUR FOR REVIEW: {p['rule']}",
                                   f"{p['camera_id']}  track {p['track_id']}  confidence {p['confidence']:.2f}  "
-                                  f"{datetime.fromtimestamp(p['ts']).strftime('%Y-%m-%d %H:%M:%S')}")
+                                  f"{to_local(utc_from_ts(p['ts'])).strftime('%Y-%m-%d %H:%M:%S %Z')}")
             path = self.evidence_dir() / f"{p['id']}.jpg"
             ok = cv2.imwrite(str(path), img, [int(cv2.IMWRITE_JPEG_QUALITY), int(settings.THEFT_EVIDENCE_JPEG_QUALITY)])
             if ok:

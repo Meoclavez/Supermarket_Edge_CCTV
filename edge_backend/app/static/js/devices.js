@@ -676,7 +676,7 @@
         this.clearPreview();
         this.addStatus('', 'info');
         this.toggleAddPanel(false);
-        status(`Added "${cam.name}". It streams in the Live matrix once the first frame arrives; place and calibrate it on the plan.`, 'ok');
+        status(`Added "${cam.name}". It streams in Cameras once the first frame arrives; place and calibrate it on the plan.`, 'ok');
         if (window.blueprintEditor) await window.blueprintEditor.load();
         await this.refresh();
         if (typeof window.loadCamerasMatrix === 'function') window.loadCamerasMatrix();
@@ -840,7 +840,7 @@
           stat.className = activeCount > 0 ? 'fp-status fp-ok' : 'fp-status fp-warn';
         }
 
-        this.renderDahuaChannels(host, port, username, password, probe.channels || [], quality);
+        this.renderDahuaChannels(host, port, username, password, probe.channels || [], quality, probe);
       } catch (e) {
         if (stat) {
           stat.textContent = `Probe failed: ${e.message}`;
@@ -848,11 +848,11 @@
         }
         if (listHost) listHost.innerHTML = '';
       } finally {
-        if (btn) { btn.disabled = false; btn.textContent = '🔍 Scan NVR Channels'; }
+        if (btn) { btn.disabled = false; btn.textContent = 'Scan recorder channels'; }
       }
     },
 
-    renderDahuaChannels(host, port, username, password, channels, defaultQuality) {
+    renderDahuaChannels(host, port, username, password, channels, defaultQuality, probe) {
       const listHost = el('dahuaChannelsList');
       if (!listHost) return;
 
@@ -861,27 +861,48 @@
         return;
       }
 
+      // Only what the recorder / stream really reported; nothing is assumed.
+      const NOT_REPORTED = '<span class="fp-dash" title="not reported by the recorder">—</span>';
+      const purposeOptions = roleOptions();
+      const titlesNote = probe && probe.titles_error
+        ? `<div class="dev-hint">Channel names were not read from the recorder (${esc(probe.titles_error)}). Type a name for each camera.</div>`
+        : '';
+
       let html = `
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
           <span style="font-size: 11px; font-weight: 700; color: var(--text-soft);">Channels on ${esc(host)}:</span>
-          <button class="btn btn-xs btn-primary" id="btnAdoptDahuaBatch">Adopt Selected</button>
+          <button class="btn btn-xs btn-primary" id="btnAdoptDahuaBatch">Add selected channels</button>
         </div>
+        ${titlesNote}
         <div style="display: flex; flex-direction: column; gap: 4px;">
       `;
 
       channels.forEach((c) => {
         const isActive = c.active;
+        const n = Number(c.channel);
+        const res = c.resolution ? esc(c.resolution) : NOT_REPORTED;
+        const fps = (typeof c.fps === 'number' && c.fps > 0) ? `${esc(c.fps)} FPS` : `${NOT_REPORTED} FPS`;
         html += `
-          <div class="dev-row" style="padding: 5px 8px; ${isActive ? 'border-color: rgba(var(--green-rgb), 0.3); background: rgba(var(--green-rgb), 0.03);' : 'opacity: 0.6;'}">
-            <input type="checkbox" class="dahua-ch-cb" data-channel="${c.channel}" ${isActive ? 'checked' : ''} style="cursor: pointer;">
+          <div class="dev-row dahua-ch-row" data-channel="${n}" style="flex-wrap: wrap; padding: 5px 8px; ${isActive ? 'border-color: rgba(var(--green-rgb), 0.3); background: rgba(var(--green-rgb), 0.03);' : 'opacity: 0.6;'}">
+            <input type="checkbox" class="dahua-ch-cb" id="dahuaCh${n}" data-channel="${n}" ${isActive ? 'checked' : ''} style="cursor: pointer;" aria-label="Add channel ${n}">
             <div class="dev-main">
-              <div class="dev-name" style="font-size: 11px;">Channel ${c.channel}: Dahua NVR Ch ${c.channel}</div>
+              <div class="dev-name" style="font-size: 11px;">Channel ${n}${c.title ? ` · <span title="Name set on the recorder">${esc(c.title)}</span>` : ''}</div>
               <div class="dev-sub" style="font-size: 9.5px;">
-                ${isActive ? `<span style="color: var(--accent-green); font-weight:bold;">● LIVE</span> · ${c.resolution || '720p'} · ${c.fps || 25} FPS` : '<span style="color: var(--text-dim);">○ No Signal</span>'}
+                ${isActive ? `<span style="color: var(--accent-green); font-weight:bold;">● LIVE</span> · ${res} · ${fps}` : '<span style="color: var(--text-dim);">○ No Signal</span>'}
               </div>
             </div>
             <div class="dev-actions">
               <span class="dev-tag ${isActive ? 'ok' : ''}">${isActive ? (c.preferred_subtype === 1 ? 'Substream' : 'Mainstream') : 'Offline'}</span>
+            </div>
+            <div style="display: flex; gap: 6px; flex-basis: 100%; padding-left: 22px;">
+              <label class="sr-only" for="dahuaChName${n}" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);">Camera name for channel ${n}</label>
+              <input type="text" class="form-input dahua-ch-name" id="dahuaChName${n}" data-channel="${n}" maxlength="120" autocomplete="off"
+                value="${esc(c.title || '')}" placeholder="Recorder channel ${n}" style="flex: 1.3; font-size: 11px; padding: 4px 6px;">
+              <label class="sr-only" for="dahuaChRole${n}" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);">Purpose for channel ${n}</label>
+              <select class="form-select dahua-ch-role" id="dahuaChRole${n}" data-channel="${n}" style="flex: 1; font-size: 11px; padding: 4px 6px;">
+                <option value="" selected>No purpose yet</option>
+                ${purposeOptions}
+              </select>
             </div>
           </div>
         `;
@@ -895,21 +916,25 @@
         const adopt = async (allowDuplicate) => {
           const box = el('dahuaDupConflict');
           if (box) { box.hidden = true; box.innerHTML = ''; }
-          const checked = Array.from(listHost.querySelectorAll('.dahua-ch-cb:checked')).map((cb) => ({
-            channel: parseInt(cb.dataset.channel, 10),
-            name: `Dahua NVR Ch ${cb.dataset.channel}`,
-            department: 'GENERAL',
-            quality: defaultQuality,
-          }));
+          // Name and purpose as the operator left them; an empty name gets
+          // "Recorder channel <N>" on the server, no purpose stays unset.
+          const checked = Array.from(listHost.querySelectorAll('.dahua-ch-cb:checked')).map((cb) => {
+            const ch = parseInt(cb.dataset.channel, 10);
+            const nameInput = listHost.querySelector(`.dahua-ch-name[data-channel="${ch}"]`);
+            const roleSelect = listHost.querySelector(`.dahua-ch-role[data-channel="${ch}"]`);
+            const item = { channel: ch, name: nameInput ? nameInput.value.trim() : '', quality: defaultQuality };
+            if (roleSelect && roleSelect.value) item.role = roleSelect.value;
+            return item;
+          });
 
           if (!checked.length) {
-            dahuaStatus('Select at least one channel to adopt.', 'warn');
+            dahuaStatus('Tick at least one channel to add.', 'warn');
             return;
           }
 
           adoptBtn.disabled = true;
-          adoptBtn.textContent = 'Adopting…';
-          dahuaStatus(`Adopting ${checked.length} channel(s)…`, 'info');
+          adoptBtn.textContent = 'Adding…';
+          dahuaStatus(`Adding ${checked.length} channel(s)…`, 'info');
 
           try {
             const res = await fetch('/api/v1/dahua/adopt', {
@@ -925,7 +950,7 @@
               // Channels already added as cameras: nothing was stored. Leave them
               // out (the existing cameras stay) or add them anyway.
               adoptBtn.disabled = false;
-              adoptBtn.textContent = 'Adopt Selected';
+              adoptBtn.textContent = 'Add selected channels';
               dahuaStatus('Some channels are already added as cameras. Nothing was added yet.', 'warn');
               window.edgeDuplicates.showConflict(box, dup, {
                 use: (d) => {
@@ -945,11 +970,13 @@
             status(`Added ${data.adopted_count} recorder channel(s). Place them on the map to count people per area.`, 'ok');
             if (window.blueprintEditor) await window.blueprintEditor.load();
             await this.refresh();
+            if (typeof window.loadCamerasMatrix === 'function') window.loadCamerasMatrix();
+            window.dispatchEvent(new CustomEvent('edge:cameras-changed', { detail: { recorder: host } }));
             this.toggleDahuaPanel();
           } catch (e) {
-            dahuaStatus(`Failed to adopt channels: ${e.message}`, 'error');
+            dahuaStatus(`Channels not added: ${e.message}`, 'error');
             adoptBtn.disabled = false;
-            adoptBtn.textContent = 'Adopt Selected';
+            adoptBtn.textContent = 'Add selected channels';
           }
         };
         adoptBtn.addEventListener('click', () => adopt(false));

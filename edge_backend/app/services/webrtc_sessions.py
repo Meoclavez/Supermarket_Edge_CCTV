@@ -29,6 +29,15 @@ RTCPeerConnection for one camera tile/focus/frame grab.
   see go2rtc_manager.transcode_source) and negotiated again. The camera's
   codec is remembered per source, so later sessions go straight to the right
   path.
+* **Privacy masks** (services/privacy_video.py): a camera with at least one
+  privacy mask (BLUR / MOSAIC / BLACKOUT / COLOR, not AI_IGNORE) is never
+  passed through. Its session's source is an ffmpeg pipeline that burns the
+  masks in and encodes H.264. If that pipeline cannot be built or started
+  the session is refused (``privacy_mask_unavailable``); there is no raw
+  fallback. Each session remembers its mask signature; when the masks change
+  (ai_zone_service notifies, the reaper re-checks every pass) the camera's
+  sessions end and go2rtc is restarted at once, because a page only notices
+  an ended session at its next heartbeat and would keep the old picture.
 * **Diagnostics**: a ring buffer of the last 50 session outcomes and browser
   reports, and an on-demand STUN NAT check (services/stun_probe.py).
 """
@@ -47,6 +56,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from app.config import settings
+from app.services import privacy_video
 from app.services.go2rtc_manager import Go2RtcError, Go2RtcUnavailable, go2rtc_manager, redact, transcode_source
 
 logger = logging.getLogger("edge.webrtc")
@@ -188,6 +198,9 @@ class Session:
     remote_addr: Optional[str] = None
     pair: Optional[dict[str, Any]] = None
     report_state: Optional[str] = None
+    masked: bool = False                         # privacy masks burned in (privacy_video)
+    privacy_sig: str = ""                        # mask signature the picture was built with ("" = none)
+    privacy_size: Optional[tuple[int, int]] = None
 
     @property
     def stream(self) -> str:
@@ -219,6 +232,7 @@ class Session:
             "transcoded": self.transcoded,
             "encoder": self.encoder,
             "connected_to": self.remote_addr,
+            "privacy_masked": self.masked,
         }
 
 
@@ -237,6 +251,7 @@ class WebRtcSessions:
         self._restart_when_idle = False
         self.violations = 0
         manager.on_exit = self._on_go2rtc_exit
+        privacy_video.add_listener(self.masks_changed)
 
     # -- settings -------------------------------------------------------------------
 
@@ -374,6 +389,12 @@ class WebRtcSessions:
         offered = offer_video_codecs(offer_sdp)
         if not offered:
             raise SessionError(502, "negotiation_failed", "the offer has no video section (recvonly video expected)")
+        try:
+            masks = privacy_video.privacy_masks(sess.camera_id)
+        except privacy_video.MaskedVideoUnavailable as exc:
+            raise privacy_refusal(str(exc)) from None
+        if masks:
+            return await self._negotiate_masked(sess, source, masks, offer_sdp, offered)
         hint = self._codec_hint.get(sess.camera_id)
         known = hint[1] if hint and hint[0] == sess.fingerprint else None
         transcode = bool(known) and known not in offered
@@ -403,6 +424,29 @@ class WebRtcSessions:
             else:
                 raise self._negotiation_error(exc) from None
         await self._learn_codec(sess)
+        return answer
+
+    async def _negotiate_masked(self, sess: Session, source: str, masks: list[dict], offer_sdp: str,
+                                offered: set[str]) -> str:
+        """Privacy masks burned in by ffmpeg, H.264 out. Any failure refuses the session: never the raw stream."""
+        sess.masked = True
+        if "H264" not in offered:
+            raise SessionError(502, "negotiation_failed",
+                               "this browser cannot play H.264, which the masked live view of this camera needs")
+        try:
+            # Writes the mask images and probes the filter once (cached): off the event loop.
+            ms = await asyncio.to_thread(privacy_video.masked_source, sess.camera_id, source, masks)
+        except privacy_video.MaskedVideoUnavailable as exc:
+            raise privacy_refusal(str(exc)) from None
+        sess.privacy_sig, sess.privacy_size = ms.signature, (ms.width, ms.height)
+        sess.transcoded, sess.codec, sess.encoder = True, "H264", ms.encoder
+        try:
+            await self.go2rtc.add_stream(sess.stream, ms.source)
+            answer = await self.go2rtc.webrtc_answer(sess.stream, offer_sdp)
+        except Go2RtcError as exc:
+            raise privacy_refusal(f"the masking pipeline did not start: {redact(str(exc))[:200]}") from None
+        await self._learn_codec(sess)
+        sess.encoder = ms.encoder   # known exactly (the probed engine); not parsed from go2rtc's producer
         return answer
 
     async def _exchange(self, sess: Session, source: str, offer_sdp: str, transcode: bool) -> str:
@@ -588,6 +632,46 @@ class WebRtcSessions:
                     fingerprints[sess.camera_id] = ""
             if fingerprints[sess.camera_id] != sess.fingerprint:
                 await self._end(sess, "camera_source_changed")
+        await self.check_privacy()
+
+    # -- privacy masks ------------------------------------------------------------------
+
+    def masks_changed(self) -> None:
+        """privacy_video listener (any thread): a privacy mask was added, changed or removed."""
+        loop = self._loop
+        if not self.sessions or loop is None or not loop.is_running():
+            return
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            loop.create_task(self.check_privacy())
+        else:
+            asyncio.run_coroutine_threadsafe(self.check_privacy(), loop)
+
+    async def check_privacy(self) -> int:
+        """End the sessions whose camera's privacy masks changed, and cut their connections now.
+
+        Returns how many sessions were ended. A page notices an ended session
+        only at its next heartbeat (up to heartbeat_s), and go2rtc has no API to
+        drop one consumer, so go2rtc is restarted: every viewer reconnects within
+        seconds and the reopened sessions are built with the current masks.
+        """
+        current: dict[tuple, str] = {}
+        ended = 0
+        for sess in list(self.sessions.values()):
+            if not sess.ready:
+                continue
+            key = (sess.camera_id, sess.privacy_size)
+            if key not in current:
+                current[key] = privacy_video.current_signature(sess.camera_id, sess.privacy_size)
+            if current[key] != sess.privacy_sig:
+                await self._end(sess, "privacy_masks_changed")
+                ended += 1
+        if ended and self.go2rtc.running():
+            await self._force_restart("the privacy masks of a camera being watched changed")
+        return ended
 
     async def _check_go2rtc(self) -> None:
         if not self.go2rtc.running():
@@ -654,9 +738,9 @@ class WebRtcSessions:
             if info is None or not (info.get("consumers") or []):
                 await self._drop_stream(name)
 
-    async def _force_restart(self) -> None:
-        logger.warning("Live video: a viewer kept its connection open after its session ended; restarting "
-                       "go2rtc to cut it (every other live video connection is ended too and reopens)")
+    async def _force_restart(self, why: str = "a viewer kept its connection open after its session ended") -> None:
+        logger.warning(f"Live video: {why}; restarting go2rtc to cut it (every other live video connection is "
+                       "ended too and reopens)")
         for sess in list(self.sessions.values()):
             if sess.ready:
                 await self._end(sess, "gateway_restart")
@@ -725,6 +809,13 @@ class WebRtcSessions:
         }
         out["advice"] = advice(out)
         return out
+
+
+def privacy_refusal(reason: str) -> SessionError:
+    """503 ``privacy_mask_unavailable``: the tile shows this instead of the picture."""
+    reason = (reason or "").strip().rstrip(".")
+    return SessionError(503, "privacy_mask_unavailable",
+                        f"{privacy_video.REFUSAL}" + (f" ({reason})." if reason else "."))
 
 
 def advice(d: dict[str, Any]) -> list[str]:
