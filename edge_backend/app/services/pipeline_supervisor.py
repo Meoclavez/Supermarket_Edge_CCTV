@@ -198,6 +198,7 @@ class PipelineSupervisor:
             for cam in cameras:
                 floor_projector.set_homography(cam.id, cam.homography_matrix,
                                                calibration_frame_size(cam.calibration_points))
+                live_engine.set_camera_zone(cam.id, getattr(cam, "watch_zone_id", None))
                 if not cam.is_ai_enabled:
                     off[cam.id] = cam
                 elif cam.rtsp_url:

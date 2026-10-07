@@ -432,6 +432,7 @@ def test_reset_requires_confirmation_and_returns_fresh_state(client, auth_header
         "structures": 0,
         "cameras": 0,
         "cameras_calibrated": 0,
+        "cameras_zone_linked": 0,
     }
     assert client.get("/api/v1/layout/pipeline/status", headers=auth_headers).json()["cameras_total"] == 0
     live = client.get("/api/v1/layout/live", headers=auth_headers).json()
@@ -447,3 +448,72 @@ def test_reset_requires_confirmation_and_returns_fresh_state(client, auth_header
     assert legacy.status_code == 200
     assert legacy.json()["total_rows"] == 0
     assert client.post("/api/v1/layout/purge-seed-data", json={}, headers=auth_headers).status_code == 400
+
+
+# ------------------------------------------------ zone products, camera links
+
+
+def test_zone_products_round_trip(client, auth_headers):
+    res = client.post(
+        "/api/v1/layout/zones",
+        json={"name": "Aisle P", "category": "AISLE", "polygon": SQUARE,
+              "products": " Chips, Lollies ,,chips, Chocolate "},
+        headers=auth_headers,
+    )
+    assert res.status_code == 201, res.text
+    zone = res.json()
+    try:
+        assert zone["products"] == ["Chips", "Lollies", "Chocolate"]
+        res = client.put(f"/api/v1/layout/zones/{zone['id']}",
+                         json={"products": ["Soft drink", "Water"]}, headers=auth_headers)
+        assert res.status_code == 200 and res.json()["products"] == ["Soft drink", "Water"]
+        # Other edits leave the list alone.
+        res = client.put(f"/api/v1/layout/zones/{zone['id']}", json={"name": "Aisle P2"}, headers=auth_headers)
+        assert res.json()["products"] == ["Soft drink", "Water"]
+        layout = client.get("/api/v1/layout", headers=auth_headers).json()
+        assert next(z for z in layout["zones"] if z["id"] == zone["id"])["products"] == ["Soft drink", "Water"]
+        res = client.put(f"/api/v1/layout/zones/{zone['id']}", json={"products": ["x" * 80]}, headers=auth_headers)
+        assert res.status_code == 400
+    finally:
+        client.delete(f"/api/v1/layout/zones/{zone['id']}", headers=auth_headers)
+
+
+def test_camera_zone_link(client, auth_headers):
+    from app.services.live_analytics_engine import live_engine
+
+    cam_id = "cam_zone_link_test"
+    _run(_insert_camera(cam_id))
+    zone = client.post(
+        "/api/v1/layout/zones",
+        json={"name": "Linked aisle", "category": "AISLE", "polygon": SQUARE},
+        headers=auth_headers,
+    ).json()
+    try:
+        res = client.put(f"/api/v1/layout/cameras/{cam_id}/zone", json={"zone_id": "zone_nope"},
+                         headers=auth_headers)
+        assert res.status_code == 404
+        res = client.put(f"/api/v1/layout/cameras/{cam_id}/zone", json={"zone_id": zone["id"]},
+                         headers=auth_headers)
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["watch_zone_id"] == zone["id"] and body["zone_name"] == "Linked aisle"
+        assert body["effective"] is True
+        assert live_engine.linked_zone(cam_id) == zone["id"]
+
+        layout = client.get("/api/v1/layout", headers=auth_headers).json()
+        entry = next(c for c in layout["cameras"] if c["camera_id"] == cam_id)
+        assert entry["watch_zone_id"] == zone["id"]
+        assert layout["setup"]["cameras_zone_linked"] >= 1
+
+        # Deleting the zone unlinks the camera.
+        res = client.delete(f"/api/v1/layout/zones/{zone['id']}", headers=auth_headers)
+        assert cam_id in res.json()["cameras_unlinked"]
+        assert live_engine.linked_zone(cam_id) is None
+        layout = client.get("/api/v1/layout", headers=auth_headers).json()
+        assert next(c for c in layout["cameras"] if c["camera_id"] == cam_id)["watch_zone_id"] is None
+        assert client.put(f"/api/v1/layout/cameras/nope/zone", json={"zone_id": None},
+                          headers=auth_headers).status_code == 404
+    finally:
+        client.delete(f"/api/v1/layout/zones/{zone['id']}", headers=auth_headers)
+        live_engine.set_camera_zone(cam_id, None)
+        _run(_delete_camera(cam_id))

@@ -99,7 +99,8 @@ Opened from Cameras → tile → "Camera setup". All shapes are drawn on the cam
 | Feature | What it's for | Where / how to configure |
 |---|---|---|
 | Blueprint editor | Draws the building in metres: "Room", "Wall", "Shelf", "Door". | Store map → "Edit map" (on phones) → tools; "Store size", "Snap 0.5 m" |
-| "Store area" | Floor areas where visits, unique people, dwell and occupancy are measured. | Store map → "Store area"; name, "Category" and colour in the inspector |
+| "Store area" | Floor areas where visits, unique people, dwell and occupancy are measured. "Products sold here" lists what the area sells; Insights and the AI summary name those products. | Store map → "Store area"; name, "Category", colour and "Products sold here" in the inspector |
+| "Counts into zone" | Counts every person an uncalibrated camera sees as a visit to one store area (the aisle it looks at), so area metrics and Insights work before calibration. Not used once the camera is calibrated. | Store map → select the camera → "Counts into zone" |
 | Live people | Positions of tracked people from calibrated cameras. | Store map → "Show:" "People" |
 | Heatmap | Where people "Walked", "Stopped" or "Touched shelves", for "Today", "Yesterday", "Last 7 days" or "Last 30 days". | Store map → "Heatmap" bar (per viewer) |
 | Layers | Shows or hides walls and shelves, areas, cameras, people, labels and grid. | Store map → "Show:" |

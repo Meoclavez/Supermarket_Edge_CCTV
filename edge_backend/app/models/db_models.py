@@ -73,6 +73,8 @@ class CameraModel(Base):
     role: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     # Checkout-lane cameras: the POS register_id this lane rings sales on (m0012).
     pos_register_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    # Uncalibrated cameras: the blueprint zone the whole view belongs to (m0017).
+    watch_zone_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
     # Relationships
     events: Mapped[list["SecurityEventModel"]] = relationship(
@@ -389,6 +391,8 @@ class StoreZoneModel(Base):
     color: Mapped[str] = mapped_column(String(16), default="#00d4ff")
     # Zones of kind SHELF may carry a planogram SKU association.
     sku_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    # Product categories sold in the zone (m0017); named by the business analysis.
+    products: Mapped[Optional[list]] = mapped_column(JSON, nullable=True, default=list)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

@@ -146,7 +146,8 @@ class RecommendationsService:
                 # The model call is blocking HTTP with a long budget; keep it off the loop.
                 overview = await retail_metrics_service.overview(db, layout.id, settings.STORE_NAME)
                 findings = [Finding(**{k: f.get(k) for k in ("category", "severity", "zone", "finding",
-                                                              "root_cause", "action_item", "evidence")})
+                                                              "root_cause", "action_item", "evidence",
+                                                              "products")})
                             for f in result["findings"]]
                 hm = (result.get("heatmap_trends") or {}).get("summary")
                 result["narrative"] = await asyncio.to_thread(
@@ -259,6 +260,14 @@ class RecommendationsService:
         elif not include_dismissed:
             stmt = stmt.where(AIDecisionRecommendationModel.status != "DISMISSED")
         rows = (await db.execute(stmt)).scalars().all()
+        # What each zone sells, by name, from the current blueprint (findings store the zone name).
+        from app.services.store_layout_service import store_layout_service
+        products_by_zone: dict[str, list[str]] = {}
+        layout = await store_layout_service.get_active_layout(db)
+        if layout is not None:
+            for z in await store_layout_service.list_zones(db, layout.id):
+                if z.products:
+                    products_by_zone[z.name[:64]] = list(z.products)
 
         items: list[dict] = []
         for r in rows:
@@ -272,6 +281,7 @@ class RecommendationsService:
                 "priority": sev.lower(),
                 "priority_rank": SEVERITY_RANK.get(sev, 9),
                 "zone": r.zone,
+                "products": products_by_zone.get(r.zone or "", []),
                 "title": r.finding,
                 "why": r.root_cause,
                 "do": r.action_item,

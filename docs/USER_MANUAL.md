@@ -234,7 +234,14 @@ The plan is drawn in metres; there is no option to upload a floor-plan image. A 
    checkout and so on. Then select each area and set, in the inspector:
    - "Zone name", for example "Aisle 3 – Confectionery";
    - "Category": ENTRANCE, EXIT, AISLE, DEPARTMENT, SHELF, CHECKOUT, STOCKROOM or EXCLUDED;
-   - "Colour".
+   - "Colour";
+   - "Products sold here", comma-separated, for example "Chips, Lollies, Chocolate". Insights and the
+     AI summary name these products when they report on the area, so a finding says which shelves
+     are meant.
+
+   Areas must not overlap: a person standing where two areas overlap is counted in the first one only.
+   Shelf names drawn with "Shelf" turn along long, narrow shelves and are hidden when they do not fit
+   at the current zoom; zoom in ("+") or select the shelf to read them.
 
    The categories matter. ENTRANCE, EXIT and CHECKOUT areas drive the "Exit without passing checkout"
    check. EXCLUDED areas are never counted.
@@ -404,6 +411,14 @@ Store map. For each camera:
 
 The same values are under "Placement on the blueprint" in the camera settings. Placement alone does
 not put people on the map; that needs calibration.
+
+**Before calibrating: "Counts into zone".** Select an uncalibrated camera on the map and pick, under
+"Counts into zone", the store area its picture shows (for example the aisle it looks down). From then
+on every person that camera sees is counted as a visit to that area, so the area's visits, dwell
+time and occupancy, and the Insights rules, work before the camera is calibrated. It does not place
+people on the map or the floor heatmap. Pick "— none —" to remove the link. Once the camera is
+calibrated, the link is no longer used: each person is counted in the area they stand in. If two
+linked cameras see the same aisle, a shopper seen by both is counted by each.
 
 ### 2.7 Calibrate each camera to the floor
 

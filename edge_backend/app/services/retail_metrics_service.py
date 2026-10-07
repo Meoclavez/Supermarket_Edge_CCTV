@@ -18,7 +18,7 @@ so the floor always won and the figure never changed.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -240,6 +240,8 @@ class ZoneMetrics:
     total_dwell_seconds: float = 0.0
     interactions: int = 0
     occupancy_now: int = 0
+    # Product categories the operator says the zone sells (store_zones.products).
+    products: list = field(default_factory=list)
 
     @property
     def engagement_rate(self) -> Optional[float]:
@@ -260,6 +262,7 @@ class ZoneMetrics:
             "interactions": self.interactions,
             "engagement_rate_pct": self.engagement_rate,
             "occupancy_now": self.occupancy_now,
+            "products": list(self.products),
             "observed": self.visits > 0,
         }
 
@@ -457,7 +460,8 @@ class RetailMetricsService:
 
         out: list[ZoneMetrics] = []
         for z in zones:
-            m = ZoneMetrics(zone_id=z.id, name=z.name, category=z.category)
+            m = ZoneMetrics(zone_id=z.id, name=z.name, category=z.category,
+                            products=list(getattr(z, "products", None) or []))
             if (row := agg.get(z.id)) is not None:
                 _, visits, uniques, avg_dwell, total_dwell, interactions = row
                 m.visits = int(visits or 0)

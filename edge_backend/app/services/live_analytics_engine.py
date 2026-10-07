@@ -1371,6 +1371,13 @@ class CameraWorker(threading.Thread):
                         )
                         self.engine.attribute_zone(t, floor[0], floor[1], now)
                         entry["zone_id"] = t.current_zone_id
+                elif counting:
+                    # No calibration: a camera linked to a zone counts its
+                    # whole view into that zone (layout PUT /cameras/{id}/zone).
+                    linked = self.engine.linked_zone(cam)
+                    if linked is not None or t.current_zone_id is not None:
+                        self.engine.attribute_zone(t, None, None, now, zone_id=linked)
+                    entry["zone_id"] = t.current_zone_id
                 if counting:
                     _append_path_point(t, fx, fy, w, h, floor, now)
                 if not counting and t.current_zone_id is not None:
@@ -1451,6 +1458,8 @@ class LiveAnalyticsEngine:
         self.workers: dict[str, CameraWorker] = {}
         self._zones: list[dict] = []          # [{id, category, polygon}]
         self._zones_lock = threading.Lock()
+        # Uncalibrated camera -> the zone its whole view belongs to (m0017).
+        self._camera_zones: dict[str, str] = {}
         self._pending_visits: list[ZoneVisitFact] = []
         self._pending_tracks: list[Track] = []
         self._buffer_lock = threading.Lock()
@@ -1472,6 +1481,25 @@ class LiveAnalyticsEngine:
             ]
         logger.info(f"Live pipeline now tracking {len(self._zones)} zone(s)")
 
+    def set_camera_zone(self, camera_id: str, zone_id: Optional[str]) -> None:
+        """Link (or with None unlink) an uncalibrated camera to one zone."""
+        with self._zones_lock:
+            if zone_id:
+                self._camera_zones[camera_id] = zone_id
+            else:
+                self._camera_zones.pop(camera_id, None)
+
+    def linked_zone(self, camera_id: str) -> Optional[str]:
+        """The zone this camera counts into, if it is linked to a live zone.
+
+        A link to a zone that was deleted or excluded counts nowhere.
+        """
+        with self._zones_lock:
+            zone_id = self._camera_zones.get(camera_id)
+            if zone_id and any(z["id"] == zone_id for z in self._zones):
+                return zone_id
+        return None
+
     def _zone_at(self, x_m: float, y_m: float) -> Optional[str]:
         with self._zones_lock:
             for z in self._zones:
@@ -1481,9 +1509,15 @@ class LiveAnalyticsEngine:
 
     # ------------------------------------------------------------------- facts
 
-    def attribute_zone(self, track: Track, x_m: float, y_m: float, now: float) -> None:
-        """Place a track in a zone, opening and closing visits as it moves."""
-        zone_id = self._zone_at(x_m, y_m)
+    def attribute_zone(self, track: Track, x_m: Optional[float], y_m: Optional[float], now: float,
+                       *, zone_id: Optional[str] = None) -> None:
+        """Place a track in a zone, opening and closing visits as it moves.
+
+        Calibrated cameras pass the floor point; an uncalibrated camera linked
+        to a zone passes that ``zone_id`` (and no point) instead.
+        """
+        if x_m is not None and y_m is not None:
+            zone_id = self._zone_at(x_m, y_m)
 
         if zone_id == track.current_zone_id:
             # Still in the same zone. Once the dwell floor is cleared the visit

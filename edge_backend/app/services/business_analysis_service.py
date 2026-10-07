@@ -76,6 +76,7 @@ class Finding:
         root_cause: str,
         action_item: str,
         evidence: dict[str, Any],
+        products: Optional[list[str]] = None,
     ):
         self.category = category
         self.severity = severity
@@ -84,6 +85,8 @@ class Finding:
         self.root_cause = root_cause
         self.action_item = action_item
         self.evidence = evidence
+        # What the zone sells (store_zones.products), filled in by analyse().
+        self.products = list(products or [])
 
     def to_dict(self) -> dict:
         return {
@@ -94,7 +97,18 @@ class Finding:
             "root_cause": self.root_cause,
             "action_item": self.action_item,
             "evidence": self.evidence,
+            "products": self.products,
         }
+
+
+def attach_products(findings: list[Finding], products_by_zone: dict[str, list[str]]) -> None:
+    """Fill each finding's ``products`` from the zone it names (by zone name).
+
+    Store-wide and product-level findings name no blueprint zone and stay empty.
+    """
+    for f in findings:
+        if not f.products and f.zone in products_by_zone:
+            f.products = list(products_by_zone[f.zone] or [])
 
 
 def _detect(zones: list[ZoneMetrics], funnel: dict) -> list[Finding]:
@@ -772,7 +786,8 @@ class BusinessAnalysisService:
             }
 
         facts = [
-            {"zone": f.zone, "severity": f.severity, "finding": f.finding, "action": f.action_item}
+            {"zone": f.zone, "severity": f.severity, "finding": f.finding, "action": f.action_item,
+             **({"zone_sells": f.products[:12]} if f.products else {})}
             for f in findings[:6]
         ]
         prompt = (
@@ -786,6 +801,8 @@ class BusinessAnalysisService:
             + "\n"
             "Write a 3-sentence executive summary for the store manager. State what is "
             "happening, why it matters commercially, and what to do first. "
+            "Where a finding lists zone_sells, name those products so the manager knows "
+            "which shelves are meant. "
             "Use only the numbers given above. Do not invent figures. Do not use markdown."
         )
 
@@ -897,6 +914,7 @@ class BusinessAnalysisService:
             logger.warning(f"Heatmap trend rules unavailable: {e}")
         _order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
         findings.sort(key=lambda f: _order.get(f.severity, 9))
+        attach_products(findings, {z.name: z.products for z in zones})
 
         if persist and findings:
             await self._persist(db, findings)

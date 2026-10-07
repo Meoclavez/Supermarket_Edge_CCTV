@@ -75,6 +75,8 @@ class ZoneCreate(BaseModel):
     polygon: list[Point]
     color: str = "#00d4ff"
     sku_id: Optional[str] = None
+    # Product categories sold here: a list, or one comma-separated string.
+    products: Optional[list[str] | str] = None
 
 
 class ZoneUpdate(BaseModel):
@@ -83,6 +85,12 @@ class ZoneUpdate(BaseModel):
     polygon: Optional[list[Point]] = None
     color: Optional[str] = None
     sku_id: Optional[str] = None
+    products: Optional[list[str] | str] = None
+
+
+class CameraZoneLink(BaseModel):
+    """The zone an uncalibrated camera's whole view belongs to; null unlinks."""
+    zone_id: Optional[str] = None
 
 
 class CameraPlacement(BaseModel):
@@ -224,6 +232,7 @@ async def create_zone(
             polygon=[p.model_dump() for p in req.polygon],
             color=req.color,
             sku_id=req.sku_id,
+            products=req.products,
         )
     except StoreLayoutError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -259,8 +268,15 @@ async def delete_zone(
     layout = await store_layout_service.get_active_layout(db)
     if not await store_layout_service.delete_zone(db, layout.id, zone_id):
         raise HTTPException(status_code=404, detail="zone not found")
+    # Cameras that counted into this zone are unlinked rather than left dangling.
+    linked = (await db.execute(select(CameraModel).where(CameraModel.watch_zone_id == zone_id))).scalars().all()
+    for cam in linked:
+        cam.watch_zone_id = None
+        live_engine.set_camera_zone(cam.id, None)
+    if linked:
+        await db.commit()
     await pipeline_supervisor.reload_layout()
-    return {"deleted": zone_id}
+    return {"deleted": zone_id, "cameras_unlinked": [c.id for c in linked]}
 
 
 # -------------------------------------------------------------- structures
@@ -374,6 +390,47 @@ async def place_camera(
         "floor_z": cam.floor_z,
         "azimuth_deg": cam.azimuth_deg,
         "fov_deg": cam.fov_deg,
+    }
+
+
+@router.put("/cameras/{camera_id}/zone")
+async def link_camera_zone(
+    camera_id: str,
+    req: CameraZoneLink,
+    db: AsyncSession = Depends(get_db),
+    _: bool = Depends(auth_service.verify_api_access),
+):
+    """Count an uncalibrated camera's shoppers into one blueprint zone.
+
+    Without a floor calibration a camera cannot say *where* on the plan a
+    shopper stands, so its tracks open no zone visits. Linking it to the zone
+    its view covers (e.g. the aisle it looks down) attributes every counted
+    track of that camera to the zone. A calibrated camera keeps exact floor
+    attribution and ignores the link. ``zone_id: null`` removes the link.
+    """
+    cam = await db.get(CameraModel, camera_id)
+    if cam is None:
+        raise HTTPException(status_code=404, detail="camera not found")
+    zone_id = (req.zone_id or "").strip() or None
+    zone_name = None
+    if zone_id is not None:
+        layout = await store_layout_service.get_active_layout(db)
+        zone = await db.get(StoreZoneModel, zone_id)
+        if zone is None or zone.layout_id != layout.id:
+            raise HTTPException(status_code=404, detail="zone not found")
+        if zone.category == "EXCLUDED":
+            raise HTTPException(status_code=400, detail="an excluded zone is never counted; pick another zone")
+        zone_name = zone.name
+    cam.watch_zone_id = zone_id
+    await db.commit()
+    live_engine.set_camera_zone(camera_id, zone_id)
+    return {
+        "camera_id": camera_id,
+        "watch_zone_id": zone_id,
+        "zone_name": zone_name,
+        "calibrated": bool(cam.homography_matrix),
+        # Said plainly so the UI can explain why a link has no effect.
+        "effective": zone_id is not None and not cam.homography_matrix,
     }
 
 

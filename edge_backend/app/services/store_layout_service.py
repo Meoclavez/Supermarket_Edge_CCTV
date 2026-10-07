@@ -58,6 +58,44 @@ class StoreLayoutError(ValueError):
     """Raised when a caller supplies geometry the store cannot accept."""
 
 
+# Products a zone sells (store_zones.products): short category names, not SKUs.
+MAX_ZONE_PRODUCTS = 40
+MAX_PRODUCT_NAME_LEN = 64
+
+
+def normalize_products(value: Any) -> list[str]:
+    """A clean product list from a list or a comma/newline-separated string.
+
+    Blank entries are dropped, whitespace collapsed and duplicates removed
+    (case-insensitively, first spelling kept), in the order given.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        items = value.replace("\n", ",").split(",")
+    elif isinstance(value, (list, tuple)):
+        items = value
+    else:
+        raise StoreLayoutError("products must be a list of names or a comma-separated string")
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, str):
+            raise StoreLayoutError("each product must be a name (text)")
+        name = " ".join(item.split())
+        if not name:
+            continue
+        if len(name) > MAX_PRODUCT_NAME_LEN:
+            raise StoreLayoutError(f"product name longer than {MAX_PRODUCT_NAME_LEN} characters: '{name[:20]}...'")
+        if name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        out.append(name)
+    if len(out) > MAX_ZONE_PRODUCTS:
+        raise StoreLayoutError(f"a zone can list at most {MAX_ZONE_PRODUCTS} products")
+    return out
+
+
 # Structure kinds: what the operator draws so the plan resembles their store.
 # WALL and DOOR are polylines with a thickness; the rest are closed polygons.
 # None of these affect analytics -- zones remain the attribution regions.
@@ -281,6 +319,7 @@ class StoreLayoutService:
         polygon: Any,
         color: str = "#00d4ff",
         sku_id: Optional[str] = None,
+        products: Any = None,
     ) -> StoreZoneModel:
         category = (category or "AISLE").upper()
         if category not in ZONE_CATEGORIES:
@@ -288,6 +327,7 @@ class StoreLayoutService:
                 f"unknown zone category '{category}'; expected one of {', '.join(ZONE_CATEGORIES)}"
             )
         pts = validate_polygon(polygon, layout.width_m, layout.height_m)
+        product_list = normalize_products(products)
 
         max_order = await db.scalar(
             select(func.max(StoreZoneModel.sort_order)).where(
@@ -302,6 +342,7 @@ class StoreLayoutService:
             polygon=pts,
             color=color,
             sku_id=sku_id,
+            products=product_list,
             sort_order=(max_order or 0) + 1,
         )
         db.add(zone)
@@ -333,6 +374,8 @@ class StoreLayoutService:
             zone.color = str(color)
         if "sku_id" in fields:
             zone.sku_id = fields["sku_id"] or None
+        if "products" in fields:
+            zone.products = normalize_products(fields["products"])
 
         await db.commit()
         await db.refresh(zone)
@@ -494,6 +537,7 @@ class StoreLayoutService:
             "polygon": zone.polygon or [],
             "color": zone.color,
             "sku_id": zone.sku_id,
+            "products": list(zone.products or []),
             "sort_order": zone.sort_order,
             "area_m2": round(polygon_area_m2(zone.polygon or []), 2),
         }
@@ -528,12 +572,17 @@ class StoreLayoutService:
         whether to show the first-run setup panel instead of an empty canvas.
         """
         calibrated = sum(1 for c in cameras if c.get("has_homography"))
+        zone_ids = {getattr(z, "id", None) for z in zones}
+        linked = sum(1 for c in cameras
+                     if not c.get("has_homography") and c.get("watch_zone_id") in zone_ids)
         return {
             "configured": bool(zones or structures or cameras),
             "zones": len(zones),
             "structures": len(structures),
             "cameras": len(cameras),
             "cameras_calibrated": calibrated,
+            # Uncalibrated cameras counting into a zone they are linked to.
+            "cameras_zone_linked": linked,
         }
 
     async def serialize_cameras(self, db: AsyncSession, layout: StoreLayoutModel) -> list[dict]:
@@ -572,6 +621,8 @@ class StoreLayoutService:
                     "fov_deg": cam.fov_deg,
                     "is_ai_enabled": cam.is_ai_enabled,
                     "has_homography": bool(cam.homography_matrix),
+                    # Zone an uncalibrated camera counts into (m0017); unused once calibrated.
+                    "watch_zone_id": getattr(cam, "watch_zone_id", None),
                     "calibration_points": cam.calibration_points,
                     # Native pixel size of the frames the worker is reading.
                     # Calibration image points are in this space; the client

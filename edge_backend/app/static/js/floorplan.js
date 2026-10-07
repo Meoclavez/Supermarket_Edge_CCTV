@@ -936,6 +936,7 @@
         if (type === 'zone') {
           const z = await this.post(`${API}/zones/${shape.id}`, {
             polygon: shape.polygon, name: shape.name, category: shape.category, color: shape.color,
+            products: shape.products || [],
           }, 'PUT');
           Object.assign(shape, z);
           this.setStatus(`Zone "${shape.name}" saved.`, 'ok');
@@ -1102,7 +1103,10 @@
           <div class="fp-field"><label for="zColor">Colour</label>
             <input id="zColor" name="zoneColor" type="color" value="${zone.color || CATEGORY_COLORS.AISLE}"></div>
         </div>
-        <div class="fp-zone-sub">${fmt(zone.area_m2)} m² · ${zone.polygon.length} corners${this.selVertex !== null ? ` · corner ${this.selVertex + 1} selected` : ''}</div>
+        <div class="fp-field"><label for="zProducts">Products sold here</label>
+          <textarea id="zProducts" name="zoneProducts" rows="2" placeholder="e.g. Chips, Lollies, Chocolate">${escapeHtml((zone.products || []).join(', '))}</textarea>
+          <span class="fp-hintline">Comma-separated. Insights and the AI summary name these when they talk about this zone.</span></div>
+        <div class="fp-zone-sub">${fmt(zone.area_m2)} m² · ${zone.polygon.length} corners${this.selVertex !== null ? ` · corner ${this.selVertex + 1} selected` : ''}${this.camerasLinkedTo(zone.id).length ? ` · counted by ${this.camerasLinkedTo(zone.id).length} uncalibrated camera${this.camerasLinkedTo(zone.id).length === 1 ? '' : 's'}` : ''}</div>
         ${this.editHints()}
         <div class="fp-saved" id="zSaved"></div>
         ${m && m.observed ? '' : '<div class="fp-empty">No visits recorded in this zone yet.</div>'}
@@ -1121,10 +1125,11 @@
         zone.name = panel.querySelector('#zName').value.trim() || zone.name;
         zone.category = panel.querySelector('#zCat').value;
         zone.color = panel.querySelector('#zColor').value;
+        zone.products = panel.querySelector('#zProducts').value.split(/[,\n]/).map((p) => p.trim()).filter(Boolean);
         await this.saveShape('zone', zone);
         flashSaved('zSaved');
       };
-      ['zName', 'zCat', 'zColor'].forEach((id) => panel.querySelector(`#${id}`).addEventListener('change', commit));
+      ['zName', 'zCat', 'zColor', 'zProducts'].forEach((id) => panel.querySelector(`#${id}`).addEventListener('change', commit));
       panel.querySelector('#fpDelete').addEventListener('click', () => this.deleteShape('zone', zone.id));
       panel.querySelector('#fpDone').addEventListener('click', () => this.select(null));
     }
@@ -1185,6 +1190,10 @@
       return `<div class="fp-hintline">Drag the shape to move it · drag a corner to reshape · double-click an edge to add a corner · <kbd>Del</kbd> removes the selected corner or the shape.</div>`;
     }
 
+    camerasLinkedTo(zoneId) {
+      return (this.cameras || []).filter((c) => c.watch_zone_id === zoneId && !c.has_homography);
+    }
+
     renderCameraInspector(panel, title, cam) {
       if (title) title.textContent = 'Camera';
       const online = cam.status === 'ONLINE';
@@ -1222,7 +1231,15 @@
         <div class="fp-saved" id="cSaved"></div>
         ${cam.has_homography
           ? `<div class="fp-cal-state is-cal">Calibrated${cp && cp.image_points ? ` from ${cp.image_points.length} point pairs` : ''}${cp && cp.saved_at ? ` · ${escapeHtml(String(cp.saved_at).slice(0, 16).replace('T', ' '))}` : ''}. People it sees are placed on the plan.</div>`
-          : '<div class="fp-cal-state is-uncal">Not calibrated. This camera counts people but cannot place them on the plan, so it adds nothing to zone metrics, the heatmap or the live map.</div>'}
+          : `<div class="fp-cal-state is-uncal">Not calibrated. This camera counts people but cannot place them on the plan, so it adds nothing to the floor heatmap or the live map${cam.watch_zone_id ? '' : ', or to zone metrics until you link it to a zone below'}.</div>`}
+        <div class="fp-field"><label for="cZone">Counts into zone${cam.has_homography ? ' (not used: calibrated)' : ''}</label>
+          <select id="cZone" name="cameraZone">
+            <option value="">— none —</option>
+            ${this.zones.filter((z) => z.category !== 'EXCLUDED').map((z) => `<option value="${escapeHtml(z.id)}" ${z.id === cam.watch_zone_id ? 'selected' : ''}>${escapeHtml(z.name)}</option>`).join('')}
+          </select>
+          <span class="fp-hintline">${cam.has_homography
+            ? 'Calibrated cameras place each person in the zone they stand in.'
+            : 'Every person this camera sees is counted as a visit to this zone (the aisle or area it looks at). Calibrate later for exact positions.'}</span></div>
         <div class="fp-actions">
           <button class="btn btn-sm btn-primary" id="fpCalibrate">${cam.has_homography ? 'Recalibrate' : 'Calibrate'}</button>
           <button class="btn btn-sm" id="fpCamPlace">Place by click</button>
@@ -1240,6 +1257,18 @@
         flashSaved('cSaved');
       };
       ['cX', 'cY', 'cAz', 'cFov', 'cZ'].forEach((id) => panel.querySelector(`#${id}`).addEventListener('change', commit));
+      panel.querySelector('#cZone').addEventListener('change', async (ev) => {
+        try {
+          const r = await this.post(`${API}/cameras/${encodeURIComponent(cam.camera_id)}/zone`, { zone_id: ev.target.value || null }, 'PUT');
+          cam.watch_zone_id = r.watch_zone_id;
+          this.setStatus(r.watch_zone_id ? `"${cam.name}" now counts into ${r.zone_name}.` : `"${cam.name}" no longer counts into a zone.`, 'ok');
+          this.emitInspector();   // the calibration note depends on the link
+          flashSaved('cSaved');
+        } catch (e) {
+          ev.target.value = cam.watch_zone_id || '';
+          this.setStatus(`Could not link the camera: ${e.message}`, 'error');
+        }
+      });
       panel.querySelector('#fpCalibrate').addEventListener('click', () => {
         if (window.calibrationTool) window.calibrationTool.open(cam.camera_id);
       });
@@ -1993,11 +2022,64 @@
           } else if (POLYLINE_KINDS.has(st.kind)) {
             ctx.fillText(st.name, s.x, s.y - 6);
           } else {
-            ctx.fillText(st.name, s.x, s.y + 4);
+            // Shelves and counters: along the fixture's long side, shrunk to
+            // fit, or left out (the name is in the inspector) when it cannot.
+            this.drawFittedLabel(poly, [{ text: st.name, weight: 600 }], 10);
           }
         }
         ctx.restore();
       });
+    }
+
+    /**
+     * Text lines centred in a polygon, along its longer side on screen (turned
+     * 90° in tall, narrow shapes such as aisles and shelf runs), at the largest
+     * size from ``base`` down to 7 px that fits. Returns false (and draws
+     * nothing) when even the smallest size does not fit. Every drawn line is
+     * registered as fixed text so camera and person labels avoid it.
+     */
+    drawFittedLabel(poly, lines, base, required = false) {
+      if (!lines.length || poly.length < 3) return false;
+      const ctx = this.ctx;
+      const pts = poly.map((p) => this.toScreen(p.x, p.y));
+      const minX = Math.min(...pts.map((p) => p.x)), maxX = Math.max(...pts.map((p) => p.x));
+      const minY = Math.min(...pts.map((p) => p.y)), maxY = Math.max(...pts.map((p) => p.y));
+      const w = maxX - minX, h = maxY - minY;
+      const vertical = h > w * 1.3;
+      const along = (vertical ? h : w) - 6, across = (vertical ? w : h) - 2;
+      const c = this.toScreen(polygonCentroid(poly).x, polygonCentroid(poly).y);
+      const fontOf = (L, px) => `${L.weight || 600} ${px}px ${L.mono ? 'ui-monospace, monospace' : 'system-ui, sans-serif'}`;
+      for (let px = base; px >= 7; px--) {
+        const lineH = px + 2;
+        // Optional lines (all but the first) are dropped before shrinking further.
+        for (let n = lines.length; n >= 1; n--) {
+          const use = lines.slice(0, n);
+          if (use.length * lineH > across) continue;
+          const widths = use.map((L) => { ctx.font = fontOf(L, px); return ctx.measureText(L.text).width; });
+          if (Math.max(...widths) > along) continue;
+          ctx.save();
+          ctx.translate(c.x, c.y);
+          if (vertical) ctx.rotate(-Math.PI / 2);
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          const top = -((use.length - 1) * lineH) / 2;
+          use.forEach((L, i) => {
+            ctx.font = fontOf(L, px);
+            ctx.fillStyle = L.color || T.text;
+            ctx.fillText(L.text, 0, top + i * lineH);
+          });
+          ctx.restore();
+          const fixed = this._fixedText;
+          if (fixed) {
+            const bw = vertical ? use.length * lineH : Math.max(...widths);
+            const bh = vertical ? Math.max(...widths) : use.length * lineH;
+            fixed.push({ x: c.x - bw / 2 - 2, y: c.y - bh / 2 - 2, w: bw + 4, h: bh + 4 });
+          }
+          return true;
+        }
+        if (!required && px <= 7) break;
+      }
+      return false;
     }
 
     drawZones() {
@@ -2018,18 +2100,14 @@
           const c = polygonCentroid(poly);
           const s = this.toScreen(c.x, c.y);
           const m = (this.zoneMetrics || {})[z.id];
-          ctx.fillStyle = T.text;
-          ctx.font = '600 11px system-ui, sans-serif';
-          ctx.textAlign = 'center';
-          ctx.fillText(z.name, s.x, s.y);
-          const fixed = this._fixedText;
-          if (fixed) { const w = ctx.measureText(z.name).width; fixed.push({ x: s.x - w / 2 - 2, y: s.y - 10, w: w + 4, h: 13 }); }
-          if (m && m.observed) {
-            ctx.fillStyle = zc;
-            ctx.font = '500 10px ui-monospace, monospace';
-            const txt = `${m.visits} visits · ${m.avg_dwell_seconds || 0}s`;
-            ctx.fillText(txt, s.x, s.y + 13);
-            if (fixed) { const w = ctx.measureText(txt).width; fixed.push({ x: s.x - w / 2 - 2, y: s.y + 3, w: w + 4, h: 13 }); }
+          const lines = [{ text: z.name, weight: 600, color: T.text }];
+          if (m && m.observed) lines.push({ text: `${m.visits} visits · ${m.avg_dwell_seconds || 0}s`, weight: 500, color: zc, mono: true });
+          if (!this.drawFittedLabel(poly, lines, 11, true)) {
+            // Too small to hold the text: keep the old centred label so a zone is never anonymous.
+            ctx.fillStyle = T.text;
+            ctx.font = '600 11px system-ui, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(z.name, s.x, s.y);
           }
         }
         ctx.restore();

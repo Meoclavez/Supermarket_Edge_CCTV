@@ -306,6 +306,39 @@ def test_interaction_marks_the_open_zone_visit(worker, walking_detector, fake_po
     assert all(v.phase != "interact" for v in engine.drain()[0])
 
 
+def test_uncalibrated_camera_linked_to_a_zone_opens_visits_there(worker, walking_detector, monkeypatch):
+    """No homography: a camera linked to a zone counts its whole view into it."""
+    w, rt, engine = worker
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    monkeypatch.setattr(settings, "ZONE_DWELL_MIN_SECONDS", 1.0)
+    engine.set_zones([
+        {"id": "zone_chips", "category": "AISLE",
+         "polygon": [{"x": 0, "y": 0}, {"x": 5, "y": 0}, {"x": 5, "y": 5}, {"x": 0, "y": 5}]},
+    ])
+    # Not linked yet: no visit, and the person is not put on the plan.
+    for i in range(settings.TRACK_MIN_HITS + 3):
+        w._analyse(frame, now=9000.0 + i)
+    (track,) = w.tracker.tracks.values()
+    assert track.current_zone_id is None and track.open_visit_id is None
+
+    engine.set_camera_zone(CAM, "zone_chips")
+    assert engine.linked_zone(CAM) == "zone_chips"
+    for i in range(3):
+        w._analyse(frame, now=9010.0 + i)
+    assert track.current_zone_id == "zone_chips" and track.open_visit_id is not None
+    snap = engine.live_snapshot()
+    assert snap["persons"] == []          # still no floor position is invented
+    visits, _ = engine.drain()
+    assert any(v.phase == "open" and v.zone_id == "zone_chips" for v in visits)
+
+    # Unlinking closes the visit; a link to a deleted zone counts nowhere.
+    engine.set_camera_zone(CAM, None)
+    w._analyse(frame, now=9020.0)
+    assert track.current_zone_id is None and track.open_visit_id is None
+    engine.set_camera_zone(CAM, "zone_gone")
+    assert engine.linked_zone(CAM) is None
+
+
 def test_pose_analytics_failure_never_stops_the_pipeline(worker, stub_detector, fake_pose):
     w, rt, engine = worker
     fake_pose.raise_with = RuntimeError("boom")
