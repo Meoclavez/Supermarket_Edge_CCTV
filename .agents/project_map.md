@@ -619,6 +619,8 @@ than firing on empty data.
   behind-back discounted x0.8 x 0.85. Dead settings: THEFT_POS_MATCH_TOLERANCE_SEC,
   THEFT_CONFIDENCE_DURATION_REF_SEC. Fixed: phone severity ignored role floors; FCM pushed every incident
   while Web Push used confidence >= 0.75; Web Push escalated every theft alert.
+* **Deployed** 2026-10-09 01:57 AEDT (f9c288c): journal "backup before migrating to v19" then "applied migration
+  0019_theft_alert_tiers" (grep the journal for `0019`, not `m0019`); 0 errors; box had 0 theft incidents at deploy.
 * Tests: test_theft_tiers.py, test_theft_end_to_end.py, test_theft_tier_ui.py (+ fixtures/theft_tier_harness.js),
   test_ui_design_system.py.
 
