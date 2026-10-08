@@ -622,7 +622,8 @@ than firing on empty data.
   (gate max(0.25, 2.0 x dt) + half predicted travel box heights, cap 1.5, height ratio 1.5) keeps a fast
   walker's id, `TRACK_MAX_AGE_SEC` 5. Local UI check with real RTMO: 0 id switches over three fast pans.
 * **Deployed** 2026-10-08 21:10 AEDT (27f2347). Live at closing time: GPU 55-59 % (unchanged), cost 11.07 ms,
-  budget 54.2/s; two issues found live, fixed in the follow-up commit (replayed on real box captures):
+  budget 54.2/s; two issues found live, fixed in 545bb11 (deployed 22:49 AEDT; live check after the 5 min
+  learning period: 0 of 32 empty cameras active, idle 0.5 fps, Ch 12 cut-out static in 51/51 samples):
   (1) motion gate false-woke ~17 of 32 empty cameras: burnt-in OSD clock pixels + local lighting (street
   light through doors, cycling sign/TV, shop window). Fix: per-pixel compare after 5x5 local brightness
   ratio, learnt flicker map (duty > 8 % or >= 6 changes in 300 s, widened +-2 cols / +-1 row), motion needs
