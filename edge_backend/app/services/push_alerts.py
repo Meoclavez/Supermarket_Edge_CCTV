@@ -80,6 +80,20 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def store_label() -> str:
+    """What phones call this store: Settings -> Store name, else the device name.
+
+    The installed app's name, the test alert and the offline / back-online
+    messages use it, so an owner with several stores can tell them apart.
+    """
+    name = (getattr(settings, "STORE_NAME", "") or "").strip()
+    if name and name != "Store":
+        return name
+    from app.services import device_identity
+
+    return (device_identity.get_identity().get("device_name") or "").strip() or "The store"
+
+
 # --------------------------------------------------------------------------- roster
 
 def _db_path() -> Path:
@@ -599,11 +613,8 @@ class PushAlertService:
 
     # ---- single messages
     async def send_test(self, sub) -> Dict[str, Any]:
-        from app.services import device_identity
-
-        ident = device_identity.get_identity()
         alert_id = f"test_{uuid.uuid4().hex[:8]}"
-        base = {"v": 1, "kind": "test", "title": f"Test alert - {ident['device_name']}",
+        base = {"v": 1, "kind": "test", "title": f"Test alert - {store_label()}",
                 "body": "Alerts from the store's CCTV reach this phone.", "tag": alert_id,
                 "url": "/dashboard", "alert_id": alert_id, "ts": int(time.time())}
         results = await self._send_all([sub], base, alert_id, {"event_type": "TEST"}, tier=0, ack=False)

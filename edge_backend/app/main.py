@@ -372,9 +372,10 @@ def web_app_manifest():
 
     data = _json.loads((STATIC_DIR / "manifest.webmanifest").read_text(encoding="utf-8"))
     try:
-        from .services.device_identity import get_identity
+        from .services.push_alerts import store_label
 
-        store = (get_identity().get("device_name") or "").strip()
+        label = store_label()
+        store = "" if label == "The store" else label
     except Exception:
         store = ""
     if store:

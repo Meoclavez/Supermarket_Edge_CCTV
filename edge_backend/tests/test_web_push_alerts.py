@@ -512,3 +512,12 @@ def test_service_worker_and_manifest_are_served_at_the_root(client):
         assert client.get(icon["src"]).status_code == 200
     page = client.get("/dashboard").text
     assert 'rel="manifest"' in page and "phone_alerts.js" in page and 'id="settings-phone-alerts"' in page
+
+
+def test_app_and_messages_are_named_after_the_store(client, monkeypatch):
+    monkeypatch.setattr(settings, "STORE_NAME", "IGA Pearcedale")
+    assert pa.store_label() == "IGA Pearcedale"
+    data = client.get("/manifest.webmanifest").json()
+    assert data["name"] == "IGA Pearcedale CCTV" and data["short_name"] == "IGA Pearcedale"
+    monkeypatch.setattr(settings, "STORE_NAME", "Store")          # the unset default: device name instead
+    assert pa.store_label() not in ("Store", "")

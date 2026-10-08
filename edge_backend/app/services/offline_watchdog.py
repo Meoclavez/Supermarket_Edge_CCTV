@@ -117,14 +117,14 @@ class OfflineWatchdog:
 
     # ---- bundle
     async def build_bundle(self, roster: Dict[str, Any], store_id: str) -> Dict[str, Any]:
-        from app.services import device_identity, web_push
-        from app.services.push_alerts import recipient_subscriptions
+        from app.services import web_push
+        from app.services.push_alerts import recipient_subscriptions, store_label
 
         enabled = bool(roster.get("watchdog_enabled"))
         minutes = int(roster.get("watchdog_offline_min") or 15)
         messages: List[Dict[str, Any]] = []
         subs = await recipient_subscriptions() if enabled else []
-        store = device_identity.get_identity().get("device_name") or "The store"
+        store = store_label()
         for sub in subs[:MAX_MESSAGES]:
             payload = {
                 "v": 1, "kind": "offline", "title": f"{store}: CCTV offline",
@@ -190,8 +190,7 @@ class OfflineWatchdog:
 
     async def _handle_alert(self, alert: Optional[Dict[str, Any]]) -> None:
         """The VPS sent an offline alert: say "back online" once, then acknowledge it."""
-        from app.services import device_identity
-        from app.services.push_alerts import push_alerts, recipient_subscriptions
+        from app.services.push_alerts import push_alerts, recipient_subscriptions, store_label
 
         if not isinstance(alert, dict) or not alert.get("id"):
             return
@@ -200,7 +199,7 @@ class OfflineWatchdog:
             self._next_delay = RETRY_S  # the VPS has not seen us back yet
             return
         if alert_id not in self._handled_alerts:
-            store = device_identity.get_identity().get("device_name") or "The store"
+            store = store_label()
             since, back = int(alert.get("offline_since") or 0), int(alert["back_online_at"])
             body = (f"Offline from {_local_hhmm(since)} to {_local_hhmm(back)}"
                     f"{f' ({_duration(back - since)})' if since else ''}. Alerts are working again.")
