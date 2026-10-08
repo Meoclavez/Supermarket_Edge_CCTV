@@ -181,7 +181,7 @@ it, so you can stop and continue later.
 | 2.8 | Draw lines and areas on the camera pictures | Camera setup |
 | 2.9 | Night watch | Camera "Settings" |
 | 2.10 | Connect the tills (optional) | Settings → "Sales data" |
-| 2.11 | Pair phones and set up push alerts | Settings → "Phones", "Push notifications" |
+| 2.11 | Phone alerts: install the web app, choose who gets alerts | Settings → "Phone alerts" |
 | 2.12 | Online access and remote live video (optional) | Settings → "Online access" |
 | 2.13 | Check that everything is complete | Today → "Store setup" |
 
@@ -633,7 +633,46 @@ sales until they are updated. "Revoke" ("Yes, revoke" / "Keep") stops the key at
 Older till set-ups that send the device's internal service key still work, but give new tills a till
 key instead.
 
-### 2.11 Pair phones and set up push alerts
+### 2.11 Phone alerts (installed web app)
+
+Phones get theft alerts from the dashboard itself, installed as an app. No app store and no
+Firebase account are needed. It works only on the store's **public address**
+(`https://<store>-cctv.ikorex.com.au`), not on a private `http://` address.
+
+**Install the app and turn on alerts (each person, on their own phone)**
+
+- **Android (Chrome):** open the public address and sign in. Tap "📲 Install app" at the top, or
+  Chrome menu ⋮ → "Install app". Open the app, then tap "Enable alerts" and choose "Allow".
+- **iPhone / iPad (iOS 16.4 or later, Safari):** open the public address in Safari. Tap Share →
+  "Add to Home Screen" → "Add". Open the new icon on the Home Screen and sign in, then tap
+  "Enable alerts" and choose "Allow". On iPhone, alerts only work in the Home Screen app.
+- "Send a test alert" under Settings → "Phone alerts" → "This phone" checks the whole path.
+
+**Choose who gets alerts (owner or administrator).** Settings → "Phone alerts" → "Who gets alerts":
+
+- Set each person to "First priority", "Backup" or "No alerts". You need at least **2 first-priority**
+  people before you can save. Until then, alerts go to every owner and administrator, with no
+  escalation.
+- An alert goes to every phone of the first-priority people. If nobody acknowledges it within
+  "Escalate to backup after" (default 5 min), the backup people get it as well, titled
+  "Not acknowledged". If no first-priority phone can be reached at all, it goes to backup at once.
+- "Alert phones from confidence" (default 75 %): only incidents at or above this level wake phones.
+  Lower ones are still recorded and shown on the Loss prevention tab.
+- "Night watch intrusions" and "Area & line alerts" can be switched on or off for phones.
+- "Alert if the store's CCTV goes offline" (default on, after 15 min): the VPS sends this when
+  the box stops calling in (power cut, internet down). The box sends "back online" when it returns.
+  It needs Online access (2.12).
+
+**Acknowledge** an alert with the notification's "Acknowledge" button (Android) or in the app
+(Loss prevention → the incident → "Acknowledge"). Everyone who got it then sees
+"Acknowledged: …", and escalation stops.
+
+"Connected phones" lists every phone with alerts on, with "Test" and "Remove". An operator sees and
+removes only their own. Removing an account stops its phones' alerts.
+
+### 2.11a Native phone app (backup)
+
+The Flutter phone app is kept as a backup. It uses pairing and Firebase:
 
 **Pair a phone**
 
@@ -1024,7 +1063,8 @@ sudo -u edgecctv ../.venv/bin/python scripts/manage_operator.py reset-setup   # 
 | A poster, mannequin or TV screen is counted as a person | The AI sees a person-shaped figure | In Camera setup click its box → "Not a person — ignore this spot", or draw a "🚫 Ignore area (no AI)"; keep "Ignore figures that never move" on (2.4, 2.8) |
 | Visitors counted twice | Same camera added twice | Resolve the duplicate banner (2.3) |
 | Sales figures show "—" | No till data | Step 2.10 |
-| No phone alerts | Push not configured, or quiet hours | Step 2.11, "Send test alert" |
+| No phone alerts | Alerts not enabled on the phone, person set to "No alerts", incident below the alert level, or the page was opened on a private http address | Step 2.11, "Send a test alert"; on iPhone, use the Home Screen app |
+| iPhone shows no "Enable alerts" | Opened in Safari, not from the Home Screen | Share → "Add to Home Screen", open the icon (2.11) |
 | "Direct video not possible from this network" | Viewer's network blocks direct video | "Check connection" / "Check remote video" |
 | Sign-in refused for 5 minutes | Too many wrong passwords | Wait 5 minutes, or ask an administrator to "Reset password" (4.6) |
 | "Your account can't change setup. Ask an administrator." | Signed in as an Operator | Ask an Owner or Administrator, or have them change your role (4.6) |

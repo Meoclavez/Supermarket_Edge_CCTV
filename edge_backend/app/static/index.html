@@ -12,6 +12,11 @@
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;800&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <!-- Installed web app: manifest + service worker at the root (main.py), icons (js/phone_alerts.js). -->
+  <link rel="manifest" href="/manifest.webmanifest">
+  <meta name="theme-color" content="#0b0f18">
+  <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-title" content="Store CCTV">
   <link rel="stylesheet" href="/static/css/style.css?v=2.6.0" />
   <link rel="stylesheet" href="/static/css/floorplan.css?v=2.6.0" />
   <link rel="stylesheet" href="/static/css/loss.css?v=2.6.0" />
@@ -24,6 +29,7 @@
   <link rel="stylesheet" href="/static/css/users.css?v=2.6.0" />
   <link rel="stylesheet" href="/static/css/site_settings.css?v=2.6.0" />
   <link rel="stylesheet" href="/static/css/backups.css?v=2.6.0" />
+  <link rel="stylesheet" href="/static/css/phone_alerts.css?v=2.6.0" />
   <!-- auth.js stays a classic (blocking) script: it must wrap fetch before any
        module runs. Everything else is deferred and runs in document order after
        parsing; theme.js is listed last so it still runs after the modules.
@@ -773,7 +779,8 @@
         <a class="btn btn-sm" href="#settings-account" onclick="return jumpTo('settings-account')">Your account</a>
         <a class="btn btn-sm" href="#settings-accounts" onclick="return jumpTo('settings-accounts')" data-admin-only>Accounts</a>
         <a class="btn btn-sm" href="#settings-recorder-streams" onclick="return jumpTo('settings-recorder-streams')">Recorder sub-streams</a>
-        <a class="btn btn-sm" href="#settings-pairing" onclick="return jumpTo('settings-pairing')">Phones</a>
+        <a class="btn btn-sm" href="#settings-phone-alerts" onclick="return jumpTo('settings-phone-alerts')">Phone alerts</a>
+        <a class="btn btn-sm" href="#settings-pairing" onclick="return jumpTo('settings-pairing')">Phone app (backup)</a>
         <a class="btn btn-sm" href="#settings-store" onclick="return jumpTo('settings-store')">Store</a>
         <a class="btn btn-sm" href="#settings-evidence" onclick="return jumpTo('settings-evidence')">Evidence storage</a>
         <a class="btn btn-sm" href="#settings-alerts" onclick="return jumpTo('settings-alerts')">Alerts and detection</a>
@@ -785,6 +792,9 @@
         <a class="btn btn-sm" href="#settings-appearance" onclick="return jumpTo('settings-appearance')">Appearance</a>
       </div>
       <div class="glass-card" id="settings-device"></div>
+      <!-- Phone alerts: this phone, who gets alerts (first priority / backup, escalation,
+           alert level, store-offline watchdog), connected phones (phone_alerts.js). -->
+      <div class="glass-card" id="settings-phone-alerts"></div>
       <!-- Your account (change password) and Accounts (owners/administrators only) (users.js). -->
       <div class="glass-card" id="settings-account"></div>
       <div class="glass-card" id="settings-accounts" data-admin-only hidden></div>
@@ -1068,6 +1078,7 @@
   <script src="/static/js/backups.js?v=2.6.0" defer></script>
   <script src="/static/js/pos_key.js?v=2.6.0" defer></script>
   <script src="/static/js/users.js?v=2.6.0" defer></script>
+  <script src="/static/js/phone_alerts.js?v=2.6.0" defer></script>
   <script src="/static/js/theme.js?v=2.6.0" defer></script>
 </body>
 </html>

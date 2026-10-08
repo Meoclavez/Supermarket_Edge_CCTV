@@ -121,7 +121,8 @@ Opened from Cameras → tile → "Camera setup". All shapes are drawn on the cam
 | "False alarms by rule" | Shows which checks are often wrong and need tuning. | Automatic |
 | Evidence viewer | Full-size annotated frame and person crop; expired evidence is labelled. | Click an evidence image |
 | "Area & line alerts" | Restricted-area and tripwire alerts (lines set to "Alert staff on crossing") with evidence still, camera, severity and store time. "Acknowledge" records who saw it (operators may); unacknowledged ones raise the banner and the tab badge. | Loss prevention → "Area & line alerts"; filters "Needs attention", "Acknowledged", "All" |
-| Phone alerts | Sends alerts to paired phones, including tripwire and restricted-area alerts. | Settings → "Phones" (see Settings) |
+| Phone alerts (installed web app) | The dashboard installs as an app (Android Chrome; iPhone Safari → Add to Home Screen, iOS 16.4+) and receives Web Push alerts, even while closed. Incidents at or above the alert level (default 75 % confidence), night intrusions and area/line alerts go to the first-priority people (at least 2); if nobody acknowledges within the delay (default 5 min), the backup people get them too. The "Acknowledge" button works from the notification. The VPS sends "store CCTV offline" after 15 min without contact; it holds only pre-encrypted messages, no keys. | Settings → "Phone alerts"; API `/api/v1/web-push/*`; worker `/sw.js`; manifest `/manifest.webmanifest` |
+| Phone alerts (native app, backup) | Sends alerts to paired Flutter phones through Firebase, including tripwire and restricted-area alerts. | Settings → "Phone app (backup)" |
 
 ## Night watch
 

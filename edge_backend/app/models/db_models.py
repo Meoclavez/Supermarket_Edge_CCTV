@@ -620,3 +620,62 @@ class HeatmapSnapshotModel(Base):
               "bucket_start", "bucket_minutes", unique=True),
         Index("ix_heatmap_snapshots_bucket", "bucket_minutes", "bucket_start"),
     )
+
+
+# --- Web app push and alert escalation (migration m0018) ---------------------
+
+
+class WebPushSubscriptionModel(Base):
+    """One installed dashboard web app (phone or browser) that receives alerts.
+
+    Created when a signed-in person taps "Enable alerts on this phone"; bound to
+    that account (``user_id``). ``endpoint`` is on the browser vendor's push
+    service; ``p256dh``/``auth`` are the phone's public keys (not secrets of
+    this box). ``vapid_key_id`` records which box key it was made for: a
+    subscription made for another key cannot be pushed to.
+    """
+    __tablename__ = "web_push_subscriptions"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    endpoint: Mapped[str] = mapped_column(String(2048), unique=True, nullable=False)
+    p256dh: Mapped[str] = mapped_column(String(128), nullable=False)
+    auth: Mapped[str] = mapped_column(String(64), nullable=False)
+    label: Mapped[str] = mapped_column(String(128), nullable=False, default="Phone")
+    platform: Mapped[str] = mapped_column(String(16), nullable=False, default="other")  # android | ios | desktop | other
+    user_agent: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    vapid_key_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_push_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_push_status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    last_push_error: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+
+
+class PushAlertModel(Base):
+    """One alert sent to web-app phones, followed until someone acknowledges it.
+
+    ``tier`` 1 phones get it at once; when nobody acknowledges within the
+    roster's delay (``escalate_at``), backup phones get it too
+    (``escalated_at``). ``sent_to`` lists the subscription ids that accepted it,
+    so "acknowledged by" can be shown on the same phones. Written and read by
+    services/push_alerts.py.
+    """
+    __tablename__ = "push_alerts"
+
+    alert_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    incident_id: Mapped[Optional[str]] = mapped_column(String(64), index=True, nullable=True)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    camera_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    title: Mapped[str] = mapped_column(String(256), nullable=False)
+    body: Mapped[str] = mapped_column(String(1024), nullable=False)
+    payload: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    escalate_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    escalated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    acknowledged_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    acknowledged_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, index=True, nullable=True)
+    sent_to: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    report: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)

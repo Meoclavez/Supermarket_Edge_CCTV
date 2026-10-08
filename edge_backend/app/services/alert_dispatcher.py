@@ -8,7 +8,10 @@
 3. pushes it to every non-revoked paired phone whose alert prefs match
    (event types, minimum severity, cameras, quiet hours), unless the camera is
    muted or the same alert type fired on that camera within
-   ``CAMERA_ALERT_COOLDOWN_SEC``.
+   ``CAMERA_ALERT_COOLDOWN_SEC``;
+4. pushes it to the installed dashboard web apps of the alert roster
+   (first priority, then backup if nobody acknowledges), see
+   :mod:`app.services.push_alerts`.
 
 It returns a delivery report stating what really happened per phone. With no
 push provider configured the outcome is ``not_configured``; nothing is ever
@@ -406,6 +409,17 @@ class AlertDispatcher:
         else:
             push_report = {"provider": "fcm_v1", "devices": 0, "targets": 0, "sent": 0, "failed": 0,
                            "skipped": "not pushed: dashboard-only event", "results": []}
+        # Installed dashboard web apps (Web Push): roster, threshold, escalation.
+        if push:
+            try:
+                from app.services.push_alerts import push_alerts
+
+                web_report = await push_alerts.on_alert(title, body, data, camera, bypass_cooldown=bypass_cooldown)
+            except Exception as exc:  # the log and the app push above stand regardless
+                logger.exception("web app push for %s failed", alert_id)
+                web_report = {"provider": "web_push", "pushed": False, "skipped": f"error: {exc}"}
+        else:
+            web_report = {"provider": "web_push", "pushed": False, "skipped": "not pushed: dashboard-only event"}
         return {
             "alert_id": alert_id,
             "event_type": et,
@@ -413,6 +427,7 @@ class AlertDispatcher:
             "logged": logged,
             "websocket_clients": ws_clients,
             "push": push_report,
+            "web_push": web_report,
         }
 
     async def send_test(self, paired_device_id: str) -> dict:

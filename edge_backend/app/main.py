@@ -200,6 +200,16 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         startup_log.exception(f"Shadow trial failed to start: {exc}")
 
+    # 4f. Phone alerts from the installed web app: escalation to backup people
+    # when nobody acknowledges, and the store-offline bundle held by the VPS.
+    from .services.push_alerts import push_alerts
+    from .services.offline_watchdog import offline_watchdog
+    try:
+        await push_alerts.start()
+        await offline_watchdog.start()
+    except Exception as exc:
+        startup_log.exception(f"Phone alert services failed to start: {exc}")
+
     # 5. Online access (dashboard through the owner's VPS): runs frpc only when
     # enabled, an address, tunnel server and token are set, and auth is on.
     from .services.remote_access_service import remote_access_service
@@ -241,6 +251,8 @@ async def lifespan(app: FastAPI):
         await recommendations_service.stop()
         await evidence_storage.stop()
         await daily_backup.stop()
+        await push_alerts.stop()
+        await offline_watchdog.stop()
         await asyncio.to_thread(shadow_trial.stop)
 
 
@@ -314,6 +326,11 @@ app.include_router(site_settings_routes.router)
 from .routes import users as users_routes  # noqa: E402
 
 app.include_router(users_routes.router)
+# Installed web app alerts (Web Push): phones, roster, escalation, acknowledge button.
+from .routes import push as push_routes  # noqa: E402
+
+app.include_router(push_routes.router)
+app.include_router(push_routes.ack_router)
 
 # Mount Static Files
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -328,6 +345,44 @@ def favicon():
 
     return FileResponse(STATIC_DIR / "favicon.svg", media_type="image/svg+xml",
                         headers={"Cache-Control": "public, max-age=86400"})
+
+@app.get("/sw.js", include_in_schema=False)
+def service_worker():
+    """The web app's service worker, at the root so its scope covers /dashboard.
+
+    no-cache: the browser checks for a new version on every page load, so a
+    deploy reaches installed phones at once.
+    """
+    from fastapi.responses import FileResponse
+
+    return FileResponse(STATIC_DIR / "sw.js", media_type="text/javascript",
+                        headers={"Cache-Control": "no-cache", "Service-Worker-Allowed": "/"})
+
+
+@app.get("/manifest.webmanifest", include_in_schema=False)
+def web_app_manifest():
+    """Install metadata (name, icons, start page) for "Install app" / "Add to Home Screen".
+
+    Named after the store, so an owner with several stores can tell the
+    installed apps apart on the home screen.
+    """
+    import json as _json
+
+    from fastapi.responses import Response
+
+    data = _json.loads((STATIC_DIR / "manifest.webmanifest").read_text(encoding="utf-8"))
+    try:
+        from .services.device_identity import get_identity
+
+        store = (get_identity().get("device_name") or "").strip()
+    except Exception:
+        store = ""
+    if store:
+        data["name"] = f"{store} CCTV"[:60]
+        data["short_name"] = store[:24]
+    return Response(_json.dumps(data), media_type="application/manifest+json",
+                    headers={"Cache-Control": "no-cache"})
+
 
 @app.get("/")
 def root(request: Request):
