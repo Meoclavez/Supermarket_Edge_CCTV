@@ -138,6 +138,8 @@
 .ss-cap-idle { color: var(--text-dim); }
 
 @media (max-width: 600px) {
-  .cam-view-tools { right: 8px; bottom: 32px; }
+  /* On a phone the bottom caption spans the tile, so the zoom tools sit under the
+     top-right badges instead of on top of the caption. */
+  .cam-view-tools { right: 8px; top: 36px; bottom: auto; }
   .vz-btn { min-width: 36px; min-height: 36px; }
 }

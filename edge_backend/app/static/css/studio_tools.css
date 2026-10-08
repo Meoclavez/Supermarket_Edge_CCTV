@@ -55,3 +55,10 @@
 .mask-mode-select { max-width: 180px; }
 .mask-colour-input { width: 32px; height: 28px; padding: 2px; border: 1px solid var(--border-strong); border-radius: var(--radius-xs); background: var(--surface); cursor: pointer; }
 .mask-row-status { flex-basis: 100%; }
+
+/* Phone: style.css turns .controls-strip into a wrapping column, where the
+   picker's 320px flex basis became its height and it stretched to the full
+   content width (4000+ px, cameras off screen). Keep it one scrollable row. */
+@media (max-width: 768px) {
+  .studio-camera-picker { flex: 0 0 auto; width: 100%; max-width: 100%; }
+}

@@ -621,6 +621,10 @@ than firing on empty data.
   while Web Push used confidence >= 0.75; Web Push escalated every theft alert.
 * **Deployed** 2026-10-09 01:57 AEDT (f9c288c): journal "backup before migrating to v19" then "applied migration
   0019_theft_alert_tiers" (grep the journal for `0019`, not `m0019`); 0 errors; box had 0 theft incidents at deploy.
+  Live read-only UI check after deploy passed (all pages, 80 icons, no JS errors, stale tokens, Ch 12 cut-out
+  grey "static"); phone fixes in the follow-up commit: Studio camera picker one scrollable row (was 4,171 px
+  wide), enlarged-tile zoom tools moved under the top badges, empty `.cam-hud-badge` hidden, tile footer wraps.
+  Known minor: icons/sprite.svg is served no-cache from an unversioned URL (revalidated ~every 4 s, 304s).
 * Tests: test_theft_tiers.py, test_theft_end_to_end.py, test_theft_tier_ui.py (+ fixtures/theft_tier_harness.js),
   test_ui_design_system.py.
 
