@@ -198,15 +198,16 @@ class Track:
     # has shown no motion beyond detector jitter.
     still_since: Optional[float] = None
     _anchor_kpts: Optional[np.ndarray] = field(default=None, repr=False)
+    # Box anchor: its top-centre point and its width (box_reference).
     _anchor_centre: Optional[tuple[float, float]] = field(default=None, repr=False)
-    _anchor_height: float = field(default=0.0, repr=False)
+    _anchor_width: float = field(default=0.0, repr=False)
     _anchor_scale: float = field(default=0.0, repr=False)
     _anchor_n: int = field(default=0, repr=False)
     _anchor_bbox: Optional[tuple] = field(default=None, repr=False)
     # Since when motion on a remembered/static figure has been put down to
     # occlusion (anchor box unchanged), see ByteTracker._occluded.
     _occluded_since: Optional[float] = field(default=None, repr=False)
-    # Recent (centre x, centre y, height) for the box-motion jitter floor.
+    # Recent (top-centre x, top y, width) for the box-motion jitter floor.
     _box_hist: deque = field(default_factory=lambda: deque(maxlen=MOTION_JITTER_WINDOW + 1), repr=False)
     _motion_streak: int = field(default=0, repr=False)
     _motion_obs_at: Optional[float] = field(default=None, repr=False)
@@ -435,6 +436,14 @@ MOTION_JITTER_PERCENTILE = 75.0
 MOTION_JITTER_WINDOW = 50
 MOTION_JITTER_MIN_STEPS = 8
 _POSE_MEDIAN_FRAMES = 3
+# A joint's motion counts only if it was visible on at least this share of
+# the track's recent observations (MOTION_JITTER_WINDOW). On the store's
+# cut-out, feet hidden behind a cooler, the model "found" knees and an ankle
+# (confidence 0.2-0.4 -> 0.7-0.97, 0.2-0.9 torso lower) on 1-2 % of analysed
+# frames, sometimes two in a row: with the pose median taken over frames
+# where the joint was not even visible, that was "motion" every few minutes.
+# A real person's limbs are visible most of the time.
+MOTION_JOINT_MIN_SEEN = 0.5
 # At most this many remembered static boxes per camera (oldest-seen dropped).
 STATIC_MEMORY_MAX = 32
 # Joints seen in both poses needed to compare two poses (memory match).
@@ -493,22 +502,29 @@ def joint_motion_over_floor(hist, anchor: Optional[np.ndarray], ref: float, frac
     ``hist`` holds the track's recent (17, 3) poses, newest last. A joint
     counts when its recent_pose position is further than
     max(``frac``, MOTION_JITTER_K x its frame-to-frame step percentile) x ``ref``
-    from the anchor (see MOTION_JITTER_K). The joint must be visible now and
-    in the anchor.
+    from the anchor (see MOTION_JITTER_K). The joint must be visible in the
+    anchor and on each of the last _POSE_MEDIAN_FRAMES observations (all the
+    positions its median is taken over), and, once the track has
+    MOTION_JITTER_MIN_STEPS steps, on at least MOTION_JOINT_MIN_SEEN of its
+    recent observations: a joint the model only now and then "finds" is not
+    a reliable one (see MOTION_JOINT_MIN_SEEN).
     """
     pos = recent_pose(hist)
     if pos is None or anchor is None or pos.shape != anchor.shape or pos.ndim != 2 or pos.shape[1] < 3:
         return False
     thr_vis = settings.KEYPOINT_VISIBILITY_THRESHOLD
-    both = (pos[:, 2] >= thr_vis) & (anchor[:, 2] >= thr_vis)
+    poses = [p for p in hist if p.shape == pos.shape]
+    h = np.stack(poses)
+    seen_obs = h[:, :, 2] >= thr_vis
+    both = seen_obs[-_POSE_MEDIAN_FRAMES:].all(axis=0) & (anchor[:, 2] >= thr_vis)
+    if len(poses) > MOTION_JITTER_MIN_STEPS:
+        both &= seen_obs.mean(axis=0) >= MOTION_JOINT_MIN_SEEN
     if not both.any():
         return False
     ref = max(float(ref), 1.0)
     dist = np.hypot(pos[:, 0] - anchor[:, 0], pos[:, 1] - anchor[:, 1]) / ref
     floor = np.full(pos.shape[0], float(frac), dtype=np.float64)
-    poses = [p for p in hist if p.shape == pos.shape]
     if len(poses) > MOTION_JITTER_MIN_STEPS:
-        h = np.stack(poses)
         seen = (h[1:, :, 2] >= thr_vis) & (h[:-1, :, 2] >= thr_vis)
         step = np.hypot(h[1:, :, 0] - h[:-1, :, 0], h[1:, :, 1] - h[:-1, :, 1]) / ref
         pct = column_percentiles(step, seen, MOTION_JITTER_PERCENTILE)
@@ -539,10 +555,32 @@ def column_percentiles(values: np.ndarray, valid: np.ndarray, q: float) -> np.nd
     return np.where(n > 0, out, np.nan)
 
 
+def box_reference(bbox) -> tuple[tuple[float, float], float]:
+    """The parts of a box its motion is measured on: top-centre point and width.
+
+    Not the bottom edge. Where a figure's feet are hidden (behind a display
+    stand, a counter, a shelf) the pose model's box bottom is its least
+    certain edge: on the store's life-size cut-out ("Dahua NVR Ch 12", feet
+    behind a drinks cooler, torso 76 px) x1, y1 and x2 stayed within 0.034
+    torso of their median over 386 analysed frames while y2 scattered by
+    0.12 torso (90th percentile) and, in ~2 % of frames, jumped 0.9-1.4
+    torso down when the model found legs in the stand (knee/ankle
+    confidence 0.2-0.4 -> 0.7-0.97), often on two analysed frames in a row
+    at ~3 frames/s. Measured on centre and height, that restarted the
+    stillness clock every minute or two, so the cut-out flipped between
+    moving and static and never stayed static at the higher analysed rates
+    (``inference_scheduler``). Whole-body motion -- walking, turning,
+    bending, standing up -- moves the top edge or the centre line; limbs
+    are the joints' job.
+    """
+    x1, y1, x2, _ = bbox
+    return ((x1 + x2) / 2.0, float(y1)), float(x2 - x1)
+
+
 def box_motion_floor(hist, ref: float, frac: float) -> float:
     """Box-motion threshold in torso lengths: ``frac``, raised by the box's own jitter.
 
-    ``hist`` holds recent (centre x, centre y, height). Like the joints'
+    ``hist`` holds recent (top-centre x, top y, width), see box_reference. Like the joints'
     floor (MOTION_JITTER_K x the 75th percentile of the frame-to-frame step,
     once MOTION_JITTER_MIN_STEPS steps are known), but capped at
     STATIC_BOX_JITTER_MAX_FRAC so a walk just before stopping cannot hide later
@@ -839,7 +877,8 @@ class ByteTracker:
     def _observe_motion(self, t: Track, now: float) -> None:
         """Update the track's motion state from this detection frame.
 
-        Motion = some joint (or the box centre/height) moved more than
+        Motion = some joint (or the box's top-centre point or width,
+        box_reference: not its bottom edge) moved more than
         STATIC_FIGURE_MOTION_FRAC of the torso length away from the anchor
         pose on MOTION_CONFIRM_FRAMES frames in a row. The anchor is reset on
         motion, so slow drift accumulates and counts, and jitter around a
@@ -848,7 +887,7 @@ class ByteTracker:
         motion through unsmoothed. A joint must also clear its own jitter
         floor (MOTION_JITTER_K) using the median of its last 3 positions, so
         a wrist the model keeps flipping on a small poster is not motion; the
-        box centre and height have the same kind of floor (box_motion_floor).
+        box has the same kind of floor (box_motion_floor).
 
         On a remembered static box (or an already static track): a detection
         gap of up to STATIC_MEMORY_MAX_GAP_SEC is still time (not only
@@ -860,8 +899,7 @@ class ByteTracker:
         if kp is not None and (kp.ndim != 2 or kp.shape[1] < 3):
             kp = None
         scale = body_scale(kp, t.bbox)
-        x1, y1, x2, y2 = t.bbox
-        centre, height = ((x1 + x2) / 2.0, (y1 + y2) / 2.0), max(y2 - y1, 1.0)
+        centre, width = box_reference(t.bbox)
         gap = None if t._motion_obs_at is None else now - t._motion_obs_at
         t._motion_obs_at = now
         remembered = self.static_filter and (t.is_static or self._memory_box_hit(t.bbox) is not None)
@@ -872,7 +910,7 @@ class ByteTracker:
 
         def reanchor() -> None:
             t._anchor_kpts = None if kp is None else kp.copy()
-            t._anchor_centre, t._anchor_height, t._anchor_scale = centre, height, scale
+            t._anchor_centre, t._anchor_width, t._anchor_scale = centre, width, scale
             t._anchor_bbox = tuple(t.bbox)
             t._anchor_n = 1
             t._motion_streak = 0
@@ -888,14 +926,14 @@ class ByteTracker:
             # comparison uses, so a pose held after a move is not averaged
             # half-way back by the frame that is still in the median window.
             kp = recent_pose(t._pose_hist)
-        t._box_hist.append((centre[0], centre[1], height))
+        t._box_hist.append((centre[0], centre[1], width))
         if t._anchor_centre is None or long_gap:
             reanchor()
         else:
             ref = max(t._anchor_scale, 1.0)
             frac = float(settings.STATIC_FIGURE_MOTION_FRAC)
             moved = float(np.hypot(centre[0] - t._anchor_centre[0], centre[1] - t._anchor_centre[1]))
-            moved = max(moved, abs(height - t._anchor_height))
+            moved = max(moved, abs(width - t._anchor_width))
             # Box and joints, each above its own jitter floor (MOTION_JITTER_K).
             if moved > box_motion_floor(t._box_hist, ref, frac) * ref or (
                     kp is not None and joint_motion_over_floor(t._pose_hist, t._anchor_kpts, ref, frac)):
@@ -912,7 +950,7 @@ class ByteTracker:
                     t.static_suspect = None
                     t.established = True
             elif t._motion_streak == 0 and t._anchor_n < MOTION_ANCHOR_FRAMES:
-                self._average_anchor(t, kp, centre, height, scale)
+                self._average_anchor(t, kp, centre, width, scale)
 
         if not self.static_filter:
             if t.motion_state == "static":
@@ -973,13 +1011,13 @@ class ByteTracker:
         return now - t._occluded_since <= float(settings.STATIC_OCCLUSION_MAX_SEC)
 
     @staticmethod
-    def _average_anchor(t: Track, kp, centre, height: float, scale: float) -> None:
+    def _average_anchor(t: Track, kp, centre, width: float, scale: float) -> None:
         """Fold a still observation into the anchor (running mean of the first few)."""
         n = t._anchor_n
         f = 1.0 / (n + 1)
         cx, cy = t._anchor_centre
         t._anchor_centre = (cx + (centre[0] - cx) * f, cy + (centre[1] - cy) * f)
-        t._anchor_height += (height - t._anchor_height) * f
+        t._anchor_width += (width - t._anchor_width) * f
         t._anchor_scale += (scale - t._anchor_scale) * f
         a = t._anchor_kpts
         if kp is not None and a is not None and a.shape == kp.shape:

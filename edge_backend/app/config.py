@@ -281,8 +281,10 @@ class Settings(BaseSettings):
     ANALYTICS_MOTION_WAKE: bool = os.getenv("ANALYTICS_MOTION_WAKE", "1").lower() not in ("0", "false", "no", "off")
     ANALYTICS_ACTIVE_HOLD_SEC: float = float(os.getenv("ANALYTICS_ACTIVE_HOLD_SEC", "4"))
     # Motion gate (services/motion_gate.py): a 64x48 grey thumbnail compared
-    # with a slowly learnt background (brightness fitted); a thumbnail pixel counts
-    # as changed above MOTION_GATE_THRESHOLD grey levels, and motion needs
+    # with a slowly learnt background (brightness fitted, globally and per
+    # area); a thumbnail pixel counts as changed above MOTION_GATE_THRESHOLD
+    # grey levels, pixels that flicker (clock overlay, signs, screens, lit
+    # glass; learnt per view) never count, and motion needs a group of
     # MOTION_GATE_MIN_PIXELS changed pixels (outside AI_IGNORE areas) on
     # MOTION_GATE_PERSIST frames in a row. A change over most of the picture
     # (lights, IR switch) re-learns the background instead.

@@ -621,6 +621,18 @@ than firing on empty data.
   `Track.predicted_bbox` / `predict_bbox(at)`, coasting predicted <= 3 s, stage-3 centre-distance match
   (gate max(0.25, 2.0 x dt) + half predicted travel box heights, cap 1.5, height ratio 1.5) keeps a fast
   walker's id, `TRACK_MAX_AGE_SEC` 5. Local UI check with real RTMO: 0 id switches over three fast pans.
+* **Deployed** 2026-10-08 21:10 AEDT (27f2347). Live at closing time: GPU 55-59 % (unchanged), cost 11.07 ms,
+  budget 54.2/s; two issues found live, fixed in the follow-up commit (replayed on real box captures):
+  (1) motion gate false-woke ~17 of 32 empty cameras: burnt-in OSD clock pixels + local lighting (street
+  light through doors, cycling sign/TV, shop window). Fix: per-pixel compare after 5x5 local brightness
+  ratio, learnt flicker map (duty > 8 % or >= 6 changes in 300 s, widened +-2 cols / +-1 row), motion needs
+  a 4-pixel 8-connected group; steady-state false wakes 1.51 -> 0.17 per camera-minute, active share
+  95 % -> 1 %, 120/120 synthetic walk-ins woken (median 0.1 s). (2) Ch 12 cut-out flipped because its
+  feet are hidden by a cooler: box bottom edge jitters (p90 0.12 torso, 2 % jumps of ~1 torso when RTMO
+  hallucinates knees/ankle). Fix: box motion measured on `box_reference()` (top-centre + width, not the
+  bottom edge); a joint counts only if seen on its last 3 observations and >= 50 % of recent ones
+  (`MOTION_JOINT_MIN_SEEN`); replay: 0 flips at 1.7 / 3 / 10 fps (was 4-11). Tests:
+  test_motion_gate_store.py, test_static_cutout_replay.py (fixtures from store-closed frames).
 * Tests: test_live_tracks_api.py, test_analysis_rate_settings.py, test_tracking_fast_motion.py,
   test_live_view_frontend.py (Node harness tests/fixtures/live_view_harness.js).
 
