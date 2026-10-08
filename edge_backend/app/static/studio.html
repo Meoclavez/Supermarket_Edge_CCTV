@@ -12,6 +12,7 @@
   <link rel="stylesheet" href="/static/css/studio_tools.css?v=2.6.0">
   <link rel="stylesheet" href="/static/css/live_video.css?v=2.6.0">
   <link rel="stylesheet" href="/static/css/ignore_areas.css?v=2.6.0">
+  <link rel="stylesheet" href="/static/css/live_view.css?v=2.6.0">
   <script src="/static/js/auth.js?v=2.6.0"></script>
 </head>
 <body>
@@ -49,9 +50,17 @@
     <div class="studio-grid">
       <div class="video-card">
         <div class="video-viewport" id="viewportWrapper">
-          <img id="streamImg" alt="Live camera feed with detector overlay" />
-          <video id="streamVideo" class="studio-video" muted playsinline autoplay disablepictureinpicture aria-label="Live camera video (direct connection)"></video>
-          <canvas id="interactiveCanvas"></canvas>
+          <!-- Zoomed as one (js/view_zoom.js): picture, AI overlay (js/live_overlay.js) and drawing canvas. -->
+          <div class="studio-stage" id="viewportStage">
+            <img id="streamImg" alt="Live camera feed with detector overlay" />
+            <video id="streamVideo" class="studio-video" muted playsinline autoplay disablepictureinpicture aria-label="Live camera video (direct connection)"></video>
+            <canvas id="interactiveCanvas"></canvas>
+          </div>
+          <span class="cam-hud-badge lo-status studio-ai-status" id="studioAiStatus" hidden></span>
+          <div class="studio-view-tools" id="studioViewTools">
+            <button type="button" class="vz-btn cam-ai-toggle" id="studioOverlayToggle" aria-pressed="true"
+              title="Show or hide the AI overlay (boxes, skeletons, behaviour)">AI</button>
+          </div>
           <!-- Opened by clicking a detected box: turn it into an ignore area. -->
           <div id="boxPopover" class="box-popover" role="dialog" aria-label="Detected box" hidden></div>
           <div id="viewportEmpty" class="viewport-empty" style="display:none;"></div>
@@ -388,6 +397,8 @@
   <div class="toast" id="toast">Notification</div>
 
   <script src="/static/js/webrtc_live.js?v=2.6.0" defer></script>
+  <script src="/static/js/view_zoom.js?v=2.6.0" defer></script>
+  <script src="/static/js/live_overlay.js?v=2.6.0" defer></script>
   <script src="/static/js/studio.js?v=2.6.0" defer></script>
   <script src="/static/js/theme.js?v=2.6.0" defer></script>
 </body>

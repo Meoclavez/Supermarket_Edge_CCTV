@@ -235,6 +235,18 @@ class CameraFeatureConfig(BaseModel):
                      "704x576, else the current sub-stream; never the main stream automatically), "
                      "sub (subtype=1) or main (subtype=0); empty = auto"),
     )
+    # Analysis rate (services/inference_scheduler.py). None = normal / the site default.
+    analysis_priority: Optional[Literal["low", "normal", "high"]] = Field(
+        None,
+        description=("Share of the GPU this camera gets when it has people or motion, against the other "
+                     "busy cameras: low (half), normal or high (double); empty = normal"),
+    )
+    max_analysis_fps: Optional[float] = Field(
+        None, ge=0.5, le=30,
+        description=("Most frames per second this camera is analysed at when it has people or motion "
+                     "(never more than it delivers, DECODE_MAX_FPS); empty = site default "
+                     "(ANALYTICS_MAX_DETECT_FPS)"),
+    )
     # Night watch schedule and options; None = never configured (off).
     night_watch: Optional[NightWatchConfig] = None
 

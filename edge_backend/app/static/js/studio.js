@@ -2,7 +2,7 @@
  * Camera Studio & Zone Editor
  *
  * One camera at a time: its live MJPEG feed with the tracker's real boxes
- * (/stream?camera_id=..&overlay=1), the pipeline's telemetry for that camera,
+ * (/stream?camera_id=..&overlay=0|1, see AI overlay below), the pipeline's telemetry for that camera,
  * snapshot / clip export, and the per-camera zone editor (tripwires,
  * restricted areas, checkout / queue areas, privacy masks, ignore areas and
  * product shelves).
@@ -26,6 +26,20 @@
  * backed by one direct WebRTC session (js/webrtc_live.js) instead of MJPEG.
  * It is raw camera video, without the detector's boxes. The session closes
  * when the tab is hidden or the page is left, and reopens when visible.
+ *
+ * AI overlay (js/live_overlay.js): on both the MJPEG feed and the direct video
+ * this page draws the tracked people itself (box, pose skeleton, live
+ * behaviour) from GET /api/v1/live/tracks, on a canvas under the drawing
+ * canvas; the MJPEG is then asked for without the server's own overlay. When
+ * the box does not offer live tracks, the MJPEG keeps the server overlay and
+ * direct video shows the plain boxes from live-status (as before).
+ *
+ * Zoom (js/view_zoom.js): wheel / pinch / drag / buttons / full screen on the
+ * viewport. The picture, the AI overlay and the drawing canvas sit in one
+ * stage (#viewportStage) that is transformed as a whole, so a click still maps
+ * to the right frame point: eventToNorm() reads the canvas's zoomed
+ * getBoundingClientRect(), and a drag to pan is never taken as a click.
+ * Drawing and box picking work at any zoom.
  */
 
 'use strict';
@@ -36,6 +50,10 @@ const ctx = canvas ? canvas.getContext('2d') : null;
 const streamImg = document.getElementById('streamImg');
 const streamVideo = document.getElementById('streamVideo');
 const viewport = document.getElementById('viewportWrapper');
+const viewStage = document.getElementById('viewportStage');
+const STUDIO_OVERLAY_KEY = 'studio';
+let studioOverlay = null;     // EdgeLiveOverlay view of the camera on screen
+let studioZoom = null;        // EdgeViewZoom handle of the viewport
 let studioRtc = null;         // direct-video session of the camera on screen (remote mode)
 let studioRtcRetry = null;
 
@@ -261,7 +279,7 @@ if (streamImg) {
     streamImg._retryTimer = setTimeout(() => {
       if (activeCameraId) {
         setViewportEmpty('');
-        const sUrl = `/stream?camera_id=${encodeURIComponent(activeCameraId)}&overlay=1&_t=${Date.now()}`;
+        const sUrl = `/stream?camera_id=${encodeURIComponent(activeCameraId)}&overlay=${studioServerOverlay()}&_t=${Date.now()}`;
         streamImg.src = window.edgeAuth && window.edgeAuth.authUrl ? window.edgeAuth.authUrl(sUrl) : sUrl;
       }
     }, 1500);
@@ -312,7 +330,8 @@ function openStudioVideo(cameraId) {
     if (state === 'connected') {
       const via = window.WebRtcLive.pairLabel(h.pair);
       setTransportBadge(`Direct${via ? ` · ${via}` : ''}`, 'ok',
-        'Direct peer-to-peer video; it does not pass through the online-access server. Raw camera video: the detector boxes are shown only on the store network.');
+        `Direct peer-to-peer video; it does not pass through the online-access server. ${studioOverlayNote()}`);
+      if (studioOverlay) studioOverlay.refresh();
       if (!streamVideo.videoWidth) setViewportEmpty('Connected. Waiting for the first picture…');
     } else if (state === 'failed') {
       studioRtc = null;
@@ -357,10 +376,101 @@ async function startFeed(cameraId) {
   setTransportBadge('', '');
   if (streamImg) {
     setViewportEmpty('');
-    const sUrl = `/stream?camera_id=${encodeURIComponent(cameraId)}&overlay=1`;
+    studioFeedOverlay = studioServerOverlay();
+    const sUrl = `/stream?camera_id=${encodeURIComponent(cameraId)}&overlay=${studioFeedOverlay}`;
     streamImg.src = window.edgeAuth && window.edgeAuth.authUrl ? window.edgeAuth.authUrl(sUrl) : sUrl;
   }
+  if (studioOverlay) studioOverlay.refresh();
 }
+
+// ------------------------------------------------------------ AI overlay and zoom
+let studioFeedOverlay = null;   // overlay= of the MJPEG on screen
+
+function studioOverlayOn() {
+  return !window.EdgeLiveOverlay || window.EdgeLiveOverlay.isEnabled(STUDIO_OVERLAY_KEY);
+}
+
+/** overlay= for the MJPEG: off when this page draws it (or the viewer hid it), else the server's own. */
+function studioServerOverlay() {
+  if (!studioOverlayOn()) return 0;
+  return window.EdgeLiveOverlay && window.EdgeLiveOverlay.clientDraws(STUDIO_OVERLAY_KEY) ? 0 : 1;
+}
+
+/** The page draws the overlay now (so the plain live-status boxes are not drawn twice). */
+function studioOverlayShowing() {
+  return !!(studioOverlay && studioOverlay.isShowing());
+}
+
+function studioOverlayNote() {
+  if (!studioOverlayOn()) return 'The AI overlay is turned off.';
+  const st = window.EdgeLiveOverlay ? window.EdgeLiveOverlay.status().state : 'unavailable';
+  if (st === 'unavailable' || st === 'denied') return 'Live AI data unavailable: only the plain detector boxes are drawn.';
+  return 'Boxes, skeletons and behaviour are drawn by this page from the box\'s live AI data.';
+}
+
+function renderStudioOverlayToggle() {
+  const b = el('studioOverlayToggle');
+  if (!b) return;
+  const on = studioOverlayOn();
+  b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  b.classList.toggle('active', on);
+  b.title = on ? 'AI overlay on: boxes, pose skeletons and live behaviour. Click to hide.' : 'AI overlay off. Click to show boxes, pose skeletons and live behaviour.';
+}
+
+function initStudioView() {
+  if (!viewport || !viewStage) return;
+  if (window.EdgeViewZoom) {
+    studioZoom = window.EdgeViewZoom.attach(viewport, viewStage, {
+      enabled: () => true,
+      controlsHost: el('studioViewTools'),
+      // No double-click zoom here: a click places a point or picks a box at once.
+      dblclickZoom: false,
+      onChange: () => {
+        if (studioOverlay) studioOverlay.redraw();
+        const pop = el('boxPopover');
+        if (pop && !pop.hidden && selectedBox) placeBoxPopover(pop, selectedBox);
+      },
+    });
+  }
+  if (window.EdgeLiveOverlay) {
+    studioOverlay = window.EdgeLiveOverlay.attach({
+      key: STUDIO_OVERLAY_KEY,
+      cameraId: activeCameraId,
+      stage: viewStage,
+      before: canvas,
+      media: () => (studioDirect() ? streamVideo : streamImg),
+      isActive: () => !!activeCameraId && !document.hidden
+        && (studioDirect() ? !!studioRtc : /\/stream\?/.test((streamImg && streamImg.getAttribute('src')) || '')),
+      statusEl: el('studioAiStatus'),
+      scale: () => (studioZoom ? studioZoom.state().s : 1),
+    });
+  }
+  const t = el('studioOverlayToggle');
+  if (t) {
+    t.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (window.EdgeLiveOverlay) window.EdgeLiveOverlay.toggle(STUDIO_OVERLAY_KEY);
+    });
+  }
+  renderStudioOverlayToggle();
+}
+
+// A toggle or a change in what the box offers: the MJPEG follows (server overlay on / off).
+window.addEventListener('edge:live-overlay', (e) => {
+  const d = (e && e.detail) || {};
+  if (d.key && d.key !== STUDIO_OVERLAY_KEY) return;
+  renderStudioOverlayToggle();
+  if (activeCameraId && !studioDirect() && streamImg && /\/stream\?/.test(streamImg.getAttribute('src') || '')
+    && studioFeedOverlay !== studioServerOverlay()) {
+    startFeed(activeCameraId);
+  }
+  if (studioRtc && studioRtc.state === 'connected') {
+    const via = window.WebRtcLive ? window.WebRtcLive.pairLabel(studioRtc.pair) : '';
+    setTransportBadge(`Direct${via ? ` · ${via}` : ''}`, 'ok',
+      `Direct peer-to-peer video; it does not pass through the online-access server. ${studioOverlayNote()}`);
+  }
+  drawOverlay();
+});
 
 // Hidden tab: webrtc_live.js closes every session. Visible again: reopen.
 document.addEventListener('visibilitychange', () => {
@@ -1603,7 +1713,10 @@ function drawLiveBoxes() {
   if (liveBoxesCamera !== activeCameraId) return;
   const W = canvas.width, H = canvas.height;
   const sel = selectedBox;
-  liveBoxes.forEach((b) => {
+  // The AI overlay draws these people (with skeletons) under this canvas, or the
+  // viewer hid it: the plain boxes stay clickable ("Not a person") but are not drawn twice.
+  const plain = studioOverlayOn() && !studioOverlayShowing();
+  if (plain) liveBoxes.forEach((b) => {
     const st = BOX_STYLE[b.state];
     const x = b.x1 * W, y = b.y1 * H, w = (b.x2 - b.x1) * W, h = (b.y2 - b.y1) * H;
     ctx.save();
@@ -1627,7 +1740,7 @@ function drawLiveBoxes() {
 
 /** The smallest live box under a normalised point (nested boxes: the inner one). */
 function liveBoxAt(x, y) {
-  if (liveBoxesCamera !== activeCameraId) return null;
+  if (liveBoxesCamera !== activeCameraId || !studioOverlayOn()) return null;   // overlay hidden: nothing to pick
   let best = null;
   liveBoxes.forEach((b) => {
     if (x < b.x1 || x > b.x2 || y < b.y1 || y > b.y2) return;
@@ -1641,10 +1754,15 @@ function placeBoxPopover(pop, b) {
   const box = contentBox();
   const W = viewport.clientWidth, H = viewport.clientHeight;
   const pw = pop.offsetWidth || 260, ph = pop.offsetHeight || 90;
-  const left = Math.max(8, Math.min(W - pw - 8, box.ox + b.x1 * box.w));
-  const below = box.oy + b.y2 * box.h + 6;
-  const above = box.oy + b.y1 * box.h - ph - 6;
-  const top = below + ph <= H - 4 ? below : (above >= 4 ? above : Math.max(4, Math.min(H - ph - 4, box.oy + b.y1 * box.h)));
+  // The popover sits outside the zoomed stage: the box's corners go through the zoom.
+  const z = studioZoom ? studioZoom.state() : { s: 1, tx: 0, ty: 0 };
+  const x1 = (box.ox + b.x1 * box.w) * z.s + z.tx;
+  const y1 = (box.oy + b.y1 * box.h) * z.s + z.ty;
+  const y2 = (box.oy + b.y2 * box.h) * z.s + z.ty;
+  const left = Math.max(8, Math.min(W - pw - 8, x1));
+  const below = y2 + 6;
+  const above = y1 - ph - 6;
+  const top = below + ph <= H - 4 ? below : (above >= 4 ? above : Math.max(4, Math.min(H - ph - 4, y1)));
   pop.style.left = `${left}px`;
   pop.style.top = `${top}px`;
 }
@@ -1789,6 +1907,7 @@ function selectCamera(cameraId) {
   }
   syncChecklistLink();
   resetLiveBoxes();
+  if (studioOverlay) studioOverlay.setCamera(cameraId);
   startFeed(cameraId);
   drawnPoints = [];
   loadZonesList();
@@ -1988,7 +2107,8 @@ async function runStudioSelfTest() {
       check('direct video rendered height > 100', rv.height > 100, `${rv.width.toFixed(0)}x${rv.height.toFixed(0)}`);
       check('direct video has a picture', streamVideo.videoWidth > 0, `${streamVideo.videoWidth}x${streamVideo.videoHeight}`);
     } else {
-      check('stream src has camera id + overlay', /\/stream\?camera_id=.+&overlay=1/.test(streamImg.getAttribute('src') || ''), streamImg.getAttribute('src'));
+      // overlay=0 while this page draws the AI overlay itself, overlay=1 when the box offers no live tracks.
+      check('stream src has camera id + overlay', new RegExp(`/stream\\?camera_id=.+&overlay=${studioFeedOverlay}`).test(streamImg.getAttribute('src') || ''), streamImg.getAttribute('src'));
       const r = streamImg.getBoundingClientRect();
       check('stream img rendered height > 100', r.height > 100, `${r.width.toFixed(0)}x${r.height.toFixed(0)}`);
       check('stream img naturalWidth > 0', streamImg.naturalWidth > 0, `${streamImg.naturalWidth}x${streamImg.naturalHeight}`);
@@ -2050,6 +2170,7 @@ async function runStudioSelfTest() {
 function initStudio() {
   if (getUrlParameter('__selftest') === '1') runStudioSelfTest();
   syncChecklistLink();
+  initStudioView();
   resizeCanvas();
   populateZoneNames();
   loadStudioSources();

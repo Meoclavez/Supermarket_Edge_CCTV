@@ -4,6 +4,10 @@
 // #settings-evidence  evidence size limit, age limit, disk limit, night watch limit and clip
 // #settings-alerts    high-value stock, repeat-alert quiet times, theft confidence,
 //                     exit-without-checkout, queue congestion
+// #settings-analysis  analysis speed (group "analysis"): GPU share for the pose model, decode
+//                     cap, per-camera ceiling, idle rate, motion wake; plus what the box can
+//                     sustain now (GET /api/v1/system/analysis-capacity, per camera allocated
+//                     vs measured frames per second). Keys the server does not offer are not shown.
 //
 // GET /api/v1/site-settings, GET /api/v1/site-settings/timezones (signed in),
 // PUT /api/v1/site-settings, DELETE /api/v1/site-settings/{key} (owner / admin).
@@ -22,6 +26,7 @@
   let zones = null;          // IANA names
   let pending = {};          // card -> values awaiting "Yes, save"
   let previewTimer = null;
+  let capacity = null;       // GET /system/analysis-capacity, or {error}
 
   const $ = (id) => document.getElementById(id);
 
@@ -75,7 +80,25 @@
         'RESTRICTED_AREA_COOLDOWN_SEC', 'THEFT_INCIDENT_COOLDOWN_SEC', 'THEFT_MIN_CONFIDENCE',
         'THEFT_EXIT_RULE_ENABLED', 'QUEUE_CONGESTED_WAIT_SEC'],
     },
+    analysis: {
+      host: 'settings-analysis', title: 'Analysis speed', group: 'analysis',
+      intro: 'How many camera frames per second the AI analyses. The box shares its capacity between the cameras: '
+        + 'cameras with people or movement get more, empty ones are checked slowly until something moves. '
+        + 'A camera\'s own priority and frame-rate cap are in its Settings.',
+      keys: ['POSE_BUDGET_UTILISATION', 'DECODE_MAX_FPS', 'ANALYTICS_MAX_DETECT_FPS', 'ANALYTICS_IDLE_DETECT_FPS',
+        'ANALYTICS_MOTION_WAKE'],
+    },
   };
+  // Stored as a fraction (0..1), edited and shown as a percentage.
+  const PERCENT_KEYS = ['THEFT_MIN_CONFIDENCE', 'POSE_BUDGET_UTILISATION'];
+  function isPct(s) {
+    return !!s && (PERCENT_KEYS.includes(s.key) || s.unit === 'fraction') && (s.max == null || Number(s.max) <= 1);
+  }
+  /** The keys a card shows: its own list, plus any other key the server puts in its group. */
+  function cardKeys(card) {
+    const extra = card.group && data && data.groups && Array.isArray(data.groups[card.group]) ? data.groups[card.group] : [];
+    return [...card.keys, ...extra.filter((k) => !card.keys.includes(k))];
+  }
   // Lowering one of these deletes evidence straight away.
   const LOWER_DELETES = ['EVIDENCE_MAX_GB', 'STORAGE_RETENTION_DAYS', 'STORAGE_MAX_DISK_PERCENT', 'NIGHT_WATCH_EVIDENCE_MAX_MB'];
 
@@ -88,9 +111,10 @@
     if (s.type === 'categories') return v.length ? v.join(', ') : 'None';
     if (s.type === 'str') return v === '' ? DASH : String(v);
     if (s.type === 'timezone') return v || "This device's own time zone";
-    if (s.key === 'THEFT_MIN_CONFIDENCE') return `${Math.round(v * 100)} %`;
+    if (isPct(s)) return `${Math.round(v * 100)} %`;
     if (s.zero_means && Number(v) === 0) return s.zero_means;
-    const unit = s.unit === 'GB' ? ' GB' : s.unit === 'MB' ? ' MB' : s.unit === '%' ? ' %' : s.unit === 's' ? ' s' : s.unit === 'days' ? ' days' : '';
+    const unit = s.unit === 'GB' ? ' GB' : s.unit === 'MB' ? ' MB' : s.unit === '%' ? ' %' : s.unit === 's' ? ' s'
+      : s.unit === 'days' ? ' days' : s.unit === 'fps' ? ' frames/s' : '';
     return `${Number(v).toLocaleString()}${unit}`;
   }
 
@@ -102,7 +126,7 @@
 
   function rangeHint(s) {
     if (s.type !== 'int' && s.type !== 'float') return '';
-    if (s.key === 'THEFT_MIN_CONFIDENCE') return `Allowed: ${Math.round(s.min * 100)}-${Math.round(s.max * 100)} %.`;
+    if (isPct(s)) return `Allowed: ${Math.round(s.min * 100)}-${Math.round(s.max * 100)} %.`;
     const lo = s.min != null ? Number(s.min).toLocaleString() : '';
     const hi = s.max != null ? Number(s.max).toLocaleString() : '';
     return `Allowed: ${s.zero_means ? '0 or ' : ''}${lo}-${hi}${s.unit && s.unit !== 'fraction' && s.unit !== 's' && s.unit !== 'days' ? ' ' + s.unit : ''}.`;
@@ -141,9 +165,9 @@
                  value="${auto ? '' : esc(s.value)}" ${auto || dis ? 'disabled' : ''} aria-label="Evidence size limit in GB"> <span class="ss-unit">GB</span>
         </div>`;
     }
-    if (s.key === 'THEFT_MIN_CONFIDENCE') {
+    if (isPct(s)) {
       return `${label}<div class="ss-inline"><input class="form-input ss-num" id="${id}" type="number" min="${Math.round(s.min * 100)}"
-          max="${Math.round(s.max * 100)}" step="1" value="${Math.round(s.value * 100)}" ${d}> <span class="ss-unit">%</span></div>`;
+          max="${Math.round(s.max * 100)}" step="1" value="${s.value == null ? '' : Math.round(s.value * 100)}" ${d}> <span class="ss-unit">%</span></div>`;
     }
     const step = s.type === 'int' ? 1 : (s.unit === '%' ? 1 : 'any');
     // The labels name their unit ("(days)", "(%)", "(seconds)", "(MB)").
@@ -185,11 +209,22 @@
       return;
     }
     const dis = !canEdit();
-    const items = card.keys.map((k) => data.settings[k]).filter(Boolean);
+    const items = cardKeys(card).map((k) => data.settings[k]).filter(Boolean);
+    if (!items.length) {
+      // This server does not offer these settings (older build): say so, show no empty form.
+      host.innerHTML = `
+        <div class="card-title"><span>${esc(card.title)}</span></div>
+        ${card.intro ? `<p class="ra-hint ss-intro">${esc(card.intro)}</p>` : ''}
+        <div class="form-status">This box does not offer these settings yet.</div>
+        ${name === 'analysis' ? capacityHtml() : ''}`;
+      bindCapacity(host);
+      return;
+    }
     host.innerHTML = `
       <div class="card-title"><span>${esc(card.title)}</span></div>
       ${card.intro ? `<p class="ra-hint ss-intro">${esc(card.intro)}</p>` : ''}
       ${name === 'evidence' ? usageHtml() : ''}
+      ${name === 'analysis' ? capacityHtml() : ''}
       <form class="ss-form" id="ss_form_${name}" autocomplete="off" novalidate>
         ${items.map((s) => field(s, dis)).join('')}
         ${dis ? '<div class="ra-hint">Only an owner or admin can change these settings.</div>' : `
@@ -202,6 +237,7 @@
     form.addEventListener('submit', (ev) => { ev.preventDefault(); onSave(name); });
     form.addEventListener('input', () => setStatus(name, ''));
     host.querySelectorAll('[data-ss-reset]').forEach((b) => b.addEventListener('click', () => onReset(name, b.dataset.ssReset)));
+    bindCapacity(host);
     if (name === 'store') {
       const tz = $(fid('SITE_TIMEZONE'));
       if (tz) tz.addEventListener('input', updatePreview);
@@ -232,7 +268,7 @@
   }
 
   function clearErrors(name) {
-    CARDS[name].keys.forEach((k) => { const e = $(`${fid(k)}_err`); if (e) e.textContent = ''; });
+    cardKeys(CARDS[name]).forEach((k) => { const e = $(`${fid(k)}_err`); if (e) e.textContent = ''; });
   }
 
   function showErrors(name, errors) {
@@ -294,7 +330,7 @@
     }
     if (raw === '') return null;   // refused below as "enter a number"
     const n = Number(raw);
-    if (s.key === 'THEFT_MIN_CONFIDENCE') return Number.isFinite(n) ? Math.round(n) / 100 : raw;
+    if (isPct(s)) return Number.isFinite(n) ? Math.round(n) / 100 : raw;
     return Number.isFinite(n) ? n : raw;
   }
 
@@ -350,7 +386,7 @@
     if (!data) return;
     clearErrors(name);
     const values = {};
-    CARDS[name].keys.forEach((k) => {
+    cardKeys(CARDS[name]).forEach((k) => {
       const s = data.settings[k];
       if (!s) return;
       const v = readValue(s);
@@ -381,6 +417,7 @@
       data = await res.json();
       delete pending[name];
       await loadEvidence();
+      if (name === 'analysis') await loadCapacity();
       renderCard(name);
       setStatus(name, (data.changed || []).length ? 'Saved. Applies now.' : 'Nothing changed.');
       applyStoreName();
@@ -447,6 +484,79 @@
     }
   }
 
+  // ------------------------------------------------------------------ analysis capacity
+
+  async function loadCapacity() {
+    try {
+      const res = await fetch('/api/v1/system/analysis-capacity', { cache: 'no-store' });
+      if (res.ok) capacity = await res.json();
+      else capacity = { error: res.status === 404 || res.status === 405 ? 'missing' : `HTTP ${res.status}` };
+    } catch (e) {
+      capacity = { error: 'no answer' };
+    }
+  }
+
+  function fpsText(v) {
+    if (v == null || !Number.isFinite(Number(v))) return DASH;
+    const n = Number(v);
+    return n < 10 ? n.toFixed(1) : String(Math.round(n));
+  }
+
+  /** What the box can sustain now, per camera: given (allocated) vs really analysed (measured). */
+  function capacityHtml() {
+    const refresh = '<button type="button" class="btn btn-xs" data-ss-capacity="refresh">Refresh</button>';
+    if (!capacity) return `<div class="ss-cap"><div class="ss-cap-head"><span class="ss-cap-title">Capacity now</span>${refresh}</div><div class="ra-hint">Loading…</div></div>`;
+    if (capacity.error) {
+      const why = capacity.error === 'missing' ? 'This box does not report its analysis capacity yet.' : `Capacity not available (${esc(capacity.error)}).`;
+      return `<div class="ss-cap"><div class="ss-cap-head"><span class="ss-cap-title">Capacity now</span>${refresh}</div><div class="ra-hint">${why}</div></div>`;
+    }
+    const c = capacity;
+    const cams = Array.isArray(c.cameras) ? c.cameras : [];
+    const prio = { low: 'Low', normal: 'Normal', high: 'High' };
+    const rows = cams.map((r) => `<tr>
+        <td>${esc(r.name || r.camera_id)}</td>
+        <td>${esc(prio[r.priority] || (r.priority ? r.priority : 'Normal'))}</td>
+        <td class="ss-cap-num">${fpsText(r.max_fps)}</td>
+        <td class="ss-cap-num">${fpsText(r.allocated_fps)}</td>
+        <td class="ss-cap-num">${fpsText(r.measured_fps)}</td>
+        <td>${r.active === false ? '<span class="ss-cap-idle">idle</span>' : (r.active === true ? 'busy' : DASH)}</td>
+      </tr>`).join('');
+    const cost = c.cost_ms != null && Number.isFinite(Number(c.cost_ms)) ? `${Number(c.cost_ms).toFixed(1)} ms per frame` : `${DASH} (not measured yet)`;
+    const budget = c.budget_per_sec != null && Number.isFinite(Number(c.budget_per_sec)) ? `${fpsText(c.budget_per_sec)} frames/s` : `${DASH} (not measured yet)`;
+    const total = c.total_allocated != null && Number.isFinite(Number(c.total_allocated)) ? `${fpsText(c.total_allocated)} frames/s` : DASH;
+    return `<div class="ss-cap">
+      <div class="ss-cap-head"><span class="ss-cap-title">Capacity now</span>${refresh}</div>
+      <div class="ss-usage">
+        <div><span class="telemetry-label">Pose model</span> ${esc(cost)}</div>
+        <div><span class="telemetry-label">Can sustain</span> ${esc(budget)}</div>
+        <div><span class="telemetry-label">Given out</span> ${esc(total)}</div>
+      </div>
+      ${cams.length ? `<div class="ss-cap-wrap"><table class="ss-cap-table">
+        <thead><tr><th>Camera</th><th>Priority</th><th class="ss-cap-num">Cap</th><th class="ss-cap-num">Given</th><th class="ss-cap-num">Analysed</th><th>Now</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>
+        <div class="ra-hint">Frames per second. "Given" is this camera's share of the AI; "Analysed" is what it really managed (measured).
+          Idle cameras (no people, no movement) are checked slowly and wake at once when something moves.</div>`
+        : '<div class="ra-hint">No camera is being analysed now.</div>'}
+    </div>`;
+  }
+
+  function bindCapacity(host) {
+    const b = host.querySelector('[data-ss-capacity="refresh"]');
+    if (!b) return;
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      await loadCapacity();
+      // Re-render only the readout, so values being typed in the form are kept.
+      const box = b.closest('.ss-cap');
+      if (box) {
+        const tmp = document.createElement('div');
+        tmp.innerHTML = capacityHtml();
+        box.replaceWith(tmp.firstElementChild);
+        bindCapacity(host);
+      }
+    });
+  }
+
   async function loadZones() {
     if (zones) return;
     try {
@@ -458,7 +568,7 @@
   async function load() {
     if (!data) renderAll();
     try {
-      const [res] = await Promise.all([fetch(API, { cache: 'no-store' }), loadEvidence(), loadZones()]);
+      const [res] = await Promise.all([fetch(API, { cache: 'no-store' }), loadEvidence(), loadZones(), loadCapacity()]);
       if (!res.ok) throw new Error((await errorOf(res, 'Site settings unavailable')).message);
       data = await res.json();
       pending = {};

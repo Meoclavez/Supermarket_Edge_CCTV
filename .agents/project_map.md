@@ -586,6 +586,44 @@ than firing on empty data.
 * **[`docs/supermarket_cctv/Supermarket_Edge_AI_CCTV_Hardware_and_Services_Guide.pdf`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/docs/supermarket_cctv/Supermarket_Edge_AI_CCTV_Hardware_and_Services_Guide.pdf):** Print-ready formal PDF document (5 pages, A4) detailing 32-camera deterministic mathematical sizing, single NVDEC decode throughput, 10-Pillar Foolproof Engineering Validation Matrix, itemized BOM, 32-channel store layout, and procurement checklist.
 * **[`docs/supermarket_cctv/Supermarket_Edge_AI_CCTV_Hardware_and_Services_Guide.html`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/docs/supermarket_cctv/Supermarket_Edge_AI_CCTV_Hardware_and_Services_Guide.html):** Paged-media HTML source for regenerating the 32-camera PDF specification document.
 
+## Live skeleton/behaviour overlay, analysis speed and zoom (2026-10-08)
+
+* **Model:** RTMO-s pose only (box + 17 keypoints per person); boxes without a skeleton were a
+  display gap (remote WebRTC had a box-only canvas; coasting tracks kept a frozen box), not a model change.
+* **Live data API** (`routes/live.py`, auth as `/layout/live`, allowed through the tunnel):
+  `GET /api/v1/live/tracks?cameras=a,b` (<= 16 ids) -> per camera `seq`, `analysed_at`, frame size,
+  measured `analysis_fps`, tracks with normalised `box`, `keypoints`, `velocity` (per s), `fresh`,
+  `age_sec`, `motion_state`, `behaviour` {level normal/watch/alert, labels, reaching_zone, conceal,
+  head_turns, pattern_score/threshold, incident_id/rule}; `GET /api/v1/live/behaviour` lists watch/alert
+  tracks. Behaviour comes from `pose_analytics.live_state()` (50 ms try-lock, 0.2 s cache per camera).
+* **Overlay:** `static/js/live_overlay.js` draws box + skeleton (joints vis >= 0.3) + behaviour chip on
+  continuous views (WebRTC tiles, enlarged MJPEG, Studio) with the stream at `overlay=0`; extrapolates by
+  velocity minus a 0.2 s picture delay (cap 0.3 s). Local grid tiles (stills every 1-5 s) keep the server
+  overlay (`render_overlay`), which now colours watch amber / alert red, adds labels, and draws coasting
+  tracks dashed at the Kalman-predicted box (skeleton only <= 1 s after the last match). Toggle
+  `#aiOverlayToggle`, stored in localStorage `edge.aiOverlay.v1`.
+* **Live behaviour:** `#liveBehaviourCard` (Loss prevention) and `#liveBehaviourStrip` (Cameras),
+  `static/js/live_behaviour.js`; click / theft banner "Watch live" -> `openCameraLive(cam, {trackId})`.
+* **Zoom:** `static/js/view_zoom.js` on the enlarged tile and Studio: wheel at cursor, pinch, drag-pan,
+  - / 1x / + buttons, double-click 2x (tiles), fullscreen; picture + overlay + Studio drawing canvas share
+  one transformed stage so clicks and overlays stay aligned.
+* **Analysis speed** (`services/inference_scheduler.py`, `services/motion_gate.py`): budget =
+  `POSE_BUDGET_UTILISATION x 1000 / measured cost_ms`; quiet cameras (no people, no motion for
+  `ANALYTICS_ACTIVE_HOLD_SEC` 4) run at `ANALYTICS_IDLE_DETECT_FPS` (0.5); a 64x48 luma frame-difference
+  gate (~56-107 us/frame, lighting-compensated, AI_IGNORE excluded) wakes them at once
+  (`ANALYTICS_MOTION_WAKE`); the rest is split max-min by priority weight (low 0.5 / normal 1 / high 2)
+  up to `ANALYTICS_MAX_DETECT_FPS` (10) or the camera's `max_analysis_fps`. `DECODE_MAX_FPS` default 10
+  (change reopens captures). Settings -> Analysis speed (`#settings-analysis`, site_settings group
+  `analysis`), camera editor `#configAnalysisPriority` / `#configMaxAnalysisFps`, capacity
+  `GET /api/v1/system/analysis-capacity`. Simulated at 10.9 ms, 32 cameras, util 0.6: 4 busy cameras
+  10 fps each, 8 -> 5.4, 16 -> 2.9 (was 1.7 for all).
+* **Tracker:** Kalman predicts with real dt (noise scaled per 0.2 s), `velocity_px` is px/s,
+  `Track.predicted_bbox` / `predict_bbox(at)`, coasting predicted <= 3 s, stage-3 centre-distance match
+  (gate max(0.25, 2.0 x dt) + half predicted travel box heights, cap 1.5, height ratio 1.5) keeps a fast
+  walker's id, `TRACK_MAX_AGE_SEC` 5. Local UI check with real RTMO: 0 id switches over three fast pans.
+* Tests: test_live_tracks_api.py, test_analysis_rate_settings.py, test_tracking_fast_motion.py,
+  test_live_view_frontend.py (Node harness tests/fixtures/live_view_harness.js).
+
 ## Dashboard shell and operator workflow (2026-09-24)
 
 * **Navigation:** five tabs plus a Settings gear: **Today** (default after sign-in), **Cameras**, **Store map**, **Insights**, **Loss prevention**. Old hashes redirect (`LEGACY_ROUTES` / `resolveRoute` in `static/js/analytics.js`): `#matrix`→`#cameras`, `#floorplan`→`#map`, `#analytics`→`#insights/footfall`, `#actions`/`#market_ai`→`#insights`, `#digest`→`#insights/report`, `#theft`→`#loss`. Phones get a bottom tab bar.

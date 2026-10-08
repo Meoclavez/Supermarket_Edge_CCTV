@@ -643,9 +643,9 @@ function filterCamerasBySearch(query) {
   applyGridSlots();
 }
 
-const FPS_LABEL = { 1: 'Low', 5: 'Normal', 15: 'High' };
+const FPS_LABEL = { 1: 'Low', 5: 'Normal', 15: 'High', 25: 'Full' };
 // Pause between two pictures of one grid tile, by "Video smoothness".
-const TILE_REFRESH_MS = { 1: 5000, 5: 2000, 15: 1000 };
+const TILE_REFRESH_MS = { 1: 5000, 5: 2000, 15: 1000, 25: 1000 };
 
 /** Video smoothness: how often grid tiles refresh, and the enlarged tile's stream rate. */
 function setDecimationFPS(fps) {
@@ -665,9 +665,30 @@ function setDecimationFPS(fps) {
   }
 }
 
+/*
+ * AI overlay (js/live_overlay.js): on live video (the enlarged MJPEG stream,
+ * direct video) this page draws the boxes, skeletons and behaviour itself from
+ * GET /api/v1/live/tracks, so the server picture is asked for WITHOUT its own
+ * overlay (no double drawing). Grid tiles on the store network are single
+ * pictures refreshed every few seconds: their overlay is burned in by the
+ * server on the same frame, so it always matches the picture. "AI overlay:
+ * Off" asks for clean pictures everywhere. When the box offers no live tracks
+ * (404), the enlarged stream falls back to the server's own overlay.
+ */
+const AI_OVERLAY_KEY = 'cameras';
+function aiOverlayOn() {
+  return !window.EdgeLiveOverlay || window.EdgeLiveOverlay.isEnabled(AI_OVERLAY_KEY);
+}
+/** overlay= for a server picture: live=true for the streaming (enlarged) view. */
+function serverOverlayParam(live) {
+  if (!aiOverlayOn()) return 0;
+  if (live && window.EdgeLiveOverlay && window.EdgeLiveOverlay.clientDraws(AI_OVERLAY_KEY)) return 0;
+  return 1;
+}
+
 function streamUrl(cameraId, maxWidth) {
   const size = maxWidth ? `&max_width=${maxWidth}` : '';
-  const base = `/stream?camera_id=${encodeURIComponent(cameraId)}&fps=${currentDecimationFPS}&overlay=1${size}`;
+  const base = `/stream?camera_id=${encodeURIComponent(cameraId)}&fps=${currentDecimationFPS}&overlay=${serverOverlayParam(true)}${size}`;
   return window.edgeAuth && window.edgeAuth.authUrl ? window.edgeAuth.authUrl(base) : base;
 }
 
@@ -824,9 +845,15 @@ function buildCameraCard(cam, slot) {
     <div class="camera-video-container" data-focus-for="${id}" role="button" tabindex="0" aria-pressed="false"
       title="Click to enlarge and watch this camera live" onclick="focusCameraTile('${id}')"
       onkeydown="if (event.target === this && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); focusCameraTile('${id}'); }">
-      <img class="camera-img" data-camera-id="${id}" alt="${escapeHtml(cam.name)} live picture" />
-      <video class="camera-video" data-video-for="${id}" muted playsinline autoplay disablepictureinpicture aria-label="${escapeHtml(cam.name)} live video"></video>
+      <div class="cam-stage" data-stage-for="${id}">
+        <img class="camera-img" data-camera-id="${id}" alt="${escapeHtml(cam.name)} live picture" />
+        <video class="camera-video" data-video-for="${id}" muted playsinline autoplay disablepictureinpicture aria-label="${escapeHtml(cam.name)} live video"></video>
+      </div>
       <div class="cam-rtc-fail" data-rtc-fail-for="${id}" hidden></div>
+      <div class="cam-view-tools" data-tools-for="${id}">
+        <button type="button" class="vz-btn cam-ai-toggle" data-ai-toggle aria-pressed="true" onclick="event.stopPropagation(); toggleAiOverlay()"
+          title="Show or hide the AI overlay (boxes, skeletons, behaviour)">AI</button>
+      </div>
       <div class="camera-overlay-top">
         <span class="cam-hud-badge ${online ? 'cam-hud-stale' : 'cam-hud-offline'}" data-live-for="${id}">${online ? '● waiting for picture' : '● ' + escapeHtml(cameraStatusLabel(cam.status))}</span>
         <span class="cam-hud-badge" data-res-for="${id}" title="Picture size">${DASH}</span>
@@ -834,6 +861,7 @@ function buildCameraCard(cam, slot) {
       <div class="camera-overlay-bottom">
         <span class="cam-hud-badge" data-hud-for="${id}" title="People the camera sees right now, and whether it is placed on the store map">${DASH}</span>
         <span class="cam-hud-badge" data-age-for="${id}" title="Age of the newest picture"></span>
+        <span class="cam-hud-badge lo-status" data-ai-for="${id}" hidden></span>
       </div>
     </div>
 
@@ -932,6 +960,7 @@ function applyGridSlots() {
       host.insertBefore(card, after || null);
       setCardPinned(card, L.pins[slot] === id);
       tileFeedRegister(id, card.querySelector('img.camera-img'));
+      tileViewAttach(id, card);
     });
   }
 
@@ -1280,7 +1309,7 @@ async function measureCameraStreams() {
  * cameras took every connection, so the Settings dialog, "Camera setup" and
  * every poll queued behind video that never ends. Tiles now refresh from
  * GET /api/v1/cameras/{id}/snapshot?annotate=false&overlay=1 (the tracker's
- * own boxes, no inference): only tiles on screen, at most TILE_MAX_IN_FLIGHT
+ * own boxes and skeletons drawn on that frame, no inference; overlay=0 with "AI overlay: Off"): only tiles on screen, at most TILE_MAX_IN_FLIGHT
  * requests at a time, and only while the Cameras view is shown in a visible
  * tab. One tile at a time can be enlarged; only that one streams live.
  *
@@ -1348,6 +1377,7 @@ function tileFeedUnregister(id) {
     tileFeed.focusId = null;
   }
   tileRtcClose(t, 'rotated-out');
+  tileViewDetach(t);
   clearTimeout(t.img._retryTimer);
   if (t.ctl) t.ctl.abort();
   if (t.url) URL.revokeObjectURL(t.url);
@@ -1362,6 +1392,7 @@ function tileFeedReset() {
   if (tileFeed.observer) tileFeed.observer.disconnect();
   tileFeed.tiles.forEach((t) => {
     tileRtcClose(t, 'rerender');
+    tileViewDetach(t);
     if (t.ctl) t.ctl.abort();
     if (t.url) URL.revokeObjectURL(t.url);
     t.url = null;
@@ -1444,6 +1475,7 @@ function tileRtcOpen(t, purpose) {
     // No re-pump from here: the 500 ms tick reopens a tile that is still on
     // screen, so a close during pagehide / hide cannot reopen in a loop.
     renderTileLive(t.id);
+    if (window.EdgeLiveOverlay) window.EdgeLiveOverlay.refresh();    // the overlay follows the session
   });
   renderTileLive(t.id);
 }
@@ -1507,7 +1539,7 @@ async function fetchTilePicture(t) {
   tileFeed.inFlight += 1;
   const timer = setTimeout(() => ctl.abort(), TILE_TIMEOUT_MS);
   try {
-    const url = `/api/v1/cameras/${encodeURIComponent(t.id)}/snapshot?annotate=false&overlay=1&max_width=${previewWidth(t.img)}`;
+    const url = `/api/v1/cameras/${encodeURIComponent(t.id)}/snapshot?annotate=false&overlay=${serverOverlayParam(false)}&max_width=${previewWidth(t.img)}`;
     const res = await fetch(url, { signal: ctl.signal, cache: 'no-store', priority: 'low' });
     if (res.status === 403) {
       const body = await res.json().catch(() => ({}));
@@ -1602,7 +1634,7 @@ function rtcTileBadge(t) {
   const via = window.WebRtcLive ? window.WebRtcLive.pairLabel(h.pair) : '';
   const how = `Direct peer-to-peer video${h.pair ? ` (this browser: ${h.pair.local || '?'}, store: ${h.pair.remote || '?'}, ${h.pair.protocol || '?'})` : ''}`
     + `${h.codec ? ` · ${h.codec}${h.transcoded ? ' (converted on the box)' : ''}` : ''}. It does not pass through the online-access server.`
-    + ' Detector boxes are not drawn on direct video.';
+    + ` ${aiOverlayNote()}`;
   const age = t.lastFrameAt ? (Date.now() - t.lastFrameAt) / 1000 : null;
   if (age !== null && age * 1000 <= TILE_LIVE_MS) return { text: `● LIVE · Direct${via ? ` · ${via}` : ''}`, kind: 'live', tip: how };
   if (age !== null) return { text: `● video stalled ${formatDuration(age)}`, kind: 'stale', tip: how };
@@ -1655,6 +1687,8 @@ function setTileFocus(id) {
   });
   if (prev) renderTileLive(prev);
   if (id) renderTileLive(id);
+  tileFeed.tiles.forEach((t) => { if (t.zoom) t.zoom.update(); });
+  if (window.EdgeLiveOverlay) window.EdgeLiveOverlay.refresh();
 }
 
 /** Tile click: enlarge that camera with a live stream; click again to shrink it. */
@@ -1687,7 +1721,10 @@ function openFocusStream(id) {
     }, 1500);
   };
   t.streamHash = null;
+  t.focusWidth = previewWidth(img);
+  t.focusOverlay = serverOverlayParam(true);
   img.src = `${streamUrl(id, previewWidth(img))}&_t=${Date.now()}`;
+  if (window.EdgeLiveOverlay) window.EdgeLiveOverlay.refresh();
 }
 
 /** Drop the live stream (removing the src closes its connection). */
@@ -1701,6 +1738,165 @@ function closeFocusStream() {
     if (t.url) t.img.src = t.url;      // the last picture, until live again
   }
 }
+
+// ---- AI overlay and zoom on the tiles (js/live_overlay.js, js/view_zoom.js)
+
+/**
+ * Whether this page draws the AI overlay on a tile now: direct video (every
+ * tile on screen, or only the enlarged one), or the enlarged tile's live MJPEG
+ * stream on the store network. Grid pictures carry the server's overlay.
+ */
+function tileOverlayActive(t) {
+  if (!t || !t.img.isConnected || !t.visible || !tileFeedActive()) return false;
+  const transport = liveTransport();
+  if (transport === 'webrtc') return !!t.rtc && (!tileFeed.focusId || tileFeed.focusId === t.id);
+  if (transport === 'local') return tileFeed.focusId === t.id && /\/stream\?/.test(t.img.getAttribute('src') || '');
+  return false;
+}
+
+function tileViewAttach(id, card) {
+  const t = tileFeed.tiles.get(id);
+  const stage = card.querySelector('.cam-stage');
+  if (!t || !stage) return;
+  if (window.EdgeViewZoom && t.box) {
+    t.zoom = window.EdgeViewZoom.attach(t.box, stage, {
+      enabled: () => tileFeed.focusId === id,
+      controlsHost: card.querySelector('.cam-view-tools'),
+      dblclickZoom: true,
+      // A single click on the enlarged tile still shrinks it (held briefly to tell it from a double click).
+      onClick: () => { if (tileFeed.focusId === id) focusCameraTile(id); },
+      onChange: () => { if (t.overlay) t.overlay.redraw(); upgradeFocusWidthSoon(t); },
+    });
+  }
+  if (window.EdgeLiveOverlay) {
+    t.overlay = window.EdgeLiveOverlay.attach({
+      key: AI_OVERLAY_KEY,
+      cameraId: id,
+      stage,
+      media: () => (liveTransport() === 'webrtc' ? t.video : t.img),
+      isActive: () => tileOverlayActive(t),
+      statusEl: card.querySelector('[data-ai-for]'),
+      scale: () => (t.zoom ? t.zoom.state().s : 1),
+    });
+  }
+  renderAiOverlayToggles();
+}
+
+function tileViewDetach(t) {
+  if (!t) return;
+  clearTimeout(t.widthTimer);
+  if (t.overlay) { t.overlay.detach(); t.overlay = null; }
+  if (t.zoom) { t.zoom.destroy(); t.zoom = null; }
+}
+
+/** Zoomed in on the store network: ask the stream for a wider picture once the gesture settles. */
+function upgradeFocusWidthSoon(t) {
+  clearTimeout(t.widthTimer);
+  t.widthTimer = setTimeout(() => {
+    if (tileFeed.focusId !== t.id || liveTransport() !== 'local' || !tileFeedActive()) return;
+    if (!/\/stream\?/.test(t.img.getAttribute('src') || '')) return;
+    if (previewWidth(t.img) > (t.focusWidth || 0)) openFocusStream(t.id);
+  }, 800);
+}
+
+/** One sentence for tooltips: what the AI overlay on direct video is doing now. */
+function aiOverlayNote() {
+  if (!window.EdgeLiveOverlay) return 'Detector boxes are not drawn on direct video.';
+  if (!aiOverlayOn()) return 'The AI overlay is turned off.';
+  const st = window.EdgeLiveOverlay.status().state;
+  if (st === 'unavailable' || st === 'denied') return 'Live AI data unavailable: no AI overlay on direct video.';
+  return 'Boxes, skeletons and behaviour are drawn by this page from the box\'s live AI data.';
+}
+
+function renderAiOverlayToggles() {
+  const on = aiOverlayOn();
+  const st = window.EdgeLiveOverlay ? window.EdgeLiveOverlay.status().state : 'unknown';
+  const off = st === 'unavailable' || st === 'denied';
+  const main = el('aiOverlayToggle');
+  if (main) {
+    main.setAttribute('aria-pressed', on ? 'true' : 'false');
+    main.classList.toggle('active', on);
+    main.textContent = on ? 'AI overlay: On' : 'AI overlay: Off';
+    main.title = on
+      ? `Boxes, pose skeletons and live behaviour are drawn on the video. Click to hide them.${off ? ' Live AI data is unavailable on this box: enlarged pictures on the store network show the server\'s own boxes; direct video shows none.' : ''}`
+      : 'The AI overlay is hidden. Click to show boxes, pose skeletons and live behaviour on the video.';
+  }
+  document.querySelectorAll('[data-ai-toggle]').forEach((b) => {
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    b.classList.toggle('active', on);
+  });
+}
+
+/** "AI overlay: On/Off" (remembered in this browser). */
+function toggleAiOverlay() {
+  if (!window.EdgeLiveOverlay) { showToast('The AI overlay did not load on this page. Reload it to try again.', 'error'); return; }
+  window.EdgeLiveOverlay.toggle(AI_OVERLAY_KEY);
+}
+
+// A toggle or a change in what the box offers: the enlarged stream and the
+// grid pictures follow (server overlay on / off), and the buttons too.
+window.addEventListener('edge:live-overlay', (e) => {
+  renderAiOverlayToggles();
+  const d = (e && e.detail) || {};
+  if (d.key && d.key !== AI_OVERLAY_KEY) return;
+  const focus = tileFeed.focusId ? tileFeed.tiles.get(tileFeed.focusId) : null;
+  if (focus && liveTransport() === 'local' && tileFeedActive() && /\/stream\?/.test(focus.img.getAttribute('src') || '')
+    && focus.focusOverlay !== serverOverlayParam(true)) {
+    openFocusStream(focus.id);
+  }
+  if (d.key) tileFeed.tiles.forEach((t) => { t.lastTry = 0; });   // toggled: refresh the pictures now
+  pumpTiles();
+});
+
+/** Settings → Analysis speed (the analysed frame rate is set there). */
+function openAnalysisSettings() {
+  switchTab('settings');
+  setTimeout(() => jumpTo('settings-analysis'), 80);
+  return false;
+}
+
+/**
+ * Open one camera live, enlarged, on the Cameras tab (theft banner, Live
+ * behaviour, a review card). A camera outside the four tiles on screen is
+ * brought into one; the person (track) is outlined when the box still tracks it.
+ */
+function openCameraLive(cameraId, opts) {
+  const o = opts || {};
+  switchTab('cameras');
+  const cam = cameraById(cameraId);
+  if (!cam) {
+    showToast(allCamerasList.length ? 'That camera is not in the camera list any more.' : 'The camera list is still loading. Try again in a moment.', 'error');
+    return false;
+  }
+  if (cameraIsOff(cam)) {
+    showToast(`${cam.name || cameraId} is turned off: there is no live video. Turn it on below the camera grid.`, 'error');
+    return false;
+  }
+  let L = cameraGrid.layout || gridLayout();
+  if (!L.slots.includes(cameraId)) {
+    if (!gridPool().some((c) => c.id === cameraId)) {
+      // Hidden by the area filter or the search: show every area again.
+      cameraGrid.search = '';
+      const input = el('cameraSearchInput');
+      if (input) input.value = '';
+      activeCameraFilter = 'ALL';
+      document.querySelectorAll('.channel-pill').forEach((pill) => pill.classList.toggle('active', pill.getAttribute('data-filter') === 'ALL'));
+    }
+    L = gridLayout();
+    const idx = L.rotating.indexOf(cameraId);
+    if (idx >= 0) cameraGrid.offset = idx;
+    cameraGrid.nextAt = 0;
+    applyGridSlots();
+  }
+  if (!tileFeed.tiles.has(cameraId)) {
+    showToast('That camera could not be shown: all four tiles are pinned to other cameras. Unpin one and try again.', 'error');
+    return false;
+  }
+  if (tileFeed.focusId !== cameraId) focusCameraTile(cameraId);
+  if (o.trackId && window.EdgeLiveOverlay) window.EdgeLiveOverlay.highlight(cameraId, o.trackId, 20000);
+  return true;
+}
+window.openCameraLive = openCameraLive;
 
 /**
  * An MJPEG <img> fires "load" only for its first picture, so the enlarged
@@ -2189,6 +2385,10 @@ async function openCameraConfigModal(cameraId) {
     ? Math.round(feats.person_max_frame_fraction * 1000) / 10 : '');
   safeSet('configStreamQuality', ['auto', 'sub', 'main'].includes(feats.stream_quality) ? feats.stream_quality : 'auto');
   loadCameraStreamStatus(cam.id);
+  // Analysis speed: priority (empty = Auto) and frame-rate cap (empty = site default).
+  safeSet('configAnalysisPriority', ANALYSIS_PRIORITIES.includes(feats.analysis_priority) ? feats.analysis_priority : '');
+  safeSet('configMaxAnalysisFps', isNum(feats.max_analysis_fps) ? feats.max_analysis_fps : '');
+  loadCameraAnalysisRate(cam.id);
 
   const bounds = layoutSnapshot ? ` Store is ${layoutSnapshot.width_m} × ${layoutSnapshot.height_m} m.` : '';
   const live = ((pipelineSnapshot && pipelineSnapshot.cameras) || []).find((c) => c.camera_id === cameraId);
@@ -2202,6 +2402,38 @@ async function openCameraConfigModal(cameraId) {
   cameraConfigAllowDuplicate = false;
   modal.style.display = 'flex';
   modal.setAttribute('data-camera-object', JSON.stringify(cam));
+}
+
+const ANALYSIS_PRIORITIES = ['low', 'normal', 'high'];
+const PRIORITY_LABEL = { low: 'Low', normal: 'Normal', high: 'High' };
+
+/** "Analysing now": this camera's share of the pose model, from GET /api/v1/system/analysis-capacity. */
+async function loadCameraAnalysisRate(cameraId) {
+  const node = el('configAnalysisRateNow');
+  if (!node) return;
+  node.textContent = 'Checking the analysed rate…';
+  let res = null;
+  let body = null;
+  try {
+    res = await fetch('/api/v1/system/analysis-capacity', { cache: 'no-store' });
+    if (res.ok) body = await res.json();
+  } catch (_) { res = null; }
+  const modal = el('modalCameraConfig');
+  if (!modal || modal.style.display === 'none' || (el('configCameraId') && el('configCameraId').value !== cameraId)) return;
+  if (!res || !body) {
+    node.textContent = res && (res.status === 404 || res.status === 405)
+      ? 'This box does not report its analysis capacity yet.'
+      : `Analysed rate not available${res ? ` (HTTP ${res.status})` : ' (no answer)'}.`;
+    return;
+  }
+  const row = (Array.isArray(body.cameras) ? body.cameras : []).find((c) => c && c.camera_id === cameraId);
+  if (!row) { node.textContent = 'This camera is not being analysed now (turned off, offline or no AI features on).'; return; }
+  const fps = (v) => (isNum(v) ? `${v < 10 ? v.toFixed(1) : Math.round(v)} frames/s` : DASH);
+  const parts = [`Now: given ${fps(row.allocated_fps)}, measured ${fps(row.measured_fps)}`];
+  if (row.priority) parts.push(`priority ${PRIORITY_LABEL[row.priority] || row.priority}`);
+  if (isNum(row.max_fps)) parts.push(`cap ${fps(row.max_fps)}`);
+  if (row.active === false) parts.push('idle (no people or movement): analysed slowly until something moves');
+  node.textContent = `${parts.join(' · ')}.`;
 }
 
 /**
@@ -2318,6 +2550,22 @@ async function handleCameraConfigSubmit(event) {
     staticSeconds = secs;
   }
 
+  // Most analysed frames per second for this camera; empty = the site default.
+  const maxFpsRaw = (el('configMaxAnalysisFps') ? el('configMaxAnalysisFps').value : '').trim();
+  let maxAnalysisFps = null;
+  if (maxFpsRaw !== '') {
+    const v = Number(maxFpsRaw);
+    if (!Number.isFinite(v) || v < 0.5 || v > 30) {
+      setCameraConfigStatus('"Most analysed frames per second" must be from 0.5 to 30, or empty for the site default.', true);
+      const f = el('configMaxAnalysisFps');
+      if (f) f.focus();
+      return;
+    }
+    maxAnalysisFps = Math.round(v * 10) / 10;
+  }
+  const prioRaw = el('configAnalysisPriority') ? el('configAnalysisPriority').value : '';
+  const analysisPriority = ANALYSIS_PRIORITIES.includes(prioRaw) ? prioRaw : null;
+
   const camUser = (el('configCamUser') ? el('configCamUser').value : '').trim();
   const camPass = el('configCamPass') ? el('configCamPass').value : '';
   if (camPass && !camUser) {
@@ -2335,6 +2583,8 @@ async function handleCameraConfigSubmit(event) {
     static_figure_seconds: staticSeconds,
     person_max_frame_fraction: personMaxFrac,
     stream_quality: el('configStreamQuality') ? el('configStreamQuality').value : 'auto',
+    analysis_priority: analysisPriority,
+    max_analysis_fps: maxAnalysisFps,
   };
 
   // PUT replaces the whole row, so every field the API knows is sent back
@@ -2530,6 +2780,10 @@ async function runSelfTest() {
   if (tiles.length) {
     const id = tiles[0].getAttribute('data-camera-id');
     focusCameraTile(id);
+    const zoomTools = document.querySelector(`[data-tools-for="${CSS.escape(id)}"] .vz-controls`);
+    check('enlarged tile shows its zoom controls', !!zoomTools && !zoomTools.hidden);
+    check('tile picture and AI overlay canvas share one zoom stage',
+      !!document.querySelector(`[data-stage-for="${CSS.escape(id)}"] .lo-canvas`) && !!tiles[0].closest('.cam-stage'));
     if (rtcMode) {
       const f = tileFeed.tiles.get(id);
       check('enlarged tile keeps (or opens) its direct video', !!f && !!f.rtc, f && f.rtc ? f.rtc.state : 'no session');
@@ -2612,9 +2866,12 @@ window.confirmDeleteCurrentCamera = confirmDeleteCurrentCamera;
 window.cancelDeleteCurrentCamera = cancelDeleteCurrentCamera;
 window.initOrUpdateCharts = initOrUpdateCharts;
 window.renderHourlyVisitors = renderHourlyVisitors;
+window.toggleAiOverlay = toggleAiOverlay;
+window.openAnalysisSettings = openAnalysisSettings;
 
 function initAnalytics() {
   loadGridPrefs();
+  renderAiOverlayToggles();
   initHashRouting();
   fetchSystemTelemetry();
   refreshBrand();

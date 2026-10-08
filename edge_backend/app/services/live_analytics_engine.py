@@ -31,6 +31,7 @@ import logging
 import threading
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
@@ -50,6 +51,8 @@ from app.services.inference_backend import (
     person_threshold,
 )
 from app.services.inference_scheduler import inference_scheduler
+from app.services.motion_gate import MotionGate
+from app.services import motion_gate as motion_gate_mod
 from app.services.shadow_trial import shadow_trial
 from app.services import night_watch as nw
 from app.services.privacy_mask import (
@@ -254,6 +257,15 @@ class CameraRuntime:
     # pass and read by the API / stream overlay. Never mutated in place.
     _tracks: list[dict] = field(default_factory=list, repr=False)
     _tracks_at: float = 0.0
+    # Live overlay (/api/v1/live/tracks): analysed-frame counter, wall time and
+    # pixel size of the latest analysed frame, monotonic times of recent
+    # analysed frames (measured analysis rate) and per-track centre velocity
+    # state {track_id: (t, cx, cy, vx, vy)} in pixels per second.
+    analysis_seq: int = 0
+    analysed_at: Optional[float] = None
+    analysed_size: Optional[tuple] = None
+    _analysed_mono: deque = field(default_factory=lambda: deque(maxlen=64), repr=False)
+    _velocity: dict = field(default_factory=dict, repr=False)
 
     def put_frame(self, frame) -> None:
         """Keep ``frame`` (a Frame, or a BGR array) as the newest one."""
@@ -283,10 +295,81 @@ class CameraRuntime:
         """Unmasked frame, for inference only. Never serve or store this."""
         return self.get_frame(masked=False)
 
-    def set_tracks(self, tracks: list[dict], now: Optional[float] = None) -> None:
+    def set_tracks(self, tracks: list[dict], now: Optional[float] = None,
+                   frame_size: Optional[tuple] = None) -> None:
+        """Publish the worker's track snapshot (replaced whole, never mutated).
+
+        ``frame_size`` (width, height) marks the snapshot of an analysed frame:
+        it advances ``analysis_seq``, stamps ``analysed_at``, feeds the measured
+        analysis rate and gives each entry ``vel_px`` (see ``_with_velocity``).
+        Clearing calls (camera offline, analysis off) pass no frame size.
+        """
+        tracks = list(tracks)
+        stamp = now or time.time()
+        if frame_size is not None:
+            tracks = self._with_velocity(tracks, stamp)
         with self._lock:
-            self._tracks = list(tracks)
-            self._tracks_at = now or time.time()
+            self._tracks = tracks
+            self._tracks_at = stamp
+            if frame_size is not None:
+                self.analysis_seq += 1
+                self.analysed_at = stamp
+                self.analysed_size = (int(frame_size[0]), int(frame_size[1]))
+                self._analysed_mono.append(time.monotonic())
+
+    # EMA weight of the newest centre displacement, and the longest gap
+    # between two matches still turned into a velocity (longer: unknown).
+    VELOCITY_ALPHA = 0.5
+    VELOCITY_MAX_GAP_SEC = 2.0
+
+    def _with_velocity(self, tracks: list[dict], now: float) -> list[dict]:
+        """Entries copied with ``vel_px`` = [vx, vy] box-centre pixels/second, or None.
+
+        Measured from consecutive *matched* boxes (time of each match), EMA
+        smoothed; a coasting entry carries its track's last velocity. Runs on
+        the worker thread only (the only writer of ``_velocity``).
+        """
+        out: list[dict] = []
+        seen = set()
+        a = self.VELOCITY_ALPHA
+        for e in tracks:
+            tid = e.get("track_id") if isinstance(e, dict) else None
+            if tid is None or not all(k in e for k in ("x1", "y1", "x2", "y2")):
+                out.append(e)
+                continue
+            seen.add(tid)
+            prev = self._velocity.get(tid)
+            vel = prev[3] if prev is not None else None
+            if e.get("fresh", True):
+                t = float(e.get("last_seen") or now)
+                cx, cy = (e["x1"] + e["x2"]) / 2.0, (e["y1"] + e["y2"]) / 2.0
+                if prev is None:
+                    self._velocity[tid] = (t, cx, cy, None)
+                elif t > prev[0]:
+                    dt = t - prev[0]
+                    if dt <= self.VELOCITY_MAX_GAP_SEC:
+                        inst = ((cx - prev[1]) / dt, (cy - prev[2]) / dt)
+                        vel = inst if vel is None else (a * inst[0] + (1 - a) * vel[0],
+                                                         a * inst[1] + (1 - a) * vel[1])
+                    else:
+                        vel = None
+                    self._velocity[tid] = (t, cx, cy, vel)
+            out.append({**e, "vel_px": None if vel is None else [round(vel[0], 2), round(vel[1], 2)]})
+        for tid in [k for k in self._velocity if k not in seen]:
+            del self._velocity[tid]
+        return out
+
+    def live_meta(self) -> dict:
+        """Analysed-frame counter, time, pixel size and measured analysis rate (copied under the lock)."""
+        with self._lock:
+            times = list(self._analysed_mono)
+            seq, at, size = self.analysis_seq, self.analysed_at, self.analysed_size
+        fps = None
+        mono = time.monotonic()
+        recent = [t for t in times if mono - t <= 15.0]
+        if len(recent) >= 2 and recent[-1] > recent[0]:
+            fps = round((len(recent) - 1) / (recent[-1] - recent[0]), 2)
+        return {"seq": seq, "analysed_at": at, "size": size, "analysis_fps": fps}
 
     def get_tracks(self) -> list[dict]:
         with self._lock:
@@ -626,6 +709,10 @@ class CameraWorker(threading.Thread):
         self._detect_n = self._clip_n
         # Night watch armed on this camera (the normal analysis is paused).
         self._night_armed = False
+        # Cheap per-frame motion check that wakes a quiet camera
+        # (services/motion_gate.py, ANALYTICS_MOTION_WAKE).
+        self._motion_gate = MotionGate()
+        self._motion_gate_on = False
 
     def stop(self) -> None:
         self._stop.set()
@@ -778,6 +865,57 @@ class CameraWorker(threading.Thread):
 
         return width(self._max_width()) != width(getattr(cap, "max_width", 0))
 
+    def _fps_changed(self, cap, source: str) -> bool:
+        """A capture opened with another DECODE_MAX_FPS than the current one (site setting changed)."""
+        want = max(0.0, float(settings.DECODE_MAX_FPS or 0))
+        if isinstance(cap, (capture_backends.ThinnedCapture, capture_backends.FfmpegHwCapture)):
+            return abs(float(cap.max_fps or 0) - want) > 1e-6
+        try:
+            import cv2
+
+            # An RTSP capture opened unthinned (DECODE_MAX_FPS was 0).
+            return want > 0 and isinstance(cap, cv2.VideoCapture) and capture_backends.hw_eligible(source)
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _rate_settings(self) -> None:
+        """Push this camera's analysis_priority / max_analysis_fps and AI_IGNORE areas to
+        the scheduler and the motion gate (on connect and every 2 s)."""
+        cam = self.rt.camera_id
+        try:
+            inference_scheduler.configure(cam, camera_setting(cam, "analysis_priority"),
+                                          camera_setting(cam, "max_analysis_fps"))
+        except Exception as e:  # noqa: BLE001 - the defaults apply
+            _log_once(f"rate_settings:{type(e).__name__}", f"analysis rate settings unreadable ({e})")
+        if settings.ANALYTICS_MOTION_WAKE:
+            try:
+                self._motion_gate.set_ignore(
+                    ignore_polygons(cam, motion_gate_mod.WIDTH, motion_gate_mod.HEIGHT))
+            except Exception as e:  # noqa: BLE001 - motion anywhere counts
+                _log_once(f"motion_ignore:{type(e).__name__}", f"motion gate ignore areas unreadable ({e})")
+
+    def _people_in_view(self) -> int:
+        """Tracks that may be people (tentative included, static figures not)."""
+        return sum(1 for t in list(self.tracker.tracks.values())
+                   if not t.is_static and not t.is_pending_static)
+
+    def _motion_step(self, frame, now: float) -> None:
+        """Motion gate on this decoded frame; motion keeps / makes the camera active."""
+        on = bool(settings.ANALYTICS_MOTION_WAKE) and (not self.rt.analysis_flags
+                                                        or any(self.rt.analysis_flags.values()))
+        if on != self._motion_gate_on:
+            self._motion_gate_on = on
+            self._motion_gate.reset()
+        if not on:
+            return
+        try:
+            if self._motion_gate.update(frame, now):
+                inference_scheduler.motion(self.rt.camera_id)
+        except Exception as e:  # noqa: BLE001 - never take the capture loop down
+            _log_once(f"motion_gate:{type(e).__name__}",
+                      f"motion gate failed on {self.rt.camera_id} ({type(e).__name__}: {e}); "
+                      "quiet cameras wake only on their idle-rate analysis")
+
     def _open_software(self, src: str):
         import cv2
 
@@ -922,6 +1060,8 @@ class CameraWorker(threading.Thread):
                 frames_in_window = 0
                 sized = False
                 self._clip_n = self._clip_every(cap)
+                self._rate_settings()
+                self._motion_gate.reset()
                 # A test video file plays in a loop at its own frame rate, like
                 # a camera: its end is not the camera going offline, and
                 # unpaced it was read at decode speed and ended in seconds.
@@ -982,11 +1122,21 @@ class CameraWorker(threading.Thread):
                         frames_in_window = 0
                         last_tick = now
                         self._clip_n = self._clip_every(cap)
+                        self._rate_settings()
                         if self._width_changed(cap):
                             logger.info(f"Camera {self.rt.camera_id}: frame width limit is now "
                                         f"{self._max_width() or 'native'} (pose model or setting changed); "
                                         "reopening the stream")
-                            reopen = True
+                            reopen = "width"
+                            break
+                        if self._fps_changed(cap, active_source):
+                            # Site setting DECODE_MAX_FPS changed: the decoder's
+                            # frame-rate cap is fixed at open, so reopen (same
+                            # frame size: tracks are kept).
+                            logger.info(f"Camera {self.rt.camera_id}: decode frame-rate cap is now "
+                                        f"{float(settings.DECODE_MAX_FPS):g} fps (setting changed); "
+                                        "reopening the stream")
+                            reopen = "fps"
                             break
 
                     # Night watch: while armed, a cheap motion check replaces
@@ -995,11 +1145,14 @@ class CameraWorker(threading.Thread):
                     mode = self._night_watch_step(frame, now)
                     if mode == nw.HOLD:
                         continue
+                    if mode == nw.NORMAL:
+                        # Motion on a quiet camera (no people lately) wakes it
+                        # to its full share on this very frame.
+                        self._motion_step(frame, now)
                     # The scheduler decides whether this frame gets inferred:
-                    # the camera's fair share of the accelerator, never more
-                    # than every Nth frame of the camera's native rate (the
-                    # clip stride already accounts for frames the GPU decoder
-                    # dropped). Frames it skips are still shown.
+                    # the camera's share of the accelerator (more where people
+                    # are, the idle rate where nobody is), never above its
+                    # ceiling. Frames it skips are still shown.
                     if inference_scheduler.admit(self.rt.camera_id, fps=self.rt.fps,
                                                  frame_index=self._frame_index, every_n=self._detect_n):
                         try:
@@ -1007,6 +1160,7 @@ class CameraWorker(threading.Thread):
                                 self._night_confirm(frame.bgr(), now)
                             else:
                                 self._analyse(frame.bgr(), now)
+                                inference_scheduler.set_activity(self.rt.camera_id, self._people_in_view())
                         finally:
                             inference_scheduler.done(self.rt.camera_id)
 
@@ -1053,13 +1207,15 @@ class CameraWorker(threading.Thread):
                         pass
 
             if reopen and not self._stop.is_set():
-                # A planned reopen at a new frame width: no retry wait. Track
-                # boxes and pose state are in the old frame's pixels.
-                for t in self.tracker.flush_all():
-                    self.engine.close_track(t, reason="frame_size_changed")
-                self.rt.set_tracks([])
-                self.rt.live_track_count = 0
-                _reset_pose_camera(self.rt.camera_id)
+                # A planned reopen: no retry wait. At a new frame width, track
+                # boxes and pose state are in the old frame's pixels; at a new
+                # frame rate they stay valid (the tracker works in seconds).
+                if reopen == "width":
+                    for t in self.tracker.flush_all():
+                        self.engine.close_track(t, reason="frame_size_changed")
+                    self.rt.set_tracks([])
+                    self.rt.live_track_count = 0
+                    _reset_pose_camera(self.rt.camera_id)
                 continue
             if self._sleep(wait):
                 break
@@ -1348,6 +1504,14 @@ class CameraWorker(threading.Thread):
                 # Only keypoints measured on this detection frame are shown;
                 # a coasting track keeps its box but not a stale skeleton.
                 "keypoints": keypoints_to_list(t.keypoints) if t.keypoints_fresh else None,
+                # Live overlay (live_tracks / render_overlay): matched on this
+                # frame, time of the last match, the tracker's predicted box
+                # for a coasting track and its last matched skeleton.
+                "fresh": t.misses == 0,
+                "last_seen": round(float(t.last_seen), 3),
+                "pred_box": None if t.misses == 0 else [
+                    round(float(v), 1) for v in (getattr(t, "predicted_bbox", None) or t.bbox)],
+                "kp_last": keypoints_to_list(t.keypoints) if t.misses != 0 else None,
                 # Filled only when a homography exists; otherwise the track
                 # has no place on the blueprint and these stay None.
                 "x_m": None,
@@ -1384,7 +1548,7 @@ class CameraWorker(threading.Thread):
                     # Counting was switched off mid-visit: finish it honestly.
                     self.engine.leave_zone(t, now)
             snapshot.append(entry)
-        self.rt.set_tracks(snapshot, now)
+        self.rt.set_tracks(snapshot, now, frame_size=(w, h))
 
         # Evidence frames are saved by pose_analytics / tripwire_engine, so
         # they carry the privacy masks; the analysis itself already ran on the
@@ -1812,6 +1976,46 @@ class LiveAnalyticsEngine:
             "uncalibrated_track_count": uncalibrated_tracks,
         }
 
+    def live_tracks(self, camera_ids) -> dict:
+        """Per-camera live tracks for the dashboard's client-side overlay (/api/v1/live/tracks).
+
+        Built from the snapshot each worker already published plus the pose
+        analytics' behaviour (``behaviour_state``, cached briefly); no
+        inference runs and no worker lock is held for longer than a copy.
+        Unknown camera ids are omitted.
+        """
+        cameras: dict = {}
+        for cid in camera_ids:
+            rt = self.runtimes.get(cid)
+            if rt is not None:
+                cameras[cid] = _live_camera_tracks(rt)
+        return {"server_time": round(time.time(), 3), "cameras": cameras}
+
+    def live_behaviour(self) -> dict:
+        """Live tracks at "watch" or "alert" on every camera, newest first (/api/v1/live/behaviour)."""
+        rows: list[dict] = []
+        for rt in list(self.runtimes.values()):
+            state = behaviour_state(rt.camera_id, dict(rt.analysis_flags))
+            if not state:
+                continue
+            by_id = state.get("tracks") or {}
+            for t in rt.get_tracks():
+                b = by_id.get(str(t.get("track_id")))
+                if not b or b.get("level") not in ("watch", "alert"):
+                    continue
+                rows.append({
+                    "camera_id": rt.camera_id,
+                    "camera_name": rt.name,
+                    "track_id": t.get("track_id"),
+                    "level": b["level"],
+                    "labels": list(b.get("labels") or []),
+                    "pattern_score": b.get("pattern_score"),
+                    "incident_id": b.get("incident_id"),
+                    "since": None if b.get("since") is None else round(float(b["since"]), 3),
+                })
+        rows.sort(key=lambda r: r["since"] if r["since"] is not None else float("-inf"), reverse=True)
+        return {"tracks": rows}
+
     def mark_started(self) -> None:
         self._started = True
 
@@ -1882,6 +2086,129 @@ def _overlay_ignore_areas(out: np.ndarray, rt: CameraRuntime, scale: float) -> N
         _log_once(f"overlay_ignore:{type(e).__name__}", f"ignore areas not drawn on the overlay: {e}")
 
 
+# ----------------------------------------------------------------- live view
+
+WATCH_COLOUR = (0, 165, 255)     # BGR amber/orange: an active behaviour cue
+ALERT_COLOUR = (40, 40, 235)     # BGR red: a rule fired on this track (cooldown)
+# A coasting track's last skeleton is drawn (moved with the predicted box)
+# for this long after its last match; after that only the dashed box.
+COASTING_SKELETON_MAX_SEC = 1.0
+# pose_analytics.live_state is read at most this often per camera (shared
+# by the stream overlay and every dashboard poll).
+BEHAVIOUR_CACHE_SEC = 0.2
+_behaviour_cache: dict = {}
+_behaviour_cache_lock = threading.Lock()
+
+
+def behaviour_state(camera_id: str, flags: Optional[dict] = None) -> Optional[dict]:
+    """The camera's per-track behaviour (``pose_analytics.live_state``), or None.
+
+    None ("not available") when shelf interaction and theft detection are
+    both off for the camera (``flags`` = the worker's last-read analysis
+    flags; empty = not read yet), when pose analytics is unavailable, or when
+    it has nothing for this camera. Cached ``BEHAVIOUR_CACHE_SEC`` per camera;
+    ``live_state`` itself waits at most a few ms for the camera's lock, so a
+    reader never stalls the worker thread.
+    """
+    if flags and not (flags.get("theft_detection") or flags.get("shelf_interaction")):
+        return None
+    pa = _get_pose_analytics()
+    fn = getattr(pa, "live_state", None) if pa is not None else None
+    if fn is None:
+        return None
+    mono = time.monotonic()
+    with _behaviour_cache_lock:
+        hit = _behaviour_cache.get(camera_id)
+        if hit is not None and hit[2] is pa and mono - hit[0] < BEHAVIOUR_CACHE_SEC:
+            return hit[1]
+    try:
+        state = fn(camera_id)
+    except Exception as e:  # noqa: BLE001 - the live view must never break on it
+        _log_once(f"live_state:{type(e).__name__}", f"pose_analytics.live_state failed: {e}")
+        state = None
+    with _behaviour_cache_lock:
+        _behaviour_cache[camera_id] = (mono, state, pa)
+    return state
+
+
+def _norm_box(box, w: int, h: int) -> list:
+    return [round(min(max(float(box[0]) / w, 0.0), 1.0), 4), round(min(max(float(box[1]) / h, 0.0), 1.0), 4),
+            round(min(max(float(box[2]) / w, 0.0), 1.0), 4), round(min(max(float(box[3]) / h, 0.0), 1.0), 4)]
+
+
+def _live_camera_tracks(rt: CameraRuntime) -> dict:
+    """One camera's entry of /api/v1/live/tracks: everything normalised to the analysed frame."""
+    meta = rt.live_meta()
+    tracks = rt.get_tracks()
+    flags = dict(rt.analysis_flags)
+    size = meta["size"]
+    if not size and rt.frame_width and rt.frame_height:
+        size = (rt.frame_width, rt.frame_height)
+    analysing = (not flags) or any(flags.values())
+    state = behaviour_state(rt.camera_id, flags)
+    by_id = (state or {}).get("tracks") if state else None
+    out: list[dict] = []
+    if size and size[0] and size[1]:
+        w, h = int(size[0]), int(size[1])
+        ref = meta["analysed_at"]
+        for t in tracks:
+            if not all(k in t for k in ("track_id", "x1", "y1", "x2", "y2")):
+                continue
+            fresh = bool(t.get("fresh", True))
+            pred = t.get("pred_box")
+            box = pred if (not fresh and pred) else (t["x1"], t["y1"], t["x2"], t["y2"])
+            last_seen = t.get("last_seen")
+            if fresh:
+                age = 0.0
+            elif last_seen is not None and ref is not None:
+                age = round(max(0.0, float(ref) - float(last_seen)), 2)
+            else:
+                age = None
+            kps = t.get("keypoints") if fresh else t.get("kp_last")
+            vel = t.get("vel_px")
+            state_name = t.get("motion_state") or "pending"
+            if t.get("pending_static") and state_name != "static":
+                state_name = "pending_static"
+            b = by_id.get(str(t["track_id"])) if by_id is not None else None
+            out.append({
+                "track_id": t["track_id"],
+                "confirmed": bool(t.get("confirmed")),
+                "motion_state": state_name,
+                "box": _norm_box(box, w, h),
+                "velocity": None if not vel else [round(float(vel[0]) / w, 4), round(float(vel[1]) / h, 4)],
+                "fresh": fresh,
+                "age_sec": age,
+                "keypoints": None if not kps else [
+                    [round(float(p[0]) / w, 4), round(float(p[1]) / h, 4), round(float(p[2]), 3)] for p in kps],
+                "behaviour": None if not b else {k: v for k, v in b.items() if k != "since"},
+            })
+    return {
+        "seq": int(meta["seq"]),
+        "analysed_at": None if meta["analysed_at"] is None else round(float(meta["analysed_at"]), 3),
+        "frame_width": int(size[0]) if size else None,
+        "frame_height": int(size[1]) if size else None,
+        "analysis_fps": meta["analysis_fps"] if analysing else None,
+        "tracks": out,
+    }
+
+
+def _dashed_rect(out: np.ndarray, p1: tuple, p2: tuple, colour, thickness: int = 1, dash: int = 6) -> None:
+    """A dashed rectangle (a coasting track: position predicted, not measured)."""
+    import cv2
+
+    x1, y1 = p1
+    x2, y2 = p2
+    step = max(2, dash) * 2
+    for x in range(min(x1, x2), max(x1, x2), step):
+        xe = min(x + dash, max(x1, x2))
+        cv2.line(out, (x, y1), (xe, y1), colour, thickness)
+        cv2.line(out, (x, y2), (xe, y2), colour, thickness)
+    for y in range(min(y1, y2), max(y1, y2), step):
+        ye = min(y + dash, max(y1, y2))
+        cv2.line(out, (x1, y), (x1, ye), colour, thickness)
+        cv2.line(out, (x2, y), (x2, ye), colour, thickness)
+
+
 def render_overlay(frame: np.ndarray, rt: CameraRuntime, scale: float = 1.0) -> np.ndarray:
     """Draw the worker's current track boxes onto a copy of ``frame``.
 
@@ -1896,7 +2223,12 @@ def render_overlay(frame: np.ndarray, rt: CameraRuntime, scale: float = 1.0) -> 
     areas faintly violet "ignored". A corner tag states whether the camera is
     calibrated so nobody mistakes boxes for positions. When the pose model
     supplied keypoints on the latest detection frame, the visible limbs are
-    drawn too (wrists marked larger).
+    drawn too (wrists marked larger). A coasting track (not matched on the
+    latest analysed frame) is a thin dashed box at the tracker's predicted
+    position, with its last skeleton for up to ``COASTING_SKELETON_MAX_SEC``
+    and none after. A track with an active behaviour cue is amber, one a
+    rule fired on (within the incident cooldown) red, with the behaviour
+    labels under the box (``behaviour_state``).
 
     ``scale`` is the size of ``frame`` relative to the camera's frames (a
     preview from ``fit_width``): boxes are drawn scaled onto the small frame,
@@ -1908,9 +2240,21 @@ def render_overlay(frame: np.ndarray, rt: CameraRuntime, scale: float = 1.0) -> 
     _overlay_ignore_areas(out, rt, scale)
     tracks = rt.get_tracks()
     confirmed_colour = (80, 220, 90)     # BGR green
+    try:
+        beh_state = behaviour_state(rt.camera_id, dict(rt.analysis_flags))
+    except Exception:  # noqa: BLE001 - an overlay detail must never break the stream
+        beh_state = None
+    behaviours = (beh_state or {}).get("tracks") or {}
+    analysed_at = rt.analysed_at
 
     for t in tracks:
-        x1, y1, x2, y2 = (int(t[k] * scale) for k in ("x1", "y1", "x2", "y2"))
+        fresh = bool(t.get("fresh", True))
+        pred = t.get("pred_box")
+        box = pred if (not fresh and pred) else (t["x1"], t["y1"], t["x2"], t["y2"])
+        x1, y1, x2, y2 = (int(float(v) * scale) for v in box)
+        stale = 0.0
+        if not fresh and t.get("last_seen") is not None and analysed_at is not None:
+            stale = max(0.0, float(analysed_at) - float(t["last_seen"]))
         state = t.get("motion_state")
         tid = t["track_id"][-4:]
         label = f"{tid} {t['confidence']:.2f}"
@@ -1924,15 +2268,43 @@ def render_overlay(frame: np.ndarray, rt: CameraRuntime, scale: float = 1.0) -> 
             colour, thickness, label = PENDING_COLOUR, 2, f"{tid} pending {t['confidence']:.2f}"
         else:
             colour, thickness = confirmed_colour, 2
-        if state != "static" and not t.get("pending_static") and t["x_m"] is not None:
+        if state != "static" and not t.get("pending_static") and t.get("x_m") is not None:
             label += f" ({t['x_m']:.1f},{t['y_m']:.1f})m"
-        cv2.rectangle(out, (x1, y1), (x2, y2), colour, thickness)
+        # Behaviour (pose_analytics): amber while a cue is active, red after
+        # a rule fired on this track; its labels are drawn under the box.
+        beh = behaviours.get(str(t["track_id"]))
+        level = beh.get("level") if beh else None
+        if level == "alert":
+            colour, thickness = ALERT_COLOUR, max(thickness, 2)
+        elif level == "watch":
+            colour, thickness = WATCH_COLOUR, max(thickness, 2)
+        if fresh:
+            cv2.rectangle(out, (x1, y1), (x2, y2), colour, thickness)
+        else:
+            # Coasting: where the tracker predicts the person is, not a measurement.
+            _dashed_rect(out, (x1, y1), (x2, y2), colour, 1)
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
         ty = max(th + 4, y1 - 4)
         cv2.rectangle(out, (x1, ty - th - 4), (x1 + tw + 4, ty + 2), colour, -1)
         cv2.putText(out, label, (x1 + 2, ty - 1), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (10, 10, 10), 1)
+        if level in ("watch", "alert") and beh.get("labels"):
+            text = " | ".join(beh["labels"][:3])
+            (bw, bh), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+            by = min(out.shape[0] - 3, y2 + bh + 6)
+            cv2.rectangle(out, (x1, by - bh - 4), (x1 + bw + 4, by + 3), colour, -1)
+            cv2.putText(out, text, (x1 + 2, by - 1), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                        (255, 255, 255) if level == "alert" else (10, 10, 10), 1)
 
         kpts = t.get("keypoints")
+        if not fresh:
+            # The last matched skeleton, moved with the predicted box, for a
+            # short coast only: after that a stale pose would be misleading.
+            kpts = None
+            last = t.get("kp_last")
+            if last and stale <= COASTING_SKELETON_MAX_SEC:
+                dx = (box[0] + box[2] - t["x1"] - t["x2"]) / 2.0
+                dy = (box[1] + box[3] - t["y1"] - t["y2"]) / 2.0
+                kpts = [(p[0] + dx, p[1] + dy, p[2]) for p in last]
         if kpts:
             if scale != 1.0:
                 kpts = [(p[0] * scale, p[1] * scale, p[2]) for p in kpts]

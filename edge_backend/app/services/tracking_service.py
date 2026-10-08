@@ -64,34 +64,59 @@ ASSIGNMENT_METHOD = "hungarian" if _hungarian is not None else "greedy"
 # ------------------------------------------------------------ Kalman filter
 
 
+# The per-step noise below was tuned (SORT/ByteTrack) for one step per
+# analysed frame; it is now per REF_DT seconds of real time, so the filter is
+# the same as before at 5 analysed frames/s and stays right at any other or
+# varying rate (the scheduler gives a camera 0.5 to 10+ frames/s).
+REF_DT = 0.2
+# One prediction step covers at most this many seconds (a stalled camera).
+MAX_STEP_DT = 5.0
+# A coasting track (not matched) is moved on by its velocity for at most this
+# long after it was last seen; after that its predicted box stays put rather
+# than sliding across the picture (a walker hidden for 2 s behind a shelf end
+# is still re-acquired by IoU where they reappear).
+COAST_PREDICT_SEC = 3.0
+# Stage 3 (centre gate) only for tracks seen at most this long ago: one or two
+# missed analysed frames of a fast mover, not a person who left a while ago.
+CENTRE_GATE_MAX_GAP_SEC = 1.0
+
+
 class _KalmanXYWH:
-    """Constant-velocity Kalman filter on (cx, cy, w, h), one step per update.
+    """Constant-velocity Kalman filter on (cx, cy, w, h); velocities in pixels per second.
 
     Noise is scaled by the box size, as in SORT/ByteTrack, so a near person
-    and a far person get proportionate uncertainty.
+    and a far person get proportionate uncertainty, and by the real time
+    between analysed frames (``dt``), so the prediction is right whatever the
+    analysed rate: a walker analysed twice a second is predicted half a
+    second ahead, not one "frame".
     """
 
     _W_POS = 1.0 / 20.0
     _W_VEL = 1.0 / 160.0
 
     def __init__(self):
-        self._F = np.eye(8)
-        self._F[:4, 4:] = np.eye(4)
         self._H = np.eye(4, 8)
 
     def initiate(self, z: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         mean = np.r_[z, np.zeros(4)]
         w, h = z[2], z[3]
-        p, v = self._W_POS, self._W_VEL
+        p, v = self._W_POS, self._W_VEL / REF_DT
         std = [2 * p * w, 2 * p * h, 2 * p * w, 2 * p * h, 10 * v * w, 10 * v * h, 10 * v * w, 10 * v * h]
         return mean, np.diag(np.square(std))
 
-    def predict(self, mean: np.ndarray, cov: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def predict(self, mean: np.ndarray, cov: np.ndarray, dt: float = REF_DT,
+                move_dt: Optional[float] = None) -> tuple[np.ndarray, np.ndarray]:
+        """Advance ``dt`` seconds; the box moves by its velocity for ``move_dt`` (default ``dt``)."""
+        dt = min(max(float(dt), 0.0), MAX_STEP_DT)
+        move = dt if move_dt is None else min(max(float(move_dt), 0.0), dt)
         w, h = max(mean[2], 1.0), max(mean[3], 1.0)
-        p, v = self._W_POS, self._W_VEL
-        q = np.diag(np.square([p * w, p * h, p * w, p * h, v * w, v * h, v * w, v * h]))
-        mean = self._F @ mean
-        cov = self._F @ cov @ self._F.T + q
+        k = dt / REF_DT
+        p, v = self._W_POS, self._W_VEL / REF_DT
+        q = np.diag(np.square([p * w, p * h, p * w, p * h, v * w, v * h, v * w, v * h]) * k)
+        f = np.eye(8)
+        f[:4, 4:] = np.eye(4) * move
+        mean = f @ mean
+        cov = f @ cov @ f.T + q
         return mean, cov
 
     def update(self, mean: np.ndarray, cov: np.ndarray, z: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -188,9 +213,11 @@ class Track:
     # Recent poses (ByteTracker._observe_motion): per-joint jitter floor and
     # the 3-frame median pose compared against the anchor.
     _pose_hist: deque = field(default_factory=lambda: deque(maxlen=MOTION_JITTER_WINDOW + 1), repr=False)
-    # Kalman state (cx, cy, w, h, vx, vy, vw, vh) and covariance.
+    # Kalman state (cx, cy, w, h, vx, vy, vw, vh), velocities in px/s, its
+    # covariance, and the time (``now`` of the tracker update) it is at.
     _mean: Optional[np.ndarray] = field(default=None, repr=False)
     _cov: Optional[np.ndarray] = field(default=None, repr=False)
+    _kf_t: Optional[float] = field(default=None, repr=False)
 
     @property
     def confirmed(self) -> bool:
@@ -237,11 +264,34 @@ class Track:
 
     @property
     def predicted_bbox(self) -> tuple[float, float, float, float]:
+        """The Kalman box at the latest analysed frame (pixels).
+
+        For a track matched on that frame it is the filtered box; for a
+        coasting track (``misses`` > 0) it is where the track is predicted to
+        be at that frame's time, moved on by its velocity for at most
+        COAST_PREDICT_SEC since it was last seen, while ``bbox`` stays the
+        last measured box. ``predict_bbox(t)`` extrapolates to another time.
+        """
         return _xywh_to_xyxy(self._mean) if self._mean is not None else self.bbox
+
+    def predict_bbox(self, at: float) -> tuple[float, float, float, float]:
+        """The box predicted at time ``at`` (e.g. now, between analysed frames), read-only.
+
+        Constant velocity from the Kalman state, for at most COAST_PREDICT_SEC
+        after the track was last seen.
+        """
+        if self._mean is None or self._kf_t is None:
+            return self.bbox
+        start = max(self._kf_t, self.last_seen)
+        end = min(float(at), self.last_seen + COAST_PREDICT_SEC)
+        move = max(0.0, end - start) if end > start else 0.0
+        m = self._mean.copy()
+        m[:4] += m[4:] * move
+        return _xywh_to_xyxy(m)
 
     @property
     def velocity_px(self) -> tuple[float, float]:
-        """Predicted centre motion, pixels per detection frame."""
+        """Kalman centre velocity, pixels per second."""
         if self._mean is None:
             return (0.0, 0.0)
         return (float(self._mean[4]), float(self._mean[5]))
@@ -955,7 +1005,13 @@ class ByteTracker:
 
         for t in self.tracks.values():
             if t._mean is not None:
-                t._mean, t._cov = _KF.predict(t._mean, t._cov)
+                last = t._kf_t if t._kf_t is not None else t.last_seen
+                dt = now - last
+                # A coasting track moves on by its velocity only until
+                # COAST_PREDICT_SEC after it was last seen.
+                move = min(now, t.last_seen + COAST_PREDICT_SEC) - max(last, t.last_seen)
+                t._mean, t._cov = _KF.predict(t._mean, t._cov, dt, max(0.0, move))
+                t._kf_t = now
             t.age += 1
 
         # A box in shade needs less confidence than one in light
@@ -980,6 +1036,21 @@ class ByteTracker:
             self._apply(recent[r], low[c], now)
             matched_tracks.add(recent[r].track_id)
 
+        # Stage 3 (fast movers): a track IoU could not place, against the
+        # confident detections left, by centre distance from its predicted
+        # centre (see _centre_scores). At 2 analysed frames/s a walker's box
+        # no longer overlaps its last one, and ByteTrack would start a new
+        # identity every frame.
+        left = [t for t in pool if t.track_id not in matched_tracks and not t.is_static
+                and (t.misses == 0 or now - t.last_seen <= CENTRE_GATE_MAX_GAP_SEC)]
+        free = [ci for ci in range(len(high)) if ci not in used_high]
+        if left and free:
+            dets = [high[ci] for ci in free]
+            for r, c in linear_assignment(self._centre_scores(left, dets, now), 1e-9):
+                self._apply(left[r], dets[c], now)
+                matched_tracks.add(left[r].track_id)
+                used_high.add(free[c])
+
         for t in pool:
             if t.track_id not in matched_tracks:
                 t.misses += 1
@@ -989,10 +1060,13 @@ class ByteTracker:
             if ci not in used_high and d.confidence >= person_threshold(d, settings.TRACK_NEW_TRACK_THRESHOLD):
                 self._spawn(d, now)
 
-        # Retire tracks that have gone missing for too long.
+        # Retire tracks that have gone missing for too long: in analysed
+        # frames, and in seconds (30 frames are 60 s at 0.5 frames/s).
+        max_age_s = float(settings.TRACK_MAX_AGE_SEC)
         for tid in list(self.tracks.keys()):
             t = self.tracks[tid]
-            if t.confirmed and t.misses > settings.TRACK_MAX_AGE_FRAMES:
+            if t.confirmed and (t.misses > settings.TRACK_MAX_AGE_FRAMES
+                                or (max_age_s > 0 and t.misses > 0 and now - t.last_seen > max_age_s)):
                 self._finished.append(self.tracks.pop(tid))
             elif not t.confirmed and t.misses > settings.TRACK_TENTATIVE_MAX_MISSES:
                 self.tracks.pop(tid)
@@ -1000,10 +1074,40 @@ class ByteTracker:
         self.save_static_memory(now)
         return list(self.tracks.values())
 
+    @staticmethod
+    def _centre_scores(tracks: list[Track], dets: list[Detection], now: float) -> np.ndarray:
+        """Stage-3 scores in (0, 1] for (track, detection) pairs inside the centre gate, else 0.
+
+        Gate radius in box heights, from the track's predicted centre:
+        TRACK_CENTRE_GATE_SPEED x seconds since the track was last seen (at
+        least 0.25), plus half the track's own predicted travel in that time,
+        at most TRACK_CENTRE_GATE_MAX. The two boxes' heights must be within
+        a factor 1.5. Score = 1 - distance / radius (closest wins).
+        """
+        speed = max(0.0, float(settings.TRACK_CENTRE_GATE_SPEED))
+        bound = max(0.25, float(settings.TRACK_CENTRE_GATE_MAX))
+        out = np.zeros((len(tracks), len(dets)))
+        for i, t in enumerate(tracks):
+            x1, y1, x2, y2 = t.predicted_bbox
+            pcx, pcy, ph = (x1 + x2) / 2.0, (y1 + y2) / 2.0, max(y2 - y1, 1.0)
+            gap = max(0.0, now - t.last_seen)
+            vx, vy = t.velocity_px
+            travel = math.hypot(vx, vy) * min(gap, CENTRE_GATE_MAX_GAP_SEC) / ph
+            radius = min(bound, max(0.25, speed * gap) + 0.5 * travel)
+            for j, d in enumerate(dets):
+                dh = max(d.y2 - d.y1, 1.0)
+                if not (1 / 1.5 <= dh / ph <= 1.5):
+                    continue
+                dist = math.hypot((d.x1 + d.x2) / 2.0 - pcx, (d.y1 + d.y2) / 2.0 - pcy) / ((ph + dh) / 2.0)
+                if dist < radius:
+                    out[i, j] = 1.0 - dist / radius
+        return out
+
     def _apply(self, t: Track, d: Detection, now: float) -> None:
         z = _xyxy_to_xywh((d.x1, d.y1, d.x2, d.y2))
         if t._mean is None:
             t._mean, t._cov = _KF.initiate(z)
+            t._kf_t = now
         else:
             t._mean, t._cov = _KF.update(t._mean, t._cov, z)
         t.bbox = (d.x1, d.y1, d.x2, d.y2)
@@ -1030,6 +1134,7 @@ class ByteTracker:
             keypoints=None if d.keypoints is None else np.asarray(d.keypoints, dtype=np.float32).copy(),
             _mean=mean,
             _cov=cov,
+            _kf_t=now,
         )
         self._observe_motion(self.tracks[tid], now)
 

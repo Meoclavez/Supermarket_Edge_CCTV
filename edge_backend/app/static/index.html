@@ -30,6 +30,7 @@
   <link rel="stylesheet" href="/static/css/site_settings.css?v=2.6.0" />
   <link rel="stylesheet" href="/static/css/backups.css?v=2.6.0" />
   <link rel="stylesheet" href="/static/css/phone_alerts.css?v=2.6.0" />
+  <link rel="stylesheet" href="/static/css/live_view.css?v=2.6.0" />
   <!-- auth.js stays a classic (blocking) script: it must wrap fetch before any
        module runs. Everything else is deferred and runs in document order after
        parsing; theme.js is listed last so it still runs after the modules.
@@ -97,6 +98,7 @@
         </div>
       </div>
       <div class="theft-banner-actions">
+        <button type="button" class="btn btn-sm" data-banner="live" hidden title="Open this camera's live video enlarged on the Cameras tab, with the person outlined">Watch live</button>
         <button type="button" class="btn btn-primary btn-sm" data-banner="review">Review now</button>
         <button type="button" class="btn btn-sm" data-banner="dismiss" title="Hide until the next new incident">Dismiss</button>
       </div>
@@ -193,11 +195,19 @@
           <!-- Pills are built from the departments cameras are actually assigned to. -->
         </div>
 
-        <div class="filter-group" id="fpsFilterChips" title="How often each tile's picture refreshes (Low 5 s, Normal 2 s, High 1 s) and how smooth an enlarged tile's live video is. Click a tile to enlarge it. Lower is lighter on this computer.">
+        <div class="filter-group" id="fpsFilterChips" title="How often each tile's picture refreshes (Low 5 s, Normal 2 s, High and Full 1 s) and how smooth an enlarged tile's live video is (1, 5, 15 or 25 pictures per second). Click a tile to enlarge it. Lower is lighter on this computer.">
           <span class="filter-label">Video smoothness:</span>
           <button type="button" class="fps-btn" data-fps="1" onclick="setDecimationFPS(1)">Low</button>
           <button type="button" class="fps-btn active" data-fps="5" onclick="setDecimationFPS(5)">Normal</button>
           <button type="button" class="fps-btn" data-fps="15" onclick="setDecimationFPS(15)">High</button>
+          <button type="button" class="fps-btn" data-fps="25" onclick="setDecimationFPS(25)">Full</button>
+        </div>
+
+        <!-- AI overlay on live video (js/live_overlay.js) and the analysed frame rate (Settings → Analysis speed). -->
+        <div class="filter-group" id="aiOverlayChips">
+          <button type="button" class="fps-btn lo-toggle active" id="aiOverlayToggle" aria-pressed="true" onclick="toggleAiOverlay()">AI overlay: On</button>
+          <a class="fps-btn lo-link" href="#settings-analysis" onclick="return openAnalysisSettings()"
+            title="How many frames per second the AI analyses, per camera and for the whole box">Analysis speed</a>
         </div>
 
         <div class="controls-right">
@@ -223,6 +233,9 @@
 
       <!-- Same camera added twice: one banner per group (js/duplicates.js). -->
       <div class="dup-mount" id="dupBannerCameras" hidden></div>
+
+      <!-- People showing watch / alert cues right now; click one to watch it (js/live_behaviour.js). -->
+      <div class="lb-strip" id="liveBehaviourStrip" role="group" aria-label="Live behaviour" hidden></div>
 
       <div class="camera-grid camera-grid-quad" id="cameraMatrixGrid"></div>
 
@@ -621,6 +634,20 @@
          LOSS PREVENTION (js/loss.js)
          ========================================== -->
     <section id="tab-theft" class="tab-view">
+      <!-- Live behaviour (js/live_behaviour.js): watch / alert cues on the cameras right now. -->
+      <div class="glass-card" id="liveBehaviourCard">
+        <div class="card-title">
+          <span>Live behaviour</span>
+          <span class="lb-note" id="liveBehaviourNote" aria-live="polite"></span>
+        </div>
+        <p class="loss-intro">
+          People the cameras are watching <b>right now</b>: a reach into a shelf, a hand at a pocket or the chest,
+          looking around a lot. These are live cues to look at, not findings. <b>Watch live</b> opens the camera
+          enlarged with the person outlined.
+        </p>
+        <div id="liveBehaviourList" class="lb-list"><div class="fp-empty">Loading…</div></div>
+      </div>
+
       <!-- LOSS:BEGIN (loss.js owns this region) -->
       <section class="overview-strip loss-kpis" aria-label="Loss prevention at a glance">
         <div class="stat-box">
@@ -784,6 +811,7 @@
         <a class="btn btn-sm" href="#settings-store" onclick="return jumpTo('settings-store')">Store</a>
         <a class="btn btn-sm" href="#settings-evidence" onclick="return jumpTo('settings-evidence')">Evidence storage</a>
         <a class="btn btn-sm" href="#settings-alerts" onclick="return jumpTo('settings-alerts')">Alerts and detection</a>
+        <a class="btn btn-sm" href="#settings-analysis" onclick="return jumpTo('settings-analysis')">Analysis speed</a>
         <a class="btn btn-sm" href="#settings-remote" onclick="return jumpTo('settings-remote')">Online access</a>
         <a class="btn btn-sm" href="#settings-remote-video" onclick="return jumpTo('settings-remote-video')">Live video</a>
         <a class="btn btn-sm" href="#settings-pos" onclick="return jumpTo('settings-pos')">Sales data</a>
@@ -802,6 +830,9 @@
       <div class="glass-card" id="settings-store"></div>
       <div class="glass-card" id="settings-evidence"></div>
       <div class="glass-card" id="settings-alerts"></div>
+      <!-- Analysis speed: GPU share, decode cap, per-camera ceiling, idle rate, motion wake, and the
+           capacity the box can sustain (site_settings.js, GET /api/v1/system/analysis-capacity). -->
+      <div class="glass-card" id="settings-analysis"></div>
       <div class="glass-card" id="settings-remote"></div>
       <!-- Online access · Live video: direct WebRTC settings and "Check remote video" (remote_video.js). -->
       <div class="glass-card" id="settings-remote-video"></div>
@@ -1025,6 +1056,31 @@
           </div>
         </div>
 
+        <!-- Analysis speed for this camera (features.analysis_priority / max_analysis_fps). -->
+        <div class="form-section-title">Analysis speed</div>
+        <div class="form-grid-2col">
+          <div class="form-group">
+            <label for="configAnalysisPriority">Analysis priority</label>
+            <select class="form-input" id="configAnalysisPriority" name="analysisPriority" aria-describedby="configAnalysisHint">
+              <option value="">Auto (normal)</option>
+              <option value="low">Low</option>
+              <option value="normal">Normal</option>
+              <option value="high">High</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="configMaxAnalysisFps">Most analysed frames per second</label>
+            <input type="number" min="0.5" max="30" step="0.5" class="form-input" id="configMaxAnalysisFps" name="maxAnalysisFps"
+              placeholder="Site default" inputmode="decimal" aria-describedby="configAnalysisHint" />
+          </div>
+        </div>
+        <div class="cam-feat-hint" id="configAnalysisHint">
+          When the AI cannot analyse every camera at full speed, it shares its capacity out: a High camera gets about
+          twice the frames of a Normal one, a Low one about half. The frame-rate cap limits this camera even when there
+          is capacity to spare; leave it empty for the site default (Settings → Analysis speed), 0.5 to 30.
+        </div>
+        <div class="dept-hint" id="configAnalysisRateNow" aria-live="polite"></div>
+
         <!-- Night watch section (js/night_watch.js mounts it when the dialog opens). -->
         <div id="nightWatchMount" data-mount="night-watch" style="margin-top: 10px;"></div>
 
@@ -1060,10 +1116,13 @@
   <script src="/static/js/duplicates.js?v=2.6.0" defer></script>
   <script src="/static/js/devices.js?v=2.6.0" defer></script>
   <script src="/static/js/calibration.js?v=2.6.0" defer></script>
+  <script src="/static/js/view_zoom.js?v=2.6.0" defer></script>
+  <script src="/static/js/live_overlay.js?v=2.6.0" defer></script>
   <script src="/static/js/analytics.js?v=2.6.0" defer></script>
   <script src="/static/js/camera_roles.js?v=2.6.0" defer></script>
   <script src="/static/js/today.js?v=2.6.0" defer></script>
   <script src="/static/js/loss.js?v=2.6.0" defer></script>
+  <script src="/static/js/live_behaviour.js?v=2.6.0" defer></script>
   <script src="/static/js/zone_alerts.js?v=2.6.0" defer></script>
   <script src="/static/js/insights.js?v=2.6.0" defer></script>
   <script src="/static/js/heatmap_history.js?v=2.6.0" defer></script>

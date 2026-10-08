@@ -736,7 +736,8 @@ async def delete_camera(camera_id: str, db: AsyncSession = Depends(get_db)):
 # not reset them, so a key absent from the request keeps its stored value.
 _NON_FLAG_SETTINGS = ("person_max_frame_fraction", "night_watch", "decode_max_width", "stream_quality",
                       # Newer switches an older client (mobile app) does not send.
-                      "static_figure_filter", "static_figure_seconds", "theft_clip")
+                      "static_figure_filter", "static_figure_seconds", "theft_clip",
+                      "analysis_priority", "max_analysis_fps")
 
 
 def _keep_unsent_settings(target: Dict[str, object], sent: object, stored: object) -> None:

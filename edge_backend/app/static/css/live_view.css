@@ -1,0 +1,125 @@
+/* ===================================================================
+   Live view: AI overlay (js/live_overlay.js), zoom / pan / full screen
+   (js/view_zoom.js), Live behaviour (js/live_behaviour.js) and the
+   Analysis speed capacity readout (js/site_settings.js).
+   Colours drawn over camera footage are fixed in both themes (legible on
+   video either way, like the tile HUD); everything else uses theme tokens.
+   =================================================================== */
+
+:root {
+  --lo-normal: #3ddc97;     /* tracked person, no cue */
+  --lo-watch: #ffb020;      /* an active cue: reach, hand at body, scanning */
+  --lo-alert: #ff4d5e;      /* a rule fired on this person just now */
+  --lo-static: #9aa4b2;     /* never moves: poster, mannequin ("static") */
+  --lo-highlight: #ffffff;  /* the person an alert or a click pointed at */
+  --lo-chip-text: #0b0f14;
+  --lo-joint: #ffffff;
+}
+
+/* ---- the zoomed stage: picture + overlay canvas, transformed together ---- */
+.cam-stage, .studio-stage { position: absolute; inset: 0; z-index: 0; transform-origin: 0 0; will-change: transform; }
+.cam-stage .camera-img { width: 100%; height: 100%; object-fit: contain; }
+.lo-canvas { position: absolute; left: 0; top: 0; pointer-events: none; z-index: 4; }
+.lo-canvas[hidden] { display: none; }
+.studio-stage #interactiveCanvas { z-index: 10; }
+
+/* Gestures belong to the view only while it can zoom (enlarged tile, Camera setup). */
+.vz-active { touch-action: pan-y; }
+.vz-active.vz-zoomed { touch-action: none; cursor: grab; }
+.vz-active.vz-zoomed:active { cursor: grabbing; }
+.camera-card-focus .camera-video-container.vz-zoomed[data-focus-for] { cursor: grab; }
+
+/* ---- view tools (zoom buttons, AI toggle): over the picture, not zoomed ---- */
+.cam-view-tools, .studio-view-tools { position: absolute; right: 8px; bottom: 34px; z-index: 3; display: none;
+  align-items: center; gap: 4px; line-height: 1.2; }
+.camera-card-focus .cam-view-tools { display: flex; }
+.studio-view-tools { display: flex; bottom: 8px; z-index: 13; }
+.vz-controls { display: inline-flex; align-items: center; gap: 4px; }
+.vz-controls[hidden] { display: none; }
+.vz-btn { min-width: 30px; min-height: 30px; padding: 2px 8px; border-radius: 6px; cursor: pointer;
+  font: 700 13px/1 var(--font-sans); color: #e6edf3; background: rgba(5, 7, 11, 0.78);
+  border: 1px solid rgba(120, 140, 170, 0.4); }
+.vz-btn:hover:not(:disabled) { border-color: #00d4ff; color: #ffffff; }
+.vz-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.vz-btn:disabled { opacity: 0.45; cursor: default; }
+.vz-btn[hidden] { display: none; }
+.vz-level { min-width: 44px; font-family: var(--font-mono); font-size: 11.5px; }
+.cam-ai-toggle { font-size: 11px; letter-spacing: 0.04em; }
+.cam-ai-toggle[aria-pressed="true"] { color: #3ddc97; border-color: rgba(61, 220, 151, 0.55); }
+.cam-ai-toggle[aria-pressed="false"] { color: #9aa4b2; text-decoration: line-through; }
+
+/* ---- AI status badge (tile HUD / Camera setup) ---- */
+.lo-status[hidden] { display: none; }
+.lo-status-ok { color: #3ddc97; border-color: rgba(61, 220, 151, 0.35); }
+.lo-status-warn { color: #ffc46b; border-color: rgba(255, 196, 107, 0.35); }
+.lo-status-off { color: #aab4c0; border-color: rgba(170, 180, 192, 0.35); }
+.studio-ai-status { position: absolute; left: 8px; top: 8px; z-index: 13; pointer-events: none; line-height: 1.4; }
+
+/* ---- full screen: the view fills the screen, picture letterboxed ---- */
+.camera-video-container:fullscreen, .video-viewport:fullscreen { width: 100vw; height: 100vh; max-height: none;
+  aspect-ratio: auto; border: 0; border-radius: 0; background: #000000; }
+.camera-video-container:-webkit-full-screen, .video-viewport:-webkit-full-screen { width: 100vw; height: 100vh;
+  max-height: none; aspect-ratio: auto; border: 0; border-radius: 0; background: #000000; }
+.camera-video-container:fullscreen .cam-view-tools { display: flex; }
+.camera-video-container:-webkit-full-screen .cam-view-tools { display: flex; }
+
+/* ---- Cameras tab: AI overlay switch, analysis-speed link ---- */
+.lo-toggle[aria-pressed="false"] { color: var(--text-dim); }
+.lo-link { text-decoration: none; display: inline-flex; align-items: center; }
+
+/* ---- Live behaviour strip (Cameras tab) ---- */
+.lb-strip { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 0 0 10px; }
+.lb-strip[hidden] { display: none; }
+.lb-strip-title { font-size: 11px; font-weight: 800; color: var(--text-soft); margin-right: 2px; }
+.lb-strip-off { font-size: 11px; color: var(--text-dim); }
+.lb-chip { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; padding: 4px 10px; min-height: 28px;
+  border-radius: 999px; cursor: pointer; font: 600 11px/1.3 var(--font-sans); color: var(--text-soft);
+  background: rgba(var(--tint-rgb), 0.04); border: 1px solid rgba(var(--slate-rgb), 0.35);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lb-chip:hover { color: var(--text-strong); }
+.lb-chip:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.lb-chip-level { font-weight: 800; }
+.lb-chip-watch { border-color: rgba(var(--amber-rgb), 0.6); }
+.lb-chip-watch .lb-chip-level { color: var(--amber); }
+.lb-chip-alert { border-color: rgba(var(--rose-rgb), 0.7); background: rgba(var(--rose-rgb), 0.1); }
+.lb-chip-alert .lb-chip-level { color: var(--rose); }
+
+/* ---- Live behaviour panel (Loss prevention tab) ---- */
+.lb-note { font-size: 11px; font-weight: 600; color: var(--text-dim); }
+.lb-list { display: flex; flex-direction: column; gap: 8px; }
+.lb-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 9px 11px; border-radius: 9px;
+  background: rgba(var(--tint-rgb), 0.03); border: 1px solid rgba(var(--slate-rgb), 0.22); border-left-width: 4px; }
+.lb-watch { border-left-color: var(--amber); }
+.lb-alert { border-left-color: var(--rose); background: rgba(var(--rose-rgb), 0.06); }
+.lb-level { font-size: 10.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em; padding: 2px 7px;
+  border-radius: 5px; flex-shrink: 0; }
+.lb-level-watch { color: var(--amber); background: rgba(var(--amber-rgb), 0.12); }
+.lb-level-alert { color: var(--rose); background: rgba(var(--rose-rgb), 0.14); }
+.lb-main { flex: 1 1 220px; min-width: 0; }
+.lb-title { font-size: 12.5px; font-weight: 700; color: var(--text-strong); overflow-wrap: anywhere; }
+.lb-labels { font-size: 12px; color: var(--text-soft); line-height: 1.45; overflow-wrap: anywhere; }
+.lb-meta { font-size: 11px; color: var(--text-dim); }
+.lb-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* ---- theft banner: the headline opens the camera live ---- */
+.theft-banner-live { cursor: pointer; }
+.theft-banner-live:hover .theft-banner-title { text-decoration: underline; }
+.theft-banner-actions .btn[hidden] { display: none; }
+
+/* ---- Settings → Analysis speed: capacity readout ---- */
+.ss-cap { margin: 0 0 14px; }
+.ss-cap-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.ss-cap-title { font-size: 12px; font-weight: 800; color: var(--text-soft); }
+.ss-cap-wrap { width: 100%; overflow-x: auto; margin-bottom: 6px; }
+.ss-cap-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.ss-cap-table th, .ss-cap-table td { padding: 5px 8px; text-align: left; border-bottom: 1px solid rgba(var(--slate-rgb), 0.18);
+  white-space: nowrap; }
+.ss-cap-table th { font-size: 10.5px; font-weight: 700; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; }
+.ss-cap-table td { color: var(--text-soft); }
+.ss-cap-table .ss-cap-num { text-align: right; font-family: var(--font-mono); }
+.ss-cap-idle { color: var(--text-dim); }
+
+@media (max-width: 600px) {
+  .cam-view-tools { right: 6px; bottom: 30px; }
+  .vz-btn { min-width: 34px; min-height: 34px; }
+}

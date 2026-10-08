@@ -42,7 +42,14 @@ M544, S640, N640 = 14.0, 5.6, 2.7
 
 @pytest.fixture(autouse=True)
 def _defaults(monkeypatch):
+    # ANALYTICS_MAX_DETECT_FPS 5: these tests were written when the per-camera
+    # ceiling was native fps / ANALYTICS_DETECT_EVERY_N_FRAMES (25 / 5 = 5 fps);
+    # the ceiling is now that setting (default 10), so they pin it to 5. The
+    # weighted / activity / 10 fps behaviour is tested below and in
+    # test_analysis_rate_settings.py.
     for key, value in {"ANALYTICS_SCHEDULER": True, "POSE_BUDGET_UTILISATION": 0.6,
+                       "ANALYTICS_MAX_DETECT_FPS": 5.0, "ANALYTICS_IDLE_DETECT_FPS": 0.5,
+                       "ANALYTICS_ACTIVE_HOLD_SEC": 4.0, "ANALYTICS_MOTION_WAKE": True,
                        "ANALYTICS_MIN_DETECT_FPS": 1.0, "ANALYTICS_TARGET_DETECT_FPS": 2.0,
                        "ANALYTICS_REFIT_DEBOUNCE_SEC": 30.0, "ANALYTICS_MAX_INFLIGHT": 4,
                        "ANALYTICS_DETECT_EVERY_N_FRAMES": 5, "RECORDING_FPS": 25,
@@ -519,8 +526,12 @@ def test_worker_admits_through_the_scheduler_and_releases_every_slot(monkeypatch
     monkeypatch.setattr(w, "_open", lambda src=None: Cap())
     monkeypatch.setattr(w, "_push_clip_buffer", lambda f: None)
     monkeypatch.setattr(w, "_analyse", lambda f, now: analysed.append(now))
+    # Someone is in view the whole time, so the camera stays active (with
+    # nobody it turns quiet after ANALYTICS_ACTIVE_HOLD_SEC: see
+    # test_analysis_rate_settings.py).
+    monkeypatch.setattr(w, "_people_in_view", lambda: 1)
     w.run()
-    assert 45 <= len(analysed) <= 51                     # 10 s at 25 fps, alone: every 5th frame
+    assert 45 <= len(analysed) <= 51                     # 10 s at 25 fps, alone: at its 5 fps ceiling
     assert sched.status()["inflight"] == 0
     assert sched.camera_status("cam_sched") is None      # forgotten when the worker stopped
 

@@ -109,6 +109,60 @@ def get_preflight(probe: bool = False):
     return result
 
 
+def _camera_rate_setting(camera_id: str, name: str):
+    try:
+        return feature_manager.get_setting(camera_id, name)
+    except Exception:  # noqa: BLE001 - unreadable: the default applies
+        return None
+
+
+@router.get("/analysis-capacity")
+def get_analysis_capacity():
+    """What the GPU sustains for person detection and how it is shared between cameras.
+
+    ``cost_ms`` is the measured device time per analysed frame and
+    ``budget_per_sec`` the analysed frames per second POSE_BUDGET_UTILISATION
+    of it allows (both null until measured). Per camera: its priority, the
+    most it may be analysed at (``max_fps``: its own max_analysis_fps or the
+    site default, at most the frames it delivers), the rate allocated now and
+    measured over the last 10 s, and ``active`` (people or movement: it shares
+    the budget; otherwise it runs at the idle rate). A camera that is not
+    streaming has nothing allocated and ``measured_fps`` null.
+    """
+    from ..config import settings
+    from ..services.inference_scheduler import inference_scheduler
+
+    cap = inference_scheduler.capacity()
+    rows = cap.pop("cameras")
+    cameras = []
+    for cam_id, rt in sorted(list(live_engine.runtimes.items()), key=lambda kv: (kv[1].name or kv[0]).lower()):
+        row = rows.get(cam_id)
+        own_max = _camera_rate_setting(cam_id, "max_analysis_fps")
+        entry = {
+            "camera_id": cam_id,
+            "name": rt.name,
+            "priority": _camera_rate_setting(cam_id, "analysis_priority") or "normal",
+            "max_fps": None,
+            "max_fps_setting": own_max,
+            "allocated_fps": 0.0,
+            "measured_fps": None,
+            "active": False,
+            "status": rt.status,
+        }
+        if row is not None:
+            entry.update({k: row[k] for k in ("max_fps", "allocated_fps", "measured_fps", "active", "quiet",
+                                              "people", "analysis_off", "night_hold")})
+        else:
+            cap_fps = own_max or float(settings.ANALYTICS_MAX_DETECT_FPS)
+            entry["max_fps"] = round(float(cap_fps), 2) if cap_fps and cap_fps > 0 else None
+        cameras.append(entry)
+    return {**cap, "cameras": cameras,
+            "max_detect_fps": float(settings.ANALYTICS_MAX_DETECT_FPS),
+            "idle_detect_fps": float(settings.ANALYTICS_IDLE_DETECT_FPS),
+            "motion_wake": bool(settings.ANALYTICS_MOTION_WAKE),
+            "decode_max_fps": float(settings.DECODE_MAX_FPS)}
+
+
 def _evidence_summary() -> Optional[dict]:
     """The evidence limit's last pass (no scan here); None if the module is unavailable."""
     try:

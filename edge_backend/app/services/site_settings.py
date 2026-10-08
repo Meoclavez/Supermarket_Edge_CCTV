@@ -22,6 +22,11 @@ consumers that cache something derived from a value are told here:
   are forgotten.
 * evidence limits: one evidence-limit pass runs straight away, so a lowered
   limit deletes the oldest evidence now rather than at the next 15-minute pass.
+* analysis rates (``POSE_BUDGET_UTILISATION``, ``ANALYTICS_*``): the
+  inference scheduler re-allocates at once. ``DECODE_MAX_FPS`` is fixed when
+  a camera stream opens, so each camera worker reopens its stream within ~2 s
+  of the change (CameraWorker._fps_changed; same path as a frame-width change,
+  the old capture and its ffmpeg are released first, tracks are kept).
 
 Saved values are loaded when this module is imported (``app.main`` imports
 the route at start-up, before the pipeline starts). A database restored from
@@ -66,7 +71,7 @@ class SiteSettingsError(ValueError):
 class Spec:
     key: str
     kind: str                    # str | timezone | int | float | bool | categories
-    group: str                   # store | evidence | alerts
+    group: str                   # store | evidence | alerts | analysis
     label: str
     help: str
     min: Optional[float] = None
@@ -124,6 +129,28 @@ SPECS: Tuple[Spec, ...] = (
          "calibrated camera with entrance/exit and checkout areas."),
     Spec("QUEUE_CONGESTED_WAIT_SEC", "float", "alerts", "Queue congested after (seconds)",
          "A checkout lane is shown as congested when the average wait passes this.", 30, 1800, "s"),
+    # ------------------------------------------------------------- analysis
+    # How often cameras are analysed (services/inference_scheduler.py). The
+    # GPU's real cost per frame is measured, so these are shares and caps,
+    # never a frame rate promised for a particular GPU.
+    Spec("POSE_BUDGET_UTILISATION", "float", "analysis", "GPU share for person detection",
+         "The share of the GPU's measured capacity that person detection may use. Higher analyses "
+         "busy cameras more often but leaves less for video decoding and the rest of the system.",
+         0.2, 0.95, "fraction"),
+    Spec("ANALYTICS_MAX_DETECT_FPS", "float", "analysis", "Most analysed frames per second per camera",
+         "A camera with people or movement is analysed up to this often, when the GPU has room "
+         "(a camera's own maximum overrides it). Fast-moving people are followed better at higher rates.",
+         0.5, 30, "fps"),
+    Spec("ANALYTICS_IDLE_DETECT_FPS", "float", "analysis", "Analysed frames per second with nobody in view",
+         "A camera with no people and no movement is checked this often; the rest of the GPU goes to "
+         "cameras where people are.", 0.1, 5, "fps"),
+    Spec("ANALYTICS_MOTION_WAKE", "bool", "analysis", "Wake a quiet camera on movement",
+         "A cheap movement check on every video frame puts a quiet camera back to full rate the moment "
+         "something moves, so a person walking in is analysed straight away."),
+    Spec("DECODE_MAX_FPS", "float", "analysis", "Video frames per second read from each camera",
+         "Frames per second decoded from each camera. Analysis can never be faster than this. Higher "
+         "costs more CPU. Changing it reconnects every camera's stream (a second or two without picture).",
+         2, 25, "fps", {"applies": "reconnect"}),
 )
 SPECS_BY_KEY: Dict[str, Spec] = {s.key: s for s in SPECS}
 GROUP_KEYS: Dict[str, List[str]] = {}
@@ -131,6 +158,7 @@ for _s in SPECS:
     GROUP_KEYS.setdefault(_s.group, []).append(_s.key)
 EVIDENCE_KEYS = frozenset(GROUP_KEYS["evidence"]) - {"NIGHT_WATCH_CLIP"}
 HIGH_VALUE_KEYS = frozenset({"THEFT_HIGH_VALUE_CATEGORIES", "THEFT_HIGH_VALUE_MIN_PRICE"})
+ANALYSIS_KEYS = frozenset(GROUP_KEYS["analysis"])
 
 
 def parse_categories(value: Any) -> List[str]:
@@ -490,7 +518,7 @@ class SiteSettingsStore:
                 "overridden": spec.key in self.overrides,
                 "min": spec.extra.get("min_nonzero", spec.min), "max": mx, "unit": spec.unit,
                 "zero_means": spec.extra.get("zero_means"),
-                "applies": "live",
+                "applies": spec.extra.get("applies", "live"),
                 "changed_at": (self.changed.get(spec.key) or {}).get("at"),
                 "changed_by": (self.changed.get(spec.key) or {}).get("by"),
             }
@@ -542,6 +570,13 @@ def _after_change(keys: set) -> None:
             logger.warning(f"Could not refresh clip buffers after a night-watch clip change: {exc}")
     if keys & EVIDENCE_KEYS:
         run_evidence_pass()
+    if keys & ANALYSIS_KEYS:
+        try:
+            from app.services.inference_scheduler import inference_scheduler
+
+            inference_scheduler.reallocate()
+        except Exception as exc:  # noqa: BLE001 - the next scheduler tick applies it anyway
+            logger.warning(f"Could not re-allocate analysis rates after a settings change: {exc}")
 
 
 def run_evidence_pass() -> None:

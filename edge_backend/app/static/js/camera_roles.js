@@ -367,6 +367,17 @@
       const v = features.person_max_frame_fraction;
       frac.value = typeof v === 'number' && isFinite(v) ? Math.round(v * 1000) / 10 : '';
     }
+    // Analysis speed (empty = Auto / site default), so Save does not undo a role's choice.
+    const prio = $('configAnalysisPriority');
+    if (prio && 'analysis_priority' in features) {
+      const v = features.analysis_priority;
+      prio.value = v === 'low' || v === 'normal' || v === 'high' ? v : '';
+    }
+    const maxFps = $('configMaxAnalysisFps');
+    if (maxFps && 'max_analysis_fps' in features) {
+      const v = features.max_analysis_fps;
+      maxFps.value = typeof v === 'number' && isFinite(v) ? v : '';
+    }
   }
 
   async function applyRole(clear) {

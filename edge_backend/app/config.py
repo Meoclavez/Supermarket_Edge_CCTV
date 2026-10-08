@@ -253,19 +253,60 @@ class Settings(BaseSettings):
     # fairly between the cameras that are analysing: a frame that arrives while
     # its camera has no token is simply not inferred (video and recording are
     # unaffected). Each camera gets at least ANALYTICS_MIN_DETECT_FPS and never
-    # more than its fps / ANALYTICS_DETECT_EVERY_N_FRAMES. The pose model (and
+    # more than its ceiling (ANALYTICS_MAX_DETECT_FPS below; with the scheduler
+    # off: fps / ANALYTICS_DETECT_EVERY_N_FRAMES). The pose model (and
     # the "auto" keypoint refiner, shed first) is re-fitted so every camera can
     # get ANALYTICS_TARGET_DETECT_FPS, ANALYTICS_REFIT_DEBOUNCE_SEC after the
     # camera set or the load last changed. Off = the old every-Nth-frame rule.
     ANALYTICS_SCHEDULER: bool = os.getenv("ANALYTICS_SCHEDULER", "1").lower() not in ("0", "false", "no", "off")
     ANALYTICS_MIN_DETECT_FPS: float = float(os.getenv("ANALYTICS_MIN_DETECT_FPS", "1.0"))
     ANALYTICS_TARGET_DETECT_FPS: float = float(os.getenv("ANALYTICS_TARGET_DETECT_FPS", "2.0"))
+    # Where the budget goes (services/inference_scheduler.py, scheduler on).
+    # A camera is "active" while it has people (any non-static track) or saw
+    # pixel motion (services/motion_gate.py) in the last
+    # ANALYTICS_ACTIVE_HOLD_SEC; active cameras share the budget max-min fair,
+    # weighted by their analysis_priority (low 0.5, normal 1, high 2), each up
+    # to its ceiling: its own max_analysis_fps, else ANALYTICS_MAX_DETECT_FPS,
+    # never above the frames it delivers (DECODE_MAX_FPS). A "quiet" camera
+    # (no people, no motion) is analysed at ANALYTICS_IDLE_DETECT_FPS only,
+    # and with ANALYTICS_MOTION_WAKE the cheap motion gate puts it back to its
+    # full share on the next decoded frame that moves. Default 10 / 0.5: on
+    # the store box (32 D1 cameras, 10.9 ms per RTMO frame, 0.6 of the GPU =
+    # 55 frames/s) 4 cameras with people get 10 fps each instead of 1.7 (the
+    # equal split), 8 get 5.4 and 16 get 2.9 each (28 / 24 / 16 quiet cameras
+    # at 0.5); at 0.75 of the GPU 7.1 and 3.8. A quiet camera wakes within one decoded
+    # frame (0.1 s at 10 fps), so 0.5 fps is only a backstop. Site settings.
+    ANALYTICS_MAX_DETECT_FPS: float = float(os.getenv("ANALYTICS_MAX_DETECT_FPS", "10"))
+    ANALYTICS_IDLE_DETECT_FPS: float = float(os.getenv("ANALYTICS_IDLE_DETECT_FPS", "0.5"))
+    ANALYTICS_MOTION_WAKE: bool = os.getenv("ANALYTICS_MOTION_WAKE", "1").lower() not in ("0", "false", "no", "off")
+    ANALYTICS_ACTIVE_HOLD_SEC: float = float(os.getenv("ANALYTICS_ACTIVE_HOLD_SEC", "4"))
+    # Motion gate (services/motion_gate.py): a 64x48 grey thumbnail compared
+    # with a slowly learnt background (brightness fitted); a thumbnail pixel counts
+    # as changed above MOTION_GATE_THRESHOLD grey levels, and motion needs
+    # MOTION_GATE_MIN_PIXELS changed pixels (outside AI_IGNORE areas) on
+    # MOTION_GATE_PERSIST frames in a row. A change over most of the picture
+    # (lights, IR switch) re-learns the background instead.
+    MOTION_GATE_THRESHOLD: float = float(os.getenv("MOTION_GATE_THRESHOLD", "14"))
+    MOTION_GATE_MIN_PIXELS: int = int(os.getenv("MOTION_GATE_MIN_PIXELS", "4"))
+    MOTION_GATE_PERSIST: int = int(os.getenv("MOTION_GATE_PERSIST", "2"))
     ANALYTICS_REFIT_DEBOUNCE_SEC: float = float(os.getenv("ANALYTICS_REFIT_DEBOUNCE_SEC", "30"))
     # Analysed frames in flight at once across all cameras (one on the
     # accelerator, the rest in pre/post-processing); a camera whose turn comes
     # while this many are in flight skips that frame instead of queueing.
     ANALYTICS_MAX_INFLIGHT: int = int(os.getenv("ANALYTICS_MAX_INFLIGHT", "4"))
     TRACK_MAX_AGE_FRAMES: int = int(os.getenv("TRACK_MAX_AGE_FRAMES", "30"))
+    # A confirmed track also ends after this many seconds unseen, whatever the
+    # analysed rate: 30 frames are 3 s at 10 fps but 60 s at 0.5 fps.
+    TRACK_MAX_AGE_SEC: float = float(os.getenv("TRACK_MAX_AGE_SEC", "5"))
+    # Fast movers (tracking_service): when IoU finds no partner for a track,
+    # a confident detection whose centre is within the predicted centre +
+    # TRACK_CENTRE_GATE_SPEED box heights per second since the track was last
+    # seen (at least 0.25, at most TRACK_CENTRE_GATE_MAX box heights) and of
+    # similar height keeps the identity, instead of starting a new track.
+    # 2 heights/s is ~3.4 m/s for a 1.7 m person (a run); the bound keeps a
+    # person who left from handing the id to someone entering elsewhere.
+    TRACK_CENTRE_GATE_SPEED: float = float(os.getenv("TRACK_CENTRE_GATE_SPEED", "2.0"))
+    TRACK_CENTRE_GATE_MAX: float = float(os.getenv("TRACK_CENTRE_GATE_MAX", "1.5"))
     TRACK_MIN_HITS: int = int(os.getenv("TRACK_MIN_HITS", "3"))
     # ByteTrack-style two-stage association. The engine asks the detector for
     # boxes down to TRACK_LOW_CONF_THRESHOLD; those low-confidence boxes can
@@ -796,14 +837,17 @@ class Settings(BaseSettings):
     # camera's detection ceiling stays native fps / ANALYTICS_DETECT_EVERY_N_FRAMES
     # (25 / 5 = 5 fps) as long as this is at least that; the enlarged live
     # view and clips show at most this rate.
-    # Default 5: every consumer but the enlarged live view is satisfied by it
-    # (analysis ~2-3 fps per camera and never capped by it, see
-    # CameraWorker._clip_every; clip ring 5 fps; the dashboard's "Normal"
-    # live view asks for 5 fps), and it halves the per-frame capture cost:
-    # 8 test cameras 67 -> 58 % of a core (720p camera 8 -> 6 %, 2560x1440 at
-    # native 15 -> 10 %). 10 gives Studio and the "High" live view smoother
-    # motion for about 1 % of a core per camera.
-    DECODE_MAX_FPS: float = float(os.getenv("DECODE_MAX_FPS", "5"))
+    # Default 10: a camera with people may be analysed up to
+    # ANALYTICS_MAX_DETECT_FPS (10), which needs 10 delivered frames; at 5 a
+    # fast walker crossed a third of the frame between two analysed frames.
+    # Cost: about 1 % of a core per camera more than 5 fps (704x576 on the
+    # GPU path: 3.9 % of a core per camera at 10 fps incl. ffmpeg, store box
+    # i5-14400F), i.e. ~1/3 of one core of 16 threads for 32 cameras; the
+    # frames stay NV12 until analysed, and the motion gate reads only their
+    # luma. 5 halves the per-frame capture cost (8 test cameras 67 -> 58 % of
+    # a core) but caps analysis at 5 fps. A site setting; running cameras
+    # reopen their streams within seconds of a change.
+    DECODE_MAX_FPS: float = float(os.getenv("DECODE_MAX_FPS", "10"))
     # GPU-decoded frames wider than this are scaled down on the GPU, before
     # they are downloaded, keeping the aspect ratio (0 = native size); a
     # camera's own ``decode_max_width`` setting overrides it. "auto" = 1920

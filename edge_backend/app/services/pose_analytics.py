@@ -246,6 +246,12 @@ class TrackState:
     cues: Deque[Dict[str, Any]] = field(default_factory=lambda: deque(maxlen=64))
     last_head_cue: float = float("-inf")
     last_sweep_cue: float = float("-inf")
+    # Live view (live_state): the fused BEHAVIOUR_PATTERN score from the last
+    # evaluation (None = not evaluated: pattern off, theft off or in cooldown)
+    # and rule -> (incident id, ts) of the incidents raised on this track.
+    pattern_score: Optional[float] = None
+    pattern_ts: float = -1.0
+    incident_ids: Dict[str, Tuple[str, float]] = field(default_factory=dict)
 
 
 @dataclass
@@ -265,6 +271,8 @@ class CameraState:
     thresholds: Dict[str, Any] = field(default_factory=dict)
     exit_rule_on: bool = True
     zones_role: Optional[str] = None
+    # Frame time of the latest observe() (the live view's "now").
+    last_ts: Optional[float] = None
 
 
 # ============================================================================
@@ -704,6 +712,7 @@ class PoseAnalytics:
                         tracks: list, result: ObserveResult) -> None:
         cam.interactions_on = self._flag(cam.camera_id, "shelf_interaction")
         cam.theft_on = self._flag(cam.camera_id, "theft_detection")
+        cam.last_ts = ts
         self._refresh_role(cam)
         if not cam.interactions_on and not cam.theft_on:
             # Both analyses are switched off for this camera: keep no state.
@@ -1428,6 +1437,7 @@ class PoseAnalytics:
         Not evaluated for a track on which any other rule fired within the
         incident cooldown: that person has already been reported for review.
         """
+        st.pattern_score, st.pattern_ts = None, ts
         if not settings.THEFT_PATTERN_ENABLED:
             return
         window = settings.THEFT_PATTERN_HEAD_WINDOW_SEC
@@ -1439,6 +1449,10 @@ class PoseAnalytics:
                 self._add_cue(st, rules.CUE_HEAD_SCAN, ts, float(np.mean(vis)) if vis else None,
                               f"{turns} head turns in {window:.0f}s", None)
         if not st.cues or not cam.theft_on:
+            if cam.theft_on and not any(
+                    r != rules.RULE_BEHAVIOUR_PATTERN and ts - t < settings.THEFT_INCIDENT_COOLDOWN_SEC
+                    for r, t in st.fired.items()):
+                st.pattern_score = 0.0   # evaluated: no cues, nothing to fuse
             return
         half_life = max(float(settings.THEFT_PATTERN_HALF_LIFE_SEC), 1.0)
         while st.cues and ts - st.cues[0]["t"] > 6.0 * half_life:   # < 2 % left
@@ -1453,6 +1467,8 @@ class PoseAnalytics:
             weights=rules.parse_cue_map(settings.THEFT_PATTERN_WEIGHTS),
             caps=rules.parse_cue_map(settings.THEFT_PATTERN_CAPS),
         )
+        score = verdict.get("score")
+        st.pattern_score = None if score is None else float(score)
         if not verdict.get("detected"):
             return
         zone_id = next((c["zone_id"] for c in reversed(st.cues) if c.get("zone_id")), None)
@@ -1615,6 +1631,7 @@ class PoseAnalytics:
             "estimated_loss_value": loss,
             "snapshot": snapshot,
         }
+        st.incident_ids[rule] = (incident["id"], ts)
         self._enqueue("incident", incident)
         self.stats["incidents"] += 1
         result.incidents.append({k: v for k, v in incident.items() if k != "snapshot"})
@@ -1649,6 +1666,145 @@ class PoseAnalytics:
                 self._end_reach(cam, st, hand, hand.active_last or ts)
             if hand.closing is not None:
                 self._emit_reach(cam, st, hand)
+
+    # --------------------------------------------------------- live view
+
+    CONCEAL_LABELS = {
+        rules.CONCEAL_POCKET: "Hand at pocket",
+        rules.CONCEAL_CHEST: "Hand at chest",
+        rules.CONCEAL_BEHIND_BACK: "Hand behind back",
+    }
+
+    def live_state(self, camera_id: str, lock_timeout: float = 0.05) -> Optional[Dict[str, Any]]:
+        """Per-track behaviour for the live overlay (/api/v1/live/tracks). Read-only.
+
+        Returns None when there is nothing honest to report: no pose state for
+        the camera yet, shelf interaction and theft detection both off, or the
+        camera's lock was not free within ``lock_timeout`` (an observe() is
+        running; the caller must never stall inference, so it reports
+        "not available" instead of waiting). Otherwise
+        ``{"now", "theft_on", "interactions_on", "pattern_threshold",
+        "tracks": {track_id: behaviour}}``, each behaviour built from the
+        state as of the latest analysed frame (see ``_live_behaviour``). The
+        dicts are fresh copies: nothing returned aliases the worker's state.
+        """
+        cam = self._cameras.get(camera_id)
+        if cam is None:
+            return None
+        if not cam.lock.acquire(timeout=max(0.0, float(lock_timeout))):
+            return None
+        try:
+            if (not cam.interactions_on and not cam.theft_on) or cam.last_ts is None:
+                return None
+            now = float(cam.last_ts)
+            threshold = float(self._thr(cam, "pattern_score_threshold", settings.THEFT_PATTERN_SCORE_THRESHOLD))
+            zone_names = {z.id: z.name for z in cam.zones}
+            tracks = {str(tid): self._live_behaviour(cam, st, now, zone_names, threshold)
+                      for tid, st in cam.tracks.items()}
+            return {"now": now, "theft_on": bool(cam.theft_on), "interactions_on": bool(cam.interactions_on),
+                    "pattern_threshold": threshold, "tracks": tracks}
+        finally:
+            cam.lock.release()
+
+    def _live_behaviour(self, cam: CameraState, st: TrackState, now: float,
+                        zone_names: Dict[str, str], threshold: float) -> Dict[str, Any]:
+        """One track's live behaviour (caller holds ``cam.lock``).
+
+        ``level``: "alert" when a rule fired on this track within
+        ``THEFT_INCIDENT_COOLDOWN_SEC``; "watch" when any cue is active now --
+        a reach in progress, a hand held at a concealment target after a
+        reach, a hand hidden behind the body, head scanning (at least
+        ``THEFT_PATTERN_HEAD_TURNS`` turns within ``THEFT_PATTERN_HEAD_WINDOW_SEC``)
+        or a fused pattern score of at least half its threshold; else
+        "normal". The theft cues (everything but the reach) count only while
+        theft detection is on. ``since`` is when the current level began.
+        """
+        labels: List[str] = []
+        watch_onsets: List[float] = []
+        alert_at: Optional[float] = None
+        incident_id: Optional[str] = None
+        incident_rule: Optional[str] = None
+        theft = bool(cam.theft_on)
+
+        if theft:
+            cooldown = settings.THEFT_INCIDENT_COOLDOWN_SEC
+            recent = [(t, r) for r, t in st.fired.items() if 0.0 <= now - t < cooldown]
+            if recent:
+                alert_at, incident_rule = max(recent)
+                rec = st.incident_ids.get(incident_rule)
+                incident_id = rec[0] if rec is not None and rec[1] == alert_at else None
+                labels.append(rules.RULE_LABELS.get(incident_rule, incident_rule))
+
+        reaching_zone: Optional[str] = None
+        conceal: Optional[str] = None
+        reach_labels: List[str] = []
+        cue_labels: List[str] = []
+        for hand in st.hands.values():
+            if hand.active_zone is not None and not hand.active_suppressed:
+                name = (zone_names.get(hand.active_zone)
+                        or (hand.active_zone_geom.name if hand.active_zone_geom is not None else None)
+                        or str(hand.active_zone))
+                if reaching_zone is None:
+                    reaching_zone = name
+                label = f"Reaching: {name}"
+                if label not in reach_labels:
+                    reach_labels.append(label)
+                watch_onsets.append(hand.active_started)
+            if not theft:
+                continue
+            hand_target = None
+            if hand.post_reach:
+                last = hand.post_reach[-1]
+                if last.get("target") and now - float(last.get("t", now)) <= 1.0:
+                    hand_target = str(last["target"])
+                    onset = float(last["t"])
+                    for s in reversed(hand.post_reach):
+                        if not s.get("target"):
+                            break
+                        onset = float(s["t"])
+                    if conceal is None:
+                        conceal = hand_target
+                    label = self.CONCEAL_LABELS.get(hand_target, f"Hand at {hand_target}")
+                    if label not in cue_labels:
+                        cue_labels.append(label)
+                    watch_onsets.append(onset)
+            if hand.occluded_since is not None and hand_target != rules.CONCEAL_BEHIND_BACK:
+                if "Hand hidden behind body" not in cue_labels:
+                    cue_labels.append("Hand hidden behind body")
+                watch_onsets.append(float(hand.occluded_since))
+
+        labels.extend(reach_labels)
+        labels.extend(cue_labels)
+        window = settings.THEFT_PATTERN_HEAD_WINDOW_SEC
+        turns = [t for t in st.head_turns if 0.0 <= now - t <= window]
+        if theft and turns and len(turns) >= max(1, int(settings.THEFT_PATTERN_HEAD_TURNS)):
+            labels.append(f"Looking around ({len(turns)})")
+            watch_onsets.append(min(turns))
+
+        score = st.pattern_score if (theft and settings.THEFT_PATTERN_ENABLED) else None
+        if score is not None and threshold > 0 and score >= 0.5 * threshold:
+            labels.append(f"Behaviour score {score:.2f} of {threshold:.2f}")
+            cue_ts = [float(c["t"]) for c in st.cues if "t" in c]
+            watch_onsets.append(min(cue_ts) if cue_ts else (st.pattern_ts if st.pattern_ts >= 0 else now))
+
+        if alert_at is not None:
+            level, since = "alert", alert_at
+        elif watch_onsets:
+            level, since = "watch", min(watch_onsets)
+        else:
+            level, since = "normal", None
+        return {
+            "level": level,
+            "labels": labels,
+            "reaching_zone": reaching_zone,
+            "conceal": conceal,
+            "head_turns": len(turns),
+            "pattern_score": None if score is None else round(float(score), 3),
+            "pattern_threshold": round(threshold, 3),
+            "incident_id": incident_id,
+            "incident_rule": incident_rule,
+            "since": since,
+        }
 
     # ------------------------------------------------------------ writer
 

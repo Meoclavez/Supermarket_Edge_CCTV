@@ -237,7 +237,25 @@
     }
     banner.dataset.incident = pick.id;
     banner.dataset.kind = pick.kind;
+    // "Watch live": that camera enlarged on the Cameras tab, the person outlined while still tracked.
+    banner.dataset.camera = it.camera_id || '';
+    banner.dataset.track = (pick.kind === 'theft' && it.person_track_id) || '';
+    const live = banner.querySelector('[data-banner="live"]');
+    const canLive = !!it.camera_id && typeof window.openCameraLive === 'function';
+    if (live) live.hidden = !canLive;
+    const left = banner.querySelector('.theft-banner-left');
+    if (left) {
+      left.classList.toggle('theft-banner-live', canLive);
+      left.title = canLive ? 'Click to watch this camera live' : '';
+    }
     banner.style.display = 'flex';
+  }
+
+  function bannerLive() {
+    const banner = $('theftAlertBanner');
+    const cam = banner && banner.dataset.camera;
+    if (!cam || typeof window.openCameraLive !== 'function') return;
+    window.openCameraLive(cam, { trackId: banner.dataset.track || null });
   }
 
   function bannerReview() {
@@ -420,6 +438,9 @@
       b.push(`<button type="button" class="btn btn-sm" data-action="resolve" data-incident="${id}" title="Correct the recorded outcome">Change outcome</button>`);
     }
     if (inc.clip_url) b.push(`<button type="button" class="btn btn-sm" data-action="play-clip" data-incident="${id}" title="About 5 s before to 10 s after">▶ Play clip</button>`);
+    if (isOpen(inc) && inc.camera_id && typeof window.openCameraLive === 'function') {
+      b.push(`<button type="button" class="btn btn-sm" data-action="watch-live" data-incident="${id}" title="This camera's live video, enlarged, with the person outlined while the box still tracks them">Watch live</button>`);
+    }
     if (inc.studio_url) b.push(`<a class="btn btn-sm" href="${esc(inc.studio_url)}" target="_blank" rel="noopener">Watch camera now</a>`);
     return b.join('');
   }
@@ -1006,6 +1027,10 @@
     else if (action === 'dispatch') openDispatchForm(id);
     else if (action === 'cancel') { closeForm(); renderList(true); }
     else if (action === 'false-alarm' || action === 'acknowledge') quickAction(btn, id, action);
+    else if (action === 'watch-live') {
+      const inc = state.incidents.find((i) => i.id === id);
+      if (inc && inc.camera_id && typeof window.openCameraLive === 'function') window.openCameraLive(inc.camera_id, { trackId: inc.person_track_id || null });
+    }
     else if (action === 'play-clip') {
       const inc = state.incidents.find((i) => i.id === id);
       if (inc && inc.clip_url) openEvidence(inc.snapshot_url || inc.evidence_snapshot_url || null, incidentCaption(inc), inc.clip_url, 'clip');
@@ -1044,9 +1069,13 @@
     if (banner) {
       banner.addEventListener('click', (e) => {
         const b = e.target.closest('[data-banner]');
-        if (!b) return;
+        if (!b) {
+          if (e.target.closest('.theft-banner-live')) bannerLive();
+          return;
+        }
         if (b.dataset.banner === 'review') bannerReview();
         else if (b.dataset.banner === 'dismiss') bannerDismiss();
+        else if (b.dataset.banner === 'live') bannerLive();
       });
     }
     const viewer = $('theftEvidenceViewer');

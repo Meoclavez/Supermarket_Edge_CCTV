@@ -385,7 +385,9 @@ def test_live_snapshot_hides_keypoints_of_a_coasting_track(worker, stub_detector
     for i in range(settings.TRACK_MIN_HITS + 1):
         w._analyse(frame, now=9000.0 + i)
     monkeypatch.setattr(lae.person_detector, "detect", lambda f, **kw: [])
-    w._analyse(frame, now=9010.0)
+    # One analysed frame later (1 s): still coasting. (Was 9010: a track unseen
+    # for 7 s now ends by TRACK_MAX_AGE_SEC, whatever the frame count.)
+    w._analyse(frame, now=9000.0 + settings.TRACK_MIN_HITS + 1)
     (box,) = engine.live_snapshot()["detections"][0]["boxes"]
     assert box["keypoints"] is None
 

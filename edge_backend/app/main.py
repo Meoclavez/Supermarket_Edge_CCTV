@@ -331,6 +331,10 @@ from .routes import push as push_routes  # noqa: E402
 
 app.include_router(push_routes.router)
 app.include_router(push_routes.ack_router)
+# Live tracks + behaviour for the dashboard's client-side overlay (JSON only).
+from .routes import live as live_routes  # noqa: E402
+
+app.include_router(live_routes.router)
 
 # Mount Static Files
 STATIC_DIR = Path(__file__).resolve().parent / "static"
