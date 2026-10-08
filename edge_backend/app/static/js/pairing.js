@@ -124,8 +124,8 @@
             <div class="pr-field-label">Server address</div>
             <ul class="pr-url-list">${urls}</ul>
             <div class="pr-actions">
-              <button type="button" class="btn btn-sm" id="prRegenBtn">New code</button>
-              <button type="button" class="btn btn-sm" id="prCancelBtn">Cancel</button>
+              <button type="button" class="btn btn-secondary btn-sm" id="prRegenBtn">New code</button>
+              <button type="button" class="btn btn-secondary btn-sm" id="prCancelBtn">Cancel</button>
             </div>
           </div>
         </div>`;
@@ -223,7 +223,7 @@
     if (!host) return;
     const c = pushCfg;
     const configured = !!(c && c.configured);
-    const badge = !c ? '<span class="badge">…</span>'
+    const badge = !c ? '<span class="badge badge-neutral">…</span>'
       : configured ? '<span class="badge badge-green" id="prPushBadge">Configured</span>'
         : '<span class="badge badge-warning" id="prPushBadge">Not configured</span>';
     const details = configured
@@ -241,7 +241,7 @@
           <input type="file" id="prSaFile" class="form-input" accept=".json,application/json">
           <div class="pr-actions">
             <button type="button" class="btn btn-primary btn-sm" id="prSaUpload">Upload</button>
-            ${configured ? '<button type="button" class="btn btn-sm" id="prSaCancel">Cancel</button>' : ''}
+            ${configured ? '<button type="button" class="btn btn-secondary btn-sm" id="prSaCancel">Cancel</button>' : ''}
           </div>
         </div>`;
     } else if (pushMode === 'confirm-remove') {
@@ -249,13 +249,13 @@
         <div class="pr-confirm" id="prSaConfirm">Remove the service account? Phones stop receiving pushes until a new one is uploaded.
           <div class="pr-actions">
             <button type="button" class="btn btn-danger btn-sm" id="prSaRemoveYes">Yes, remove</button>
-            <button type="button" class="btn btn-sm" id="prSaRemoveNo">Keep</button>
+            <button type="button" class="btn btn-secondary btn-sm" id="prSaRemoveNo">Keep</button>
           </div>
         </div>`;
     } else {
       actions = `
         <div class="pr-actions">
-          <button type="button" class="btn btn-sm" id="prSaReplace">Replace</button>
+          <button type="button" class="btn btn-secondary btn-sm" id="prSaReplace">Replace</button>
           <button type="button" class="btn btn-danger btn-sm" id="prSaRemove">Remove</button>
         </div>`;
     }
@@ -267,7 +267,7 @@
         <select class="form-select pr-grow" id="prTestDevice" ${devices.length ? '' : 'disabled'}>
           ${opts || '<option value="">No paired phones</option>'}
         </select>
-        <button type="button" class="btn btn-sm" id="prTestBtn" ${devices.length ? '' : 'disabled'}>Send test alert</button>
+        <button type="button" class="btn btn-secondary btn-sm" id="prTestBtn" ${devices.length ? '' : 'disabled'}>Send test alert</button>
       </div>
       <div class="form-status" id="prTestStatus"></div>`;
 
@@ -411,7 +411,7 @@
     if (!host) return;
     const rows = devices.map((d) => renderDeviceRow(d)).join('');
     host.innerHTML = `
-      <div class="card-title"><span>Paired phones</span><span class="badge" id="prDeviceCount">${devices.length}</span></div>
+      <div class="card-title"><span>Paired phones</span><span class="badge badge-neutral" id="prDeviceCount">${devices.length}</span></div>
       ${devices.length ? `<div class="pr-device-list" id="prDeviceList">${rows}</div>`
         : '<div class="pr-hint" id="prNoDevices">No phones paired yet. Use “Pair a phone” above.</div>'}
       <div class="form-status ${errorText ? 'form-status-error' : ''}" id="prDevicesStatus">${esc(errorText || '')}</div>`;
@@ -426,14 +426,14 @@
       ? `<form class="pr-inline" data-rename="${id}" autocomplete="off">
            <input class="form-input pr-grow" name="name" maxlength="128" value="${esc(d.name)}" aria-label="Phone name">
            <button type="submit" class="btn btn-primary btn-sm">Save</button>
-           <button type="button" class="btn btn-sm" data-act="rename-cancel">Cancel</button>
+           <button type="button" class="btn btn-secondary btn-sm" data-act="rename-cancel">Cancel</button>
          </form>`
       : `<div class="pr-device-name">${esc(d.name)}</div>`;
     const confirm = revoking
       ? `<div class="pr-confirm">Revoke ${esc(d.name)}? It is signed out immediately and stops receiving alerts. It must be paired again to reconnect.
            <div class="pr-actions">
              <button type="button" class="btn btn-danger btn-sm" data-act="revoke-yes">Yes, revoke</button>
-             <button type="button" class="btn btn-sm" data-act="revoke-no">Keep</button>
+             <button type="button" class="btn btn-secondary btn-sm" data-act="revoke-no">Keep</button>
            </div>
          </div>` : '';
     return `
@@ -446,8 +446,8 @@
           </div>
           <div class="pr-device-push">${pushSummary(d)}</div>
           <div class="pr-actions pr-device-actions">
-            ${renaming ? '' : '<button type="button" class="btn btn-sm" data-act="rename">Rename</button>'}
-            <button type="button" class="btn btn-sm" data-act="prefs" aria-expanded="${ui.prefsOpen === d.id}">Alert settings</button>
+            ${renaming ? '' : '<button type="button" class="btn btn-secondary btn-sm" data-act="rename">Rename</button>'}
+            <button type="button" class="btn btn-secondary btn-sm" data-act="prefs" aria-expanded="${ui.prefsOpen === d.id}">Alert settings</button>
             <button type="button" class="btn btn-danger btn-sm" data-act="revoke">Revoke</button>
           </div>
         </div>
@@ -497,7 +497,7 @@
         </div>
         <div class="pr-actions">
           <button type="submit" class="btn btn-primary btn-sm">Save alert settings</button>
-          <button type="button" class="btn btn-sm" data-act="prefs-close">Close</button>
+          <button type="button" class="btn btn-secondary btn-sm" data-act="prefs-close">Close</button>
         </div>
       </form>`;
   }

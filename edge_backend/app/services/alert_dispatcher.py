@@ -13,6 +13,15 @@
    (first priority, then backup if nobody acknowledges), see
    :mod:`app.services.push_alerts`.
 
+A theft incident carrying ``data["alert_tier"]`` (services/theft_alert_policy)
+is routed by its level: ``review`` is neither logged to the alert history,
+broadcast nor pushed (it waits in the review list); ``watch`` is logged and
+broadcast and pushed only when the store switched that on; ``alert`` is
+pushed (unless switched off); ``critical`` is always pushed, skips the
+per-camera cooldown and escalates. ``data["channels"]`` carries the level's
+channels (banner, sound, push, escalate) to the dashboard and the phones.
+Without a tier (staff-sent messages, other alerts) nothing changes.
+
 It returns a delivery report stating what really happened per phone. With no
 push provider configured the outcome is ``not_configured``; nothing is ever
 reported as delivered that was not accepted by the provider.
@@ -369,6 +378,8 @@ class AlertDispatcher:
         from app.services import device_identity
 
         data = dict(data or {})
+        persist, broadcast, push, bypass_cooldown, route_note = self._route_tier(
+            data, persist, broadcast, push, bypass_cooldown)
         et = str(event_type or data.get("event_type") or EventType.THEFT_SUSPECTED.value)
         try:
             et_enum: Optional[EventType] = EventType(et)
@@ -408,7 +419,7 @@ class AlertDispatcher:
             push_report = await self._push(title, body, data, camera, bypass_cooldown=bypass_cooldown)
         else:
             push_report = {"provider": "fcm_v1", "devices": 0, "targets": 0, "sent": 0, "failed": 0,
-                           "skipped": "not pushed: dashboard-only event", "results": []}
+                           "skipped": route_note or "not pushed: dashboard-only event", "results": []}
         # Installed dashboard web apps (Web Push): roster, threshold, escalation.
         if push:
             try:
@@ -419,8 +430,9 @@ class AlertDispatcher:
                 logger.exception("web app push for %s failed", alert_id)
                 web_report = {"provider": "web_push", "pushed": False, "skipped": f"error: {exc}"}
         else:
-            web_report = {"provider": "web_push", "pushed": False, "skipped": "not pushed: dashboard-only event"}
-        return {
+            web_report = {"provider": "web_push", "pushed": False,
+                          "skipped": route_note or "not pushed: dashboard-only event"}
+        report = {
             "alert_id": alert_id,
             "event_type": et,
             "severity": sev,
@@ -429,6 +441,37 @@ class AlertDispatcher:
             "push": push_report,
             "web_push": web_report,
         }
+        if data.get("alert_tier"):
+            report["alert_tier"] = data["alert_tier"]
+            report["channels"] = data.get("channels")
+        return report
+
+    @staticmethod
+    def _route_tier(data: dict, persist: bool, broadcast: bool, push: bool, bypass_cooldown: bool):
+        """Apply a theft incident's alert-tier routing; unchanged without ``alert_tier``.
+
+        Returns (persist, broadcast, push, bypass_cooldown, note) and puts
+        the level's channels into ``data["channels"]``.
+        """
+        from app.services import theft_alert_policy as tp
+
+        tier = tp.normalise_tier(data.get("alert_tier"))
+        if tier is None:
+            data.pop("alert_tier", None)
+            return persist, broadcast, push, bypass_cooldown, None
+        ch = tp.channels(tier)
+        data["alert_tier"], data["channels"] = tier, ch
+        label = tp.TIER_LABELS[tier]
+        note = None
+        if tier == "review":
+            persist = broadcast = push = False
+            note = "not pushed: Review level (review list only)"
+        elif not ch["push"]:
+            push = False
+            note = f"not pushed: {label} level is set to dashboard only"
+        if tier == "critical":
+            bypass_cooldown = True
+        return persist, broadcast, push, bypass_cooldown, note
 
     async def send_test(self, paired_device_id: str) -> dict:
         """Send a clearly-labelled test push to one phone (prefs, mute and cooldown ignored)."""

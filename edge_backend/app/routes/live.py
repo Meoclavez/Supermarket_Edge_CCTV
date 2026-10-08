@@ -55,7 +55,10 @@ def live_tracks(
     coasting), ``velocity`` (normalised units per second, null until two
     matches), ``fresh``/``age_sec``, normalised ``keypoints`` (last matched
     pose) and ``behaviour`` (null when shelf interaction and theft detection
-    are off for the camera, or not available).
+    are off for the camera, or not available). A behaviour at level "alert"
+    carries ``tier`` (review | watch | alert | critical) and ``risk_score``
+    of the incident that fired (services/theft_alert_policy.py); both are
+    null otherwise.
     """
     return live_engine.live_tracks(parse_camera_ids(cameras))
 

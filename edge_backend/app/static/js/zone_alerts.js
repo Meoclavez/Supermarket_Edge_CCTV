@@ -202,7 +202,7 @@
         title="Tell other staff this alert has been seen">${busy ? 'Acknowledging…' : 'Acknowledge'}</button>`);
     }
     if (ev.camera_id) {
-      b.push(`<a class="btn btn-sm" href="/dashboard/studio?camera_id=${encodeURIComponent(ev.camera_id)}" target="_blank" rel="noopener">Watch camera now</a>`);
+      b.push(`<a class="btn btn-secondary btn-sm" href="/dashboard/studio?camera_id=${encodeURIComponent(ev.camera_id)}" target="_blank" rel="noopener">Watch camera now</a>`);
     }
     return b.join('');
   }

@@ -7,14 +7,10 @@
   <script>(function(){var m=null;try{m=localStorage.getItem('edge_cctv_theme')}catch(e){}document.documentElement.setAttribute('data-theme',m==='light'||m==='system'?m:'dark')})();</script>
   <title>Edge AI CCTV - Store dashboard</title>
 
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;800&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <!-- Installed web app: manifest + service worker at the root (main.py), icons (js/phone_alerts.js). -->
   <link rel="manifest" href="/manifest.webmanifest">
-  <meta name="theme-color" content="#0b0f18">
+  <meta name="theme-color" content="#151a21">
   <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
   <meta name="apple-mobile-web-app-title" content="Store CCTV">
   <link rel="stylesheet" href="/static/css/style.css?v=2.6.0" />
@@ -36,6 +32,8 @@
        parsing; theme.js is listed last so it still runs after the modules.
        The server rewrites each ?v= to a hash of the file (web_delivery.py). -->
   <script src="/static/js/auth.js?v=2.6.0"></script>
+  <!-- Icons (Lucide sprite, icons/sprite.svg): window.EdgeIcon, used by every module below. -->
+  <script src="/static/js/icons.js?v=2.6.0" defer></script>
 
   <!-- Chart.js 4.4.1 for the visitors-by-hour charts (vendored: vendor/chartjs/SOURCE.txt) -->
   <script src="/static/vendor/chartjs/chart.umd.min.js" defer></script>
@@ -46,38 +44,38 @@
          theme.js and auth.js mount the theme switch and Sign out into .header-actions. -->
     <header class="top-nav-header">
       <div class="brand-group">
-        <span class="brand-logo-glow" aria-hidden="true">👁️</span>
+        <span class="brand-logo-glow" aria-hidden="true"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-cctv"></use></svg></span>
         <div class="brand-titles">
-          <h1 class="brand-title" id="brandTitle">Store dashboard</h1>
-          <span class="brand-subtitle" id="brandSubtitle">&mdash;</span>
+          <div class="brand-line"><span class="brand-product">Edge AI CCTV</span><h1 class="brand-title" id="brandTitle">Store dashboard</h1></div>
+          <span class="brand-subtitle" id="brandSubtitle" title="Camera status">&mdash;</span>
         </div>
       </div>
 
       <nav class="tab-nav-bar" id="mainNav" aria-label="Main">
         <button type="button" class="tab-btn" data-tab="today" onclick="switchTab('today')">
-          <span class="tab-icon" aria-hidden="true">🏠</span><span class="tab-label">Today</span>
+          <span class="tab-icon" aria-hidden="true"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-house"></use></svg></span><span class="tab-label">Today</span>
         </button>
         <button type="button" class="tab-btn" data-tab="cameras" onclick="switchTab('cameras')">
-          <span class="tab-icon" aria-hidden="true">📹</span><span class="tab-label">Cameras</span>
+          <span class="tab-icon" aria-hidden="true"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-cctv"></use></svg></span><span class="tab-label">Cameras</span>
           <span class="tab-count" id="matrixCamCountBadge" title="Cameras configured">0</span>
         </button>
         <button type="button" class="tab-btn" data-tab="map" onclick="switchTab('map')">
-          <span class="tab-icon" aria-hidden="true">🗺️</span><span class="tab-label" data-short="Map">Store map</span>
+          <span class="tab-icon" aria-hidden="true"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-map"></use></svg></span><span class="tab-label" data-short="Map">Store map</span>
         </button>
         <button type="button" class="tab-btn" data-tab="insights" onclick="switchTab('insights')">
-          <span class="tab-icon" aria-hidden="true">📈</span><span class="tab-label">Insights</span>
+          <span class="tab-icon" aria-hidden="true"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-trending-up"></use></svg></span><span class="tab-label">Insights</span>
           <span class="tab-count" id="tabActionCountBadge" title="Open recommendations" hidden>0</span>
         </button>
         <button type="button" class="tab-btn" data-tab="loss" onclick="switchTab('loss')">
-          <span class="tab-icon" aria-hidden="true">🚨</span><span class="tab-label" data-short="Alerts">Loss prevention</span>
+          <span class="tab-icon" aria-hidden="true"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-shield-alert"></use></svg></span><span class="tab-label" data-short="Alerts">Loss prevention</span>
           <span class="tab-count tab-count-alert" id="tabTheftCountBadge" title="Incidents waiting for review" hidden>0</span>
         </button>
       </nav>
 
       <div class="header-actions">
-        <button type="button" class="btn btn-sm header-gear" data-tab="settings" onclick="switchTab('settings')"
+        <button type="button" class="btn btn-sm btn-ghost header-gear" data-tab="settings" onclick="switchTab('settings')"
                 id="navSettings" title="Settings: cameras, phones, online access, sales data, system health" aria-label="Settings">
-          <span aria-hidden="true">⚙️</span><span class="header-gear-label">Settings</span>
+          <svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-settings"></use></svg><span class="header-gear-label">Settings</span>
         </button>
       </div>
     </header>
@@ -85,20 +83,20 @@
     <!-- BANNER:BEGIN (loss.js owns this region: the theft alert banner) -->
     <div id="theftAlertBanner" class="theft-banner" style="display: none;">
       <div class="theft-banner-left">
-        <span class="theft-banner-icon">🚨</span>
+        <span class="theft-banner-icon" aria-hidden="true"><svg class="icon icon-lg" aria-hidden="true"><use href="/static/icons/sprite.svg#i-siren"></use></svg></span>
         <div>
           <div class="theft-banner-title" id="theftBannerHeadline"></div>
           <div class="theft-banner-meta">
             <span id="theftBannerConfidence"></span>
-            <span>•</span>
+            <span class="theft-banner-sep" aria-hidden="true">&middot;</span>
             <span id="theftBannerTime"></span>
-            <span>•</span>
+            <span class="theft-banner-sep" aria-hidden="true">&middot;</span>
             <span id="theftBannerDetails"></span>
           </div>
         </div>
       </div>
       <div class="theft-banner-actions">
-        <button type="button" class="btn btn-sm" data-banner="live" hidden title="Open this camera's live video enlarged on the Cameras tab, with the person outlined">Watch live</button>
+        <button type="button" class="btn btn-sm" data-banner="live" hidden title="Open this camera's live video enlarged on the Cameras tab, with the person outlined"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-video"></use></svg>Watch live</button>
         <button type="button" class="btn btn-primary btn-sm" data-banner="review">Review now</button>
         <button type="button" class="btn btn-sm" data-banner="dismiss" title="Hide until the next new incident">Dismiss</button>
       </div>
@@ -203,7 +201,7 @@
           <button type="button" class="fps-btn" data-fps="25" onclick="setDecimationFPS(25)">Full</button>
         </div>
 
-        <!-- AI overlay on live video (js/live_overlay.js) and the analysed frame rate (Settings → Analysis speed). -->
+        <!-- AI overlay on live video (js/live_overlay.js) and the analysed frame rate (Settings > Analysis speed). -->
         <div class="filter-group" id="aiOverlayChips">
           <button type="button" class="fps-btn lo-toggle active" id="aiOverlayToggle" aria-pressed="true" onclick="toggleAiOverlay()">AI overlay: On</button>
           <a class="fps-btn lo-link" href="#settings-analysis" onclick="return openAnalysisSettings()"
@@ -212,17 +210,17 @@
 
         <div class="controls-right">
           <label for="cameraSearchInput" class="sr-only">Search cameras</label>
-          <input type="text" id="cameraSearchInput" name="cameraSearch" class="search-input" placeholder="🔍 Search cameras..." oninput="filterCamerasBySearch(this.value)" aria-label="Search cameras" autocomplete="off" />
-          <button type="button" class="btn btn-sm btn-primary" onclick="openDeviceManager()">+ Add cameras</button>
+          <span class="search-field"><svg class="icon icon-md search-field-icon" aria-hidden="true"><use href="/static/icons/sprite.svg#i-search"></use></svg><input type="text" id="cameraSearchInput" name="cameraSearch" class="search-input" placeholder="Search cameras" oninput="filterCamerasBySearch(this.value)" aria-label="Search cameras" autocomplete="off" /></span>
+          <button type="button" class="btn btn-sm btn-primary" onclick="openDeviceManager()"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-plus"></use></svg>Add cameras</button>
         </div>
       </div>
 
       <!-- Four tiles at a time; the other cameras rotate through them (js/analytics.js,
            cameraGrid). Shown only when more than four cameras are on. -->
       <div class="grid-rotation-bar" id="gridRotationBar" role="group" aria-label="Camera rotation" hidden>
-        <button type="button" class="btn btn-sm" id="gridPrevBtn" onclick="stepCameraGrid(-1)" aria-label="Show the previous cameras">&lsaquo; Previous</button>
+        <button type="button" class="btn btn-sm" id="gridPrevBtn" onclick="stepCameraGrid(-1)" aria-label="Show the previous cameras"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-chevron-left"></use></svg>Previous</button>
         <button type="button" class="btn btn-sm" id="gridPauseBtn" onclick="toggleCameraRotation()" aria-pressed="false">Pause</button>
-        <button type="button" class="btn btn-sm" id="gridNextBtn" onclick="stepCameraGrid(1)" aria-label="Show the next cameras">Next &rsaquo;</button>
+        <button type="button" class="btn btn-sm" id="gridNextBtn" onclick="stepCameraGrid(1)" aria-label="Show the next cameras">Next<svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-chevron-right"></use></svg></button>
         <span class="grid-rotation-status" id="gridRotationStatus"></span>
         <label class="grid-rotation-delay" for="gridDelayInput">Change every
           <input type="number" id="gridDelayInput" name="gridDelay" class="grid-delay-input" min="3" max="600" step="1" value="10"
@@ -252,9 +250,9 @@
           <!-- Editor toolbar. Every control here writes to the database. -->
           <div class="floorplan-toolbar" id="fpToolbar">
             <div class="fp-tool-group">
-              <button type="button" class="btn btn-sm" onclick="blueprintEditor.zoom(1.2)" title="Zoom in" aria-label="Zoom in">+</button>
-              <button type="button" class="btn btn-sm" onclick="blueprintEditor.zoom(0.8)" title="Zoom out" aria-label="Zoom out">&minus;</button>
-              <button type="button" class="btn btn-sm" onclick="blueprintEditor.resetView()" title="Fit the whole store in view">Fit</button>
+              <button type="button" class="btn btn-sm btn-icon" onclick="blueprintEditor.zoom(1.2)" title="Zoom in" aria-label="Zoom in"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-zoom-in"></use></svg></button>
+              <button type="button" class="btn btn-sm btn-icon" onclick="blueprintEditor.zoom(0.8)" title="Zoom out" aria-label="Zoom out"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-zoom-out"></use></svg></button>
+              <button type="button" class="btn btn-sm" onclick="blueprintEditor.resetView()" title="Fit the whole store in view"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-scan"></use></svg>Fit</button>
             </div>
             <span class="fp-sep fp-edit-only"></span>
             <div class="fp-tool-group fp-edit-only" id="fpTools">
@@ -269,7 +267,7 @@
             <span class="fp-sep fp-edit-only"></span>
             <label class="fp-toggle fp-edit-only" for="fpSnap" title="Snap points to a 0.5 m grid"><input type="checkbox" id="fpSnap" name="fpSnap" checked onchange="blueprintEditor.toggleSnap(this.checked)"> Snap 0.5 m</label>
             <span class="fp-mode fp-edit-only" title="What a click on the map does now">Now: <b id="fpMode">view</b></span>
-            <button type="button" class="btn btn-sm fp-edit-toggle" id="fpEditToggle" aria-pressed="false" onclick="toggleMapEditing()">Edit map</button>
+            <button type="button" class="btn btn-sm fp-edit-toggle" id="fpEditToggle" aria-pressed="false" onclick="toggleMapEditing()"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-pencil"></use></svg>Edit map</button>
           </div>
 
           <!-- What is drawn on the map, and the heatmap kind (js/floorplan.js mounts
@@ -318,7 +316,7 @@
                when there are many cameras. -->
           <div class="fp-cam-list" id="fpCamList">
             <button type="button" class="fp-cam-list-toggle" id="fpCamListToggle" aria-expanded="false" aria-controls="fpCamBadges">
-              <span class="fp-cam-list-caret" aria-hidden="true">&#9656;</span>
+              <span class="fp-cam-list-caret" aria-hidden="true"><svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons/sprite.svg#i-chevron-right"></use></svg></span>
               <span id="fpCamListSummary" class="fp-cam-list-summary">Cameras</span>
             </button>
             <div id="fpCamBadges" class="fp-cam-badges" hidden></div>
@@ -345,8 +343,8 @@
           <div class="glass-card" id="deviceManagerCard">
             <div class="card-title dev-card-title"><span>Cameras &amp; devices</span></div>
             <div class="dev-toolbar" role="group" aria-label="Add cameras">
-              <button type="button" class="btn btn-sm btn-primary" onclick="deviceManager.scan()" id="btnScanDevices" title="Look for cameras on USB and the local network">Scan network</button>
-              <button type="button" class="btn btn-sm btn-secondary" onclick="deviceManager.toggleAddPanel()" id="btnToggleAddCamera" aria-expanded="false" aria-controls="addCameraPanel" title="Add a camera by RTSP / MJPEG address, ONVIF address, USB device or video file">+ Add camera</button>
+              <button type="button" class="btn btn-sm btn-primary" onclick="deviceManager.scan()" id="btnScanDevices" title="Look for cameras on USB and the local network"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-search"></use></svg>Scan network</button>
+              <button type="button" class="btn btn-sm btn-secondary" onclick="deviceManager.toggleAddPanel()" id="btnToggleAddCamera" aria-expanded="false" aria-controls="addCameraPanel" title="Add a camera by RTSP / MJPEG address, ONVIF address, USB device or video file"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-plus"></use></svg>Add camera</button>
               <button type="button" class="btn btn-sm btn-secondary" onclick="deviceManager.toggleDahuaPanel()" id="btnToggleDahua" title="Add many cameras at once from a Dahua recorder (NVR / XVR / DVR)">Dahua recorder</button>
             </div>
 
@@ -671,6 +669,8 @@
           <span class="loss-kpi-note" id="lossKpiFalseRateNote"></span>
         </div>
       </section>
+      <!-- By alert level (loss.js renderTierKpis, GET /theft/statistics by_tier / active_by_tier). -->
+      <section class="loss-tier-kpis" id="lossTierKpis" aria-label="Incidents by alert level"><div class="fp-empty">Loading…</div></section>
 
       <div class="glass-card">
         <div class="card-title">
@@ -680,9 +680,12 @@
         <p class="loss-intro">
           Each entry is <b>suspicious behaviour for staff to check</b>, not a finding of theft. Look at the evidence
           image and the live camera, then record what really happened. Your outcomes decide which rules are trusted.
+          Each entry has an <b>alert level</b> (Critical, Alert, Watch or Review) from its risk score; open
+          <b>Why this level</b> on an entry for the reasons. Levels are set in Settings &gt; Theft alert levels.
         </p>
         <div class="loss-legacy" id="lossLegacyNotice" role="status" hidden></div>
         <div class="loss-chips" id="lossFilterChips" role="group" aria-label="Show incidents"></div>
+        <div class="loss-chips" id="lossTierChips" role="group" aria-label="Show alert level"></div>
         <div id="theftIncidentsList" class="loss-list"><div class="fp-empty">Loading…</div></div>
       </div>
 
@@ -811,6 +814,7 @@
         <a class="btn btn-sm" href="#settings-store" onclick="return jumpTo('settings-store')">Store</a>
         <a class="btn btn-sm" href="#settings-evidence" onclick="return jumpTo('settings-evidence')">Evidence storage</a>
         <a class="btn btn-sm" href="#settings-alerts" onclick="return jumpTo('settings-alerts')">Alerts and detection</a>
+        <a class="btn btn-sm" href="#settings-theft-alerts" onclick="return jumpTo('settings-theft-alerts')">Theft alert levels</a>
         <a class="btn btn-sm" href="#settings-analysis" onclick="return jumpTo('settings-analysis')">Analysis speed</a>
         <a class="btn btn-sm" href="#settings-remote" onclick="return jumpTo('settings-remote')">Online access</a>
         <a class="btn btn-sm" href="#settings-remote-video" onclick="return jumpTo('settings-remote-video')">Live video</a>
@@ -830,11 +834,14 @@
       <div class="glass-card" id="settings-store"></div>
       <div class="glass-card" id="settings-evidence"></div>
       <div class="glass-card" id="settings-alerts"></div>
+      <!-- Theft alert levels: thresholds, who is told at each level, weights, combined signs, and the
+           policy explainer from GET /api/v1/theft/alert-policy (site_settings.js, group theft_alerts). -->
+      <div class="glass-card" id="settings-theft-alerts"></div>
       <!-- Analysis speed: GPU share, decode cap, per-camera ceiling, idle rate, motion wake, and the
            capacity the box can sustain (site_settings.js, GET /api/v1/system/analysis-capacity). -->
       <div class="glass-card" id="settings-analysis"></div>
       <div class="glass-card" id="settings-remote"></div>
-      <!-- Online access · Live video: direct WebRTC settings and "Check remote video" (remote_video.js). -->
+      <!-- Online access > Live video: direct WebRTC settings and "Check remote video" (remote_video.js). -->
       <div class="glass-card" id="settings-remote-video"></div>
       <div class="glass-card" id="settings-pairing"></div>
       <div class="glass-card" id="settings-push"></div>
@@ -847,9 +854,9 @@
       <div class="glass-card" id="settings-appearance">
         <div class="card-title"><span>Appearance</span></div>
         <div class="appearance-row" role="radiogroup" aria-label="Colour theme">
-          <button type="button" class="btn btn-sm" data-set-theme="light" role="radio">Light</button>
-          <button type="button" class="btn btn-sm" data-set-theme="dark" role="radio">Dark</button>
-          <button type="button" class="btn btn-sm" data-set-theme="system" role="radio">Same as this device</button>
+          <button type="button" class="btn btn-sm" data-set-theme="light" role="radio"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-sun"></use></svg>Light</button>
+          <button type="button" class="btn btn-sm" data-set-theme="dark" role="radio"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-moon"></use></svg>Dark</button>
+          <button type="button" class="btn btn-sm" data-set-theme="system" role="radio"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-monitor"></use></svg>Same as this device</button>
         </div>
       </div>
 
@@ -911,12 +918,12 @@
        placement (metres on the blueprint) goes to PATCH /api/v1/layout/cameras/{id}/placement. -->
   <div class="modal-overlay" id="modalCameraConfig">
     <div class="modal-card" style="max-width: 680px;">
-      <div style="display: flex; justify-content: space-between; align-items: center;">
-        <h3 style="font-size: 15px; font-weight: 800; color: var(--accent-cyan);" id="cameraModalTitle">📷 Configure camera</h3>
-        <button type="button" class="btn btn-sm" onclick="closeCameraConfigModal()">✕ Close</button>
+      <div class="modal-header">
+        <h3 class="modal-title" id="cameraModalTitle"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-camera"></use></svg> Configure camera</h3>
+        <button type="button" class="btn btn-ghost btn-icon" onclick="closeCameraConfigModal()" title="Close" aria-label="Close"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-x"></use></svg></button>
       </div>
 
-      <form id="formCameraConfig" onsubmit="handleCameraConfigSubmit(event)" style="margin-top: 12px;">
+      <form id="formCameraConfig" onsubmit="handleCameraConfigSubmit(event)">
         <input type="hidden" id="configCameraId" name="cameraId" />
 
         <div class="form-grid-2col">
@@ -930,7 +937,7 @@
           </div>
         </div>
 
-        <div class="form-grid-2col" style="margin-top: 8px;">
+        <div class="form-grid-2col" style="margin-top: 12px;">
           <div class="form-group">
             <label for="configDepartment">Department label (optional)</label>
             <!-- Free text, suggestions are departments already in use. What the
@@ -948,12 +955,12 @@
         <!-- V2 MOUNT POINT: camera role picker and setup checklist. -->
         <div id="cameraRoleMount" data-mount="camera-role"></div>
 
-        <div class="form-group" style="margin-top: 8px;">
+        <div class="form-group" style="margin-top: 12px;">
           <label for="configRtspUrl">Stream source (RTSP URL or /dev/video path)</label>
           <input type="text" class="form-input" id="configRtspUrl" name="rtspUrl" />
         </div>
 
-        <div class="form-grid-2col" style="margin-top: 8px;">
+        <div class="form-grid-2col" style="margin-top: 12px;">
           <div class="form-group">
             <label for="configCamUser">Camera username</label>
             <input type="text" class="form-input" id="configCamUser" name="cameraUsername" autocomplete="off" placeholder="unchanged" />
@@ -964,7 +971,7 @@
           </div>
         </div>
 
-        <div class="form-grid-2col" style="margin-top: 8px;">
+        <div class="form-grid-2col" style="margin-top: 12px;">
           <div class="form-group">
             <label for="configFps">Capture FPS</label>
             <input type="number" min="1" max="60" class="form-input" id="configFps" name="fps" />
@@ -977,7 +984,7 @@
         </div>
 
         <!-- Stream quality (Dahua recorder channels; services/stream_selection.py). -->
-        <div class="form-group" style="margin-top: 8px;">
+        <div class="form-group" style="margin-top: 12px;">
           <label for="configStreamQuality">Stream quality (analysis)</label>
           <select class="form-input" id="configStreamQuality" name="streamQuality" aria-describedby="configStreamStatus">
             <option value="auto">Auto: smallest sub-stream of at least D1 (recommended)</option>
@@ -985,7 +992,7 @@
             <option value="main">Main stream (high decode cost)</option>
           </select>
           <div class="dept-hint" id="configStreamStatus"></div>
-          <button type="button" class="btn btn-xs" id="btnMeasureStreams" onclick="measureCameraStreams()" style="margin-top: 4px;"
+          <button type="button" class="btn btn-xs" id="btnMeasureStreams" onclick="measureCameraStreams()" style="margin-top: 4px; align-self: flex-start;"
             title="Open each sub-stream once to read its size (read-only), then apply Auto's choice">Check sub-streams again</button>
         </div>
 
@@ -1000,7 +1007,7 @@
             <input type="number" step="any" min="0" class="form-input" id="configFloorY" name="floorY" required />
           </div>
         </div>
-        <div class="form-grid-2col" style="margin-top: 8px;">
+        <div class="form-grid-2col" style="margin-top: 12px;">
           <div class="form-group">
             <label for="configFloorZ">Mounting height Z (m)</label>
             <input type="number" step="any" min="0" class="form-input" id="configFloorZ" name="floorZ" />
@@ -1010,15 +1017,15 @@
             <input type="number" step="any" min="1" max="180" class="form-input" id="configFovDeg" name="fovDeg" />
           </div>
         </div>
-        <div class="form-group" style="margin-top: 8px;">
-          <div style="display: flex; justify-content: space-between;">
+        <div class="form-group" style="margin-top: 12px;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
             <label for="configAzimuthSlider">Azimuth (0-360°, 0 = facing +x)</label>
-            <span id="configAzimuthVal" style="font-family: var(--font-mono); color: var(--accent-cyan); font-size: 11px;">0°</span>
+            <span id="configAzimuthVal" class="num" style="font-size: 12px; color: var(--text-secondary);">0°</span>
           </div>
-          <input type="range" min="0" max="360" step="1" value="0" id="configAzimuthSlider" name="azimuthDeg" style="width: 100%; accent-color: var(--accent-cyan);" oninput="document.getElementById('configAzimuthVal').textContent = this.value + '°'" />
+          <input type="range" min="0" max="360" step="1" value="0" id="configAzimuthSlider" name="azimuthDeg" style="width: 100%;" oninput="document.getElementById('configAzimuthVal').textContent = this.value + '°'" />
         </div>
 
-        <div class="form-group" style="margin-top: 10px;">
+        <div class="form-group" style="margin-top: 12px;">
           <label>AI features on this camera</label>
           <div class="checkbox-group-grid">
             <label class="checkbox-label" for="featPeopleCounting" title="Zone visits, dwell, queues and footfall from tracked people"><input type="checkbox" id="featPeopleCounting" name="featPeopleCounting" /> People counting &amp; dwell</label>
@@ -1045,10 +1052,10 @@
           </div>
         </div>
 
-        <div class="form-group" style="margin-top: 8px;">
+        <div class="form-group" style="margin-top: 12px;">
           <label for="configPersonMaxFrac">Largest person size (% of the frame)</label>
           <input type="number" min="5" max="100" step="1" class="form-input" id="configPersonMaxFrac" name="personMaxFrac" placeholder="Server default" />
-          <div style="font-size: 11px; color: var(--text-dim); margin-top: 4px; line-height: 1.45;">
+          <div class="field-hint">
             Detections bigger than this are treated as false boxes. Raise it for a camera mounted close to
             the shoppers (for example facing a shelf about 2 m away). Leave empty to use the server default
             (<code>PERSON_MAX_FRAME_FRACTION</code>, 35&nbsp;% unless changed). A close person whose shoulders
@@ -1077,28 +1084,28 @@
         <div class="cam-feat-hint" id="configAnalysisHint">
           When the AI cannot analyse every camera at full speed, it shares its capacity out: a High camera gets about
           twice the frames of a Normal one, a Low one about half. The frame-rate cap limits this camera even when there
-          is capacity to spare; leave it empty for the site default (Settings → Analysis speed), 0.5 to 30.
+          is capacity to spare; leave it empty for the site default (Settings &gt; Analysis speed), 0.5 to 30.
         </div>
         <div class="dept-hint" id="configAnalysisRateNow" aria-live="polite"></div>
 
         <!-- Night watch section (js/night_watch.js mounts it when the dialog opens). -->
-        <div id="nightWatchMount" data-mount="night-watch" style="margin-top: 10px;"></div>
+        <div id="nightWatchMount" data-mount="night-watch" style="margin-top: 12px;"></div>
 
         <div id="cameraConfigStatus" class="form-status" aria-live="polite"></div>
 
-        <div style="display: flex; justify-content: space-between; gap: 8px; margin-top: 14px; flex-wrap: wrap;">
+        <div class="modal-footer">
           <!-- Two-step inline delete: the first click reveals the confirmation row. -->
           <div id="cameraDeleteBlock">
-            <button type="button" class="btn btn-danger" id="btnCameraDeleteAsk" onclick="askDeleteCurrentCamera()">🗑️ Remove camera</button>
-            <span id="cameraDeleteConfirm" style="display:none; align-items:center; gap:6px;">
-              <span style="font-size: 11.5px; color: var(--accent-red);">Remove this camera and stop its pipeline?</span>
+            <button type="button" class="btn btn-danger" id="btnCameraDeleteAsk" onclick="askDeleteCurrentCamera()"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-trash-2"></use></svg>Remove camera</button>
+            <span id="cameraDeleteConfirm" style="display:none; align-items:center; gap:8px;">
+              <span style="font-size: 13px; color: var(--danger);">Remove this camera and stop its pipeline?</span>
               <button type="button" class="btn btn-danger btn-sm" onclick="confirmDeleteCurrentCamera()">Yes, remove</button>
               <button type="button" class="btn btn-sm" onclick="cancelDeleteCurrentCamera()">Keep</button>
             </span>
           </div>
-          <div style="display: flex; gap: 8px;">
+          <div class="modal-footer-actions">
             <button type="button" class="btn" onclick="closeCameraConfigModal()">Cancel</button>
-            <button type="submit" class="btn btn-primary" id="btnCameraSave">💾 Save</button>
+            <button type="submit" class="btn btn-primary" id="btnCameraSave"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-save"></use></svg>Save</button>
           </div>
         </div>
       </form>

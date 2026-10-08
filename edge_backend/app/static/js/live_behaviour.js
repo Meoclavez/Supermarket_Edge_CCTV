@@ -7,6 +7,11 @@
  * prevention tab (#liveBehaviourList) or the Cameras tab (#liveBehaviourStrip)
  * is on screen, never while the tab is hidden.
  *
+ * A person at "alert" shows the alert level of the incident that fired
+ * (critical / alert / watch / review) as a tier badge: from the row's own
+ * ``tier`` when the box reports it, else from that incident in the review
+ * queue (window.edgeLoss.incidentTier). No level known: no badge (never guessed).
+ *
  * Clicking a person opens that camera enlarged on the Cameras tab with the
  * person outlined (window.openCameraLive, analytics.js). These are live cues
  * for staff to look at, never a finding of theft. When the box does not offer
@@ -60,6 +65,25 @@
 
   function levelWord(level) { return level === 'alert' ? 'Alert' : 'Watch'; }
 
+  const TIERS = ['review', 'watch', 'alert', 'critical'];
+  const TIER_LABEL = { review: 'Review', watch: 'Watch', alert: 'Alert', critical: 'Critical' };
+  /** {tier, label, risk} of the incident fired on this person, or null (level "watch", or not known). */
+  function tierInfo(t) {
+    if (!t || t.level !== 'alert') return null;
+    if (TIERS.includes(t.tier)) return { tier: t.tier, label: TIER_LABEL[t.tier], risk: isNum(t.risk_score) ? t.risk_score : null };
+    const loss = window.edgeLoss;
+    if (t.incident_id && loss && typeof loss.incidentTier === 'function') {
+      try {
+        const r = loss.incidentTier(t.incident_id);
+        if (r && TIERS.includes(r.tier)) return { tier: r.tier, label: r.label || TIER_LABEL[r.tier], risk: isNum(r.risk) ? r.risk : null };
+      } catch (_) { /* the review queue is not loaded */ }
+    }
+    return null;
+  }
+  function tierBadge(info) {
+    return info ? `<span class="tier-badge tier-${info.tier} lb-tier" title="Alert level of the incident raised for this person">${esc(info.label)} level</span>` : '';
+  }
+
   function rowHtml(t) {
     const level = t.level === 'alert' ? 'alert' : 'watch';
     const labels = Array.isArray(t.labels) ? t.labels.filter((x) => typeof x === 'string' && x) : [];
@@ -67,16 +91,20 @@
     const meta = [];
     if (ago !== null) meta.push(`for ${esc(duration(ago))}`);
     if (isNum(t.pattern_score)) meta.push(`pattern score ${t.pattern_score.toFixed(2)}`);
+    const info = tierInfo(t);
+    if (info && info.risk !== null) meta.push(`<span class="lb-risk">risk ${Math.round(info.risk * 100)}%</span>`);
     const cam = esc(t.camera_name || t.camera_id);
-    return `<div class="lb-row lb-${level}">
+    const tierCls = info ? `lb-tier-${info.tier}` : '';
+    return `<div class="lb-row lb-${level} ${tierCls}">
         <span class="lb-level lb-level-${level}">${levelWord(level)}</span>
+        ${tierBadge(info)}
         <div class="lb-main">
           <div class="lb-title">${cam}</div>
           <div class="lb-labels">${labels.length ? labels.map(esc).join(' · ') : 'Live cue (no detail reported)'}</div>
           ${meta.length ? `<div class="lb-meta">${meta.join(' · ')}</div>` : ''}
         </div>
         <div class="lb-actions">
-          ${t.incident_id ? `<button type="button" class="btn btn-sm" data-lb-incident="${esc(t.incident_id)}" title="An incident was raised for this person: open it in the review queue">Incident</button>` : ''}
+          ${t.incident_id ? `<button type="button" class="btn btn-secondary btn-sm" data-lb-incident="${esc(t.incident_id)}" title="An incident was raised for this person: open it in the review queue">Incident</button>` : ''}
           <button type="button" class="btn btn-sm btn-primary" data-lb-camera="${esc(t.camera_id)}" data-lb-track="${esc(t.track_id || '')}"
             title="Open ${cam} enlarged on the Cameras tab with this person outlined">Watch live</button>
         </div>
@@ -122,9 +150,13 @@
         const level = t.level === 'alert' ? 'alert' : 'watch';
         const labels = Array.isArray(t.labels) ? t.labels.filter((x) => typeof x === 'string' && x) : [];
         const label = labels[0] || 'live cue';
-        return `<button type="button" class="lb-chip lb-chip-${level}" data-lb-camera="${esc(t.camera_id)}" data-lb-track="${esc(t.track_id || '')}"
-          title="${esc(`${levelWord(level)}: ${labels.join(' · ') || 'live cue'} on ${t.camera_name || t.camera_id}. Click to watch.`)}">
-          <span class="lb-chip-level">${levelWord(level)}</span> ${esc(t.camera_name || t.camera_id)} · ${esc(label)}</button>`;
+        const info = tierInfo(t);
+        const word = info ? `${info.label} level` : levelWord(level);
+        const crit = info && info.tier === 'critical' ? 'lb-chip-critical' : '';
+        const wordCls = info ? 'lb-chip-tier' : '';
+        return `<button type="button" class="lb-chip lb-chip-${level} ${crit}" data-lb-camera="${esc(t.camera_id)}" data-lb-track="${esc(t.track_id || '')}"
+          title="${esc(`${word}: ${labels.join(' · ') || 'live cue'} on ${t.camera_name || t.camera_id}. Click to watch.`)}">
+          <span class="lb-chip-level ${wordCls}">${esc(word)}</span> ${esc(t.camera_name || t.camera_id)} · ${esc(label)}</button>`;
       }).join('');
       const more = state.tracks.length > STRIP_MAX ? `<span class="lb-strip-off">+${state.tracks.length - STRIP_MAX} more on Loss prevention</span>` : '';
       html = `<span class="lb-strip-title">Live behaviour</span>${chips}${more}`;
@@ -209,7 +241,7 @@
     schedule(0);
   }
 
-  window.edgeLiveBehaviour = { refresh: () => schedule(0), _test: { secondsSince } };
+  window.edgeLiveBehaviour = { refresh: () => schedule(0), _test: { secondsSince, tierInfo, rowHtml } };
 
   if (window.edgeAuth && typeof window.edgeAuth.onReady === 'function') window.edgeAuth.onReady(init);
   else if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);

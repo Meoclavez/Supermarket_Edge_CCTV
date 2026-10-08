@@ -264,7 +264,7 @@
     if (code === 'camera_off' || status === 409) return codedError('camera_off', 'Camera is turned off', why || 'Turn it on to watch it.');
     if (code === 'video_session_limit') {
       const max = data && Number.isFinite(Number(data.max_sessions)) ? Number(data.max_sessions) : null;
-      return codedError('session_limit', 'Live video limit reached', `The box sends at most ${max === null ? 'a limited number of' : max} live videos at once. Close another viewer, or raise the limit in Settings → Online access.`);
+      return codedError('session_limit', 'Live video limit reached', `The box sends at most ${max === null ? 'a limited number of' : max} live videos at once. Close another viewer, or raise the limit in Settings > Online access.`);
     }
     // A 429 without that code is the box's request-rate guard, not the video limit.
     if (status === 429) return codedError('rate_limited', 'The box asked this browser to slow down', why && why !== 'Too Many Requests' ? why : 'Too many requests from this address in the last minute.');

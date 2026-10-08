@@ -88,8 +88,8 @@
           <td>${esc(b.kind || DASH)}</td>
           <td>${esc(fmtSize(b.size_bytes))}</td>
           <td class="bk-actions">
-            <button type="button" class="btn btn-sm" data-bk="download" data-file="${esc(b.filename)}">Download</button>
-            <button type="button" class="btn btn-sm" data-bk="restore" data-file="${esc(b.filename)}"${state.busy ? ' disabled' : ''}>Restore</button>
+            <button type="button" class="btn btn-secondary btn-sm" data-bk="download" data-file="${esc(b.filename)}">Download</button>
+            <button type="button" class="btn btn-secondary btn-sm" data-bk="restore" data-file="${esc(b.filename)}"${state.busy ? ' disabled' : ''}>Restore</button>
           </td>
         </tr>`;
       if (!confirming) return row;
@@ -99,7 +99,7 @@
           anything recorded since is kept only in the safety backup. ${esc(restartSentence())} You may need to sign in again.</p>
           <div class="bk-confirm-actions">
             <button type="button" class="btn btn-danger btn-sm" data-bk="restore-yes" data-file="${esc(b.filename)}"${state.busy ? ' disabled' : ''}>Yes, restore</button>
-            <button type="button" class="btn btn-sm" data-bk="restore-no">Keep</button>
+            <button type="button" class="btn btn-secondary btn-sm" data-bk="restore-no">Keep</button>
           </div></div></td></tr>`;
     }).join('');
     return `<div class="bk-table-wrap"><table class="data-table bk-table">
@@ -118,13 +118,13 @@
     const resetReady = state.resetText === 'RESET';
     card.innerHTML = `
       <div class="card-title"><span>Backups and reset</span>
-        <button type="button" class="btn btn-sm" data-bk="refresh"${state.busy ? ' disabled' : ''}>Refresh</button></div>
+        <button type="button" class="btn btn-secondary btn-sm" data-bk="refresh"${state.busy ? ' disabled' : ''}>Refresh</button></div>
       <p class="ra-hint">Backups hold the database: store layout, cameras, settings, user accounts and recorded figures.
         Evidence images and clips are not included. The device backs up each time it starts. A downloaded backup contains
         this store's accounts and camera settings, so keep it somewhere safe.</p>
       <div class="bk-toolbar">
         <button type="button" class="btn btn-primary btn-sm" data-bk="backup"${state.busy ? ' disabled' : ''}>Back up now</button>
-        <label class="btn btn-sm bk-upload${state.busy ? ' bk-disabled' : ''}">Upload a backup
+        <label class="btn btn-secondary btn-sm bk-upload${state.busy ? ' bk-disabled' : ''}">Upload a backup
           <input type="file" id="bkUploadInput" accept=".db,.gz,.sqlite,.sqlite3,application/gzip,application/vnd.sqlite3"${state.busy ? ' disabled' : ''} hidden>
         </label>
         <span class="bk-note">An uploaded file is checked first and then appears in the list; restoring it is a separate step.</span>
@@ -215,7 +215,7 @@
           const el = $('bkStatus');
           if (el) {
             const b = document.createElement('button');
-            b.type = 'button'; b.className = 'btn btn-sm bk-reload'; b.textContent = 'Reload page';
+            b.type = 'button'; b.className = 'btn btn-secondary btn-sm bk-reload'; b.textContent = 'Reload page';
             b.addEventListener('click', () => window.location.reload());
             el.appendChild(b);
           }

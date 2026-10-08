@@ -81,3 +81,19 @@ OpenMMLab publishes no ONNX for it.
 | go2rtc (live video gateway for direct WebRTC; official release v1.9.14 from `AlexxIT/go2rtc`, unmodified, pinned by SHA-256 in `edge_backend/scripts/bootstrap.py`; run as a separate process) | MIT |
 | FFmpeg (installed from the operating system's packages) | LGPL-2.1-or-later, or GPL-2.0-or-later for GPL-enabled builds such as Debian/Ubuntu's |
 | frp: frpc on the edge box, frps on the owner's VPS (optional online access; official release v0.71.0 / `fatedier/frps` image, unmodified) | Apache-2.0 |
+
+## Dashboard assets (served by the edge box, no CDN)
+
+| Component | Version | Licence | Where |
+|---|---|---|---|
+| Chart.js | 4.4.1 | MIT | `edge_backend/app/static/vendor/chartjs/` (`SOURCE.txt`, `LICENSE.md`) |
+| Lucide icons (`lucide-static`, only the icons used, as one SVG sprite) | 1.53.0 | ISC; the icons derived from Feather are also MIT (Copyright (c) 2013-present Cole Bemis) | `edge_backend/app/static/icons/sprite.svg` (`SOURCE.txt`, `LICENSE-lucide.txt`), built by `edge_backend/scripts/build_icon_sprite.py` |
+
+Lucide ISC licence: Copyright (c) 2026 Lucide Icons and Contributors. Permission
+to use, copy, modify, and/or distribute this software for any purpose with or
+without fee is hereby granted, provided that the above copyright notice and
+this permission notice appear in all copies. The full licence text, including
+the MIT notice for the Feather-derived icons, ships next to the sprite in
+`LICENSE-lucide.txt`.
+
+The dashboard uses the browser's system fonts; no web fonts are loaded.

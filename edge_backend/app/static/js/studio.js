@@ -45,6 +45,23 @@
 'use strict';
 
 const DASH = '—';
+
+/** Icon markup from js/icons.js (window.EdgeIcon); '' when that script is missing. Never throws. */
+function uiIcon(name, opts) {
+  try { return window.EdgeIcon && typeof window.EdgeIcon.svg === 'function' ? window.EdgeIcon.svg(name, opts) : ''; } catch (_) { return ''; }
+}
+
+/** A Save button's idle face: the save icon and its words (kept in data-label for after "Saving…"). */
+function setSaveLabel(btn, text) {
+  if (!btn) return;
+  btn.dataset.label = text;
+  btn.innerHTML = `${uiIcon('save', { size: 'sm' })} ${escapeHtml(text)}`;
+}
+
+/** Icon-only Delete button of a rule row (opens the inline "Delete?" confirmation). */
+function deleteIconButton() {
+  return `<button type="button" class="btn btn-danger btn-sm btn-icon rule-delete" onclick="askDeleteRule(this)" title="Delete" aria-label="Delete">${uiIcon('trash-2', { size: 'sm' }) || 'Delete'}</button>`;
+}
 const canvas = document.getElementById('interactiveCanvas');
 const ctx = canvas ? canvas.getContext('2d') : null;
 const streamImg = document.getElementById('streamImg');
@@ -342,8 +359,8 @@ function openStudioVideo(cameraId) {
           <div class="studio-rtc-fail-title">${escapeHtml(title)}</div>
           <div>${escapeHtml(e.detail || '')}</div>
           <div class="studio-rtc-fail-actions">
-            <button type="button" class="btn btn-sm" onclick="studioRetryVideo()">Try again</button>
-            <a class="btn btn-sm btn-primary" href="/dashboard#settings">Check connection (Settings → Online access)</a>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="studioRetryVideo()">Try again</button>
+            <a class="btn btn-sm btn-primary" href="/dashboard#settings">Check connection (Settings &gt; Online access)</a>
           </div>
         </div>`);
     } else if (state === 'closed') {
@@ -658,7 +675,7 @@ function openProductModal(zone = null) {
   // stored values are sent back unchanged on save (submitProductModal).
   NOT_MEASURED_STUDY.forEach(([id]) => { const c = el(id); if (c) { c.checked = false; c.disabled = true; } });
   const title = el('productModalTitle');
-  if (title) title.textContent = zone ? `🛒 Edit product shelf area: ${zone.name}` : '🛒 Map product shelf area';
+  if (title) title.innerHTML = `${uiIcon('shopping-cart')} ${escapeHtml(zone ? `Edit product shelf area: ${zone.name}` : 'Map product shelf area')}`;
   el('productModalStatus').textContent = zone && zone.shelf_level_source === 'derived' && !zone.shelf_level
     ? `Shelf level currently derived from position: ${zone.effective_shelf_level}.` : '';
   modal.style.display = 'flex';
@@ -797,7 +814,7 @@ function deleteConfirmHtml(kind, id) {
       <span class="rule-confirm" style="display:none;">
         <span class="zone-sub">Delete?</span>
         <button type="button" class="btn btn-danger btn-sm rule-delete-yes" onclick="confirmDeleteZone('${kind}', '${id}', this)">Delete</button>
-        <button type="button" class="btn btn-sm rule-delete-no" onclick="cancelDeleteRule(this)">Keep</button>
+        <button type="button" class="btn btn-secondary btn-sm rule-delete-no" onclick="cancelDeleteRule(this)">Keep</button>
       </span>`;
 }
 async function confirmDeleteZone(kind, id, btn) {
@@ -920,12 +937,12 @@ async function loadZonesList() {
       prodContainer.insertAdjacentHTML('beforeend', `
         <div class="zone-item" style="border-color: rgba(var(--orange-rgb), 0.3)" data-product-zone="${id}">
           <div class="zone-info">
-            <span class="zone-name">🛒 ${escapeHtml(pz.name)}</span>
+            <span class="zone-name">${uiIcon('shopping-cart', { size: 'sm' })} ${escapeHtml(pz.name)}</span>
             <span class="zone-sub">${sub}</span>
           </div>
           <span class="rule-actions">
-            <button type="button" class="btn btn-sm" onclick="editProductZone('${id}')" title="Edit product, SKU, shelf level">✏️</button>
-            <button type="button" class="btn btn-danger btn-sm rule-delete" onclick="askDeleteRule(this)" title="Delete">🗑️</button>
+            <button type="button" class="btn btn-secondary btn-sm btn-icon" onclick="editProductZone('${id}')" title="Edit product, SKU, shelf level" aria-label="Edit">${uiIcon('pencil', { size: 'sm' }) || 'Edit'}</button>
+            ${deleteIconButton()}
           </span>${deleteConfirmHtml('PRODUCT', id)}
         </div>`);
     });
@@ -960,14 +977,14 @@ async function loadZonesList() {
       return `
         <div class="zone-item" data-mask-id="${id}" style="flex-wrap: wrap;">
           <div class="zone-info">
-            <span class="zone-name">🌫️ ${escapeHtml(ex.name)}</span>
+            <span class="zone-name">${uiIcon('eye-off', { size: 'sm' })} ${escapeHtml(ex.name)}</span>
             <span class="zone-sub">${(ex.points || []).length} vertices</span>
           </div>
           <label class="sr-only" for="maskMode_${id}" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);">Mode for ${escapeHtml(ex.name)}</label>
           <select id="maskMode_${id}" class="form-select mask-mode-select" style="max-width: 170px; font-size: 11px;" onchange="updateMaskMode('${id}')">${maskModeOptions(mode)}</select>
           <input type="color" class="mask-colour-input" aria-label="Mask colour" value="${bgrToHex(ex.mask_color_bgr)}" style="${mode === 'COLOR' ? '' : 'display:none;'}" onchange="updateMaskMode('${id}')" />
           <span class="rule-actions">
-            <button type="button" class="btn btn-danger btn-sm rule-delete" onclick="askDeleteRule(this)" title="Delete">🗑️</button>
+            ${deleteIconButton()}
           </span>${deleteConfirmHtml('MASK', id)}
           <div class="mask-row-status form-status" aria-live="polite" style="flex-basis: 100%; margin-top: 2px;">${escapeHtml((MASK_MODES[mode] || {}).help || '')}</div>
         </div>`;
@@ -1030,7 +1047,7 @@ function drawSavedRules() {
       'rgba(192,132,252,0.10)', true, editing ? 3 : 1.8);
     const p = (z.points || [])[0];
     const kind = QUEUE_KIND_LABEL[z.kind] || 'Checkout lane';
-    if (p) drawLabel(`🧾 ${z.name || kind} · ${kind.toLowerCase()}${on ? '' : ' (off)'}`, p.x * canvas.width + 4, p.y * canvas.height + 14, '#d8b4fe');
+    if (p) drawLabel(`${z.name || kind} · ${kind.toLowerCase()}${on ? '' : ' (off)'}`, p.x * canvas.width + 4, p.y * canvas.height + 14, '#d8b4fe');
   });
   savedZonesForCamera.intrusion_zones.forEach((z) => {
     const editing = editingRule && editingRule.id === z.id;
@@ -1038,7 +1055,7 @@ function drawSavedRules() {
     drawPolyline(z.points || [], editing ? '#ffffff' : (on ? 'rgba(255,91,107,0.85)' : 'rgba(255,91,107,0.35)'),
       'rgba(255,91,107,0.10)', true, editing ? 3 : 1.8);
     const p = (z.points || [])[0];
-    if (p) drawLabel(`⛔ ${z.name || 'Restricted area'}${on ? '' : ' (off)'}`, p.x * canvas.width + 4, p.y * canvas.height + 14, '#ff8a95');
+    if (p) drawLabel(`${z.name ? `Restricted · ${z.name}` : 'Restricted area'}${on ? '' : ' (off)'}`, p.x * canvas.width + 4, p.y * canvas.height + 14, '#ff8a95');
   });
   savedZonesForCamera.tripwires.forEach((tw) => {
     const a = { x: tw.x1, y: tw.y1 }, b = { x: tw.x2, y: tw.y2 };
@@ -1047,7 +1064,7 @@ function drawSavedRules() {
     const colour = editing ? '#ffffff' : (on ? '#00f0ff' : 'rgba(0,240,255,0.4)');
     drawPolyline([a, b], colour, 'transparent', false, editing ? 3.5 : 2.2);
     drawInArrow(a, b, tw.in_side || 'right', colour, 'IN');
-    drawLabel(`🚪 ${tw.name || 'Tripwire'}${on ? '' : ' (off)'}`, a.x * canvas.width + 4, a.y * canvas.height - 6, '#7ff8ff');
+    drawLabel(`${tw.name ? `Line · ${tw.name}` : 'Tripwire'}${on ? '' : ' (off)'}`, a.x * canvas.width + 4, a.y * canvas.height - 6, '#7ff8ff');
   });
 }
 
@@ -1102,7 +1119,7 @@ function fillTripwireForm(tw) {
   el('twAlertDirection').value = (tw && tw.alert_direction) || 'in';
   el('twSeverity').value = (tw && tw.severity) || 'WARNING';
   el('twEnabled').checked = tw ? tw.enabled !== false : true;
-  el('btnSaveTripwire').textContent = tw ? '💾 Save changes' : '💾 Save tripwire';
+  setSaveLabel(el('btnSaveTripwire'), tw ? 'Save changes' : 'Save tripwire');
   syncRuleForms();
 }
 
@@ -1118,7 +1135,7 @@ function scheduleRowHtml(row, idx) {
         <input type="time" id="raFrom_${idx}" class="form-input sched-from" value="${escapeHtml((row && row.from) || '22:00')}" />
         <label for="raTo_${idx}" class="zone-sub">to</label>
         <input type="time" id="raTo_${idx}" class="form-input sched-to" value="${escapeHtml((row && row.to && row.to !== '24:00') ? row.to : (row && row.to === '24:00' ? '00:00' : '07:00'))}" />
-        <button type="button" class="btn btn-danger btn-sm sched-remove" onclick="removeScheduleRow(this)" title="Remove this time window">✕</button>
+        <button type="button" class="btn btn-danger btn-sm btn-icon sched-remove" onclick="removeScheduleRow(this)" title="Remove this time window" aria-label="Remove this time window">${uiIcon('x', { size: 'sm' }) || 'Remove'}</button>
       </div>
     </div>`;
 }
@@ -1145,7 +1162,7 @@ function fillRestrictedForm(area) {
   el('raSeverity').value = (area && area.severity) || 'HIGH';
   el('raTimezone').value = (area && area.timezone) || '';
   el('raEnabled').checked = area ? area.enabled !== false : true;
-  el('btnSaveRestricted').textContent = area ? '💾 Save changes' : '💾 Save restricted area';
+  setSaveLabel(el('btnSaveRestricted'), area ? 'Save changes' : 'Save restricted area');
   syncRuleForms();
 }
 
@@ -1314,17 +1331,17 @@ function ruleRow(kind, rule, icon, sub) {
   return `
     <div class="zone-item" data-rule-id="${id}">
       <div class="zone-info">
-        <span class="zone-name">${icon} ${escapeHtml(rule.name || rule.id)}${rule.enabled === false ? ' <span class="badge">off</span>' : ''}</span>
+        <span class="zone-name">${uiIcon(icon, { size: 'sm' })} ${escapeHtml(rule.name || rule.id)}${rule.enabled === false ? ' <span class="badge badge-neutral">off</span>' : ''}</span>
         <span class="zone-sub">${sub}</span>
       </div>
       <span class="rule-actions">
-        <button type="button" class="btn btn-sm rule-edit" onclick="editRule('${kind}', '${id}')" title="Edit">✎ Edit</button>
-        <button type="button" class="btn btn-danger btn-sm rule-delete" onclick="askDeleteRule(this)" title="Delete">🗑️</button>
+        <button type="button" class="btn btn-secondary btn-sm rule-edit" onclick="editRule('${kind}', '${id}')" title="Edit">${uiIcon('pencil', { size: 'sm' })} Edit</button>
+        ${deleteIconButton()}
       </span>
       <span class="rule-confirm" style="display:none;">
         <span class="zone-sub">Delete?</span>
         <button type="button" class="btn btn-danger btn-sm rule-delete-yes" onclick="confirmDeleteRule('${kind}', '${id}')">Delete</button>
-        <button type="button" class="btn btn-sm rule-delete-no" onclick="cancelDeleteRule(this)">Keep</button>
+        <button type="button" class="btn btn-secondary btn-sm rule-delete-no" onclick="cancelDeleteRule(this)">Keep</button>
       </span>
     </div>`;
 }
@@ -1342,11 +1359,11 @@ function renderRuleLists(unavailable, tripwires, intrusion) {
     c.innerHTML = items.length ? items.map(rowFn).join('') : `<div class="fp-empty">${emptyMsg}</div>`;
   };
   render('tripwiresListContainer', tripwires, 'No tripwires on this camera. Draw one across an entrance with the Tripwire tool.',
-    (tw) => ruleRow('TRIPWIRE', tw, '🚪',
+    (tw) => ruleRow('TRIPWIRE', tw, 'door-open',
       `in = ${escapeHtml(tw.in_side || 'right')} side · ${tw.counts_footfall === false ? 'not footfall' : 'footfall'} · ` +
       (tw.alert_enabled ? `alert ${escapeHtml(tw.alert_direction || 'in')} (${escapeHtml(tw.severity || 'WARNING')})` : 'no alert')));
   render('intrusionListContainer', intrusion, 'No restricted areas on this camera. Draw one with the Restricted area tool.',
-    (z) => ruleRow('INTRUSION', z, '⛔',
+    (z) => ruleRow('INTRUSION', z, 'ban',
       `${escapeHtml(scheduleSummary(z))} · dwell ${escapeHtml(z.min_dwell_seconds ?? 0)} s · ${escapeHtml(z.severity || 'HIGH')}` +
       (z.timezone ? ` · ${escapeHtml(z.timezone)}` : '')));
 }
@@ -1360,8 +1377,7 @@ function fillQueueForm(area) {
   el('qaName').value = area ? (area.name || '') : '';
   el('qaKind').value = kind;
   const btn = el('btnSaveQueue');
-  btn.textContent = area ? '💾 Save changes' : '💾 Save area';
-  btn.dataset.label = btn.textContent;
+  setSaveLabel(btn, area ? 'Save changes' : 'Save area');
 }
 
 async function saveQueueArea() {
@@ -1381,7 +1397,7 @@ async function saveQueueArea() {
   const body = { name, kind };
   if (n >= 3) body.points = drawnPoints;
   const btn = el('btnSaveQueue');
-  const idle = btn.dataset.label || btn.textContent;
+  const idle = btn.dataset.label || btn.textContent.trim();
   btn.disabled = true;
   btn.textContent = 'Saving…';
   setRuleStatus(statusId, 'Saving…');
@@ -1403,7 +1419,7 @@ async function saveQueueArea() {
     setRuleStatus(statusId, `Not saved: ${err.message}`, true);
   } finally {
     btn.disabled = false;
-    btn.textContent = idle;
+    setSaveLabel(btn, idle);
   }
 }
 
@@ -1435,18 +1451,18 @@ function queueRow(z) {
   return `
     <div class="zone-item qa-row${on ? '' : ' qa-row-off'}" data-rule-id="${id}" data-queue-id="${id}" data-kind="${kind}" data-enabled="${on}">
       <div class="zone-info">
-        <span class="zone-name"><span class="qa-kind-badge qa-kind-${kind}">${kind === 'queue' ? 'Queue' : 'Checkout'}</span>${escapeHtml(z.name || z.id)}${on ? '' : ' <span class="badge">off</span>'}</span>
+        <span class="zone-name"><span class="qa-kind-badge qa-kind-${kind}">${kind === 'queue' ? 'Queue' : 'Checkout'}</span>${escapeHtml(z.name || z.id)}${on ? '' : ' <span class="badge badge-neutral">off</span>'}</span>
         <span class="zone-sub">${sub}</span>
       </div>
       <span class="rule-actions">
-        <button type="button" class="btn btn-sm qa-toggle" aria-pressed="${on}" onclick="toggleQueueArea('${id}', this)" title="${on ? 'Stop timing people in this area' : 'Start timing people in this area'}">${on ? 'Turn off' : 'Turn on'}</button>
-        <button type="button" class="btn btn-sm rule-edit" onclick="editRule('QUEUE', '${id}')" title="Edit name, kind or shape">✎ Edit</button>
-        <button type="button" class="btn btn-danger btn-sm rule-delete" onclick="askDeleteRule(this)" title="Delete">🗑️</button>
+        <button type="button" class="btn btn-secondary btn-sm qa-toggle" aria-pressed="${on}" onclick="toggleQueueArea('${id}', this)" title="${on ? 'Stop timing people in this area' : 'Start timing people in this area'}">${on ? 'Turn off' : 'Turn on'}</button>
+        <button type="button" class="btn btn-secondary btn-sm rule-edit" onclick="editRule('QUEUE', '${id}')" title="Edit name, kind or shape">${uiIcon('pencil', { size: 'sm' })} Edit</button>
+        ${deleteIconButton()}
       </span>
       <span class="rule-confirm" style="display:none;">
         <span class="zone-sub">Delete?</span>
         <button type="button" class="btn btn-danger btn-sm rule-delete-yes" onclick="confirmDeleteRule('QUEUE', '${id}', this)">Delete</button>
-        <button type="button" class="btn btn-sm rule-delete-no" onclick="cancelDeleteRule(this)">Keep</button>
+        <button type="button" class="btn btn-secondary btn-sm rule-delete-no" onclick="cancelDeleteRule(this)">Keep</button>
       </span>
       ${note ? `<div class="qa-row-status form-status${note.err ? ' form-status-error' : ''}" aria-live="polite">${escapeHtml(note.msg)}</div>` : ''}
     </div>`;
@@ -1488,7 +1504,7 @@ function drawIgnoreAreas() {
       'rgba(45,212,191,0.10)', true, editing ? 3 : 1.8);
     ctx.restore();
     const p = (z.points || [])[0];
-    if (p) drawLabel(`🚫 ${z.name || 'Ignore area'} · no AI${on ? '' : ' (off)'}`, p.x * canvas.width + 4, p.y * canvas.height + 14, '#5eead4');
+    if (p) drawLabel(`${z.name || 'Ignore area'} · no AI${on ? '' : ' (off)'}`, p.x * canvas.width + 4, p.y * canvas.height + 14, '#5eead4');
   });
 }
 
@@ -1499,8 +1515,7 @@ function fillIgnoreForm(area) {
   const v = area ? area.ignore_box_fraction : IGNORE_COVERAGE_DEFAULT;
   sel.innerHTML = area ? coverageOptions(v) : coverageOptions(IGNORE_COVERAGE_DEFAULT);
   const btn = el('btnSaveIgnore');
-  btn.textContent = area ? '💾 Save changes' : '💾 Save ignore area';
-  btn.dataset.label = btn.textContent;
+  setSaveLabel(btn, area ? 'Save changes' : 'Save ignore area');
 }
 
 function readCoverage(select) {
@@ -1521,7 +1536,7 @@ async function saveIgnoreArea() {
   const body = { name };
   if (fraction !== null) body.ignore_box_fraction = fraction;
   const btn = el('btnSaveIgnore');
-  const idle = btn.dataset.label || btn.textContent;
+  const idle = btn.dataset.label || btn.textContent.trim();
   btn.disabled = true;
   btn.textContent = 'Saving…';
   setRuleStatus(statusId, 'Saving…');
@@ -1546,7 +1561,7 @@ async function saveIgnoreArea() {
     setRuleStatus(statusId, `Not saved: ${err.message}`, true);
   } finally {
     btn.disabled = false;
-    btn.textContent = idle;
+    setSaveLabel(btn, idle);
   }
 }
 
@@ -1606,7 +1621,7 @@ function ignoreRow(z) {
   return `
     <div class="zone-item ig-row${on ? '' : ' ig-row-off'}" data-ignore-id="${id}" data-enabled="${on}">
       <div class="zone-info">
-        <span class="zone-name">🚫 ${escapeHtml(z.name || z.id)}${on ? '' : ' <span class="badge">off</span>'}</span>
+        <span class="zone-name">${uiIcon('ban', { size: 'sm' })} ${escapeHtml(z.name || z.id)}${on ? '' : ' <span class="badge badge-neutral">off</span>'}</span>
         <span class="zone-sub">${sub}</span>
       </div>
       <div class="ig-row-controls">
@@ -1615,8 +1630,8 @@ function ignoreRow(z) {
         <label class="checkbox-label ig-enabled" for="igOn_${id}"><input type="checkbox" id="igOn_${id}" ${on ? 'checked' : ''} onchange="toggleIgnoreArea('${id}', this)" /> Enabled</label>
       </div>
       <span class="rule-actions">
-        <button type="button" class="btn btn-sm rule-edit" onclick="editIgnoreArea('${id}')" title="Edit name or coverage">✎ Edit</button>
-        <button type="button" class="btn btn-danger btn-sm rule-delete" onclick="askDeleteRule(this)" title="Delete">🗑️</button>
+        <button type="button" class="btn btn-secondary btn-sm rule-edit" onclick="editIgnoreArea('${id}')" title="Edit name or coverage">${uiIcon('pencil', { size: 'sm' })} Edit</button>
+        ${deleteIconButton()}
       </span>${deleteConfirmHtml('IGNORE', id)}
       ${note ? `<div class="ig-row-status form-status${note.err ? ' form-status-error' : ''}" aria-live="polite">${escapeHtml(note.msg)}</div>` : ''}
     </div>`;
@@ -1776,7 +1791,7 @@ function openBoxPopover(b) {
     <div class="box-popover-title">Detected: ${escapeHtml(BOX_STATE_TEXT[b.state] || 'person')}${conf}</div>
     <div class="box-popover-actions">
       <button type="button" class="btn btn-warning btn-sm" id="btnNotPerson" onclick="ignoreSelectedBox(this)">Not a person — ignore this spot</button>
-      <button type="button" class="btn btn-sm" onclick="closeBoxPopover()">Cancel</button>
+      <button type="button" class="btn btn-secondary btn-sm" onclick="closeBoxPopover()">Cancel</button>
     </div>
     <div class="box-popover-status form-status" id="boxPopoverStatus" aria-live="polite"></div>`;
   pop.hidden = false;
@@ -1836,8 +1851,8 @@ async function ignoreSelectedBox(btn) {
     pop.innerHTML = `
       <div class="box-popover-msg">Ignore area added. People are no longer detected there.</div>
       <div class="box-popover-actions">
-        ${newId ? `<button type="button" class="btn btn-sm" id="btnUndoBoxIgnore" onclick="undoBoxIgnore('${escapeHtml(newId)}', this)">Undo</button>` : ''}
-        <button type="button" class="btn btn-sm" onclick="closeBoxPopover()">Close</button>
+        ${newId ? `<button type="button" class="btn btn-secondary btn-sm" id="btnUndoBoxIgnore" onclick="undoBoxIgnore('${escapeHtml(newId)}', this)">Undo</button>` : ''}
+        <button type="button" class="btn btn-secondary btn-sm" onclick="closeBoxPopover()">Close</button>
       </div>
       <div class="box-popover-status form-status" id="boxPopoverStatus" aria-live="polite"></div>`;
     placeBoxPopover(pop, b);
@@ -1858,7 +1873,7 @@ async function undoBoxIgnore(id, btn) {
     if (pop && !pop.hidden) {
       pop.innerHTML = `
         <div class="box-popover-msg">Undone: the ignore area was removed. People there are detected again.</div>
-        <div class="box-popover-actions"><button type="button" class="btn btn-sm" onclick="closeBoxPopover()">Close</button></div>`;
+        <div class="box-popover-actions"><button type="button" class="btn btn-secondary btn-sm" onclick="closeBoxPopover()">Close</button></div>`;
       clearTimeout(closeBoxPopover._timer);
       closeBoxPopover._timer = setTimeout(closeBoxPopover, 5000);
     }
@@ -1898,6 +1913,7 @@ function selectCamera(cameraId) {
   const cam = studioCameras.find((c) => c.id === cameraId);
   document.querySelectorAll('#cameraButtonsList .btn').forEach((b) => {
     b.classList.toggle('btn-primary', b.getAttribute('data-camera-id') === cameraId);
+    b.classList.toggle('btn-secondary', b.getAttribute('data-camera-id') !== cameraId);
   });
   el('sourceBadge').textContent = cam ? `${cam.name} · ${cam.department || ''}` : cameraId;
   const url = new URL(window.location.href);
@@ -1938,7 +1954,7 @@ async function loadStudioSources() {
   studioCameras.forEach((cam) => {
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'btn btn-sm';
+    btn.className = 'btn btn-secondary btn-sm';
     btn.setAttribute('data-camera-id', cam.id);
     btn.textContent = `${cam.name}${cam.status === 'ONLINE' ? '' : ' (' + (cam.status || 'OFFLINE').toLowerCase() + ')'}`;
     btn.onclick = () => selectCamera(cam.id);
@@ -1949,7 +1965,13 @@ async function loadStudioSources() {
   const pick = studioCameras.find((c) => c.id === wanted) || studioCameras.find((c) => c.id === activeCameraId) || studioCameras[0];
   if (wanted && !studioCameras.some((c) => c.id === wanted)) showToast(`Camera "${wanted}" not found; showing ${pick.name}.`);
   if (pick.id !== activeCameraId) selectCamera(pick.id);
-  else document.querySelectorAll('#cameraButtonsList .btn').forEach((b) => b.classList.toggle('btn-primary', b.getAttribute('data-camera-id') === activeCameraId));
+  else {
+    document.querySelectorAll('#cameraButtonsList .btn').forEach((b) => {
+      const on = b.getAttribute('data-camera-id') === activeCameraId;
+      b.classList.toggle('btn-primary', on);
+      b.classList.toggle('btn-secondary', !on);
+    });
+  }
   // Tool from the link: only needs the camera chosen, not a loaded frame
   // (points are normalised, and the canvas re-sizes when the first frame arrives).
   applyDeepLinkTool();

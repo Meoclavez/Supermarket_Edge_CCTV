@@ -72,6 +72,7 @@ import numpy as np
 
 from app.config import settings
 from app.services.timeutil import to_local, utc_from_ts  # stored times are naive UTC
+from app.services import theft_alert_policy as policy
 from app.services import theft_detection_service as rules
 
 logger = logging.getLogger(__name__)
@@ -252,6 +253,8 @@ class TrackState:
     pattern_score: Optional[float] = None
     pattern_ts: float = -1.0
     incident_ids: Dict[str, Tuple[str, float]] = field(default_factory=dict)
+    # rule -> (alert tier, risk score) of the incidents raised on this track.
+    incident_tiers: Dict[str, Tuple[str, float]] = field(default_factory=dict)
 
 
 @dataclass
@@ -296,6 +299,11 @@ class PoseAnalytics:
         self._sync_engine_url: Optional[str] = None
         self.stats = {"frames": 0, "interactions": 0, "incidents": 0, "persisted": 0, "write_errors": 0,
                       "deduplicated": 0}
+        # (camera_id, zone_id) -> times of recent incidents there, for the
+        # zone-burst tier step (theft_alert_policy). In memory: a restart
+        # starts the count again.
+        self._zone_incidents: Dict[Tuple[str, str], Deque[float]] = {}
+        self._zone_incidents_lock = threading.Lock()
 
     # ----------------------------------------------------------- lifecycle
 
@@ -1594,10 +1602,13 @@ class PoseAnalytics:
         last = st.fired.get(rule)
         if last is not None and ts - last < settings.THEFT_INCIDENT_COOLDOWN_SEC:
             return False
+        # Earlier incidents on this person, for the combination tier steps.
+        earlier = [(r, ts - t) for r, t in st.fired.items() if r != rule and ts >= t]
         st.fired[rule] = ts
         st.cues.clear()
 
         zone = self._zone_by_id(cam, zone_id)
+        assessment = self._assess(cam, st, rule, verdict, confidence, ts, zone, zone_id, earlier)
         evidence = list(verdict.get("evidence") or [])
         if zone is not None:
             evidence.insert(0, f"Product zone: {zone.name}" + (f" ({zone.category})" if zone.category else ""))
@@ -1621,7 +1632,10 @@ class PoseAnalytics:
             "track_id": str(st.track_id),
             "ts": ts,
             "confidence": round(confidence, 3),
-            "severity": self._severity(cam, confidence),
+            "severity": assessment["severity"],
+            "alert_tier": assessment["alert_tier"],
+            "risk_score": assessment["risk_score"],
+            "risk_factors": assessment["risk_factors"],
             "zone_id": zone_id,
             "zone_name": zone.name if zone else None,
             "evidence": evidence,
@@ -1632,26 +1646,72 @@ class PoseAnalytics:
             "snapshot": snapshot,
         }
         st.incident_ids[rule] = (incident["id"], ts)
+        st.incident_tiers[rule] = (assessment["alert_tier"], assessment["risk_score"])
         self._enqueue("incident", incident)
         self.stats["incidents"] += 1
         result.incidents.append({k: v for k, v in incident.items() if k != "snapshot"})
         logger.info(f"Suspicious behaviour for review: {rule} on {cam.camera_id} track {st.track_id} "
-                    f"(confidence {confidence:.2f})")
+                    f"(confidence {confidence:.2f}, risk {assessment['risk_score']:.2f}, "
+                    f"level {assessment['alert_tier']})")
         return True
 
     @staticmethod
-    def _severity(cam: CameraState, confidence: float) -> str:
-        sev = "HIGH" if confidence >= 0.75 else ("MEDIUM" if confidence >= 0.5 else "LOW")
-        try:
-            from app.services.camera_roles import preset
+    def _zone_info(z: Optional[ProductZoneGeom]) -> Optional[Dict[str, Any]]:
+        if z is None:
+            return None
+        return {"id": z.id, "name": z.name, "category": z.category, "price": z.price,
+                "high_value": z.high_value, "value_tier": z.value_tier}
 
-            p = preset(cam.role)
-        except Exception:
-            p = None
-        order = ("LOW", "MEDIUM", "HIGH")
-        if p is not None and p.alert_severity_floor in order and order.index(sev) < order.index(p.alert_severity_floor):
-            sev = p.alert_severity_floor
-        return sev
+    def _assess(self, cam: CameraState, st: TrackState, rule: str, verdict: Dict[str, Any], confidence: float,
+                ts: float, zone: Optional[ProductZoneGeom], zone_id: Optional[str],
+                earlier: List[Tuple[str, float]]) -> Dict[str, Any]:
+        """Risk score and alert tier of an incident being raised (theft_alert_policy.assess)."""
+        floor_cat = None
+        if st.current_floor_zone is not None and st.zone_sequence \
+                and st.zone_sequence[-1].get("zone_id") == st.current_floor_zone:
+            floor_cat = st.zone_sequence[-1].get("category")
+        reached = None
+        if rule == rules.RULE_EXIT_WITHOUT_CHECKOUT:
+            seen = []
+            for r in st.reaches:
+                if r.get("zone_id") not in seen:
+                    seen.append(r.get("zone_id"))
+            reached = [self._zone_info(self._zone_by_id(cam, zid)) for zid in seen]
+            reached = [z for z in reached if z]
+        burst = None
+        if zone_id:
+            window = max(1.0, float(settings.THEFT_BURST_WINDOW_MIN)) * 60.0
+            with self._zone_incidents_lock:
+                q = self._zone_incidents.setdefault((cam.camera_id, str(zone_id)), deque(maxlen=256))
+                while q and ts - q[0] > window:
+                    q.popleft()
+                q.append(ts)
+                burst = len(q)
+        label = zone.name if zone is not None else None
+        if label is None and zone_id:
+            label = next((z.get("name") for z in self._floor_zones() if z.get("id") == zone_id), None)
+        try:
+            return policy.assess(rule, confidence, target=verdict.get("target"), zone=self._zone_info(zone),
+                                 reached_zones=reached, role=cam.role, floor_category=floor_cat,
+                                 other_rules=earlier, zone_burst=burst, zone_label=label or zone_id)
+        except Exception as e:  # never lose an incident to the scoring: fall back to the score alone
+            logger.exception(f"theft risk scoring failed for {rule} on {cam.camera_id}: {e}")
+            tier = policy.tier_for_score(confidence)
+            return {"alert_tier": tier, "risk_score": round(float(confidence), 3),
+                    "risk_factors": [{"factor": "confidence", "value": round(float(confidence), 3),
+                                      "effect": "base", "reason": "Risk scoring failed; level from confidence only"}],
+                    "severity": policy.TIER_SEVERITY[tier], "event_severity": policy.TIER_EVENT_SEVERITY[tier],
+                    "channels": policy.channels(tier)}
+
+    @staticmethod
+    def _severity(cam: CameraState, confidence: float) -> str:
+        """Severity of an incident with this confidence on this camera, before place and case.
+
+        From the alert tier (theft_alert_policy): the confidence alone gives
+        the tier, the camera role's floor raises it; critical/alert = HIGH,
+        watch = MEDIUM, review = LOW.
+        """
+        return policy.assess("", confidence, role=cam.role)["severity"]
 
     def _finalize_track(self, cam: CameraState, st: TrackState, ts: float,
                         frame: Optional[np.ndarray] = None) -> None:
@@ -1718,12 +1778,17 @@ class PoseAnalytics:
         or a fused pattern score of at least half its threshold; else
         "normal". The theft cues (everything but the reach) count only while
         theft detection is on. ``since`` is when the current level began.
+        ``tier`` / ``risk_score``: the alert tier and risk of the fired
+        incident (the highest still in cooldown on this person), null at
+        "watch" and "normal"; the incident row carries the same values.
         """
         labels: List[str] = []
         watch_onsets: List[float] = []
         alert_at: Optional[float] = None
         incident_id: Optional[str] = None
         incident_rule: Optional[str] = None
+        tier: Optional[str] = None
+        risk: Optional[float] = None
         theft = bool(cam.theft_on)
 
         if theft:
@@ -1734,6 +1799,11 @@ class PoseAnalytics:
                 rec = st.incident_ids.get(incident_rule)
                 incident_id = rec[0] if rec is not None and rec[1] == alert_at else None
                 labels.append(rules.RULE_LABELS.get(incident_rule, incident_rule))
+                # The highest tier among the incidents still in cooldown on this person.
+                for r_ts, r_rule in recent:
+                    tr = st.incident_tiers.get(r_rule)
+                    if tr is not None and policy.tier_index(tr[0]) > policy.tier_index(tier):
+                        tier, risk = tr
 
         reaching_zone: Optional[str] = None
         conceal: Optional[str] = None
@@ -1803,6 +1873,10 @@ class PoseAnalytics:
             "pattern_threshold": round(threshold, 3),
             "incident_id": incident_id,
             "incident_rule": incident_rule,
+            # Alert tier (review | watch | alert | critical) and risk score of
+            # the fired incident; null while no incident fired.
+            "tier": tier,
+            "risk_score": None if risk is None else round(float(risk), 3),
             "since": since,
         }
 
@@ -1953,7 +2027,9 @@ class PoseAnalytics:
             img = render_evidence(snap["frame"], snap.get("bbox"), snap.get("keypoints"),
                                   f"SUSPICIOUS BEHAVIOUR FOR REVIEW: {p['rule']}",
                                   f"{p['camera_id']}  track {p['track_id']}  confidence {p['confidence']:.2f}  "
-                                  f"{to_local(utc_from_ts(p['ts'])).strftime('%Y-%m-%d %H:%M:%S %Z')}")
+                                  + (f"level {p['alert_tier']} (risk {float(p.get('risk_score') or 0):.2f})  "
+                                     if p.get("alert_tier") else "")
+                                  + f"{to_local(utc_from_ts(p['ts'])).strftime('%Y-%m-%d %H:%M:%S %Z')}")
             path = self.evidence_dir() / f"{p['id']}.jpg"
             ok = cv2.imwrite(str(path), img, [int(cv2.IMWRITE_JPEG_QUALITY), int(settings.THEFT_EVIDENCE_JPEG_QUALITY)])
             if ok:
@@ -2048,6 +2124,9 @@ class PoseAnalytics:
             rule=p["rule"],
             severity=p["severity"],
             confidence=p["confidence"],
+            alert_tier=p.get("alert_tier"),
+            risk_score=p.get("risk_score"),
+            risk_factors=p.get("risk_factors") or [],
             person_track_id=p["track_id"],
             evidence_summary=summary[:1000],
             evidence=p["evidence"],
@@ -2069,12 +2148,18 @@ class PoseAnalytics:
             rules.RULE_SUSPICIOUS_LOITERING: "LOITERING",
         }.get(p["rule"], "THEFT_SUSPECTED")
         conf = p["confidence"]
-        title = f"Review: {rules.RULE_LABELS.get(p['rule'], p['rule'])} - {row['camera_name']}"
+        tier = policy.normalise_tier(p.get("alert_tier"))
+        label = rules.RULE_LABELS.get(p["rule"], p["rule"])
+        prefix = policy.TIER_TITLE[tier] if tier else "Review"
+        title = f"{prefix}: {label} - {row['camera_name']}"
         body = "Suspicious behaviour for staff review. " + "; ".join(p["evidence"][:2])
         data = {
             "camera_id": p["camera_id"],
             "event_type": event_type,
-            "severity": "HIGH" if conf >= 0.75 else ("WARNING" if conf >= 0.5 else "INFO"),
+            # Tiered incidents: the tier's severity. Without a tier (older
+            # callers) the confidence bands as before.
+            "severity": (policy.TIER_EVENT_SEVERITY[tier] if tier else
+                         "HIGH" if conf >= 0.75 else ("WARNING" if conf >= 0.5 else "INFO")),
             "confidence": conf,
             "incident_id": p["id"],
             "rule": p["rule"],
@@ -2082,6 +2167,11 @@ class PoseAnalytics:
             "snapshot_url": row.get("evidence_snapshot_url") or "",
             "zone_name": p.get("zone_name") or "",
         }
+        if tier:
+            data.update(alert_tier=tier, risk_score=p.get("risk_score"),
+                        risk_reasons=[f.get("reason") for f in (p.get("risk_factors") or [])
+                                      if f.get("factor") not in ("confidence", "level_from_score")][:4],
+                        channels=policy.channels(tier))
         return title, body, data
 
     def _dispatch_notification(self, title: str, body: str, data: Dict[str, Any]) -> None:

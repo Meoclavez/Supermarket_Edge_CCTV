@@ -1,0 +1,19 @@
+Lucide icons, lucide-static 1.53.0 (ISC License; the icons derived from Feather
+are also under the MIT License; full text in LICENSE-lucide.txt in this directory).
+
+sprite.svg holds only the icons the dashboard uses, one <symbol id="i-NAME"> per
+icon, copied from the package's icons/NAME.svg with the path data unmodified
+(the per-file <svg> wrapper is replaced by the <symbol>; stroke-width is left to
+the .icon rule in css/style.css). js/icons.js lists the same names.
+
+  package:   https://registry.npmjs.org/lucide-static/-/lucide-static-1.53.0.tgz
+  integrity: sha512-xddbAP/qViJOeURl46uiTwmX6hn79PcaHW4xDQcM/bCiO1wd1eYE6hIVXr1dko14aK5HAadZNmAqaEWusc8q1A==
+  shasum:    093bd00ef7024893b499ac8e82dddeecb93ab215
+
+Served locally (no CDN). To add an icon or upgrade, extract that package and run
+  python edge_backend/scripts/build_icon_sprite.py <extracted>/package [new-icon-name ...]
+which rewrites sprite.svg and the name list in js/icons.js together; then update
+the version here and in THIRD_PARTY_NOTICES.md.
+
+The PNG app icons in this directory (icon-*.png, maskable-512.png,
+apple-touch-icon.png, badge-96.png) are this product's own artwork, not Lucide.

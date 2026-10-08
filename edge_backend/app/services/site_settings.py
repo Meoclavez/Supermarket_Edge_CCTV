@@ -151,11 +151,90 @@ SPECS: Tuple[Spec, ...] = (
          "Frames per second decoded from each camera. Analysis can never be faster than this. Higher "
          "costs more CPU. Changing it reconnects every camera's stream (a second or two without picture).",
          2, 25, "fps", {"applies": "reconnect"}),
+    # --------------------------------------------------------- theft_alerts
+    # Alert levels for possible theft (services/theft_alert_policy.py). Each
+    # incident gets a risk score = confidence x place weight x case weight,
+    # recorded with its reasons, and a level from the thresholds below.
+    Spec("THEFT_TIER_WATCH_MIN", "float", "theft_alerts", "Watch level from risk score",
+         "Incidents scoring at least this are shown in a banner on the dashboard (no sound, no phone). "
+         "Below it they only go to the review list.", 0.05, 0.9, "fraction", {"section": "levels"}),
+    Spec("THEFT_TIER_ALERT_MIN", "float", "theft_alerts", "Alert level from risk score",
+         "Incidents scoring at least this sound the dashboard alarm and are sent to the alert phones.",
+         0.1, 0.95, "fraction", {"section": "levels"}),
+    Spec("THEFT_TIER_CRITICAL_MIN", "float", "theft_alerts", "Critical level from risk score",
+         "Incidents scoring at least this are also escalated to the backup people and repeated until "
+         "someone acknowledges them. Concealment followed by walking out without paying is always critical.",
+         0.2, 1.0, "fraction", {"section": "levels"}),
+    Spec("THEFT_ROUTE_WATCH_SOUND", "bool", "theft_alerts", "Watch: play the alarm sound",
+         "Off: Watch incidents show a quiet banner. On: they also play the dashboard alarm sound.",
+         extra={"section": "routing"}),
+    Spec("THEFT_ROUTE_WATCH_PUSH", "bool", "theft_alerts", "Watch: send to phones",
+         "On: Watch incidents are also sent to the alert phones. Off keeps phones for Alert and Critical.",
+         extra={"section": "routing"}),
+    Spec("THEFT_ROUTE_ALERT_PUSH", "bool", "theft_alerts", "Alert: send to phones",
+         "On: Alert incidents are sent to the first-priority phones. Off: dashboard banner and sound only.",
+         extra={"section": "routing"}),
+    Spec("THEFT_ROUTE_ALERT_ESCALATE", "bool", "theft_alerts", "Alert: escalate when nobody acknowledges",
+         "On: Alert incidents nobody acknowledges in time also go to the backup people, like Critical ones.",
+         extra={"section": "routing"}),
+    Spec("THEFT_CASE_WEIGHT_CONCEALMENT", "float", "theft_alerts", "Weight: hiding an item in a pocket or jacket",
+         "How strongly a hand going from the shelf into a pocket or inside a jacket counts. 1 = as measured.",
+         0.3, 1.5, "x", {"section": "cases"}),
+    Spec("THEFT_CASE_WEIGHT_CONCEAL_BEHIND_BACK", "float", "theft_alerts", "Weight: hand hidden behind the back",
+         "Hiding behind the back or into a worn bag is inferred from the hand going out of sight, so it "
+         "counts less than a pocket seen directly.", 0.3, 1.5, "x", {"section": "cases"}),
+    Spec("THEFT_CASE_WEIGHT_SHELF_SWEEPING", "float", "theft_alerts", "Weight: shelf sweeping",
+         "Many quick grabs from one shelf section.", 0.3, 1.5, "x", {"section": "cases"}),
+    Spec("THEFT_CASE_WEIGHT_EXIT_WITHOUT_CHECKOUT", "float", "theft_alerts", "Weight: leaving without passing a checkout",
+         "Picked up stock, then walked into an exit area without a checkout visit seen on the same camera.",
+         0.3, 1.5, "x", {"section": "cases"}),
+    Spec("THEFT_CASE_WEIGHT_LOITERING", "float", "theft_alerts", "Weight: loitering at high-value stock",
+         "A long stay with repeated reaching and looking around. Common for honest shoppers too, so it "
+         "counts less.", 0.3, 1.5, "x", {"section": "cases"}),
+    Spec("THEFT_CASE_WEIGHT_PATTERN", "float", "theft_alerts", "Weight: combination of weaker signs",
+         "Several weaker signs from one person (looking around, items not put back, a hand held at the body).",
+         0.3, 1.5, "x", {"section": "cases"}),
+    Spec("THEFT_PLACE_WEIGHT_HIGH_VALUE", "float", "theft_alerts", "Place: high-value products",
+         "Product areas in a high-value category, at or above the high-value price, or marked Premium.",
+         0.5, 1.5, "x", {"section": "places"}),
+    Spec("THEFT_PLACE_WEIGHT_LOW_VALUE", "float", "theft_alerts", "Place: low-value products",
+         "Product areas marked Low value (or in the cheapest third by price).", 0.5, 1.5, "x",
+         {"section": "places"}),
+    Spec("THEFT_PLACE_WEIGHT_EXIT_ZONE", "float", "theft_alerts", "Place: at an exit or entrance",
+         "The person was in an exit or entrance area of the floor plan when it happened.", 0.5, 1.5, "x",
+         {"section": "places"}),
+    Spec("THEFT_PLACE_WEIGHT_DOOR_CAMERA", "float", "theft_alerts", "Place: door camera",
+         "Cameras whose role is Entrance, Exit or Entrance / exit door. Not added on top of the exit area.",
+         0.5, 1.5, "x", {"section": "places"}),
+    Spec("THEFT_PLACE_WEIGHT_CHECKOUT_CAMERA", "float", "theft_alerts", "Place: checkout camera",
+         "Cameras whose role is Checkout / cashier (impulse racks at the lane).", 0.5, 1.5, "x",
+         {"section": "places"}),
+    Spec("THEFT_COMBO_WINDOW_SEC", "float", "theft_alerts", "Same person: combine signs within (seconds)",
+         "Two different signs from the same person within this time raise the level by one; hiding an item "
+         "and then leaving without paying within it is Critical.", 30, 1800, "s", {"section": "combos"}),
+    Spec("THEFT_BURST_WINDOW_MIN", "float", "theft_alerts", "Repeated at one shelf: within (minutes)",
+         "Several incidents at the same shelf or area within this time raise the level by one.",
+         5, 240, "min", {"section": "combos"}),
+    Spec("THEFT_BURST_MIN_INCIDENTS", "int", "theft_alerts", "Repeated at one shelf: from (incidents)",
+         "How many incidents at the same shelf or area, within the time above, count as repeated.",
+         2, 20, None, {"section": "combos"}),
 )
 SPECS_BY_KEY: Dict[str, Spec] = {s.key: s for s in SPECS}
 GROUP_KEYS: Dict[str, List[str]] = {}
 for _s in SPECS:
     GROUP_KEYS.setdefault(_s.group, []).append(_s.key)
+GROUP_LABELS: Dict[str, str] = {
+    "store": "Store", "evidence": "Evidence storage", "alerts": "Alerts and detection",
+    "analysis": "Analysis speed", "theft_alerts": "Theft alert levels",
+}
+# Sub-headings inside a group (Spec.extra["section"]).
+SECTION_LABELS: Dict[str, str] = {
+    "levels": "When each level starts",
+    "routing": "Who is told at each level",
+    "cases": "How much each kind of behaviour counts",
+    "places": "Where it happened",
+    "combos": "Repeated or combined signs",
+}
 EVIDENCE_KEYS = frozenset(GROUP_KEYS["evidence"]) - {"NIGHT_WATCH_CLIP"}
 HIGH_VALUE_KEYS = frozenset({"THEFT_HIGH_VALUE_CATEGORIES", "THEFT_HIGH_VALUE_MIN_PRICE"})
 ANALYSIS_KEYS = frozenset(GROUP_KEYS["analysis"])
@@ -330,8 +409,17 @@ def validate_one(key: str, raw: Any) -> Any:
     return _number(spec, raw)
 
 
+TIER_KEYS = ("THEFT_TIER_WATCH_MIN", "THEFT_TIER_ALERT_MIN", "THEFT_TIER_CRITICAL_MIN")
+
+
 def _cross_check(effective: Dict[str, Any], changed: Dict[str, Any], errors: Dict[str, str]) -> None:
     """Checks between values and against the disk."""
+    if set(TIER_KEYS) & set(changed):
+        w, a, c = (float(effective[k]) for k in TIER_KEYS)
+        if not w < a < c:
+            key = next((k for k in reversed(TIER_KEYS) if k in changed), TIER_KEYS[-1])
+            errors[key] = (f"the levels must rise: Watch ({w * 100:g}%) below Alert ({a * 100:g}%) "
+                           f"below Critical ({c * 100:g}%)")
     if not ({"EVIDENCE_MAX_GB", "NIGHT_WATCH_EVIDENCE_MAX_MB"} & set(changed)):
         return
     disk = disk_info()
@@ -519,13 +607,15 @@ class SiteSettingsStore:
                 "min": spec.extra.get("min_nonzero", spec.min), "max": mx, "unit": spec.unit,
                 "zero_means": spec.extra.get("zero_means"),
                 "applies": spec.extra.get("applies", "live"),
+                "section": spec.extra.get("section"),
                 "changed_at": (self.changed.get(spec.key) or {}).get("at"),
                 "changed_by": (self.changed.get(spec.key) or {}).get("by"),
             }
         # What "Automatic (10% of disk)" means on this disk, so the dashboard can
         # tell whether switching to it (or resetting to it) lowers the limit.
         auto = _auto_cap_bytes(disk)
-        return {"settings": items, "groups": GROUP_KEYS, "store_time": store_time(),
+        return {"settings": items, "groups": GROUP_KEYS, "group_labels": GROUP_LABELS,
+                "sections": SECTION_LABELS, "store_time": store_time(),
                 "disk": {**disk, "max_evidence_gb": most, "auto_evidence_cap_bytes": auto,
                          "auto_evidence_gb": round(auto / GB, 2) if auto else None}}
 

@@ -20,6 +20,11 @@
 (function () {
   'use strict';
 
+  /** Icon markup from js/icons.js (window.EdgeIcon); '' when that script is missing. Never throws. */
+  const ico = (name, opts) => {
+    try { return window.EdgeIcon && typeof window.EdgeIcon.svg === 'function' ? window.EdgeIcon.svg(name, opts) : ''; } catch (_) { return ''; }
+  };
+
   const API = '/api/v1/layout';
   const MIN_PAIRS = 4;
 
@@ -166,7 +171,7 @@
       const busy = n.kind === 'busy';
       bar.innerHTML = `
         <span class="fp-cal-remote-text ${n.kind === 'err' ? 'is-err' : ''}">${esc(n.text)}</span>
-        <button type="button" class="btn btn-sm" id="fpCalRefresh" ${busy ? 'disabled' : ''}>Take a new picture</button>
+        <button type="button" class="btn btn-secondary btn-sm" id="fpCalRefresh" ${busy ? 'disabled' : ''}>Take a new picture</button>
         ${n.kind === 'err' ? '<a class="btn btn-sm btn-primary" href="#settings" onclick="openRemoteVideoCheck(); return false;">Check connection</a>' : ''}`;
       bar.querySelector('#fpCalRefresh')?.addEventListener('click', () => this.loadRemoteFrame());
     },
@@ -307,7 +312,7 @@
         actionsEl.innerHTML = `
           <span class="fp-empty" style="padding:0">Remove the stored calibration for this camera? It will stop placing people on the plan until recalibrated.</span>
           <button class="btn btn-sm btn-danger" id="fpCalClearYes">Yes, clear</button>
-          <button class="btn btn-sm" id="fpCalClearNo">Cancel</button>`;
+          <button class="btn btn-secondary btn-sm" id="fpCalClearNo">Cancel</button>`;
         actionsEl.querySelector('#fpCalClearNo')?.addEventListener('click', () => {
           this._confirmingClear = false;
           this.renderActions();
@@ -330,8 +335,8 @@
 
       actionsEl.innerHTML = `
         <button class="btn btn-sm btn-primary" id="fpCalSolve" ${canSolve ? '' : 'disabled'} title="${canSolve ? 'Compute and store the calibration' : `Needs ${MIN_PAIRS} points marked in both the picture and the map`}">Save calibration</button>
-        <button class="btn btn-sm" id="fpCalTest" ${canTest ? '' : 'disabled'} title="Check how far each point lands from where you clicked on the map">Test accuracy</button>
-        <button class="btn btn-sm" id="fpCalUndo" ${canUndo ? '' : 'disabled'}>${this.pending ? 'Cancel this point' : 'Undo last point'}</button>
+        <button class="btn btn-secondary btn-sm" id="fpCalTest" ${canTest ? '' : 'disabled'} title="Check how far each point lands from where you clicked on the map">Test accuracy</button>
+        <button class="btn btn-secondary btn-sm" id="fpCalUndo" ${canUndo ? '' : 'disabled'}>${this.pending ? 'Cancel this point' : 'Undo last point'}</button>
         <button class="btn btn-sm btn-danger" id="fpCalClear" ${canClear ? '' : 'disabled'} title="${clearTitle}">${clearText}</button>`;
 
       actionsEl.querySelector('#fpCalSolve')?.addEventListener('click', () => this.solve());
@@ -352,15 +357,15 @@
         }
         return `<div class="fp-cal-pair" title="Picture ${Math.round(p.image.x)}, ${Math.round(p.image.y)} px · map ${fmt(p.floor.x, 2)}, ${fmt(p.floor.y, 2)} m">
           <span class="fp-cal-n" style="background:${this.color()}">${i + 1}</span>
-          <span>Point ${i + 1}: camera ✓</span>
-          <span>map ✓ ${err}</span>
-          <button class="btn btn-xs btn-danger fp-cal-del" data-del="${i}" title="Remove this point" aria-label="Remove point ${i + 1}">×</button>
+          <span>Point ${i + 1}: camera ${ico('check', { size: 'sm', label: 'set' })}</span>
+          <span>map ${ico('check', { size: 'sm', label: 'set' })} ${err}</span>
+          <button class="btn btn-danger btn-xs btn-icon fp-cal-del" data-del="${i}" title="Remove this point" aria-label="Remove point ${i + 1}">${ico('x', { size: 'sm' }) || 'Remove'}</button>
         </div>`;
       });
       if (this.pending) {
         rows.push(`<div class="fp-cal-pair pending">
           <span class="fp-cal-n" style="background:${this.color()}">${this.pairs.length + 1}</span>
-          <span>Point ${this.pairs.length + 1}: camera ✓</span>
+          <span>Point ${this.pairs.length + 1}: camera ${ico('check', { size: 'sm', label: 'set' })}</span>
           <span>now click the same spot on the map…</span>
           <span></span>
         </div>`);
@@ -603,7 +608,8 @@
   function accuracyTag(m) {
     const q = qualityWord(m);
     const cls = { good: 'fp-cal-acc-good', fair: 'fp-cal-acc-fair', poor: 'fp-cal-acc-poor' }[q];
-    return `<span class="fp-cal-acc ${cls}" title="${q}">● ${cm(m)} off</span>`;
+    const dot = { good: 'is-online', fair: 'is-warning', poor: 'is-offline' }[q];
+    return `<span class="fp-cal-acc ${cls}" title="${q}"><span class="status-dot ${dot}" aria-hidden="true"></span> ${cm(m)} off</span>`;
   }
 
   async function errorDetail(res) {

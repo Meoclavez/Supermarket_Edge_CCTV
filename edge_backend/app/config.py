@@ -418,7 +418,10 @@ class Settings(BaseSettings):
     # NIGHT_WATCH_EVIDENCE_MAX_MB, NIGHT_WATCH_CLIP, THEFT_HIGH_VALUE_CATEGORIES,
     # THEFT_HIGH_VALUE_MIN_PRICE, TRIPWIRE_ALERT_COOLDOWN_SEC,
     # RESTRICTED_AREA_COOLDOWN_SEC, THEFT_INCIDENT_COOLDOWN_SEC,
-    # THEFT_MIN_CONFIDENCE, THEFT_EXIT_RULE_ENABLED, QUEUE_CONGESTED_WAIT_SEC.
+    # THEFT_MIN_CONFIDENCE, THEFT_EXIT_RULE_ENABLED, QUEUE_CONGESTED_WAIT_SEC,
+    # and the "theft_alerts" group (THEFT_TIER_*, THEFT_CASE_WEIGHT_*,
+    # THEFT_PLACE_WEIGHT_*, THEFT_COMBO_WINDOW_SEC, THEFT_BURST_*,
+    # THEFT_ROUTE_*), see services/theft_alert_policy.py.
     #
     # Store identity & default premises extent (metres) for a fresh blueprint.
     STORE_ID: str = os.getenv("STORE_ID", "store_main")
@@ -739,16 +742,61 @@ class Settings(BaseSettings):
     # Exit without checkout (needs a calibrated camera and ENTRANCE/EXIT + CHECKOUT zones). Dashboard.
     THEFT_EXIT_RULE_ENABLED: bool = os.getenv("THEFT_EXIT_RULE_ENABLED", "true").lower() in ("1", "true", "yes")
     # Sweethearting: seconds between a checkout hand pass and a POS scan to count as matched.
+    # Not read by the live pipeline: detect_sweethearting() is not wired (no
+    # per-item scan times and no scanner hand-pass detection in this build).
     THEFT_POS_MATCH_TOLERANCE_SEC: float = float(os.getenv("THEFT_POS_MATCH_TOLERANCE_SEC", "2.0"))
     # One incident per track and rule inside this window. Dashboard.
     THEFT_INCIDENT_COOLDOWN_SEC: float = float(os.getenv("THEFT_INCIDENT_COOLDOWN_SEC", "120.0"))
     # Incidents below this evidence-derived confidence are not raised. Dashboard.
     THEFT_MIN_CONFIDENCE: float = float(os.getenv("THEFT_MIN_CONFIDENCE", "0.3"))
     # Reference durations (seconds) at which a rule's duration evidence saturates to ~63%.
+    # Not read anywhere: each rule saturates on its own window (kept so an
+    # existing .env still loads).
     THEFT_CONFIDENCE_DURATION_REF_SEC: float = float(os.getenv("THEFT_CONFIDENCE_DURATION_REF_SEC", "1.5"))
     # Where evidence JPEGs are written; empty means <STORAGE_DIR>/theft_evidence.
     THEFT_EVIDENCE_DIR: str = os.getenv("THEFT_EVIDENCE_DIR", "")
     THEFT_EVIDENCE_JPEG_QUALITY: int = int(os.getenv("THEFT_EVIDENCE_JPEG_QUALITY", "85"))
+
+    # ---- Alert tiers (services/theft_alert_policy.py). Defaults only: the
+    # dashboard (Settings > Theft alert levels, site-settings group
+    # "theft_alerts") saves the store's own values.
+    # risk = confidence x place weight x case weight (0..1). Below WATCH the
+    # incident is "review" (review queue only); WATCH: dashboard banner, no
+    # sound, no phone; ALERT: banner + sound + phone push; CRITICAL: alert +
+    # escalation to backup people and repeats until acknowledged.
+    THEFT_TIER_WATCH_MIN: float = float(os.getenv("THEFT_TIER_WATCH_MIN", "0.35"))
+    THEFT_TIER_ALERT_MIN: float = float(os.getenv("THEFT_TIER_ALERT_MIN", "0.55"))
+    THEFT_TIER_CRITICAL_MIN: float = float(os.getenv("THEFT_TIER_CRITICAL_MIN", "0.80"))
+    # Case weights: how much each kind of behaviour says about theft by itself.
+    THEFT_CASE_WEIGHT_CONCEALMENT: float = float(os.getenv("THEFT_CASE_WEIGHT_CONCEALMENT", "1.0"))
+    THEFT_CASE_WEIGHT_CONCEAL_BEHIND_BACK: float = float(os.getenv("THEFT_CASE_WEIGHT_CONCEAL_BEHIND_BACK", "0.85"))
+    THEFT_CASE_WEIGHT_SHELF_SWEEPING: float = float(os.getenv("THEFT_CASE_WEIGHT_SHELF_SWEEPING", "0.9"))
+    THEFT_CASE_WEIGHT_EXIT_WITHOUT_CHECKOUT: float = float(os.getenv("THEFT_CASE_WEIGHT_EXIT_WITHOUT_CHECKOUT", "0.9"))
+    THEFT_CASE_WEIGHT_LOITERING: float = float(os.getenv("THEFT_CASE_WEIGHT_LOITERING", "0.55"))
+    THEFT_CASE_WEIGHT_PATTERN: float = float(os.getenv("THEFT_CASE_WEIGHT_PATTERN", "0.65"))
+    # Place weights (multiplied, the product capped at 1.5): high-value / low-value
+    # product areas (category, price or value tier), an EXIT/ENTRANCE floor
+    # zone or a door camera (the larger of the two), a checkout camera.
+    THEFT_PLACE_WEIGHT_HIGH_VALUE: float = float(os.getenv("THEFT_PLACE_WEIGHT_HIGH_VALUE", "1.25"))
+    THEFT_PLACE_WEIGHT_LOW_VALUE: float = float(os.getenv("THEFT_PLACE_WEIGHT_LOW_VALUE", "0.85"))
+    THEFT_PLACE_WEIGHT_EXIT_ZONE: float = float(os.getenv("THEFT_PLACE_WEIGHT_EXIT_ZONE", "1.25"))
+    THEFT_PLACE_WEIGHT_DOOR_CAMERA: float = float(os.getenv("THEFT_PLACE_WEIGHT_DOOR_CAMERA", "1.15"))
+    THEFT_PLACE_WEIGHT_CHECKOUT_CAMERA: float = float(os.getenv("THEFT_PLACE_WEIGHT_CHECKOUT_CAMERA", "1.1"))
+    # Combinations on one person (track): concealment then exit without
+    # checkout within this window is critical; two different rules within it
+    # raise the tier by one.
+    THEFT_COMBO_WINDOW_SEC: float = float(os.getenv("THEFT_COMBO_WINDOW_SEC", "300"))
+    # A burst: at least this many incidents in one zone (any person) within
+    # the window raises the tier by one.
+    THEFT_BURST_WINDOW_MIN: float = float(os.getenv("THEFT_BURST_WINDOW_MIN", "30"))
+    THEFT_BURST_MIN_INCIDENTS: int = int(os.getenv("THEFT_BURST_MIN_INCIDENTS", "3"))
+    # Per-tier routing that the store may change (the rest is fixed: review
+    # never notifies, watch always shows a banner, alert always banners and
+    # sounds, critical always pushes and escalates).
+    THEFT_ROUTE_WATCH_SOUND: bool = os.getenv("THEFT_ROUTE_WATCH_SOUND", "false").lower() in ("1", "true", "yes")
+    THEFT_ROUTE_WATCH_PUSH: bool = os.getenv("THEFT_ROUTE_WATCH_PUSH", "false").lower() in ("1", "true", "yes")
+    THEFT_ROUTE_ALERT_PUSH: bool = os.getenv("THEFT_ROUTE_ALERT_PUSH", "true").lower() in ("1", "true", "yes")
+    THEFT_ROUTE_ALERT_ESCALATE: bool = os.getenv("THEFT_ROUTE_ALERT_ESCALATE", "false").lower() in ("1", "true", "yes")
 
     # ---------------- Tripwires & restricted areas (services/tripwire_engine.py) ----------------
     # Dead band either side of a tripwire, in pixels, as the larger of a

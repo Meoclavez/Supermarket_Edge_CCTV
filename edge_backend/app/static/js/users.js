@@ -95,7 +95,7 @@
           <input id="usPwConfirm" type="password" class="form-input" autocomplete="new-password" required></div>
         <div class="pr-actions">
           <button type="submit" class="btn btn-primary btn-sm" id="usPwSave">Save new password</button>
-          <button type="button" class="btn btn-sm" id="usPwCancel">Cancel</button>
+          <button type="button" class="btn btn-secondary btn-sm" id="usPwCancel">Cancel</button>
         </div>
       </form>` : '';
     host.innerHTML = `
@@ -103,7 +103,7 @@
         ${role ? `<span class="badge us-role us-role-${esc(role)}" id="usMyRole">${esc(ROLE_LABEL[role] || role)}</span>` : ''}</div>
       ${who}
       ${role ? `<div class="us-kv"><span class="us-k">Role</span><span class="us-v">${esc(ROLE_LABEL[role] || role)}: ${esc(ROLE_HELP[role] || '')}</span></div>` : ''}
-      ${a.username && !pwOpen ? '<div class="pr-actions"><button type="button" class="btn btn-sm" id="usPwOpen">Change password</button></div>' : ''}
+      ${a.username && !pwOpen ? '<div class="pr-actions"><button type="button" class="btn btn-secondary btn-sm" id="usPwOpen">Change password</button></div>' : ''}
       ${form}
       ${status(pwMessage)}`;
     const openBtn = $('usPwOpen');
@@ -191,12 +191,12 @@
         <div class="pr-hint">Give the person this password; they can change it under “Your account”.</div>
         <div class="pr-actions">
           <button type="submit" class="btn btn-primary btn-sm" id="usAddSave">Create account</button>
-          <button type="button" class="btn btn-sm" data-act="close">Cancel</button>
+          <button type="button" class="btn btn-secondary btn-sm" data-act="close">Cancel</button>
         </div>
         <div class="form-status" id="usAddStatus"></div>
       </form>` : '';
     host.innerHTML = `
-      <div class="card-title"><span>Accounts</span><span class="badge" id="usCount">${accounts.length}</span></div>
+      <div class="card-title"><span>Accounts</span><span class="badge badge-neutral" id="usCount">${accounts.length}</span></div>
       <div class="us-roles">
         <div><b>Owner / Administrator</b>: everything, including setup and accounts.</div>
         <div><b>Operator</b>: daily use: cameras, alerts, insights; can’t change setup.</div>
@@ -221,7 +221,7 @@
           <label class="us-inline-label" for="usRole-${id}">New role</label>
           <select class="form-select" id="usRole-${id}" name="role">${roleOptions(acc.role)}</select>
           <button type="submit" class="btn btn-primary btn-sm">Save role</button>
-          <button type="button" class="btn btn-sm" data-act="close">Cancel</button>
+          <button type="button" class="btn btn-secondary btn-sm" data-act="close">Cancel</button>
         </form>`;
     } else if (isOpen('reset')) {
       panel = `<form class="us-inline" data-form="reset" data-id="${id}" autocomplete="off" novalidate>
@@ -230,22 +230,22 @@
           <input type="password" class="form-input" name="pw2" placeholder="Confirm new password"
                  aria-label="Confirm new password" autocomplete="new-password">
           <button type="submit" class="btn btn-primary btn-sm">Save password</button>
-          <button type="button" class="btn btn-sm" data-act="close">Cancel</button>
+          <button type="button" class="btn btn-secondary btn-sm" data-act="close">Cancel</button>
           <div class="pr-sub us-full">${esc(acc.display_name)} is signed out of every browser and signs in again with the new password.</div>
         </form>`;
     } else if (isOpen('remove')) {
       panel = `<div class="pr-confirm">Remove ${esc(acc.display_name)}? They are signed out at once, including phones paired to this account, and can no longer sign in.
           <div class="pr-actions">
             <button type="button" class="btn btn-danger btn-sm" data-act="remove-yes" data-id="${id}">Yes, remove</button>
-            <button type="button" class="btn btn-sm" data-act="close">Keep</button>
+            <button type="button" class="btn btn-secondary btn-sm" data-act="close">Keep</button>
           </div>
         </div>`;
     }
     const actions = acc.is_you
       ? '<span class="pr-sub">Use “Change password” above</span>'
       : touch ? `
-          <button type="button" class="btn btn-sm" data-act="role" data-id="${id}">Change role</button>
-          <button type="button" class="btn btn-sm" data-act="reset" data-id="${id}">Reset password</button>
+          <button type="button" class="btn btn-secondary btn-sm" data-act="role" data-id="${id}">Change role</button>
+          <button type="button" class="btn btn-secondary btn-sm" data-act="reset" data-id="${id}">Reset password</button>
           <button type="button" class="btn btn-danger btn-sm" data-act="remove" data-id="${id}">Remove</button>`
         : '<span class="pr-sub">Only an owner can change an owner</span>';
     const msg = rowMessage.id === acc.id && rowMessage.text

@@ -426,7 +426,7 @@
     const b = document.createElement('button');
     b.type = 'button';
     b.id = 'authSignOut';
-    b.className = 'btn btn-sm';
+    b.className = 'btn btn-secondary btn-sm';
     b.textContent = 'Sign out';
     b.title = 'Sign out of the dashboard';
     b.addEventListener('click', () => window.edgeAuth.signOut());

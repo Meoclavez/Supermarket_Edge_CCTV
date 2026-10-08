@@ -310,7 +310,7 @@ class TheftIncidentModel(Base):
     department: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     shelf_zone_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     theft_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)  # SHELF_SWEEPING, CONCEALMENT, SWEETHEARTING, PUSHOUT_EXIT_BYPASS, HIGH_RISK_CASING
-    severity: Mapped[str] = mapped_column(String(32), default="HIGH", index=True)  # CRITICAL, HIGH, MEDIUM
+    severity: Mapped[str] = mapped_column(String(32), default="HIGH", index=True)  # HIGH, MEDIUM, LOW (from alert_tier)
     confidence: Mapped[float] = mapped_column(Float, default=0.85)
     person_track_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     evidence_summary: Mapped[str] = mapped_column(String(1024), default="")
@@ -345,6 +345,12 @@ class TheftIncidentModel(Base):
     # Set when the evidence storage limit deleted this incident's evidence
     # file (services/evidence_storage.py); snapshot_path keeps the old name.
     evidence_expired_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # m0019: alert tier (review | watch | alert | critical), risk score 0..1
+    # and the factors behind it ([{factor, value, effect, reason}]), from
+    # services/theft_alert_policy.py. NULL on rows recorded before tiers.
+    alert_tier: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, index=True)
+    risk_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    risk_factors: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

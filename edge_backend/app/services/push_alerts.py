@@ -12,9 +12,16 @@ silent.
 
 **What is pushed** (from :meth:`AlertDispatcher.dispatch`):
 
-* loss-prevention incidents with confidence >= ``min_confidence`` (default
-  0.75, the HIGH severity band). Lower-confidence incidents are still recorded
-  and shown on the dashboard; they just do not wake anyone;
+* loss-prevention incidents by their alert level (``data["alert_tier"]``,
+  services/theft_alert_policy): the dispatcher only calls this for levels
+  routed to phones (alert, critical, and watch if switched on). Only levels
+  whose channels say ``escalate`` (critical; alert if switched on) escalate to
+  the backup people; critical alerts are also repeated to everyone every
+  ``escalate_after_min`` minutes, at most ``CRITICAL_MAX_REPEATS`` times,
+  until acknowledged. A pushed alert that reached no first-priority phone
+  goes to the backup people straight away whatever its level. Incidents
+  without a level (older callers) use ``min_confidence`` (default 0.75) as
+  before;
 * night-watch intrusions and area / line alerts, each switchable;
 * "staff sent" messages to the first-priority phones (never escalated).
 
@@ -293,6 +300,14 @@ class PushAlertService:
         et = str(data.get("event_type") or "")
         if data.get("kind") == "staff_dispatch":
             return True, "", False
+        if et in THEFT_TYPES and data.get("alert_tier"):
+            from app.services import theft_alert_policy as tp
+
+            tier = tp.normalise_tier(data.get("alert_tier"))
+            ch = data.get("channels") if isinstance(data.get("channels"), dict) else tp.channels(tier)
+            if tier is None or not ch.get("push"):
+                return False, f"{tier or 'this'} level is not sent to phones", False
+            return True, "", True
         if et in THEFT_TYPES:
             conf = data.get("confidence")
             if not isinstance(conf, (int, float)) or isinstance(conf, bool):
@@ -348,7 +363,12 @@ class PushAlertService:
 
         now = _utcnow()
         escalate_at = None
-        if track and backup:
+        # Tiered theft alerts escalate only when their level says so; an alert
+        # no first-priority phone accepted still goes to the backup people now.
+        escalates = track and (not data.get("alert_tier")
+                               or bool((data.get("channels") or {}).get("escalate")))
+        report["escalates"] = bool(escalates and backup)
+        if track and backup and (escalates or not accepted):
             delay = timedelta(minutes=int(roster["escalate_after_min"]))
             escalate_at = now if not accepted else now + delay
         report["escalate_at"] = escalate_at.isoformat() + "Z" if escalate_at else None
@@ -364,7 +384,7 @@ class PushAlertService:
     def _payload(kind: str, title: str, body: str, data: Dict[str, Any], alert_id: str) -> Dict[str, Any]:
         incident_id = data.get("incident_id")
         url = f"/dashboard?incident={incident_id}" if incident_id else f"/dashboard?alert={alert_id}"
-        return {
+        out = {
             "v": 1, "kind": kind, "title": str(title)[:120], "body": str(body)[:600],
             "tag": f"alert-{incident_id or alert_id}", "url": url,
             "alert_id": alert_id, "incident_id": incident_id,
@@ -372,6 +392,10 @@ class PushAlertService:
             "camera": data.get("camera_name") or data.get("camera_id"),
             "ts": int(time.time()),
         }
+        if data.get("alert_tier"):
+            out["tier"] = data["alert_tier"]
+            out["repeat"] = bool((data.get("channels") or {}).get("repeat"))
+        return out
 
     async def _send_all(self, subs: List[Any], base: Dict[str, Any], alert_id: str, data: Dict[str, Any],
                         tier: int, ack: bool = True) -> List[Dict[str, Any]]:
@@ -507,7 +531,7 @@ class PushAlertService:
         from app.database import async_session_factory
         from app.models.db_models import PushAlertModel
 
-        counts = {"open": 0, "acknowledged": 0, "escalated": 0, "expired": 0}
+        counts = {"open": 0, "acknowledged": 0, "escalated": 0, "expired": 0, "repeated": 0}
         async with self._tick_lock():
             now = _utcnow()
             async with async_session_factory() as session:
@@ -535,11 +559,19 @@ class PushAlertService:
                         counts["escalated"] += 1
                         todo.append(("escalate", row.alert_id, dict(row.payload or {}), list(row.sent_to or []),
                                      row.created_at))
+                    elif (row.payload or {}).get("repeat") and (row.escalate_at is None or row.escalated_at):
+                        n = self._due_repeat(row, now)
+                        if n:
+                            counts["repeated"] += 1
+                            todo.append(("repeat", row.alert_id, dict(row.payload or {}), list(row.sent_to or []),
+                                         n))
                 await session.commit()
             for kind, alert_id, payload, sent_to, extra in todo:
                 try:
                     if kind == "handled":
                         await self._send_handled(alert_id, payload, sent_to, extra)
+                    elif kind == "repeat":
+                        await self._repeat(alert_id, payload, sent_to, extra)
                     else:
                         await self._escalate(alert_id, payload, sent_to, extra)
                 except Exception:
@@ -570,6 +602,58 @@ class PushAlertService:
                 row.sent_to = list(dict.fromkeys(list(row.sent_to or []) + accepted))
                 row.report = {**(row.report or {}), "escalation": {
                     "phones": len(subs), "sent": len(accepted), "at": _utcnow().isoformat() + "Z"}}
+                await session.commit()
+
+    @staticmethod
+    def _due_repeat(row, now: datetime) -> int:
+        """The repeat number due now for an unacknowledged critical alert (0 = none due).
+
+        Every ``escalate_after_min`` minutes after the alert (or its
+        escalation), at most ``CRITICAL_MAX_REPEATS`` times. Records the
+        repeat on the row's report.
+        """
+        from app.services.theft_alert_policy import CRITICAL_MAX_REPEATS
+
+        report = dict(row.report or {})
+        rep = dict(report.get("repeats") or {})
+        count = int(rep.get("count") or 0)
+        if count >= CRITICAL_MAX_REPEATS:
+            return 0
+        last = row.escalated_at or row.created_at
+        if rep.get("last_at"):
+            try:
+                last = datetime.fromisoformat(str(rep["last_at"]).rstrip("Z"))
+            except ValueError:
+                pass
+        interval = timedelta(minutes=int(load_roster().get("escalate_after_min") or 5))
+        if last is None or now - last < interval:
+            return 0
+        report["repeats"] = {"count": count + 1, "last_at": now.isoformat() + "Z"}
+        row.report = report
+        return count + 1
+
+    async def _repeat(self, alert_id: str, payload: Dict[str, Any], sent_to: List[str], n: int) -> None:
+        """Send an unacknowledged critical alert again to every alert phone (both tiers)."""
+        from app.services.theft_alert_policy import CRITICAL_MAX_REPEATS
+
+        accounts = await load_accounts()
+        first, backup, _mode = resolve_tiers(load_roster(), accounts)
+        subs = await subscriptions_for(first + backup)
+        base = dict(payload, kind="escalation", ts=int(time.time()))
+        base["title"] = ("Still not acknowledged: " + str(payload.get("title") or "alert"))[:120]
+        base["body"] = (f"Reminder {n} of {CRITICAL_MAX_REPEATS}. " + str(payload.get("body") or ""))[:600]
+        results = await self._send_all(subs, base, alert_id, {"event_type": payload.get("event_type")}, tier=3)
+        accepted = [r["subscription_id"] for r in results if r["status"] == "sent"]
+        logger.warning("Critical alert %s repeated (%d of %d) to %d phone(s), %d accepted", alert_id, n,
+                       CRITICAL_MAX_REPEATS, len(subs), len(accepted))
+        from app.database import async_session_factory
+        from app.models.db_models import PushAlertModel
+
+        async with async_session_factory() as session:
+            row = await session.get(PushAlertModel, alert_id)
+            if row is not None:
+                # Everyone reminded also gets the "acknowledged by" notice.
+                row.sent_to = list(dict.fromkeys(list(row.sent_to or []) + accepted))
                 await session.commit()
 
     async def _send_handled(self, alert_id: str, payload: Dict[str, Any], sent_to: List[str],

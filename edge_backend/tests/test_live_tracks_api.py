@@ -356,7 +356,7 @@ def test_behaviour_feed_lists_watch_and_alert_newest_first(client, pose, monkeyp
     assert top["camera_name"] == "Aisle 1" and top["incident_id"] == "theft_sweep"
     assert top["labels"] == ["Possible shelf sweeping"] and top["since"] == pytest.approx(NOW - 1)
     assert set(top) == {"camera_id", "camera_name", "track_id", "level", "labels", "pattern_score",
-                        "incident_id", "since"}
+                        "tier", "risk_score", "incident_id", "since"}
 
 
 def test_live_json_routes_pass_the_online_access_tunnel(monkeypatch):

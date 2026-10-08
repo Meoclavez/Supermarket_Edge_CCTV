@@ -2,40 +2,56 @@
    deep-link return link. Colours only via style.css variables so the light
    and dark themes both work. */
 
-.studio-tool-row { display: flex; gap: 6px; flex-wrap: wrap; min-width: 0; }
-.studio-tool-row > .btn { min-width: 0; min-height: 32px; white-space: normal; text-align: center; }
-.studio-tool-btn[aria-pressed="true"] { outline: 2px solid var(--accent-cyan); outline-offset: 1px; }
+.studio-tool-row { display: flex; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.studio-tool-row > .btn { flex: 1 1 auto; min-width: 0; min-height: 32px; white-space: normal; text-align: center; justify-content: flex-start; }
+.studio-tool-btn[aria-pressed="true"] { background: var(--accent-bg); border-color: var(--accent); color: var(--accent-text); box-shadow: inset 0 0 0 1px var(--accent); }
 
-.qa-tool-btn { background: var(--accent-purple-dim); border-color: var(--accent-purple); color: var(--accent-purple); }
-.qa-tool-btn:hover { background: var(--accent-purple-dim); border-color: var(--accent-purple); filter: brightness(1.15); }
-.qa-tool-btn[aria-pressed="true"] { outline-color: var(--accent-purple); }
+.qa-tool-btn .icon { color: var(--violet); }
 
-.studio-tool-help { font-size: 11.5px; line-height: 1.45; color: var(--text-dim); min-width: 0; overflow-wrap: anywhere; }
+.studio-tool-help { font-size: 12px; line-height: 1.45; color: var(--text-dim); min-width: 0; overflow-wrap: anywhere; }
 
 /* Checkout / queue form (shares .rule-form layout). */
-.qa-form { border-color: var(--accent-purple); min-width: 0; }
-.qa-form .rule-form-title { color: var(--accent-purple); }
-.qa-explain { font-size: 11.5px; line-height: 1.45; color: var(--text-main); overflow-wrap: anywhere; }
+.qa-form { border-color: var(--violet-border); min-width: 0; }
+.qa-form .rule-form-title { color: var(--text); }
+.qa-explain { font-size: 12px; line-height: 1.45; color: var(--text-main); overflow-wrap: anywhere; }
 .qa-form .rule-form-grid { grid-template-columns: repeat(auto-fit, minmax(min(190px, 100%), 1fr)); }
 .qa-form .form-input, .qa-form .form-select { min-width: 0; width: 100%; background: var(--input-bg); }
 
 /* Saved checkout / queue rows. */
-.qa-row { flex-wrap: wrap; border-color: var(--accent-purple-dim); }
+.qa-row { flex-wrap: wrap; }
 .qa-row .zone-info { flex: 1 1 160px; min-width: 0; }
 .qa-row .zone-name { overflow-wrap: anywhere; }
 .qa-row .rule-actions, .qa-row .rule-confirm { flex-wrap: wrap; }
 .qa-row .btn { min-height: 32px; }
 .qa-row-off { opacity: 0.7; }
-.qa-kind-badge { display: inline-block; padding: 1px 7px; margin-right: 4px; border-radius: 999px; font-size: 9.5px;
-  font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase; vertical-align: middle;
-  border: 1px solid var(--accent-purple); color: var(--accent-purple); background: var(--accent-purple-dim); }
-.qa-kind-queue { border-color: var(--accent-orange); color: var(--accent-orange); background: var(--accent-orange-dim); }
+.qa-kind-badge { display: inline-flex; align-items: center; height: 20px; padding: 0 6px; margin-right: 4px; border-radius: var(--radius-xs); font-size: 12px;
+  font-weight: 500; vertical-align: middle;
+  border: 1px solid var(--violet-border); color: var(--violet); background: var(--violet-bg); }
+.qa-kind-queue { border-color: var(--warning-border); color: var(--warning); background: var(--warning-bg); }
 .qa-row-status { flex-basis: 100%; margin-top: 2px; }
 
 /* Return link to the dashboard setup checklist (?from=checklist). */
-.studio-back-checklist { font-weight: 800; }
-.studio-status-link { font-weight: 700; color: var(--accent-cyan); text-decoration: underline; }
+.studio-back-checklist { font-weight: 600; }
+.studio-status-link { font-weight: 500; color: var(--accent-text); text-decoration: underline; text-underline-offset: 2px; }
 .studio-saved-checklist { display: inline; color: var(--text-main); }
 .qa-toggle { white-space: nowrap; }
-.qa-toggle[aria-pressed="false"] { border-color: var(--accent-green); color: var(--accent-green); }
-.qa-kind-checkout { border-color: var(--accent-purple); }
+.qa-toggle[aria-pressed="false"] { border-color: var(--success-border); color: var(--success); }
+.qa-kind-checkout { border-color: var(--violet-border); }
+
+/* Camera bar, drawing actions, capture row and side column (studio.html). */
+.studio-camera-picker { flex: 1 1 320px; min-width: 0; flex-wrap: nowrap; overflow-x: auto; }
+.studio-camera-label { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.studio-camera-list { flex-wrap: nowrap; }
+.studio-draw-actions { justify-content: flex-end; }
+.studio-capture-row > .btn { flex: 1 1 200px; }
+.studio-side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.telemetry-val-error { color: var(--danger); }
+.confirm-text { font-size: 13px; color: var(--danger); }
+
+/* Product modal: study metrics that are not measured yet. */
+.study-not-measured { opacity: 0.55; cursor: not-allowed; }
+
+/* Privacy mask rows (js/studio.js): mode, colour and the row's status line. */
+.mask-mode-select { max-width: 180px; }
+.mask-colour-input { width: 32px; height: 28px; padding: 2px; border: 1px solid var(--border-strong); border-radius: var(--radius-xs); background: var(--surface); cursor: pointer; }
+.mask-row-status { flex-basis: 100%; }

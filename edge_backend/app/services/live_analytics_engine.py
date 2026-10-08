@@ -2010,6 +2010,8 @@ class LiveAnalyticsEngine:
                     "level": b["level"],
                     "labels": list(b.get("labels") or []),
                     "pattern_score": b.get("pattern_score"),
+                    "tier": b.get("tier"),
+                    "risk_score": b.get("risk_score"),
                     "incident_id": b.get("incident_id"),
                     "since": None if b.get("since") is None else round(float(b["since"]), 3),
                 })

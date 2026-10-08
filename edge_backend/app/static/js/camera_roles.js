@@ -20,10 +20,17 @@
 (function () {
   'use strict';
 
-  const ROLE_ICON = {
-    entrance: '🚪', exit: '🏃', entrance_exit: '↔️', checkout: '🧾',
-    aisle: '🛒', high_value: '💎', stockroom: '📦', overview: '👁️',
+  /** Icon markup from js/icons.js (window.EdgeIcon); '' when that script is missing. Never throws. */
+  const ico = (name, opts) => {
+    try { return window.EdgeIcon && typeof window.EdgeIcon.svg === 'function' ? window.EdgeIcon.svg(name, opts) : ''; } catch (_) { return ''; }
   };
+  // Icon (sprite name) per camera purpose; roleIcon() renders it.
+  const ROLE_ICON = {
+    entrance: 'door-open', exit: 'footprints', entrance_exit: 'move-horizontal', checkout: 'receipt',
+    aisle: 'shopping-cart', high_value: 'gem', stockroom: 'package', overview: 'eye',
+  };
+  /** SVG icon of a camera purpose ('' for no role; a neutral circle for an unknown one). */
+  const roleIcon = (role, size) => (role ? ico(ROLE_ICON[role] || 'circle', { size: size || 'sm' }) : '');
   const FEATURE_LABEL = {
     people_counting: 'People counting',
     shelf_interaction: 'Shelf reaches',
@@ -140,7 +147,7 @@
     const prog = o.progress && pr && pr.required_total
       ? ` <span class="role-badge-prog">${pr.required_done}/${pr.required_total}</span>` : '';
     return `<span class="role-badge role-badge-set" data-role-badge="${esc(cameraId)}" data-role="${esc(role)}" title="${esc(p.description || '')}">`
-      + `<span aria-hidden="true">${ROLE_ICON[role] || '•'}</span> ${esc(p.label || role)}${prog}</span>`;
+      + `${roleIcon(role)} ${esc(p.label || role)}${prog}</span>`;
   }
 
   function progressText(cameraId) {
@@ -170,7 +177,7 @@
       const missing = pr && pr.missing && pr.missing.length ? `Still to do: ${pr.missing.join(', ')}` : 'Every required step is done';
       slot.innerHTML = `
         ${badgeHtml(id)}
-        <button type="button" class="btn btn-xs role-setup-btn ${done ? 'is-done' : ''}" data-role-action="open-checklist" data-camera="${esc(id)}" title="${esc(missing)}">${done ? '✓ ' : ''}${esc(progressText(id) || 'Setup')}</button>`;
+        <button type="button" class="btn btn-secondary btn-xs role-setup-btn ${done ? 'is-done' : ''}" data-role-action="open-checklist" data-camera="${esc(id)}" title="${esc(missing)}">${done ? ico('check', { size: 'sm' }) : ''}${esc(progressText(id) || 'Setup')}</button>`;
     });
   }
 
@@ -182,7 +189,7 @@
       const on = !!(p.features || {})[k];
       let change = '';
       if (cur && typeof cur[k] === 'boolean' && cur[k] !== on) change = ` <span class="role-change">(now ${cur[k] ? 'on' : 'off'})</span>`;
-      return `<li class="${on ? 'is-on' : 'is-off'}"><span aria-hidden="true">${on ? '✓' : '–'}</span> ${esc(FEATURE_LABEL[k])}: <b>${on ? 'on' : 'off'}</b>${change}</li>`;
+      return `<li class="${on ? 'is-on' : 'is-off'}">${ico(on ? 'check' : 'minus', { size: 'sm' })} ${esc(FEATURE_LABEL[k])}: <b>${on ? 'on' : 'off'}</b>${change}</li>`;
     }).join('');
     const extras = [];
     if (isFinite(p.theft_sensitivity) && p.theft_sensitivity !== 1) {
@@ -209,7 +216,7 @@
     return state.presets.map((p) => `
       <label class="role-option ${p.id === selected ? 'is-selected' : ''}" data-role-option="${esc(p.id)}" title="${esc(p.description)}">
         <input type="radio" name="${esc(name)}" value="${esc(p.id)}" ${p.id === selected ? 'checked' : ''}>
-        <span class="role-ico" aria-hidden="true">${ROLE_ICON[p.id] || '•'}</span>
+        <span class="role-ico" aria-hidden="true">${roleIcon(p.id, 'md')}</span>
         <span class="role-opt-label">${esc(p.label)}</span>
       </label>`).join('');
   }
@@ -276,7 +283,7 @@
       host.innerHTML = '<div class="role-picker"><div class="fp-empty">Camera purposes could not be loaded. Try again in a moment.</div></div>';
       return;
     }
-    const curLabel = current ? `${ROLE_ICON[current] || ''} ${esc(roleLabel(current))}` : 'not set';
+    const curLabel = current ? `${roleIcon(current)} ${esc(roleLabel(current))}` : 'not set';
     host.innerHTML = `
       <fieldset class="role-picker role-picker-edit" data-role-picker="edit">
         <legend class="role-picker-title">Camera purpose</legend>
@@ -287,7 +294,7 @@
         <div class="role-apply-row" id="cfgRoleApplyRow" hidden>
           <button type="button" class="btn btn-sm btn-primary" id="btnApplyRole" data-role-action="apply-role">Use this purpose</button>
           <label class="role-keep"><input type="checkbox" id="roleKeepSwitches"> Keep my current analysis switches</label>
-          ${current ? '<button type="button" class="btn btn-sm" id="btnClearRole" data-role-action="clear-role">Remove purpose</button>' : ''}
+          ${current ? '<button type="button" class="btn btn-secondary btn-sm" id="btnClearRole" data-role-action="clear-role">Remove purpose</button>' : ''}
         </div>
         <div class="form-status" id="cfgRoleStatus" role="status" aria-live="polite"></div>
         <div class="role-register" id="cfgRoleRegister" hidden></div>
@@ -401,7 +408,7 @@
       setModalCamera(patch);
       if (state.cameras[camId]) Object.assign(state.cameras[camId], { role: res.role, pos_register_id: res.pos_register_id });
       const label = $('roleCurrentLabel');
-      if (label) label.textContent = res.role ? `${ROLE_ICON[res.role] || ''} ${res.role_label}` : 'not set';
+      if (label) label.innerHTML = res.role ? `${roleIcon(res.role)} ${esc(res.role_label)}` : 'not set';
       // Re-mount so the Remove button and preview match the new state.
       await mountEdit(camId, modalCamera());
       renderInlineSetup(res.setup);
@@ -449,7 +456,7 @@
         <input type="text" class="form-input" id="roleRegisterInput" list="roleRegisterList" maxlength="64" autocomplete="off" placeholder="e.g. REG-1" value="${esc(current)}">
         <datalist id="roleRegisterList">${opts}</datalist>
         <button type="button" class="btn btn-sm btn-primary" data-role-action="save-register">${current ? 'Update' : 'Link register'}</button>
-        ${current ? '<button type="button" class="btn btn-sm" data-role-action="unlink-register">Unlink</button>' : ''}
+        ${current ? '<button type="button" class="btn btn-secondary btn-sm" data-role-action="unlink-register">Unlink</button>' : ''}
       </div>
       <div class="form-status" id="roleRegisterStatus" role="status" aria-live="polite">${current ? esc(registerSeenText(current, list)) : ''}</div>`;
   }
@@ -518,17 +525,17 @@
       return `<div class="fp-empty">${esc(setup.message || 'Choose a purpose for this camera to get its setup checklist.')}</div>`;
     }
     const head = setup.required_total
-      ? `<div class="rc-head"><span class="rc-score ${setup.complete ? 'is-done' : ''}">${setup.complete ? '✓ Ready' : `${setup.required_done} of ${setup.required_total} required steps done`}</span></div>`
+      ? `<div class="rc-head"><span class="rc-score ${setup.complete ? 'is-done' : ''}">${setup.complete ? `${ico('check', { size: 'sm' })} Ready` : `${setup.required_done} of ${setup.required_total} required steps done`}</span></div>`
       : '';
     const rows = items.map((it) => `
       <li class="rc-item ${it.done ? 'is-done' : 'is-todo'}" data-rc-item="${esc(it.id)}" data-done="${it.done ? '1' : '0'}">
-        <span class="rc-mark" aria-hidden="true">${it.done ? '✓' : ''}</span>
+        <span class="rc-mark" aria-hidden="true">${it.done ? ico('check', { size: 'sm' }) : ''}</span>
         <span class="rc-body">
           <span class="rc-label">${esc(it.label)} <span class="rc-tag ${it.required ? 'is-req' : ''}">${it.required ? 'required' : 'optional'}</span>
             <span class="sr-only">${it.done ? 'done' : 'to do'}</span></span>
           ${it.hint ? `<span class="rc-hint">${esc(it.hint)}</span>` : ''}
         </span>
-        <button type="button" class="btn btn-xs ${it.done ? '' : (it.required ? 'btn-primary' : '')} rc-action" data-role-action="rc-action" data-where="${esc(where)}" data-camera="${esc(setup.camera_id)}" data-item="${esc(it.id)}">${esc(actionLabel(it))}</button>
+        <button type="button" class="btn btn-xs ${it.done ? 'btn-secondary' : (it.required ? 'btn-primary' : 'btn-secondary')} rc-action" data-role-action="rc-action" data-where="${esc(where)}" data-camera="${esc(setup.camera_id)}" data-item="${esc(it.id)}">${esc(actionLabel(it))}</button>
       </li>`).join('');
     return `${head}<ul class="rc-list">${rows}</ul>`;
   }
@@ -590,13 +597,13 @@
       <div class="modal-card rc-modal-card">
         <div class="rc-modal-head">
           <h3 class="rc-title" id="rcTitle">Camera setup</h3>
-          <button type="button" class="btn btn-sm" data-role-action="close-checklist">✕ Close</button>
+          <button type="button" class="btn btn-secondary btn-sm" data-role-action="close-checklist">${ico('x', { size: 'sm' })} Close</button>
         </div>
         <div class="rc-sub" id="rcSub"></div>
         <div id="rcBody"><div class="fp-empty">Loading…</div></div>
         <div class="rc-foot">
-          <button type="button" class="btn btn-sm" data-role-action="rc-refresh">Check again</button>
-          <button type="button" class="btn btn-sm" data-role-action="rc-settings">Change purpose</button>
+          <button type="button" class="btn btn-secondary btn-sm" data-role-action="rc-refresh">Check again</button>
+          <button type="button" class="btn btn-secondary btn-sm" data-role-action="rc-settings">Change purpose</button>
         </div>
       </div>`;
     m.addEventListener('click', (e) => { if (e.target === m) closeChecklist(); });
@@ -628,7 +635,7 @@
     if (sub) {
       const p = setup && setup.role ? state.byId[setup.role] : null;
       sub.innerHTML = setup && setup.role
-        ? `${(o && o.justAdded) ? '<b>Camera added.</b> ' : ''}Purpose: <b>${ROLE_ICON[setup.role] || ''} ${esc(setup.role_label || setup.role)}</b>${p ? `. ${esc(p.mounting_tip)}` : ''}`
+        ? `${(o && o.justAdded) ? '<b>Camera added.</b> ' : ''}Purpose: <b>${roleIcon(setup.role)} ${esc(setup.role_label || setup.role)}</b>${p ? `. ${esc(p.mounting_tip)}` : ''}`
         : 'This camera has no purpose yet.';
     }
     if (body) body.innerHTML = checklistHtml(setup, 'checklist');
@@ -653,11 +660,11 @@
         : !c.required_total ? 'Nothing required'
         : c.complete ? 'Ready' : `${c.required_done}/${c.required_total} done`;
       const action = role
-        ? `<button type="button" class="btn btn-xs ${c.complete ? '' : 'btn-primary'}" data-role-action="open-checklist" data-camera="${esc(c.camera_id)}">${c.complete ? 'Checklist' : 'Continue setup'}</button>`
+        ? `<button type="button" class="btn btn-xs ${c.complete ? 'btn-secondary' : 'btn-primary'}" data-role-action="open-checklist" data-camera="${esc(c.camera_id)}">${c.complete ? 'Checklist' : 'Continue setup'}</button>`
         : `<button type="button" class="btn btn-xs btn-primary" data-role-action="set-purpose" data-camera="${esc(c.camera_id)}">Set purpose</button>`;
       return `<li class="rc-cam-row ${c.complete ? 'is-done' : ''}" data-setup-camera="${esc(c.camera_id)}">
           <span class="rc-cam-name">${esc(c.name)}</span>
-          <span class="rc-cam-role">${role ? `${ROLE_ICON[role] || ''} ${esc(c.role_label || role)}` : '—'}</span>
+          <span class="rc-cam-role">${role ? `${roleIcon(role)} ${esc(c.role_label || role)}` : '—'}</span>
           <span class="rc-cam-state">${esc(state_)}</span>
           ${action}
         </li>`;
@@ -744,7 +751,7 @@
   window.edgeRoles = {
     badgeHtml, newCameraRole, resetNew, afterCameraAdded, openChecklist, closeChecklist,
     storeCamerasHtml, refresh: loadCameras, presets: () => state.presets.slice(),
-    roleOf, roleLabel, icon: (r) => ROLE_ICON[r] || '',
+    roleOf, roleLabel, icon: (r) => roleIcon(r),
   };
 
   if (window.edgeAuth && typeof window.edgeAuth.onReady === 'function') window.edgeAuth.onReady(init);

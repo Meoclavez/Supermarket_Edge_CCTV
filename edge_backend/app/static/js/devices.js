@@ -156,7 +156,7 @@
           : (!online && !off && c.last_error ? `<div class="dev-hint">${esc(String(c.last_error).slice(0, 160))}</div>` : '');
         const power = off
           ? `<button class="btn btn-xs btn-primary" onclick="deviceManager.setEnabled('${id}', true)" title="Start this camera again">Turn on</button>`
-          : `<button class="btn btn-xs" onclick="deviceManager.setEnabled('${id}', false)" title="Stop this camera: no video, no analysis and no network traffic until it is turned on again">Turn off</button>`;
+          : `<button class="btn btn-secondary btn-xs" onclick="deviceManager.setEnabled('${id}', false)" title="Stop this camera: no video, no analysis and no network traffic until it is turned on again">Turn off</button>`;
         return `
         <div class="dev-row dev-row-cam ${c.camera_id === selected ? 'is-selected' : ''}" data-cam-row="${id}">
           <span class="dev-dot ${online ? 'dot-on' : off ? 'dot-disabled' : 'dot-off'}"></span>
@@ -176,11 +176,11 @@
           </div>
           <div class="dev-actions">
             ${power}
-            ${online || off ? '' : `<button class="btn btn-xs" onclick="deviceManager.reconnect('${id}')" title="Try to connect to this camera now">Reconnect</button>`}
-            <button class="btn btn-xs" onclick="deviceManager.config('${id}')" title="Position, bearing, field of view">Config</button>
-            <button class="btn btn-xs" data-role-action="open-checklist" data-camera="${id}" title="What is left to set up for this camera's purpose">Checklist</button>
-            <button class="btn btn-xs ${c.has_homography ? '' : 'btn-primary'}" onclick="deviceManager.calibrate('${id}')" title="Map this camera's image onto the plan">Calibrate</button>
-            <button class="btn btn-xs" onclick="deviceManager.place('${id}')" title="Click the plan to reposition">Place</button>
+            ${online || off ? '' : `<button class="btn btn-secondary btn-xs" onclick="deviceManager.reconnect('${id}')" title="Try to connect to this camera now">Reconnect</button>`}
+            <button class="btn btn-secondary btn-xs" onclick="deviceManager.config('${id}')" title="Position, bearing, field of view">Config</button>
+            <button class="btn btn-secondary btn-xs" data-role-action="open-checklist" data-camera="${id}" title="What is left to set up for this camera's purpose">Checklist</button>
+            <button class="btn btn-xs ${c.has_homography ? 'btn-secondary' : 'btn-primary'}" onclick="deviceManager.calibrate('${id}')" title="Map this camera's image onto the plan">Calibrate</button>
+            <button class="btn btn-secondary btn-xs" onclick="deviceManager.place('${id}')" title="Click the plan to reposition">Place</button>
             <button class="btn btn-xs btn-danger" onclick="deviceManager.remove('${id}')">Remove</button>
           </div>
         </div>`;
@@ -318,7 +318,7 @@
           </div>
           <div class="fp-actions">
             <button class="btn btn-sm btn-primary" id="adSubmit">Add camera</button>
-            <button class="btn btn-sm" id="adCancel">Cancel</button>
+            <button class="btn btn-secondary btn-sm" id="adCancel">Cancel</button>
           </div>
         </div>`;
 
@@ -393,7 +393,7 @@
         <div class="dev-main"><div class="dev-sub">Remove "${esc(name)}"? Recorded observations are kept.</div></div>
         <div class="dev-actions">
           <button class="btn btn-xs btn-danger" id="rmYes">Remove</button>
-          <button class="btn btn-xs" id="rmNo">Keep</button>
+          <button class="btn btn-secondary btn-xs" id="rmNo">Keep</button>
         </div>`;
       row.querySelector('#rmNo').addEventListener('click', () => {
         if (host) row.innerHTML = restore; else this.renderCameras();
@@ -729,7 +729,7 @@
         const passStatus = el('nvrPassStatus');
         const passInput = el('nvrPass');
         if (data.credentials.has_password) {
-          if (passStatus) passStatus.textContent = '✓ Saved on disk';
+          if (passStatus) passStatus.textContent = 'Saved on disk';
           if (passInput) passInput.placeholder = '•••••••• (Saved on disk)';
         }
 
@@ -764,7 +764,7 @@
         if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
         const data = await res.json();
         if (stat) {
-          stat.textContent = '✓ NVR credentials saved to disk (persisted across restarts)';
+          stat.textContent = 'NVR credentials saved to disk (persisted across restarts)';
           stat.className = 'fp-status fp-ok';
         }
         await this.loadNvrConfig();
@@ -818,7 +818,7 @@
         const probe = data.probe || {};
         if (!probe.reachable) {
           if (stat) {
-            stat.textContent = `❌ ${probe.error || 'NVR is unreachable on port ' + port}`;
+            stat.textContent = `${probe.error || 'NVR is unreachable on port ' + port}`;
             stat.className = 'fp-status fp-error';
           }
           if (listHost) listHost.innerHTML = '<div class="fp-empty">No response from NVR. Check IP and network connection.</div>';
@@ -827,7 +827,7 @@
 
         if (!probe.authenticated) {
           if (stat) {
-            stat.textContent = `🔒 Authentication failed (401). Invalid username or password for ${host}`;
+            stat.textContent = `Authentication failed (401). Invalid username or password for ${host}`;
             stat.className = 'fp-status fp-error';
           }
           if (listHost) listHost.innerHTML = '<div class="fp-empty">Please verify NVR password and click Scan again.</div>';
@@ -836,7 +836,7 @@
 
         const activeCount = probe.active_channels_count || 0;
         if (stat) {
-          stat.textContent = `✓ Found ${activeCount} active camera feed(s) across ${probe.channel_count_scanned} channels on the recorder.`;
+          stat.textContent = `Found ${activeCount} active camera feed(s) across ${probe.channel_count_scanned} channels on the recorder.`;
           stat.className = activeCount > 0 ? 'fp-status fp-ok' : 'fp-status fp-warn';
         }
 
@@ -888,7 +888,7 @@
             <div class="dev-main">
               <div class="dev-name" style="font-size: 11px;">Channel ${n}${c.title ? ` · <span title="Name set on the recorder">${esc(c.title)}</span>` : ''}</div>
               <div class="dev-sub" style="font-size: 9.5px;">
-                ${isActive ? `<span style="color: var(--accent-green); font-weight:bold;">● LIVE</span> · ${res} · ${fps}` : '<span style="color: var(--text-dim);">○ No Signal</span>'}
+                ${isActive ? `<span style="color: var(--accent-green); font-weight:bold;"><span class="status-dot is-online" aria-hidden="true"></span> LIVE</span> · ${res} · ${fps}` : '<span style="color: var(--text-dim);"><span class="status-dot is-offline" aria-hidden="true"></span> No Signal</span>'}
               </div>
             </div>
             <div class="dev-actions">

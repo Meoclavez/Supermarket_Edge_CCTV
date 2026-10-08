@@ -23,6 +23,11 @@
 (function () {
   'use strict';
 
+  /** Icon markup from js/icons.js (window.EdgeIcon); '' when that script is missing. Never throws. */
+  const ico = (name, opts) => {
+    try { return window.EdgeIcon && typeof window.EdgeIcon.svg === 'function' ? window.EdgeIcon.svg(name, opts) : ''; } catch (_) { return ''; }
+  };
+
   // Camera thumbnail helpers: snapshots on the store network; through the
   // online-access tunnel (direct-video mode) no snapshot is ever requested.
   function thumbTransport() {
@@ -979,7 +984,7 @@
         actions.innerHTML =
           `<span class="fp-empty" style="padding:0">Delete "${escapeHtml(shape.name)}"?${type === 'zone' ? ' Recorded visits are kept.' : ''}</span>
            <button class="btn btn-sm btn-danger" id="fpConfirmDel">Yes, delete</button>
-           <button class="btn btn-sm" id="fpAbortDel">Keep</button>`;
+           <button class="btn btn-secondary btn-sm" id="fpAbortDel">Keep</button>`;
         actions.querySelector('#fpAbortDel').addEventListener('click', () => this.emitInspector());
         actions.querySelector('#fpConfirmDel').addEventListener('click', () => this._doDelete(type, id));
         return;
@@ -1118,7 +1123,7 @@
         </div>
         <div class="fp-actions">
           <button class="btn btn-sm btn-danger" id="fpDelete">Delete zone</button>
-          <button class="btn btn-sm" id="fpDone">Done</button>
+          <button class="btn btn-secondary btn-sm" id="fpDone">Done</button>
         </div>`;
 
       const commit = async () => {
@@ -1166,7 +1171,7 @@
         <div class="fp-saved" id="stSaved"></div>
         <div class="fp-actions">
           <button class="btn btn-sm btn-danger" id="fpDelete">Delete ${KIND_LABEL[st.kind].toLowerCase()}</button>
-          <button class="btn btn-sm" id="fpDone">Done</button>
+          <button class="btn btn-secondary btn-sm" id="fpDone">Done</button>
         </div>`;
 
       const commit = async () => {
@@ -1207,7 +1212,7 @@
         <img id="fpCamThumb" class="fp-thumb" alt="Live frame from ${escapeHtml(cam.name)}"${thumbTransport() === 'local' ? ` src="${thumbSnapshotUrl(cam.camera_id)}"` : ''}>
         <div class="fp-thumb-bar" id="fpCamThumbBar" hidden>
           <span class="fp-thumb-note" id="fpCamThumbNote"></span>
-          <button type="button" class="btn btn-xs" id="fpCamThumbRefresh" title="Take one new picture over the direct video connection">Take a new picture</button>
+          <button type="button" class="btn btn-secondary btn-xs" id="fpCamThumbRefresh" title="Take one new picture over the direct video connection">Take a new picture</button>
         </div>
         <div class="fp-kv">
           <span>Frame</span><b>${frame}</b>
@@ -1242,9 +1247,9 @@
             : 'Every person this camera sees is counted as a visit to this zone (the aisle or area it looks at). Calibrate later for exact positions.'}</span></div>
         <div class="fp-actions">
           <button class="btn btn-sm btn-primary" id="fpCalibrate">${cam.has_homography ? 'Recalibrate' : 'Calibrate'}</button>
-          <button class="btn btn-sm" id="fpCamPlace">Place by click</button>
+          <button class="btn btn-secondary btn-sm" id="fpCamPlace">Place by click</button>
           <button class="btn btn-sm btn-danger" id="fpCamRemove">Remove</button>
-          <button class="btn btn-sm" id="fpDone">Done</button>
+          <button class="btn btn-secondary btn-sm" id="fpDone">Done</button>
         </div>`;
 
       const commit = async () => {
@@ -1385,7 +1390,7 @@
         <div class="fp-saved" id="sSaved"></div>
         <div class="fp-actions">
           <button class="btn btn-sm btn-primary" id="sApply">Apply</button>
-          <button class="btn btn-sm" id="sCancel">Cancel</button>
+          <button class="btn btn-secondary btn-sm" id="sCancel">Cancel</button>
         </div>`;
       panel.querySelector('#sApply').addEventListener('click', async () => {
         try {
@@ -1418,9 +1423,9 @@
       panel.style.display = '';
       const step = (n, done, text, sub, btn, fn) => `
         <div class="fp-setup-step ${done ? 'done' : ''}">
-          <span class="fp-step-n">${done ? '✓' : n}</span>
+          <span class="fp-step-n">${done ? (ico('check', { size: 'sm', label: 'Done' }) || 'Done') : n}</span>
           <span class="fp-step-text">${text}<small>${sub}</small></span>
-          <button class="btn btn-xs ${done ? '' : 'btn-primary'}" data-fn="${fn}">${btn}</button>
+          <button class="btn btn-xs ${done ? 'btn-secondary' : 'btn-primary'}" data-fn="${fn}">${btn}</button>
         </div>`;
       panel.innerHTML = `
         <div class="fp-setup-title">Set up your store</div>
@@ -1587,7 +1592,7 @@
       HEATMAP_KINDS.forEach((k) => {
         const b = document.createElement('button');
         b.type = 'button';
-        b.className = 'btn btn-xs fp-heat-kind';
+        b.className = 'btn btn-secondary btn-xs fp-heat-kind';
         b.dataset.heatmapKind = k.kind;
         b.textContent = k.label;
         b.title = k.title;
@@ -1603,7 +1608,7 @@
       HEATMAP_RANGES.forEach((r) => {
         const b = document.createElement('button');
         b.type = 'button';
-        b.className = 'btn btn-xs fp-heat-kind';
+        b.className = 'btn btn-secondary btn-xs fp-heat-kind';
         b.dataset.heatmapRange = r.range;
         b.textContent = r.label;
         b.title = r.title;
@@ -1626,11 +1631,13 @@
       document.querySelectorAll('#fpHeatmapKind [data-heatmap-kind]').forEach((b) => {
         const on = b.dataset.heatmapKind === this.heatmapKind;
         b.classList.toggle('btn-primary', on);
+        b.classList.toggle('btn-secondary', !on);
         b.setAttribute('aria-pressed', on ? 'true' : 'false');
       });
       document.querySelectorAll('#fpHeatRange [data-heatmap-range]').forEach((b) => {
         const on = b.dataset.heatmapRange === this.heatmapRange;
         b.classList.toggle('btn-primary', on);
+        b.classList.toggle('btn-secondary', !on);
         b.setAttribute('aria-pressed', on ? 'true' : 'false');
       });
     }
@@ -1838,7 +1845,9 @@
         if (!box) {
           if (!L.required) return;
           const [bx, by] = spots[order[0]];
-          box = { x: bx, y: by, w, h };
+          // Kept inside the canvas: a pile at the plan's top edge put its
+          // label above y=0, where it was cut off.
+          box = { x: Math.max(0, Math.min(bx, W - w)), y: Math.max(0, Math.min(by, H - h)), w, h };
         }
         placed.push(box);
         // Plate in the plan colour keeps the text legible over zones and the heatmap.

@@ -62,7 +62,7 @@
           <label for="raDeviceId">Device ID</label>
           <div class="ra-inline">
             <code class="ra-code" id="raDeviceId">${id ? esc(id) : '—'}</code>
-            <button type="button" class="btn btn-sm" id="raCopyId" ${id ? '' : 'disabled'}>Copy</button>
+            <button type="button" class="btn btn-secondary btn-sm" id="raCopyId" ${id ? '' : 'disabled'}>Copy</button>
           </div>
           <div class="ra-hint">Permanent for this installation. Phones use it to confirm they are talking to this store.</div>
         </div>
@@ -188,7 +188,7 @@
         ${s.enabled && s.public_url ? `<a class="ra-link" id="raPublicUrl" href="${esc(s.public_url)}" target="_blank" rel="noopener">${esc(s.public_url)}</a>` : ''}
         <span class="ra-spacer"></span>
         ${verifiedBadge}
-        <button type="button" class="btn btn-sm" id="raVerifyBtn" ${canVerify ? '' : 'disabled'} title="${esc(verifyTitle)}">Verify now</button>
+        <button type="button" class="btn btn-secondary btn-sm" id="raVerifyBtn" ${canVerify ? '' : 'disabled'} title="${esc(verifyTitle)}">Verify now</button>
       </div>
       <div class="form-status form-status-error" id="raProcessError">${esc(processError(s))}</div>
       <div class="form-status ${s.verified ? '' : 'form-status-error'}" id="raVerifyStatus">${s.verified ? '' : esc(s.verify_error || '')}</div>
@@ -227,7 +227,7 @@
             ${s.server_key_configured ? `
               <div class="ra-inline">
                 <span class="ra-hint">Stored encrypted on this device.</span>
-                <button type="button" class="btn btn-sm" id="raServerKeyRemove">Remove</button>
+                <button type="button" class="btn btn-secondary btn-sm" id="raServerKeyRemove">Remove</button>
               </div>` : `
               <input class="form-input" id="raServerKey" type="password" autocomplete="new-password" spellcheck="false"
                      placeholder="Only if your installer gave you one">`}
@@ -248,17 +248,17 @@
           ${showTokenInput ? `
             <input class="form-input" id="raToken" type="password" autocomplete="new-password" spellcheck="false"
                    placeholder="${s.token_configured ? 'Enter the new token' : 'Enter the token'}">
-            ${tokenMode === 'replace' ? '<button type="button" class="btn btn-sm ra-mt" id="raTokenCancel">Keep current token</button>' : ''}`
+            ${tokenMode === 'replace' ? '<button type="button" class="btn btn-secondary btn-sm ra-mt" id="raTokenCancel">Keep current token</button>' : ''}`
           : tokenMode === 'confirm-remove' ? `
             <div class="ra-inline ra-confirm" id="raRemoveConfirm">
               <span>Remove the stored store token? Online access stops.</span>
               <button type="button" class="btn btn-danger btn-sm" id="raTokenRemoveYes">Remove token</button>
-              <button type="button" class="btn btn-sm" id="raTokenRemoveNo">Cancel</button>
+              <button type="button" class="btn btn-secondary btn-sm" id="raTokenRemoveNo">Cancel</button>
             </div>`
           : `
             <div class="ra-inline">
               <span class="ra-hint">Stored encrypted on this device. It is never shown again.</span>
-              <button type="button" class="btn btn-sm" id="raTokenReplace">Replace token</button>
+              <button type="button" class="btn btn-secondary btn-sm" id="raTokenReplace">Replace token</button>
               <button type="button" class="btn btn-danger btn-sm" id="raTokenRemove">Remove</button>
             </div>`}
         </div>

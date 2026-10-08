@@ -87,12 +87,12 @@
       <input id="rsHttpPort" type="number" min="1" max="65535" value="${httpPort()}"></div></div>`;
     if (r && !r.has_credentials) {
       html += `<div class="fp-status fp-warn">No sign-in is saved for ${esc(r.host)}. Save it under
-        Cameras &amp; devices → Dahua recorder → Save sign-in first.</div>`;
+        Cameras &amp; devices &gt; Dahua recorder &gt; Save sign-in first.</div>`;
     }
     html += `<div class="fp-actions">
       <button type="button" class="btn btn-sm btn-secondary" data-rs="check"${busy || running || !r || !r.has_credentials ? ' disabled' : ''}
         title="Reads each channel's sub-stream settings from the recorder. Changes nothing.">Check sub-streams</button>
-      ${r && r.saved_channels && r.saved_channels.length ? `<button type="button" class="btn btn-sm" data-rs="ask-restore-all"${busy || running ? ' disabled' : ''}>
+      ${r && r.saved_channels && r.saved_channels.length ? `<button type="button" class="btn btn-secondary btn-sm" data-rs="ask-restore-all"${busy || running ? ' disabled' : ''}>
         Restore previous stream settings (${r.saved_channels.length})</button>` : ''}
     </div>`;
     if (confirming === 'restore-all') {
@@ -109,7 +109,7 @@
     return `<div class="fp-actions" role="group" aria-label="Confirm">
       <span style="font-size:11.5px; align-self:center;">${esc(text)}</span>
       <button type="button" class="btn btn-sm btn-primary" data-rs="do-${esc(action)}">${esc(yes)}</button>
-      <button type="button" class="btn btn-sm" data-rs="cancel">Cancel</button></div>`;
+      <button type="button" class="btn btn-secondary btn-sm" data-rs="cancel">Cancel</button></div>`;
   }
 
   function renderPreview() {
@@ -208,8 +208,8 @@
         <td>${esc(e.after || '—')}</td><td><span class="fp-status ${OUTCOME_CLASS[e.outcome] || 'fp-info'}">${esc(e.text)}</span></td>
         <td>${canRestore ? (ask
           ? `<button type="button" class="btn btn-xs btn-primary" data-rs="do-restore:${e.channel}">Yes, restore</button>
-             <button type="button" class="btn btn-xs" data-rs="cancel">Cancel</button>`
-          : `<button type="button" class="btn btn-xs" data-rs="ask-restore:${e.channel}" ${busy ? 'disabled' : ''}
+             <button type="button" class="btn btn-secondary btn-xs" data-rs="cancel">Cancel</button>`
+          : `<button type="button" class="btn btn-secondary btn-xs" data-rs="ask-restore:${e.channel}" ${busy ? 'disabled' : ''}
              title="Put this channel's saved sub-stream settings back">Restore</button>`) : ''}</td></tr>`;
     });
     return html + '</tbody></table></div>';

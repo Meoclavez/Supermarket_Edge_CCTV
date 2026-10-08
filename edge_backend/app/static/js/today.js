@@ -18,7 +18,11 @@
   const POLL_MS = 15000;
   const OPEN_STATUSES = ['ACTIVE', 'ACKNOWLEDGED', 'DISPATCHED'];
   const PRIORITY_BADGE = { critical: 'badge-danger', high: 'badge-warning', medium: 'badge-primary', low: 'badge-neutral', info: 'badge-neutral' };
-  const STATUS_ICON = { available: '✓', limited: '◐', blocked: '✕', unsupported: '–' };
+  /** Icon markup from js/icons.js (window.EdgeIcon); '' when that script is missing. Never throws. */
+  const ico = (name, opts) => {
+    try { return window.EdgeIcon && typeof window.EdgeIcon.svg === 'function' ? window.EdgeIcon.svg(name, opts) : ''; } catch (_) { return ''; }
+  };
+  const STATUS_ICON = { available: 'check', limited: 'sun-moon', blocked: 'x', unsupported: 'minus' };   // sprite names
   const STATUS_WORD = { available: 'Working', limited: 'Partly', blocked: 'Needs setup', unsupported: 'Not possible' };
 
   let timer = null;
@@ -83,7 +87,7 @@
       if (box) box.classList.remove('stat-box-alert');
       if (note) {
         note.innerHTML = `All ${tot} camera${tot === 1 ? ' is' : 's are'} turned off.
-          <button type="button" class="link-btn" onclick="switchTab('cameras')">Turn on →</button>`;
+          <button type="button" class="link-btn" onclick="switchTab('cameras')">Turn on ${ico('arrow-right', { size: 'sm' })}</button>`;
         note.title = '';
       }
       return;
@@ -97,7 +101,7 @@
       note.title = '';
     } else {
       note.innerHTML = `${off.length} not working: ${escapeHtml(problemSummary(off))}${escapeHtml(offNote)}
-        <button type="button" class="link-btn" onclick="switchTab('cameras')">Fix →</button>`;
+        <button type="button" class="link-btn" onclick="switchTab('cameras')">Fix ${ico('arrow-right', { size: 'sm' })}</button>`;
       note.title = problemDetail(off);
     }
   }
@@ -118,7 +122,7 @@
       else {
         const cam = (typeof allCamerasList !== 'undefined' ? allCamerasList : [])[0];
         const href = cam ? `/dashboard/studio?camera_id=${encodeURIComponent(cam.id)}&tool=tripwire` : '/dashboard/studio';
-        src.innerHTML = `${escapeHtml(t.source_label || 'Not measured yet')}. <a class="link-btn" href="${href}">Draw an entrance line for exact counts →</a>`;
+        src.innerHTML = `${escapeHtml(t.source_label || 'Not measured yet')}. <a class="link-btn" href="${href}">Draw an entrance line for exact counts ${ico('arrow-right', { size: 'sm' })}</a>`;
       }
     }
 
@@ -136,7 +140,7 @@
       setMetric('kpiRevenue', 'Not connected');
       const v = el('kpiRevenue');
       if (v) v.classList.add('metric-unobserved', 'stat-val-text');
-      if (salesNote) salesNote.innerHTML = 'Revenue and buying rate need your tills. <button type="button" class="link-btn" onclick="switchTab(\'settings\'); setTimeout(() => jumpTo(\'settings-pos\'), 80)">Set up →</button>';
+      if (salesNote) salesNote.innerHTML = `Revenue and buying rate need your tills. <button type="button" class="link-btn" onclick="switchTab('settings'); setTimeout(() => jumpTo('settings-pos'), 80)">Set up ${ico('arrow-right', { size: 'sm' })}</button>`;
     } else {
       const v = el('kpiRevenue');
       if (v) v.classList.remove('stat-val-text');
@@ -165,10 +169,10 @@
       // Only cameras that are on: a camera turned off is not "not sending".
       const off = notWorking(pipe);
       html = `None of your ${off.length} camera(s) that are on is sending pictures: ${escapeHtml(problemSummary(off))}.` +
-        ' <button type="button" class="btn btn-sm" onclick="switchTab(\'cameras\')">Check cameras</button>';
+        ' <button type="button" class="btn btn-secondary btn-sm" onclick="switchTab(\'cameras\')">Check cameras</button>';
     } else if (overview && c.cameras_total && !c.cameras_calibrated) {
       html = 'People are counted, but no camera is placed on the store map yet, so the map and heatmap stay empty.' +
-        ' <button type="button" class="btn btn-sm" onclick="switchTab(\'map\')">Place a camera</button>';
+        ' <button type="button" class="btn btn-secondary btn-sm" onclick="switchTab(\'map\')">Place a camera</button>';
     }
     banner.innerHTML = html;
     banner.style.display = html ? 'flex' : 'none';
@@ -190,7 +194,7 @@
     host.innerHTML = open.slice(0, 5).map((i) => {
       const thumb = i.snapshot_url
         ? `<img class="today-thumb" loading="lazy" src="${escapeHtml(theftAuthUrl(i.snapshot_url))}" alt="Evidence picture">`
-        : '<span class="today-thumb today-thumb-empty" aria-hidden="true">🚨</span>';
+        : `<span class="today-thumb today-thumb-empty" aria-hidden="true">${ico('siren', { size: 'lg' })}</span>`;
       const state = i.status === 'ACTIVE' ? 'New' : i.status === 'ACKNOWLEDGED' ? 'Seen' : 'Staff sent';
       return `
         <div class="today-row" data-incident-row="${escapeHtml(i.id)}">
@@ -269,10 +273,10 @@
   function duplicatesHtml(groups) {
     if (!Array.isArray(groups) || !groups.length) return '';
     return `<div class="setup-dups" role="status">
-      <div class="setup-dups-title"><span aria-hidden="true">⚠</span> ${groups.length === 1 ? 'A camera is' : `${groups.length} cameras are`}
+      <div class="setup-dups-title">${ico('triangle-alert')} ${groups.length === 1 ? 'A camera is' : `${groups.length} cameras are`}
         added twice. Store totals count each only once until it is resolved.</div>
       <ul>${groups.map((g) => `<li>${escapeHtml(g.message)}</li>`).join('')}</ul>
-      <button type="button" class="btn btn-sm" id="todayResolveDuplicates">Resolve in Cameras</button>
+      <button type="button" class="btn btn-secondary btn-sm" id="todayResolveDuplicates">Resolve in Cameras</button>
     </div>`;
   }
 
@@ -292,7 +296,7 @@
     lastNextStep = step;
     const rows = (setup.analytics || []).map((a) => `
       <li class="setup-item setup-${escapeHtml(a.status)}" title="${escapeHtml(a.message || '')}">
-        <span class="setup-icon" aria-hidden="true">${STATUS_ICON[a.status] || '?'}</span>
+        <span class="setup-icon" aria-hidden="true">${ico(STATUS_ICON[a.status] || 'circle-help', { size: 'sm' })}</span>
         <span class="setup-label">${escapeHtml(a.label)}</span>
         <span class="setup-state">${escapeHtml(STATUS_WORD[a.status] || a.status)}</span>
         ${a.status !== 'available' ? `<span class="setup-msg">${escapeHtml(a.message || '')}</span>` : ''}

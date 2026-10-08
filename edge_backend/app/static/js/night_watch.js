@@ -294,7 +294,7 @@
     const z = s.store_timezone || {};
     const now = s.now ? `<div class="nw-clock">Store time now: ${whenHtml(s.now, true)} <span class="nw-meta">(${esc(zoneLabel(z))})</span></div>` : '';
     if (!s.cameras || !s.cameras.length) {
-      return `${now}<div class="fp-empty">Night watch is off on every camera. Turn it on in a camera's Settings (Cameras, then the camera's ⚙).</div>`;
+      return `${now}<div class="fp-empty">Night watch is off on every camera. Turn it on in a camera's Settings (Cameras, then Settings on that camera).</div>`;
     }
     const armed = s.cameras.filter((c) => (s.armed_now || []).includes(c.camera_id));
     let head;
@@ -330,7 +330,7 @@
         : (e.evidence_expired
           ? '<span class="nw-thumb nw-thumb-empty" title="Deleted by the evidence storage limit (oldest first)">Expired</span>'
           : '<span class="nw-thumb nw-thumb-empty">No image</span>');
-      const clip = e.clip_url ? ` <a class="btn btn-sm" href="${esc(authUrl(e.clip_url))}" target="_blank" rel="noopener">Clip</a>` : '';
+      const clip = e.clip_url ? ` <a class="btn btn-secondary btn-sm" href="${esc(authUrl(e.clip_url))}" target="_blank" rel="noopener">Clip</a>` : '';
       return `<li class="nw-event ${person ? 'nw-event-person' : ''}">
           ${thumb}
           <div class="nw-event-body">

@@ -1,16 +1,20 @@
 /* Settings: Store, Evidence storage, Alerts and detection (js/site_settings.js). */
 
-.ss-intro { margin: 0 0 10px; }
-.ss-form { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px 18px; }
+.ss-intro { margin: 0 0 12px; }
+.ss-form { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px 16px; }
 .ss-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.ss-field > label { font-size: 12px; font-weight: 700; color: var(--text-soft); }
-.ss-field .checkbox-label { font-size: 12px; font-weight: 700; color: var(--text-soft); }
+.ss-field > label { font-size: 12px; font-weight: 600; color: var(--text-soft); }
+.ss-field .checkbox-label { font-size: 12px; font-weight: 600; color: var(--text-soft); }
 .ss-inline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.ss-inline .form-select { flex: 1 1 160px; min-width: 0; }
+/* The select keeps its natural width (its "Automatic (10% of disk)" text was cut off); the number
+   and its unit stay together and wrap below it as one when the column is narrow. */
+.ss-inline .form-select { flex: 1 0 auto; max-width: 100%; }
+.ss-num-unit { display: inline-flex; align-items: center; gap: 8px; flex: 1 1 96px; min-width: 96px; }
+.ss-num-unit .ss-num { flex: 1 1 64px; min-width: 56px; }
 .ss-num { flex: 0 1 140px; min-width: 80px; }
 .ss-unit { font-size: 12px; color: var(--text-dim); }
-.ss-default { font-size: 11px; color: var(--text-dim); line-height: 1.5; }
-.ss-default .link-btn { font-size: 11px; margin-left: 4px; }
+.ss-default { font-size: 12px; color: var(--text-dim); line-height: 1.5; }
+.ss-default .link-btn { font-size: 12px; margin-left: 4px; }
 .ss-err { margin-top: 0; min-height: 0; }
 .ss-err:empty { display: none; }
 .ss-preview { font-size: 12px; color: var(--text-soft); margin-top: 2px; }
@@ -18,9 +22,33 @@
 .ss-actions, .ss-form > .form-status, .ss-form > .ra-hint { grid-column: 1 / -1; }
 .ss-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .ss-confirm { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; font-size: 12px; color: var(--text-soft); }
-.ss-usage { display: flex; gap: 6px 22px; flex-wrap: wrap; font-size: 12px; color: var(--text-soft); margin-bottom: 12px; }
+.ss-usage { display: flex; gap: 8px 24px; flex-wrap: wrap; font-size: 12px; color: var(--text-soft); margin-bottom: 12px; }
 .ss-usage .telemetry-label { margin-right: 4px; }
+
+/* Theft alert levels (#settings-theft-alerts): section headings in the form and the policy explainer. */
+.ss-section { grid-column: 1 / -1; margin-top: 8px; padding-top: 12px; border-top: 1px solid var(--border); }
+.ss-form > .ss-section:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+.ss-section-title { margin: 0; font-size: 14px; font-weight: 600; color: var(--text); }
+.ss-section-note { margin: 4px 0 0; }
+.ta-explain { display: flex; flex-direction: column; gap: 8px; margin: 0 0 16px; padding: 12px 16px; border-radius: var(--radius-md);
+  background: var(--surface-2); border: 1px solid var(--border); min-width: 0; }
+.ta-sub { font-size: 13px; font-weight: 600; color: var(--text); margin-top: 4px; }
+.ta-plain { margin: 0; font-size: 13px; line-height: 1.55; color: var(--text-secondary); }
+.ta-formula { font-family: var(--font-mono); font-size: 12px; overflow-wrap: anywhere; }
+.ta-table { background: var(--surface); }
+.ta-table td { vertical-align: middle; }
+.ta-desc { min-width: 220px; white-space: normal; color: var(--text-secondary); }
+.ta-note { color: var(--text-dim); }
+.ta-yes { font-weight: 600; color: var(--text); }
+.ta-no { color: var(--text-dim); }
+.ta-more summary { cursor: pointer; min-height: 28px; display: inline-flex; align-items: center; font-size: 13px; font-weight: 600; color: var(--text); }
+.ta-more[open] { display: flex; flex-direction: column; gap: 8px; }
+.ta-rules { margin: 0 0 0 16px; padding: 0; font-size: 13px; line-height: 1.6; color: var(--text-secondary); }
 
 @media (max-width: 600px) {
   .ss-form { grid-template-columns: 1fr; }
+  .ta-explain { padding: 12px; }
+}
+@media (pointer: coarse) {
+  .ta-more summary { min-height: 40px; }
 }

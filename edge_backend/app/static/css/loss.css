@@ -5,147 +5,214 @@
    =================================================================== */
 
 .loss-kpis { margin-bottom: 0; }
-.loss-kpi-note { font-size: 10.5px; color: var(--text-dim); line-height: 1.4; }
+.loss-kpi-note { font-size: 12px; color: var(--text-dim); line-height: 1.4; }
 
-.loss-intro { margin: 0 0 10px; font-size: 11.5px; color: var(--text-dim); line-height: 1.5; }
+.loss-intro { margin: 0 0 12px; font-size: 13px; color: var(--text-secondary); line-height: 1.5; }
 
-.loss-legacy { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 0 0 10px; padding: 8px 12px;
-  border-radius: 9px; font-size: 12px; color: var(--amber); background: rgba(var(--amber-rgb), 0.08);
-  border: 1px solid rgba(var(--amber-rgb), 0.25); }
+.loss-legacy { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 0 0 12px; padding: 8px 12px;
+  border-radius: var(--radius-sm); font-size: 13px; color: var(--warning); background: var(--warning-bg);
+  border: 1px solid var(--warning-border); }
 .loss-legacy[hidden] { display: none; }
 .loss-legacy span { flex: 1 1 240px; min-width: 0; }
 
 /* Filter chips */
-.loss-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
-.loss-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 4px 12px; border-radius: 20px;
-  font: 700 11.5px var(--font-sans); cursor: pointer; color: var(--text-dim);
-  background: rgba(var(--tint-rgb), 0.04); border: 1px solid var(--control-border, rgba(var(--slate-rgb), 0.25)); }
-.loss-chip:hover { color: var(--text-main); border-color: var(--accent-cyan); }
-.loss-chip.active { color: var(--accent-cyan); background: var(--accent-cyan-dim); border-color: var(--accent-cyan); }
-.loss-chip-n { font-family: var(--font-mono); font-size: 10.5px; padding: 0 6px; border-radius: 10px; background: rgba(var(--tint-rgb), 0.08); }
+.loss-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.loss-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; padding: 0 10px; border-radius: var(--radius-sm);
+  font: 500 12px/1.2 var(--font-sans); cursor: pointer; color: var(--text-secondary);
+  background: var(--surface); border: 1px solid var(--border-strong); }
+.loss-chip:hover { color: var(--text); background: var(--surface-2); }
+.loss-chip.active { color: var(--accent-text); background: var(--accent-bg); border-color: var(--accent-border); }
+.loss-chip-n { display: inline-flex; align-items: center; min-width: 18px; height: 18px; justify-content: center; font-variant-numeric: tabular-nums; font-size: 12px; padding: 0 6px; border-radius: var(--radius-pill); background: var(--neutral-bg); color: var(--text-secondary); }
 
 /* List */
-.loss-list { display: flex; flex-direction: column; gap: 10px; }
-.loss-day { font-size: 10.5px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; color: var(--text-faint);
-  margin-top: 6px; padding-bottom: 3px; border-bottom: 1px solid rgba(var(--slate-rgb), 0.15); }
+.loss-list { display: flex; flex-direction: column; gap: 12px; }
+.loss-day { font-size: 12px; font-weight: 600; color: var(--text-secondary);
+  margin-top: 8px; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
 .loss-card { min-width: 0; overflow-wrap: anywhere; }
-.loss-card-open { border-left: 3px solid var(--rose); }
+.loss-card-open { border-left: 3px solid var(--danger-solid); }
 .loss-flash { animation: lossFlash 2s ease-out; }
 @keyframes lossFlash {
-  0% { box-shadow: 0 0 0 3px rgba(var(--info-rgb), 0.75); }
-  100% { box-shadow: 0 0 0 0 rgba(var(--info-rgb), 0); }
+  0% { box-shadow: 0 0 0 3px var(--accent); }
+  100% { box-shadow: 0 0 0 0 transparent; }
 }
 
 .loss-head-main { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
 .loss-head-side { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.loss-rule { font-size: 14px; font-weight: 800; color: var(--text-strong); }
-.loss-small-badge { font-size: 10px; padding: 3px 8px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
-.loss-conf { font-family: var(--font-mono); font-size: 11px; color: var(--accent-orange); }
+.loss-rule { font-size: 14px; font-weight: 600; color: var(--text); }
+.loss-small-badge { font-size: 12px; padding: 0 8px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.loss-conf { font-variant-numeric: tabular-nums; font-size: 12px; color: var(--text-secondary); }
 
 .loss-body { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; margin-top: 8px; }
 .loss-thumb-link { flex: 0 0 auto; display: block; max-width: 100%; }
 .loss-thumb-link .evidence-thumb { max-width: 100%; }
 .loss-evidence { flex: 1 1 240px; min-width: 0; }
-.loss-evidence-label { font-size: 10.5px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .04em; }
-.loss-evidence-list { margin: 4px 0 0 16px; padding: 0; font-size: 11.5px; color: var(--text-steps); line-height: 1.45; }
-.loss-tech { margin-top: 6px; font-size: 11px; color: var(--text-dim); }
+.loss-evidence-label { font-size: 12px; color: var(--text-dim); }
+.loss-evidence-list { margin: 4px 0 0 16px; padding: 0; font-size: 13px; color: var(--text-steps); line-height: 1.45; }
+.loss-tech { margin-top: 8px; font-size: 12px; color: var(--text-dim); }
 .loss-tech summary { cursor: pointer; min-height: 24px; display: inline-flex; align-items: center; }
 .loss-tech summary:hover { color: var(--text-main); }
-.loss-tech-body { margin-top: 4px; font-family: var(--font-mono); font-size: 10.5px; line-height: 1.5; overflow-wrap: anywhere; }
+.loss-tech-body { margin-top: 4px; font-variant-numeric: tabular-nums; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 
-.loss-dispatch, .loss-outcome, .loss-outcome-notes { margin-top: 8px; font-size: 11.5px; line-height: 1.5; color: var(--text-2); }
-.loss-dispatch { padding: 6px 10px; border-radius: 8px; background: rgba(var(--tint-rgb), 0.03); border: 1px solid rgba(var(--slate-rgb), 0.15); }
-.loss-outcome { padding: 6px 10px; border-radius: 8px; background: rgba(var(--green-rgb), 0.06); border: 1px solid rgba(var(--green-rgb), 0.2); }
-.loss-outcome-legacy { color: var(--amber); background: rgba(var(--amber-rgb), 0.07); border-color: rgba(var(--amber-rgb), 0.25); }
+.loss-dispatch, .loss-outcome, .loss-outcome-notes { margin-top: 8px; font-size: 13px; line-height: 1.5; color: var(--text-2); }
+.loss-dispatch { padding: 8px 12px; border-radius: var(--radius-sm); background: var(--surface-2); border: 1px solid var(--border); }
+.loss-outcome { padding: 8px 12px; border-radius: var(--radius-sm); background: var(--success-bg); border: 1px solid var(--success-border); }
+.loss-outcome-legacy { color: var(--amber); background: var(--warning-bg); border-color: var(--warning-border); }
 .loss-outcome-notes { color: var(--text-dim); margin-top: 4px; }
-.loss-alert-ok { color: var(--ok); font-weight: 700; }
-.loss-alert-warn { color: var(--amber); font-weight: 700; }
-.loss-alert-bad { color: var(--rose); font-weight: 700; }
+.loss-alert-ok { color: var(--ok); font-weight: 600; }
+.loss-alert-warn { color: var(--amber); font-weight: 600; }
+.loss-alert-bad { color: var(--rose); font-weight: 600; }
 
-.loss-meta { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dim); min-width: 0; }
-.loss-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.loss-meta { font-variant-numeric: tabular-nums; font-size: 12px; color: var(--text-dim); min-width: 0; }
+.loss-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
 /* Inline outcome and staff-sent forms */
 .loss-form-slot:empty { display: none; }
-.loss-form { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; padding: 12px; border-radius: 10px;
-  background: rgba(var(--info-rgb), 0.05); border: 1px solid rgba(var(--info-rgb), 0.3); }
-.loss-form-title { font-size: 12.5px; font-weight: 800; color: var(--text-strong); }
-.loss-outcomes { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 6px; }
-.loss-outcome-opt { display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 6px 10px; border-radius: 8px; cursor: pointer;
-  font-size: 12px; color: var(--text-main); background: rgba(var(--tint-rgb), 0.03); border: 1px solid rgba(var(--slate-rgb), 0.2); }
-.loss-outcome-opt:hover { border-color: var(--accent-cyan); }
-.loss-outcome-opt:has(input:checked) { border-color: var(--accent-cyan); background: var(--accent-cyan-dim); }
-.loss-outcome-opt input { accent-color: var(--accent-cyan); flex: 0 0 auto; }
+.loss-form { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; padding: 12px; border-radius: var(--radius-md);
+  background: var(--surface-2); border: 1px solid var(--border); }
+.loss-form-title { font-size: 14px; font-weight: 600; color: var(--text); }
+.loss-outcomes { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
+.loss-outcome-opt { display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 8px 12px; border-radius: var(--radius-sm); cursor: pointer;
+  font-size: 13px; color: var(--text); background: var(--surface); border: 1px solid var(--border-strong); }
+.loss-outcome-opt:hover { background: var(--surface-2); }
+.loss-outcome-opt:has(input:checked) { border-color: var(--accent); background: var(--accent-bg); }
+.loss-outcome-opt input { accent-color: var(--accent-solid); flex: 0 0 auto; }
 .loss-outcome-false span { color: var(--text-dim); }
-.loss-form-row { display: flex; flex-wrap: wrap; gap: 10px; }
-.loss-field { display: flex; flex-direction: column; gap: 4px; flex: 1 1 180px; min-width: 0; font-size: 10.5px; font-weight: 700;
-  color: var(--text-dim); text-transform: uppercase; letter-spacing: .04em; }
+.loss-form-row { display: flex; flex-wrap: wrap; gap: 12px; }
+.loss-field { display: flex; flex-direction: column; gap: 4px; flex: 1 1 180px; min-width: 0; font-size: 12px; font-weight: 500;
+  color: var(--text-secondary); }
 .loss-field[hidden] { display: none; }
 .loss-field-grow { flex: 2 1 240px; }
 .loss-value-field { flex: 1 1 160px; }
-.loss-field .form-input { width: 100%; text-transform: none; letter-spacing: 0; font-weight: 500; font-family: var(--font-sans); }
-.loss-field textarea.form-input { resize: vertical; min-height: 44px; }
-.loss-check { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-main); min-height: 28px; cursor: pointer; }
-.loss-check input { accent-color: var(--accent-cyan); }
+.loss-field .form-input { width: 100%; text-transform: none; font-weight: 500; font-family: var(--font-sans); }
+.loss-field textarea.form-input { resize: vertical; min-height: 64px; padding: 8px 10px; }
+.loss-check { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-main); min-height: 28px; cursor: pointer; }
+.loss-check input { accent-color: var(--accent-solid); }
 .loss-form-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .loss-form-status { margin-top: 0; min-height: 0; flex: 1 1 200px; }
 
 /* False alarms by rule */
 .loss-table-wrap { overflow-x: auto; }
 .loss-rule-table td:not(:first-child), .loss-rule-table th:not(:first-child) { text-align: right; white-space: nowrap; }
-.loss-rate { font-family: var(--font-mono); font-weight: 700; color: var(--text-strong); }
-.loss-rate-high { color: var(--rose); }
+.loss-rate { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--text); }
+.loss-rate-high { color: var(--danger); }
 
 /* Evidence viewer: inline full-screen overlay */
 .loss-viewer { position: fixed; inset: 0; z-index: 1000; background: var(--lightbox-scrim); align-items: center; justify-content: center; padding: 16px; }
 .loss-viewer-inner { display: flex; flex-direction: column; gap: 8px; max-width: 96vw; max-height: 94vh; min-width: 0; }
 .loss-viewer-bar { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
-.loss-viewer-caption { color: var(--lightbox-text); font-size: 12px; min-width: 0; overflow-wrap: anywhere; }
-.loss-viewer-actions { display: flex; gap: 6px; }
-.loss-viewer-img { display: block; max-width: 96vw; max-height: 86vh; object-fit: contain; background: var(--media-bg); border-radius: 6px; }
+.loss-viewer-caption { color: var(--lightbox-text); font-size: 13px; min-width: 0; overflow-wrap: anywhere; }
+.loss-viewer-actions { display: flex; gap: 8px; }
+.loss-viewer-img { display: block; max-width: 96vw; max-height: 86vh; object-fit: contain; background: var(--media-bg); border-radius: var(--radius-sm); }
 
 .loss-viewer-img[hidden], .loss-viewer-video[hidden], .loss-viewer-error[hidden], .loss-viewer-switch[hidden] { display: none; }
-.loss-viewer-video { display: block; max-width: 96vw; max-height: 86vh; background: var(--media-bg); border-radius: 6px; }
-.loss-viewer-switch { display: inline-flex; gap: 4px; margin-right: 6px; }
-.loss-viewer-switch .btn.active { color: var(--accent-cyan); border-color: var(--accent-cyan); background: var(--accent-cyan-dim); }
-.loss-viewer-error { padding: 8px 12px; border-radius: 8px; font-size: 12px; color: var(--lightbox-text);
-  background: rgba(var(--rose-rgb), 0.25); border: 1px solid rgba(var(--rose-rgb), 0.5); }
-.loss-clip-badge { color: var(--accent-cyan); border: 1px solid rgba(var(--info-rgb), 0.35); }
+.loss-viewer-video { display: block; max-width: 96vw; max-height: 86vh; background: var(--media-bg); border-radius: var(--radius-sm); }
+.loss-viewer-switch { display: inline-flex; gap: 4px; margin-right: 8px; }
+.loss-viewer-switch .btn.active { color: var(--accent-text); border-color: var(--accent-border); background: var(--accent-bg); }
+.loss-viewer-error { padding: 8px 12px; border-radius: var(--radius-md); font-size: 12px; color: var(--lightbox-text);
+  background: var(--danger-bg); border: 1px solid var(--danger-border); }
+.loss-clip-badge { color: var(--info); background: var(--info-bg); border: 1px solid var(--info-border); }
 
 /* Patterns (GET /theft/patterns) */
-.loss-pattern-days { margin-bottom: 0; text-transform: none; letter-spacing: 0; }
-.loss-pattern-summary { margin: 0 0 12px; font-size: 12px; color: var(--text-2); line-height: 1.5; }
+.loss-pattern-days { margin-bottom: 0; text-transform: none; }
+.loss-pattern-summary { margin: 0 0 12px; font-size: 13px; color: var(--text-2); line-height: 1.5; }
 .loss-pattern-summary .fp-empty { padding: 4px 2px; }
-.loss-pattern-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 14px; }
+/* Two columns: the blocks come in pairs (camera | area, checks | weeks) with full-width rows between;
+   auto-fit made a third, empty column on wide screens and squeezed the tables. */
+.loss-pattern-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 24px; }
+@media (max-width: 900px) { .loss-pattern-grid { grid-template-columns: minmax(0, 1fr); } }
 .loss-pattern-block { min-width: 0; }
 .loss-pattern-wide { grid-column: 1 / -1; }
-.loss-pattern-title { font-size: 10.5px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; color: var(--text-dim);
-  margin-bottom: 6px; }
-.loss-pattern-sub { font-size: 10.5px; color: var(--text-dim); line-height: 1.4; overflow-wrap: anywhere; }
-.loss-pattern-note { margin-top: 6px; font-size: 10.5px; color: var(--text-dim); line-height: 1.45; }
+.loss-pattern-title { font-size: 13px; font-weight: 600; color: var(--text);
+  margin-bottom: 8px; }
+.loss-pattern-sub { font-size: 12px; color: var(--text-dim); line-height: 1.4; overflow-wrap: anywhere; }
+.loss-pattern-note { margin-top: 8px; font-size: 12px; color: var(--text-dim); line-height: 1.45; }
 .loss-pattern-table td, .loss-pattern-table th { vertical-align: middle; }
 .loss-pattern-table td:first-child { min-width: 110px; overflow-wrap: anywhere; }
-.loss-num { text-align: right; white-space: nowrap; font-family: var(--font-mono); }
+.loss-num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .loss-bar-cell { width: 30%; min-width: 60px; }
-.loss-bar { display: block; height: 8px; border-radius: 4px; background: rgba(var(--slate-rgb), 0.12); overflow: hidden; }
-.loss-bar-fill { display: block; height: 100%; border-radius: 4px; background: rgb(var(--info-rgb)); }
+.loss-bar { display: block; height: 8px; border-radius: var(--radius-xs); background: var(--surface-3); overflow: hidden; }
+.loss-bar-fill { display: block; height: 100%; border-radius: var(--radius-xs); background: var(--accent); }
 
 .loss-heat-scroll { overflow-x: auto; }
 .loss-heat { display: grid; grid-template-columns: 34px repeat(24, minmax(14px, 1fr)); gap: 2px; min-width: 420px; }
 .loss-heat-corner { min-height: 14px; }
-.loss-heat-hour { font-family: var(--font-mono); font-size: 9px; color: var(--text-faint); text-align: left; line-height: 14px; }
-.loss-heat-day { font-size: 10px; font-weight: 700; color: var(--text-dim); line-height: 18px; }
-.loss-heat-cell { height: 18px; border-radius: 3px; background: rgba(var(--slate-rgb), 0.08); }
-.loss-heat-cell.has-value { background: rgba(var(--info-rgb), var(--a, 0.5)); }
-.loss-heat-cell:hover { outline: 2px solid var(--text-strong); outline-offset: -1px; }
+.loss-heat-hour { font-variant-numeric: tabular-nums; font-size: 12px; color: var(--text-faint); text-align: left; line-height: 14px; }
+.loss-heat-day { font-size: 12px; font-weight: 600; color: var(--text-dim); line-height: 18px; }
+.loss-heat-cell { height: 18px; border-radius: 2px; background: var(--surface-2); }
+.loss-heat-cell.has-value { background: rgba(var(--accent-rgb), var(--a, 0.5)); }
+.loss-heat-cell:hover { outline: 2px solid var(--text); outline-offset: -1px; }
 
-.loss-bursts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-.loss-burst { padding: 8px 10px; border-radius: 8px; font-size: 12px; color: var(--text-2); line-height: 1.45;
-  background: rgba(var(--tint-rgb), 0.03); border: 1px solid rgba(var(--slate-rgb), 0.15); }
+.loss-bursts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.loss-burst { padding: 8px 12px; border-radius: var(--radius-sm); font-size: 13px; color: var(--text-2); line-height: 1.45;
+  background: var(--surface); border: 1px solid var(--border); }
 .loss-burst-links { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
 
+/* Alert levels (tiers): KPIs, level chips, card badge, risk, "Why this level", banner, pattern mix.
+   Level colours come from the --tier-* tokens in style.css (review < watch < alert < critical). */
+.loss-tier-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: 12px; margin: 12px 0 16px; }
+.loss-tier-kpis > .fp-empty { grid-column: 1 / -1; }
+.loss-tier-kpi { min-width: 0; }
+@media (max-width: 600px) { .loss-tier-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }   /* 2 x 2 on phones, like the KPIs above */
+.loss-tier-kpi .kpi-label { text-transform: none; letter-spacing: 0; }
+.loss-tier-note { grid-column: 1 / -1; }
+.loss-tier-none { background: var(--surface); border: 1px dashed var(--border-strong); color: var(--text-secondary); }
+.loss-chips-label { display: inline-flex; align-items: center; min-height: 28px; margin-right: 4px; font-size: 12px; font-weight: 600; color: var(--text-secondary); }
+.loss-chip-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; border: 1px solid transparent; }
+.loss-dot-review { background: var(--tier-review-bg); border-color: var(--tier-review-text); }
+.loss-dot-watch { background: var(--tier-watch-text); }
+.loss-dot-alert { background: var(--tier-alert-text); }
+.loss-dot-critical { background: var(--tier-critical-bg); }
+.loss-card-open.loss-card-review { border-left-color: var(--tier-review-border); }
+.loss-card-open.loss-card-watch { border-left-color: var(--tier-watch-text); }
+.loss-card-open.loss-card-alert { border-left-color: var(--tier-alert-text); }
+.loss-card-open.loss-card-critical { border-left-color: var(--tier-critical-bg); border-left-width: 4px; }
+.loss-risk { font-variant-numeric: tabular-nums; font-size: 12px; font-weight: 600; color: var(--text); }
+.loss-why { margin-top: 8px; font-size: 13px; color: var(--text-secondary); }
+.loss-why summary { cursor: pointer; min-height: 24px; display: inline-flex; align-items: center; font-weight: 600; color: var(--text); }
+.loss-why summary:hover { text-decoration: underline; }
+/* Disclosure chevron: display:inline-flex on <summary> drops the browser's triangle, so
+   "Why this level" and "Technical details" did not look expandable. */
+.loss-why summary, .loss-tech summary { gap: 6px; list-style: none; }
+.loss-why summary::-webkit-details-marker, .loss-tech summary::-webkit-details-marker { display: none; }
+.loss-why summary::before, .loss-tech summary::before {
+  content: ""; flex: 0 0 auto; width: 5px; height: 5px; margin: 0 2px 0 1px;
+  border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg); transition: transform var(--transition-fast);
+}
+.loss-why[open] > summary::before, .loss-tech[open] > summary::before { transform: rotate(45deg); }
+.loss-why-list { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.loss-why-item { display: flex; gap: 8px; align-items: baseline; line-height: 1.45; min-width: 0; }
+.loss-why-effect { flex: 0 0 auto; min-width: 56px; font-variant-numeric: tabular-nums; font-size: 12px; font-weight: 600; color: var(--text);
+  padding: 0 6px; border-radius: var(--radius-xs); background: var(--surface-2); border: 1px solid var(--border); text-align: center; }
+.loss-why-reason { min-width: 0; overflow-wrap: anywhere; }
+.loss-why-route { margin-top: 4px; font-size: 12px; color: var(--text-dim); }
+.loss-mix { display: inline-flex; flex-wrap: wrap; gap: 4px; vertical-align: middle; }
+.loss-mix-badge { height: 20px; padding: 0 6px; font-variant-numeric: tabular-nums; }
+.loss-mix-n { font-variant-numeric: tabular-nums; }
+.loss-pattern-levels { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 8px; }
+.loss-burst-tiers { margin-top: 4px; }
+
+/* Theft banner by level (loss.js renderBanner). The id selector matches style.css's #theftAlertBanner rule.
+   Critical: solid danger. Alert: danger outline. Watch: info (quiet). No level: the base look (style.css). */
+#theftAlertBanner.theft-banner-critical { background: var(--tier-critical-bg); border-color: var(--tier-critical-border);
+  border-left-color: var(--tier-critical-border); color: var(--tier-critical-text); }
+#theftAlertBanner.theft-banner-critical .theft-banner-title,
+#theftAlertBanner.theft-banner-critical .theft-banner-meta,
+#theftAlertBanner.theft-banner-critical .theft-banner-sep,
+#theftAlertBanner.theft-banner-critical .theft-banner-icon { color: var(--tier-critical-text); }
+/* On the solid red bar the blue primary clashed (and read poorly): the main action is white with red
+   text, the others are outlined in the banner's text colour. */
+#theftAlertBanner.theft-banner-critical .btn { background: transparent; border-color: var(--tier-critical-text); color: var(--tier-critical-text); }
+#theftAlertBanner.theft-banner-critical .btn:hover { background: rgba(255, 255, 255, 0.14); }
+#theftAlertBanner.theft-banner-critical .btn-primary { background: var(--tier-critical-text); border-color: var(--tier-critical-text); color: var(--tier-critical-bg); }
+#theftAlertBanner.theft-banner-critical .btn-primary:hover { background: var(--tier-critical-text); opacity: 0.92; }
+#theftAlertBanner.theft-banner-critical .btn:focus-visible { outline-color: var(--tier-critical-text); }
+#theftAlertBanner.theft-banner-alert { background: var(--surface); border: 1px solid var(--danger-border); border-left: 4px solid var(--danger-solid); }
+#theftAlertBanner.theft-banner-watch { background: var(--tier-watch-bg); border: 1px solid var(--tier-watch-border); border-left: 4px solid var(--tier-watch-text); }
+#theftAlertBanner.theft-banner-watch .theft-banner-icon { color: var(--tier-watch-text); }
+
 /* Camera feature editor: theft clip and static-figure options (index.html camera modal) */
-.cam-feat-hint { font-size: 11px; color: var(--text-dim); margin-top: 6px; line-height: 1.45; }
+.cam-feat-hint { font-size: 12px; color: var(--text-dim); margin-top: 8px; line-height: 1.45; }
 .cam-feat-hint.is-muted, .cam-feat-static.is-muted { opacity: 0.55; }
 .cam-feat-static { margin-top: 8px; }
 .checkbox-label.is-disabled { opacity: 0.55; cursor: not-allowed; }
@@ -157,7 +224,7 @@
 }
 
 @media (pointer: coarse) {
-  .loss-chip, .loss-outcome-opt, .loss-check, .loss-tech summary { min-height: 40px; }
+  .loss-chip, .loss-outcome-opt, .loss-check, .loss-tech summary, .loss-why summary { min-height: 40px; }
   .loss-burst-links .btn { min-width: 40px; }
   .loss-actions .btn, .loss-form-actions .btn { min-height: 40px; }
 }

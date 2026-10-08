@@ -20,6 +20,24 @@
 
 const DASH = '—';
 
+/** Icon markup from js/icons.js (window.EdgeIcon); '' when that script is missing. Never throws. */
+function uiIcon(name, opts) {
+  try { return window.EdgeIcon && typeof window.EdgeIcon.svg === 'function' ? window.EdgeIcon.svg(name, opts) : ''; } catch (_) { return ''; }
+}
+
+/** The coloured dot before a status word: state 'online' | 'offline' | 'warning', or '' for neutral. */
+function statusDot(state) {
+  return `<span class="status-dot${state ? ` is-${state}` : ''}" aria-hidden="true"></span>`;
+}
+
+/** Show a status dot and a text in a badge, rewriting it only when either changed. */
+function setDotBadge(node, state, text) {
+  const key = `${state}|${text}`;
+  if (node.getAttribute('data-dot-key') === key) return;
+  node.setAttribute('data-dot-key', key);
+  node.innerHTML = `${statusDot(state)} ${escapeHtml(text)}`;
+}
+
 // Top-level views -> their section element.
 const VIEW_SECTIONS = {
   today: 'tab-today',
@@ -126,7 +144,7 @@ function emptyState(message, actionLabel, actionFn) {
   const btn = actionLabel
     ? ` <button type="button" class="btn btn-sm btn-primary empty-action" onclick="${actionFn}">${escapeHtml(actionLabel)}</button>`
     : '';
-  return `<div class="fp-empty">${escapeHtml(message)}${btn}</div>`;
+  return `<div class="fp-empty empty-state">${escapeHtml(message)}${btn}</div>`;
 }
 
 /** Parse an API time: naive strings are UTC, offset strings are taken as given. */
@@ -185,7 +203,8 @@ document.addEventListener('error', (e) => {
   if (!today && !img.classList.contains('evidence-thumb')) return;
   const note = document.createElement(today ? 'span' : 'div');
   note.className = today ? 'today-thumb today-thumb-empty' : 'evidence-thumb-empty';
-  note.textContent = today ? '🚫' : 'Evidence image not available';
+  if (today) note.innerHTML = uiIcon('ban', { size: 'lg', label: 'No picture' }) || 'No picture';
+  else note.textContent = 'Evidence image not available';
   note.title = 'The evidence picture could not be loaded';
   const link = img.closest('a');
   (link || img).replaceWith(note);
@@ -534,6 +553,7 @@ function syncAppearance() {
   document.querySelectorAll('[data-set-theme]').forEach((b) => {
     const on = b.getAttribute('data-set-theme') === mode;
     b.classList.toggle('btn-primary', on);
+    b.classList.toggle('btn-secondary', !on);
     b.setAttribute('aria-checked', on ? 'true' : 'false');
   });
 }
@@ -838,7 +858,7 @@ function buildCameraCard(cam, slot) {
       </div>
       <div class="camera-card-tools">
         <button type="button" class="cam-pin-btn" data-pin-for="${id}" aria-pressed="false" onclick="toggleCameraPin(${slot}, '${id}')"></button>
-        <span class="badge ${online ? 'badge-green' : 'badge-danger'}" data-status-for="${id}"${cam.status === 'AUTH_FAILED' ? ` title="${escapeHtml(AUTH_FAILED_TIP)}"` : ''}>● ${escapeHtml(cameraStatusLabel(cam.status || 'UNKNOWN'))}</span>
+        <span class="badge ${online ? 'badge-green badge-success' : 'badge-danger'}" data-status-for="${id}"${cam.status === 'AUTH_FAILED' ? ` title="${escapeHtml(AUTH_FAILED_TIP)}"` : ''}>${statusDot(online ? 'online' : 'offline')} ${escapeHtml(cameraStatusLabel(cam.status || 'UNKNOWN'))}</span>
       </div>
     </div>
 
@@ -855,7 +875,7 @@ function buildCameraCard(cam, slot) {
           title="Show or hide the AI overlay (boxes, skeletons, behaviour)">AI</button>
       </div>
       <div class="camera-overlay-top">
-        <span class="cam-hud-badge ${online ? 'cam-hud-stale' : 'cam-hud-offline'}" data-live-for="${id}">${online ? '● waiting for picture' : '● ' + escapeHtml(cameraStatusLabel(cam.status))}</span>
+        <span class="cam-hud-badge ${online ? 'cam-hud-stale' : 'cam-hud-offline'}" data-live-for="${id}">${online ? `${statusDot('warning')} waiting for picture` : `${statusDot('offline')} ${escapeHtml(cameraStatusLabel(cam.status))}`}</span>
         <span class="cam-hud-badge" data-res-for="${id}" title="Picture size">${DASH}</span>
       </div>
       <div class="camera-overlay-bottom">
@@ -869,9 +889,9 @@ function buildCameraCard(cam, slot) {
     <div class="cam-role-slot" data-role-slot="${id}"></div>
 
     <div class="camera-footer">
-      <button type="button" class="btn btn-sm" onclick="openCameraConfigModal('${id}')">⚙️ Settings</button>
-      <button type="button" class="btn btn-sm" data-reconnect-for="${id}" onclick="reconnectCamera('${id}')" title="Try to connect to this camera now" ${online ? 'hidden' : ''}>Reconnect</button>
-      <button type="button" class="btn btn-sm" data-power-for="${id}" onclick="setCameraEnabled('${id}', false)"
+      <button type="button" class="btn btn-secondary btn-sm" onclick="openCameraConfigModal('${id}')">${uiIcon('settings', { size: 'sm' })} Settings</button>
+      <button type="button" class="btn btn-secondary btn-sm" data-reconnect-for="${id}" onclick="reconnectCamera('${id}')" title="Try to connect to this camera now" ${online ? 'hidden' : ''}>Reconnect</button>
+      <button type="button" class="btn btn-secondary btn-sm" data-power-for="${id}" onclick="setCameraEnabled('${id}', false)"
         title="Turn this camera off: no video, no analysis and no network traffic until it is turned on again">Turn off</button>
       <a href="/dashboard/studio?camera_id=${encodeURIComponent(cam.id)}" class="btn btn-primary btn-sm" title="Draw counting lines, shelf areas, staff-only areas and privacy masks on this camera">Camera setup</a>
     </div>`;
@@ -1177,7 +1197,7 @@ function renderCameraPower() {
   }
   const actions = [];
   if (off.length > 1) {
-    actions.push(`<button type="button" class="btn btn-sm" onclick="turnAllCamerasOn()">Turn all ${off.length} on</button>`);
+    actions.push(`<button type="button" class="btn btn-secondary btn-sm" onclick="turnAllCamerasOn()">Turn all ${off.length} on</button>`);
   }
   if (offline.length) {
     const names = escapeHtml(offline.map((c) => c.name).join(', '));
@@ -1185,8 +1205,8 @@ function renderCameraPower() {
       ? `<span class="camera-power-confirm" role="group" aria-label="Confirm turning off offline cameras">
           Turn off ${offline.length} camera${offline.length === 1 ? '' : 's'} not sending pictures? They stop costing anything until turned on.
           <button type="button" class="btn btn-sm btn-danger" id="powerOfflineYes" onclick="confirmTurnOffOffline()" title="${names}">Turn off</button>
-          <button type="button" class="btn btn-sm" onclick="cancelTurnOffOffline()">Cancel</button></span>`
-      : `<button type="button" class="btn btn-sm" id="powerOfflineAsk" onclick="askTurnOffOffline()" title="${names}">Turn off ${offline.length} offline camera${offline.length === 1 ? '' : 's'}</button>`);
+          <button type="button" class="btn btn-secondary btn-sm" onclick="cancelTurnOffOffline()">Cancel</button></span>`
+      : `<button type="button" class="btn btn-secondary btn-sm" id="powerOfflineAsk" onclick="askTurnOffOffline()" title="${names}">Turn off ${offline.length} offline camera${offline.length === 1 ? '' : 's'}</button>`);
   }
   if (actions.length) html += `<div class="camera-power-actions">${actions.join('')}</div>`;
   if (html === cameraGrid.powerHtml) return;
@@ -1234,9 +1254,10 @@ function updateMatrixHud(pipe) {
     if (status) {
       const online = c.status === 'ONLINE';
       const off = c.status === 'DISABLED';
-      status.textContent = `● ${cameraStatusLabel(c.status)}`;
+      setDotBadge(status, online ? 'online' : (off ? '' : 'offline'), cameraStatusLabel(c.status));
       status.title = c.status === 'AUTH_FAILED' ? AUTH_FAILED_TIP : (online || off ? '' : (c.last_error || ''));
       status.classList.toggle('badge-green', online);
+      status.classList.toggle('badge-success', online);
       status.classList.toggle('badge-danger', !online && !off);
       status.classList.toggle('badge-neutral', off);
     }
@@ -1512,7 +1533,7 @@ function retryCameraVideo(id) {
   pumpTiles();
 }
 
-/** "Check connection" on a failed tile: Settings → Online access → Check remote video. */
+/** "Check connection" on a failed tile: Settings > Online access > Check remote video. */
 function openRemoteVideoCheck() {
   switchTab('settings');
   if (window.edgeRemoteVideo && typeof window.edgeRemoteVideo.openCheck === 'function') window.edgeRemoteVideo.openCheck();
@@ -1591,24 +1612,24 @@ function renderTileLive(id) {
   let kind;
   let tip = '';
   if (status === 'DISABLED') {
-    text = '● OFF'; kind = 'off'; tip = 'Turned off: nothing is fetched or analysed';
+    text = 'OFF'; kind = 'off'; tip = 'Turned off: nothing is fetched or analysed';
   } else if (status !== 'ONLINE') {
-    text = `● ${cameraStatusLabel(status)}`; kind = 'offline';
+    text = cameraStatusLabel(status); kind = 'offline';
   } else if (liveTransport() === 'webrtc') {
     ({ text, kind, tip } = rtcTileBadge(t));
   } else if (t && t.source === 'no-signal') {
-    text = '● NO PICTURE'; kind = 'offline'; tip = 'The server has no picture from this camera right now';
+    text = 'NO PICTURE'; kind = 'offline'; tip = 'The server has no picture from this camera right now';
   } else if (age !== null && age * 1000 <= TILE_LIVE_MS) {
-    text = '● LIVE'; kind = 'live';
+    text = 'LIVE'; kind = 'live';
     tip = t && t.id === tileFeed.focusId ? 'Live video' : `Picture refreshed every ${(TILE_REFRESH_MS[currentDecimationFPS] || 2000) / 1000} s`;
   } else if (age !== null) {
-    text = `● picture ${formatDuration(age)} old`; kind = 'stale';
+    text = `picture ${formatDuration(age)} old`; kind = 'stale';
     tip = t.error ? `Last refresh failed: ${t.error}` : 'Refreshes while the tile is on screen';
   } else {
-    text = t && t.error ? '● no picture yet' : '● waiting for picture'; kind = 'stale';
+    text = t && t.error ? 'no picture yet' : 'waiting for picture'; kind = 'stale';
     tip = t && t.error ? `Picture request failed: ${t.error}` : '';
   }
-  if (badge.textContent !== text) badge.textContent = text;
+  setDotBadge(badge, { live: 'online', offline: 'offline', stale: 'warning', off: '' }[kind], text);
   badge.title = tip;
   badge.classList.toggle('cam-hud-live', kind === 'live');
   badge.classList.toggle('cam-hud-offline', kind === 'offline');
@@ -1619,26 +1640,26 @@ function renderTileLive(id) {
 
 /** LIVE badge of a direct-video tile: what the connection really does. */
 function rtcTileBadge(t) {
-  if (!t) return { text: '● waiting for video', kind: 'stale', tip: '' };
+  if (!t) return { text: 'waiting for video', kind: 'stale', tip: '' };
   if (t.rtcError) {
     const e = t.rtcError;
     return {
-      text: e.network ? '● Direct video not possible from this network' : `● ${e.message}`,
+      text: e.network ? 'Direct video not possible from this network' : e.message,
       kind: 'offline',
       tip: e.detail || e.message,
     };
   }
   const h = t.rtc;
-  if (!h) return { text: '● waiting for video', kind: 'stale', tip: t.visible ? '' : 'Video starts when the tile is on screen' };
-  if (h.state === 'connecting') return { text: '● Connecting…', kind: 'stale', tip: 'Opening a direct video connection to the store' };
+  if (!h) return { text: 'waiting for video', kind: 'stale', tip: t.visible ? '' : 'Video starts when the tile is on screen' };
+  if (h.state === 'connecting') return { text: 'Connecting…', kind: 'stale', tip: 'Opening a direct video connection to the store' };
   const via = window.WebRtcLive ? window.WebRtcLive.pairLabel(h.pair) : '';
   const how = `Direct peer-to-peer video${h.pair ? ` (this browser: ${h.pair.local || '?'}, store: ${h.pair.remote || '?'}, ${h.pair.protocol || '?'})` : ''}`
     + `${h.codec ? ` · ${h.codec}${h.transcoded ? ' (converted on the box)' : ''}` : ''}. It does not pass through the online-access server.`
     + ` ${aiOverlayNote()}`;
   const age = t.lastFrameAt ? (Date.now() - t.lastFrameAt) / 1000 : null;
-  if (age !== null && age * 1000 <= TILE_LIVE_MS) return { text: `● LIVE · Direct${via ? ` · ${via}` : ''}`, kind: 'live', tip: how };
-  if (age !== null) return { text: `● video stalled ${formatDuration(age)}`, kind: 'stale', tip: how };
-  return { text: `● Direct${via ? ` · ${via}` : ''} · waiting for picture`, kind: 'stale', tip: how };
+  if (age !== null && age * 1000 <= TILE_LIVE_MS) return { text: `LIVE · Direct${via ? ` · ${via}` : ''}`, kind: 'live', tip: how };
+  if (age !== null) return { text: `video stalled ${formatDuration(age)}`, kind: 'stale', tip: how };
+  return { text: `Direct${via ? ` · ${via}` : ''} · waiting for picture`, kind: 'stale', tip: how };
 }
 
 /** The panel over a tile whose direct video failed: what happened, retry, connection check. */
@@ -1657,7 +1678,7 @@ function renderRtcFail(id, t, status) {
     <div class="cam-rtc-fail-title">${escapeHtml(e.network ? 'Direct video not possible from this network' : e.message)}</div>
     <div class="cam-rtc-fail-text">${escapeHtml(e.detail || '')}${wait ? ` Trying again in ${wait} s.` : ''}</div>
     <div class="cam-rtc-fail-actions">
-      <button type="button" class="btn btn-xs" onclick="event.stopPropagation(); retryCameraVideo('${sid}')">Try again</button>
+      <button type="button" class="btn btn-secondary btn-xs" onclick="event.stopPropagation(); retryCameraVideo('${sid}')">Try again</button>
       <button type="button" class="btn btn-xs btn-primary" onclick="event.stopPropagation(); openRemoteVideoCheck()">Check connection</button>
     </div>`;
 }
@@ -1848,7 +1869,7 @@ window.addEventListener('edge:live-overlay', (e) => {
   pumpTiles();
 });
 
-/** Settings → Analysis speed (the analysed frame rate is set there). */
+/** Settings > Analysis speed (the analysed frame rate is set there). */
 function openAnalysisSettings() {
   switchTab('settings');
   setTimeout(() => jumpTo('settings-analysis'), 80);
@@ -2335,7 +2356,7 @@ async function openCameraConfigModal(cameraId) {
 
   safeSet('configCameraId', cam.id);
   const titleEl = el('cameraModalTitle');
-  if (titleEl) titleEl.textContent = `📷 ${cam.name}`;
+  if (titleEl) titleEl.innerHTML = `${uiIcon('camera')} ${escapeHtml(cam.name)}`;
   safeSet('configCameraName', cam.name || '');
   safeSet('configChannelNumber', isNum(cam.channel_number) ? cam.channel_number : 1);
   populateDepartmentOptions(cam.department);

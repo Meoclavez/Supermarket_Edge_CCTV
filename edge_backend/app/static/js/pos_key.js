@@ -68,22 +68,22 @@
     if (state.confirm === 'replace') {
       actions = `<div class="tk-confirm">Replace the till key? Tills using the current key stop sending sales until they are updated with the new one.
           <button type="button" class="btn btn-danger btn-sm" data-tk="replace-yes"${dis}>Yes, replace</button>
-          <button type="button" class="btn btn-sm" data-tk="keep">Keep</button></div>`;
+          <button type="button" class="btn btn-secondary btn-sm" data-tk="keep">Keep</button></div>`;
     } else if (state.confirm === 'revoke') {
       actions = `<div class="tk-confirm">Revoke the till key? Tills using it stop sending sales immediately.
           <button type="button" class="btn btn-danger btn-sm" data-tk="revoke-yes"${dis}>Yes, revoke</button>
-          <button type="button" class="btn btn-sm" data-tk="keep">Keep</button></div>`;
+          <button type="button" class="btn btn-secondary btn-sm" data-tk="keep">Keep</button></div>`;
     } else if (s.exists) {
       actions = `<div class="tk-actions">
-          <button type="button" class="btn btn-sm" data-tk="replace"${dis}>Replace till key</button>
+          <button type="button" class="btn btn-secondary btn-sm" data-tk="replace"${dis}>Replace till key</button>
           <button type="button" class="btn btn-danger btn-sm" data-tk="revoke"${dis}>Revoke</button></div>`;
     } else {
       actions = `<div class="tk-actions"><button type="button" class="btn btn-primary btn-sm" data-tk="create"${dis}>Create till key</button></div>`;
     }
     const fresh = state.newKey ? `<div class="tk-new">
         <div class="tk-new-row"><code class="tk-key" id="tkNewKey">${esc(state.newKey)}</code>
-          <button type="button" class="btn btn-sm" data-tk="copy">Copy</button>
-          <button type="button" class="btn btn-sm" data-tk="hide">Done</button></div>
+          <button type="button" class="btn btn-secondary btn-sm" data-tk="copy">Copy</button>
+          <button type="button" class="btn btn-secondary btn-sm" data-tk="hide">Done</button></div>
         <p class="tk-warn">Shown once. Store it in the till system now.</p>
         <p class="ra-hint">The till sends it in the <code>${esc(header)}</code> header with each sale.</p>
       </div>` : '';

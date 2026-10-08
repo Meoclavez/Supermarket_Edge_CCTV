@@ -938,8 +938,20 @@ class TheftIncident(TheftIncidentBase):
     resolved_at: Optional[datetime] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
+    # Alert level (services/theft_alert_policy.py): review | watch | alert |
+    # critical; null on incidents recorded before levels existed.
+    alert_tier: Optional[str] = None
+    # 0..1 = confidence x place weight x case weight.
+    risk_score: Optional[float] = None
+    # Why: [{factor, value, effect, reason, setting?}], reasons written for staff.
+    risk_factors: List[Dict[str, Any]] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)
+
+    @field_validator("risk_factors", mode="before")
+    @classmethod
+    def _factors_list(cls, v):
+        return list(v) if isinstance(v, (list, tuple)) else []
 
 
 class TheftIncidentListResponse(BaseModel):
@@ -1024,6 +1036,13 @@ class TheftStatisticsResponse(BaseModel):
     false_alarm_rate_by_rule: List[TheftRuleOutcomeStats] = Field(default_factory=list)
     # Resolved before outcomes were required (may carry the old default).
     unverified_legacy_resolutions: int = 0
+    # Incidents per alert level (review/watch/alert/critical, "unclassified"
+    # = recorded before levels existed): all time, today (store day) and open.
+    by_tier: Dict[str, int] = Field(default_factory=dict)
+    today_by_tier: Dict[str, int] = Field(default_factory=dict)
+    active_by_tier: Dict[str, int] = Field(default_factory=dict)
+    # False-alarm rate per level from reviewer outcomes (tuning feedback for the thresholds).
+    false_alarm_rate_by_tier: Dict[str, Optional[float]] = Field(default_factory=dict)
 
 
 class TheftAcknowledgeRequest(BaseModel):

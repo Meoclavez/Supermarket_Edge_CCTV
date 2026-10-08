@@ -144,6 +144,10 @@
 
     // ---- controls
 
+    // Lucide sprite icons (icons/sprite.svg), the same markup as js/icons.js; the old text glyphs
+    // (minus, plus, U+26F6) sat off-centre and U+26F6 is a pictograph.
+    const ICON = (name) => `<svg class="icon icon-md" aria-hidden="true" focusable="false"><use href="/static/icons/sprite.svg#i-${name}"></use></svg>`;
+
     function renderControls() {
       const host = o.controlsHost;
       if (!host) return;
@@ -154,10 +158,10 @@
         controls.setAttribute('role', 'group');
         controls.setAttribute('aria-label', 'Zoom');
         controls.innerHTML = `
-          <button type="button" class="vz-btn" data-vz="out" aria-label="Zoom out" title="Zoom out">&minus;</button>
+          <button type="button" class="vz-btn" data-vz="out" aria-label="Zoom out" title="Zoom out">${ICON('zoom-out')}</button>
           <button type="button" class="vz-btn vz-level" data-vz="reset" aria-label="Reset zoom" title="Back to the whole picture">1&times;</button>
-          <button type="button" class="vz-btn" data-vz="in" aria-label="Zoom in" title="Zoom in (or use the mouse wheel / pinch; drag to move around)">+</button>
-          <button type="button" class="vz-btn" data-vz="fs" aria-label="Full screen" title="Full screen">&#x26F6;</button>`;
+          <button type="button" class="vz-btn" data-vz="in" aria-label="Zoom in" title="Zoom in (or use the mouse wheel / pinch; drag to move around)">${ICON('zoom-in')}</button>
+          <button type="button" class="vz-btn" data-vz="fs" aria-label="Full screen" title="Full screen">${ICON('maximize-2')}</button>`;
         controls.addEventListener('click', (e) => {
           const b = e.target.closest('[data-vz]');
           e.stopPropagation();
@@ -186,6 +190,9 @@
         const full = fsElement() === fsTarget;
         fs.setAttribute('aria-pressed', full ? 'true' : 'false');
         fs.title = full ? 'Leave full screen' : 'Full screen';
+        const want = full ? 'minimize-2' : 'maximize-2';
+        const use = fs.querySelector('use');
+        if (use && !use.getAttribute('href').endsWith(want)) use.setAttribute('href', `/static/icons/sprite.svg#i-${want}`);
       }
     }
 

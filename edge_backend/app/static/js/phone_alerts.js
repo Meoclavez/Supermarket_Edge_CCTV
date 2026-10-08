@@ -19,7 +19,11 @@
   const BANNER_KEY = 'edge_cctv_alert_banner_dismissed';
   const TIER_LABEL = { first_priority: 'First priority', backup: 'Backup', none: 'No alerts' };
   const ROLE_LABEL = { owner: 'Owner', admin: 'Administrator', operator: 'Operator' };
-  const PLATFORM_ICON = { ios: '📱', android: '📱', desktop: '💻', other: '🔔' };
+  /** Icon markup from js/icons.js (window.EdgeIcon); '' when that script is missing. Never throws. */
+  const ico = (name, opts) => {
+    try { return window.EdgeIcon && typeof window.EdgeIcon.svg === 'function' ? window.EdgeIcon.svg(name, opts) : ''; } catch (_) { return ''; }
+  };
+  const PLATFORM_ICON = { ios: 'smartphone', android: 'smartphone', desktop: 'monitor', other: 'bell' };   // sprite names
 
   let installEvent = null;      // Chrome's deferred beforeinstallprompt
   let roster = null;
@@ -190,10 +194,10 @@
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.id = 'paInstallBtn';
-    btn.className = 'btn btn-sm pa-install-btn';
+    btn.className = 'btn btn-secondary btn-sm pa-install-btn';
     btn.hidden = true;
     btn.title = 'Install the dashboard as an app on this device, for alerts on your phone';
-    btn.innerHTML = '<span aria-hidden="true">📲</span><span class="pa-install-label">Install app</span>';
+    btn.innerHTML = `${ico('smartphone', { size: 'sm' })}<span class="pa-install-label">Install app</span>`;
     btn.addEventListener('click', onInstallClick);
     actions.insertBefore(btn, actions.firstChild);
     updateInstallButton();
@@ -230,13 +234,13 @@
     bar.className = 'pa-banner';
     bar.setAttribute('role', 'region');
     bar.setAttribute('aria-label', 'Phone alerts');
-    bar.innerHTML = `<span aria-hidden="true">🔔</span>
+    bar.innerHTML = `${ico('bell', { size: 'lg' })}
       <div class="pa-banner-text"><b>Turn on theft alerts for this phone</b>
         <span>Get a notification when the cameras see something that needs a look, even with the app closed.</span>
         <span class="pa-banner-msg" id="paBannerMsg"></span></div>
       <div class="pa-banner-actions">
         <button type="button" class="btn btn-primary btn-sm" id="paBannerEnable">Enable alerts</button>
-        <button type="button" class="btn btn-sm" id="paBannerLater">Not now</button></div>`;
+        <button type="button" class="btn btn-secondary btn-sm" id="paBannerLater">Not now</button></div>`;
     const shell = document.querySelector('.top-nav-header');
     if (shell && shell.parentNode) shell.parentNode.insertBefore(bar, shell.nextSibling);
     $('paBannerEnable').addEventListener('click', async (e) => {
@@ -277,11 +281,11 @@
       state = `<div class="pa-state pa-state-off">${esc(notSupportedReason())}</div>`;
       if (isIos && window.isSecureContext && !isStandalone()) showIosSteps = true;
     } else if (s.permission === 'denied') {
-      state = '<div class="pa-state pa-state-off">Notifications are blocked for this app. Allow them in the phone\'s Settings → Notifications (or the browser\'s site settings), then reload.</div>';
+      state = '<div class="pa-state pa-state-off">Notifications are blocked for this app. Allow them in the phone\'s Settings &gt; Notifications (or the browser\'s site settings), then reload.</div>';
     } else if (s.subscribed) {
-      state = `<div class="pa-state pa-state-on">✔ Alerts are on for this ${isIos || isAndroid ? 'phone' : 'browser'}${here ? ` (${esc(here.label)})` : ''}.</div>`;
-      actions = `<button type="button" class="btn btn-sm" id="paTestMine">Send a test alert</button>
-        <button type="button" class="btn btn-sm" id="paDisable">Turn off on this ${isIos || isAndroid ? 'phone' : 'browser'}</button>`;
+      state = `<div class="pa-state pa-state-on">${ico('check', { size: 'sm' })} Alerts are on for this ${isIos || isAndroid ? 'phone' : 'browser'}${here ? ` (${esc(here.label)})` : ''}.</div>`;
+      actions = `<button type="button" class="btn btn-secondary btn-sm" id="paTestMine">Send a test alert</button>
+        <button type="button" class="btn btn-secondary btn-sm" id="paDisable">Turn off on this ${isIos || isAndroid ? 'phone' : 'browser'}</button>`;
     } else {
       state = '<div class="pa-state">Alerts are off on this device.</div>';
       actions = `<input id="paLabel" class="form-input pa-label-input" maxlength="80" placeholder="Name this phone (optional), e.g. Sam's iPhone">
@@ -294,12 +298,12 @@
     const steps = showIosSteps && isIos && !isStandalone() ? `
       <ol class="pa-steps">
         <li>Open this page in <b>Safari</b> (iOS 16.4 or later).</li>
-        <li>Tap <b>Share</b> <span aria-hidden="true">⬆️</span>, then <b>Add to Home Screen</b>, then <b>Add</b>.</li>
+        <li>Tap <b>Share</b> ${ico('arrow-up', { size: 'sm' })}, then <b>Add to Home Screen</b>, then <b>Add</b>.</li>
         <li>Open <b>the new app icon</b> on your Home Screen and sign in.</li>
         <li>Tap <b>Enable alerts</b> and choose <b>Allow</b>.</li>
       </ol>` : '';
     const androidHint = !isStandalone() && isAndroid && window.isSecureContext
-      ? '<div class="pr-hint">Tip: install the app first (📲 Install app at the top, or Chrome menu ⋮ → Install app), so alerts open it straight away.</div>' : '';
+      ? `<div class="pr-hint">Tip: install the app first (${ico('smartphone', { size: 'sm' })} Install app at the top, or Chrome's three-dot menu &gt; Install app), so alerts open it straight away.</div>` : '';
     return `<h3 class="pa-h">This ${isIos || isAndroid ? 'phone' : 'device'}</h3>
       ${state}${tierLine}${steps}${androidHint}
       ${actions ? `<div class="pr-actions pa-actions">${actions}</div>` : ''}
@@ -326,9 +330,9 @@
     const firstCount = d.first_priority.length;
     const lim = roster.limits || {};
     const wd = roster.watchdog || {};
-    const warn = (roster.warnings || []).map((w) => `<div class="pa-warning">⚠ ${esc(w)}</div>`).join('');
+    const warn = (roster.warnings || []).map((w) => `<div class="pa-warning">${ico('triangle-alert', { size: 'sm' })} ${esc(w)}</div>`).join('');
     const wdLine = wd.configured
-      ? `${wd.result === 'stored' ? `✔ The VPS holds the offline alert for ${esc(wd.stored)} phone(s)` : esc(wd.result || 'not run yet')}${wd.last_ok_at ? `, updated ${esc(fmtTime(wd.last_ok_at))}` : ''}${wd.error ? `. <span class="pa-warn">${esc(wd.error)}</span>` : ''}`
+      ? `${wd.result === 'stored' ? `${ico('check', { size: 'sm' })} The VPS holds the offline alert for ${esc(wd.stored)} phone(s)` : esc(wd.result || 'not run yet')}${wd.last_ok_at ? `, updated ${esc(fmtTime(wd.last_ok_at))}` : ''}${wd.error ? `. <span class="pa-warn">${esc(wd.error)}</span>` : ''}`
       : `<span class="pa-warn">${esc(wd.problem || 'Not available')}</span>`;
     return `<h3 class="pa-h">Who gets alerts</h3>
       ${warn}
@@ -339,10 +343,14 @@
         <tbody>${rows}</tbody></table></div>
       <div class="pa-count ${firstCount < roster.min_first_priority ? 'pa-warn' : ''}">${firstCount} first priority · ${d.backup.length} backup</div>
       <div class="pa-grid">
-        <div class="fp-field"><label for="paLevel">Alert phones from confidence</label>
+        <div class="fp-field pa-level-field"><label for="paLevel">Alert phones from confidence (theft alerts without a level)</label>
           <div class="pa-inline"><input id="paLevel" type="number" class="form-input" min="${Math.round((lim.min_confidence || {}).min * 100 || 30)}"
-            max="${Math.round((lim.min_confidence || {}).max * 100 || 99)}" step="1" value="${Math.round(d.min_confidence * 100)}" ${dis}><span>%</span></div>
-          <span class="pa-dim">75% = high-confidence incidents only. Lower ones still appear on the dashboard.</span></div>
+            max="${Math.round((lim.min_confidence || {}).max * 100 || 99)}" step="1" value="${Math.round(d.min_confidence * 100)}" ${dis}
+            aria-describedby="paLevelNote"><span>%</span></div>
+          <span class="pa-dim pa-level-note" id="paLevelNote">Applies only to possible-theft alerts that carry no alert level (sent by older
+            software). Theft incidents with a level go to phones by their level instead: Alert and Critical by default, Watch if switched on.
+            Night watch and area &amp; line alerts use the switches here.
+            <button type="button" class="link-btn" data-pa-jump="settings-theft-alerts">Theft alert levels ${ico('arrow-right', { size: 'sm' })}</button></span></div>
         <div class="fp-field"><label for="paEscalate">Escalate to backup after</label>
           <div class="pa-inline"><input id="paEscalate" type="number" class="form-input" min="${(lim.escalate_after_min || {}).min || 1}"
             max="${(lim.escalate_after_min || {}).max || 60}" step="1" value="${esc(d.escalate_after_min)}" ${dis}><span>min without acknowledgement</span></div></div>
@@ -355,8 +363,8 @@
       </div>
       ${admin ? `<div class="pr-actions">
           <button type="button" class="btn btn-primary btn-sm" id="paSave" ${draft ? '' : 'disabled'}>Save</button>
-          ${draft ? '<button type="button" class="btn btn-sm" id="paDiscard">Discard changes</button>' : ''}
-          <button type="button" class="btn btn-sm" id="paWdUpload" title="Send the current phone list to the VPS now">Update VPS now</button>
+          ${draft ? '<button type="button" class="btn btn-secondary btn-sm" id="paDiscard">Discard changes</button>' : ''}
+          <button type="button" class="btn btn-secondary btn-sm" id="paWdUpload" title="Send the current phone list to the VPS now">Update VPS now</button>
         </div>` : '<div class="pr-hint">Only an owner or administrator can change who gets alerts.</div>'}
       ${roster.updated_at ? `<div class="pa-dim">Last saved ${esc(fmtTime(roster.updated_at))}${roster.updated_by ? ` by ${esc(roster.updated_by)}` : ''}.</div>` : ''}
       ${status(rosterMsg)}`;
@@ -374,13 +382,13 @@
       const here = phoneState.endpoint && d.endpoint === phoneState.endpoint;
       const confirm = confirmRemove === d.id
         ? `<span class="pa-confirm">Remove? <button type="button" class="btn btn-sm btn-danger" data-act="remove-yes" data-id="${esc(d.id)}">Remove</button>
-           <button type="button" class="btn btn-sm" data-act="remove-no">Keep</button></span>`
-        : `<button type="button" class="btn btn-sm" data-act="test" data-id="${esc(d.id)}" ${d.usable ? '' : 'disabled'}>Test</button>
-           <button type="button" class="btn btn-sm" data-act="remove" data-id="${esc(d.id)}">Remove</button>`;
+           <button type="button" class="btn btn-secondary btn-sm" data-act="remove-no">Keep</button></span>`
+        : `<button type="button" class="btn btn-secondary btn-sm" data-act="test" data-id="${esc(d.id)}" ${d.usable ? '' : 'disabled'}>Test</button>
+           <button type="button" class="btn btn-secondary btn-sm" data-act="remove" data-id="${esc(d.id)}">Remove</button>`;
       const msg = deviceMsg.id === d.id ? `<div class="form-status ${deviceMsg.error ? 'form-status-error' : 'us-ok'}">${esc(deviceMsg.text)}</div>` : '';
       return `<tr>
         ${admin ? `<td>${esc(d.person)}</td>` : ''}
-        <td>${PLATFORM_ICON[d.platform] || '🔔'} ${esc(d.label)}${here ? ' <span class="badge us-you">this device</span>' : ''}
+        <td>${ico(PLATFORM_ICON[d.platform] || 'bell', { size: 'sm' })} ${esc(d.label)}${here ? ' <span class="badge us-you">this device</span>' : ''}
           ${d.usable ? '' : '<div class="pa-warn pa-small">Will not get alerts (account off, or set up with an old key: enable again on the phone).</div>'}</td>
         <td>${esc(fmtTime(d.created_at))}</td>
         <td>${last}</td>
@@ -397,7 +405,7 @@
     const rows = deliveries.slice(0, 12).map((x) => `<tr>
       <td>${esc(fmtTime(x.at))}</td><td>${esc(x.kind)}${x.tier === 2 ? ' (backup)' : ''}</td>
       <td>${esc(x.title)}</td><td>${esc(x.label)}</td>
-      <td>${x.status === 'sent' ? '✔ sent' : `<span class="pa-warn">${esc(x.status)}</span>`}</td></tr>`).join('');
+      <td>${x.status === 'sent' ? `${ico('check', { size: 'sm' })} sent` : `<span class="pa-warn">${esc(x.status)}</span>`}</td></tr>`).join('');
     return `<details class="pa-details"><summary>Recent phone alerts (${deliveries.length})</summary>
       <div class="us-table-wrap"><table class="us-table pa-table">
         <thead><tr><th>When</th><th>Kind</th><th>Alert</th><th>Phone</th><th>Result</th></tr></thead>
@@ -517,6 +525,12 @@
       }
       await reload();
     });
+    // "Theft alert levels": the Settings card that decides which theft alerts reach phones.
+    host.querySelectorAll('[data-pa-jump]').forEach((b) => b.addEventListener('click', () => {
+      const id = b.getAttribute('data-pa-jump');
+      if (typeof window.jumpTo === 'function') window.jumpTo(id);
+      else { const n = $(id); if (n) n.scrollIntoView({ block: 'start' }); }
+    }));
     host.querySelectorAll('[data-act]').forEach((b) => b.addEventListener('click', async () => {
       const act = b.getAttribute('data-act');
       const id = b.getAttribute('data-id');

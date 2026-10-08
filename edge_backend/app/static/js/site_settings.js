@@ -8,6 +8,13 @@
 //                     cap, per-camera ceiling, idle rate, motion wake; plus what the box can
 //                     sustain now (GET /api/v1/system/analysis-capacity, per camera allocated
 //                     vs measured frames per second). Keys the server does not offer are not shown.
+// #settings-theft-alerts  Theft alert levels (group "theft_alerts"), shown by section with the
+//                     server's sub-headings (sections): when each level starts (THEFT_TIER_*_MIN,
+//                     checked inline: they must rise; the server refuses otherwise with 422), who
+//                     is told at each level (THEFT_ROUTE_*), case and place weights, combined and
+//                     repeated signs. Above the form, the policy explainer from
+//                     GET /api/v1/theft/alert-policy: the score in plain words, the four levels with
+//                     what each does (their channels), worked examples and the camera-role floors.
 //
 // GET /api/v1/site-settings, GET /api/v1/site-settings/timezones (signed in),
 // PUT /api/v1/site-settings, DELETE /api/v1/site-settings/{key} (owner / admin).
@@ -88,7 +95,18 @@
       keys: ['POSE_BUDGET_UTILISATION', 'DECODE_MAX_FPS', 'ANALYTICS_MAX_DETECT_FPS', 'ANALYTICS_IDLE_DETECT_FPS',
         'ANALYTICS_MOTION_WAKE'],
     },
+    theftAlerts: {
+      host: 'settings-theft-alerts', title: 'Theft alert levels', group: 'theft_alerts', sections: true,
+      intro: 'Every possible theft gets a risk score and one of four levels. The level decides who is told and how '
+        + 'loudly: Review (review list only), Watch (dashboard banner), Alert (banner, alarm sound and phones) and '
+        + 'Critical (as Alert, escalated and repeated until someone acknowledges it). A level is a prompt to check, '
+        + 'never a finding of theft.',
+      keys: [],
+    },
   };
+  const TIER_KEYS = ['THEFT_TIER_WATCH_MIN', 'THEFT_TIER_ALERT_MIN', 'THEFT_TIER_CRITICAL_MIN'];
+  const TIER_LABEL = { review: 'Review', watch: 'Watch', alert: 'Alert', critical: 'Critical' };
+  let policy = null;         // GET /api/v1/theft/alert-policy, or {error}
   // Stored as a fraction (0..1), edited and shown as a percentage.
   const PERCENT_KEYS = ['THEFT_MIN_CONFIDENCE', 'POSE_BUDGET_UTILISATION'];
   function isPct(s) {
@@ -113,8 +131,9 @@
     if (s.type === 'timezone') return v || "This device's own time zone";
     if (isPct(s)) return `${Math.round(v * 100)} %`;
     if (s.zero_means && Number(v) === 0) return s.zero_means;
+    if (s.unit === 'x') return `x${Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
     const unit = s.unit === 'GB' ? ' GB' : s.unit === 'MB' ? ' MB' : s.unit === '%' ? ' %' : s.unit === 's' ? ' s'
-      : s.unit === 'days' ? ' days' : s.unit === 'fps' ? ' frames/s' : '';
+      : s.unit === 'days' ? ' days' : s.unit === 'fps' ? ' frames/s' : s.unit === 'min' ? ' min' : '';
     return `${Number(v).toLocaleString()}${unit}`;
   }
 
@@ -161,17 +180,17 @@
             <option value="auto" ${auto ? 'selected' : ''}>Automatic (10% of disk)</option>
             <option value="fixed" ${auto ? '' : 'selected'}>Fixed size</option>
           </select>
-          <input class="form-input ss-num" id="${id}" type="number" min="${s.min}" ${most != null ? `max="${most}"` : ''} step="0.5"
-                 value="${auto ? '' : esc(s.value)}" ${auto || dis ? 'disabled' : ''} aria-label="Evidence size limit in GB"> <span class="ss-unit">GB</span>
+          <span class="ss-num-unit"><input class="form-input ss-num" id="${id}" type="number" min="${s.min}" ${most != null ? `max="${most}"` : ''} step="0.5"
+                 value="${auto ? '' : esc(s.value)}" ${auto || dis ? 'disabled' : ''} aria-label="Evidence size limit in GB"> <span class="ss-unit">GB</span></span>
         </div>`;
     }
     if (isPct(s)) {
       return `${label}<div class="ss-inline"><input class="form-input ss-num" id="${id}" type="number" min="${Math.round(s.min * 100)}"
           max="${Math.round(s.max * 100)}" step="1" value="${s.value == null ? '' : Math.round(s.value * 100)}" ${d}> <span class="ss-unit">%</span></div>`;
     }
-    const step = s.type === 'int' ? 1 : (s.unit === '%' ? 1 : 'any');
-    // The labels name their unit ("(days)", "(%)", "(seconds)", "(MB)").
-    const unit = '';
+    const step = s.type === 'int' ? 1 : (s.unit === '%' ? 1 : s.unit === 'x' ? 0.05 : 'any');
+    // The labels name their unit ("(days)", "(%)", "(seconds)", "(MB)"); a weight says "x" (times).
+    const unit = s.unit === 'x' ? '<span class="ss-unit">x (1 = as measured)</span>' : '';
     return `${label}<div class="ss-inline"><input class="form-input ss-num" id="${id}" type="number"
         min="${s.zero_means ? 0 : s.min}" max="${s.max}" step="${step}" value="${esc(s.value)}" ${d}> ${unit}</div>`;
   }
@@ -210,13 +229,14 @@
     }
     const dis = !canEdit();
     const items = cardKeys(card).map((k) => data.settings[k]).filter(Boolean);
+    const explain = name === 'theftAlerts' ? policyHtml() : '';
     if (!items.length) {
       // This server does not offer these settings (older build): say so, show no empty form.
       host.innerHTML = `
         <div class="card-title"><span>${esc(card.title)}</span></div>
         ${card.intro ? `<p class="ra-hint ss-intro">${esc(card.intro)}</p>` : ''}
         <div class="form-status">This box does not offer these settings yet.</div>
-        ${name === 'analysis' ? capacityHtml() : ''}`;
+        ${name === 'analysis' ? capacityHtml() : ''}${explain}`;
       bindCapacity(host);
       return;
     }
@@ -225,8 +245,9 @@
       ${card.intro ? `<p class="ra-hint ss-intro">${esc(card.intro)}</p>` : ''}
       ${name === 'evidence' ? usageHtml() : ''}
       ${name === 'analysis' ? capacityHtml() : ''}
+      ${explain}
       <form class="ss-form" id="ss_form_${name}" autocomplete="off" novalidate>
-        ${items.map((s) => field(s, dis)).join('')}
+        ${card.sections ? sectionedFields(items, dis) : items.map((s) => field(s, dis)).join('')}
         ${dis ? '<div class="ra-hint">Only an owner or admin can change these settings.</div>' : `
         <div class="ss-actions" id="ss_actions_${name}">
           <button type="submit" class="btn btn-primary btn-sm">Save</button>
@@ -235,7 +256,10 @@
       </form>`;
     const form = $(`ss_form_${name}`);
     form.addEventListener('submit', (ev) => { ev.preventDefault(); onSave(name); });
-    form.addEventListener('input', () => setStatus(name, ''));
+    form.addEventListener('input', (ev) => {
+      setStatus(name, '');
+      if (name === 'theftAlerts' && ev.target && TIER_KEYS.some((k) => ev.target.id === fid(k))) checkTierOrder(true);
+    });
     host.querySelectorAll('[data-ss-reset]').forEach((b) => b.addEventListener('click', () => onReset(name, b.dataset.ssReset)));
     bindCapacity(host);
     if (name === 'store') {
@@ -254,6 +278,145 @@
         });
       }
     }
+  }
+
+  // ------------------------------------------------------------------ theft alert levels
+
+  /** Fields grouped by their section (server sub-headings, in the server's order). */
+  function sectionedFields(items, dis) {
+    const labels = (data && data.sections) || {};
+    const order = [...Object.keys(labels), ...items.map((s) => s.section || '')];
+    const seen = new Set();
+    return order.filter((sec) => { if (seen.has(sec)) return false; seen.add(sec); return true; }).map((sec) => {
+      const group = items.filter((s) => (s.section || '') === sec);
+      if (!group.length) return '';
+      const title = labels[sec] || (sec ? sec.charAt(0).toUpperCase() + sec.slice(1) : 'Other');
+      return `<div class="ss-section" data-ss-section="${esc(sec)}"><h4 class="ss-section-title">${esc(title)}</h4>
+          ${SECTION_NOTES[sec] ? `<p class="ra-hint ss-section-note">${esc(SECTION_NOTES[sec])}</p>` : ''}</div>
+        ${group.map((s) => field(s, dis)).join('')}`;
+    }).join('');
+  }
+  const SECTION_NOTES = {
+    levels: 'Risk scores run from 0 to 100 %. Each level starts at its threshold; the three must rise (Watch below Alert below Critical).',
+    routing: 'Review never interrupts anyone, and Critical always uses every channel. These switches change Watch and Alert.',
+    cases: 'Multiplies the confidence by what kind of behaviour it was. Lower a weight when a check raises too many false alarms in this store.',
+    places: 'Multiplies the confidence by where it happened. Several places multiply together, capped (see above).',
+    combos: 'Raise the level when the same person shows several signs, or when incidents repeat at one shelf.',
+  };
+
+  /** The three thresholds as typed (fractions), or null where empty or not a number. */
+  function typedTiers() {
+    return TIER_KEYS.map((k) => {
+      const el = $(fid(k));
+      const s = data && data.settings[k];
+      if (!el || !s) return s ? s.value : null;
+      const v = readValue(s);
+      return typeof v === 'number' && Number.isFinite(v) ? v : null;
+    });
+  }
+
+  /** Inline check that the levels rise; shows the reason under the field that breaks it. True when fine. */
+  function checkTierOrder(live) {
+    if (!data || !TIER_KEYS.every((k) => data.settings[k])) return true;
+    const [w, a, c] = typedTiers();
+    TIER_KEYS.forEach((k) => { const e = $(`${fid(k)}_err`); if (e && e.dataset.order) { e.textContent = ''; delete e.dataset.order; } });
+    if (w === null || a === null || c === null) return true;      // "enter a number" comes from the server
+    let bad = null;
+    if (!(a > w)) bad = 'THEFT_TIER_ALERT_MIN';
+    else if (!(c > a)) bad = 'THEFT_TIER_CRITICAL_MIN';
+    if (!bad) return true;
+    const e = $(`${fid(bad)}_err`);
+    if (e) {
+      e.textContent = `The levels must rise: Watch (${Math.round(w * 100)} %) below Alert (${Math.round(a * 100)} %) below Critical (${Math.round(c * 100)} %).`;
+      e.dataset.order = '1';
+    }
+    if (!live) setStatus('theftAlerts', 'Not saved: the levels must rise.', true);
+    return false;
+  }
+
+  async function loadPolicy() {
+    try {
+      const res = await fetch('/api/v1/theft/alert-policy', { cache: 'no-store' });
+      if (res.ok) policy = await res.json();
+      else policy = { error: res.status === 404 || res.status === 405 ? 'missing' : `HTTP ${res.status}` };
+    } catch (_) {
+      policy = { error: 'no answer' };
+    }
+  }
+
+  const pctText = (v) => (Number.isFinite(Number(v)) ? `${Math.round(Number(v) * 100)} %` : DASH);
+  const tierBadgeHtml = (t, label) => (TIER_LABEL[t]
+    ? `<span class="tier-badge tier-${t}">${esc(label || TIER_LABEL[t])}</span>` : esc(label || DASH));
+  const yesNo = (v, what) => (v ? `<span class="ta-yes">Yes</span>` : `<span class="ta-no">No</span>`) + (what ? `<span class="sr-only"> ${esc(what)}</span>` : '');
+
+  /** The explainer from GET /theft/alert-policy: plain-words score, the levels, examples, role floors. */
+  function policyHtml() {
+    if (!policy) return '<div class="ta-explain"><div class="ra-hint">Loading how the levels work…</div></div>';
+    if (policy.error) {
+      const why = policy.error === 'missing' ? 'This box does not explain its alert levels yet.' : `The explanation of the levels is not available (${esc(policy.error)}).`;
+      return `<div class="ta-explain"><div class="ra-hint">${why}</div></div>`;
+    }
+    const p = policy;
+    const cap = Number.isFinite(Number(p.place_weight_cap)) ? `x${Number(p.place_weight_cap).toFixed(2)}` : DASH;
+    const combos = p.combos || {};
+    const plain = `<p class="ta-plain">Each possible theft gets a <b>risk score</b>: how clearly the camera saw it
+        (its confidence) <b>times</b> where it happened (place weight, together at most ${esc(cap)}) <b>times</b> what kind of
+        behaviour it was (case weight). The score decides the level. Then the level can go up: hiding an item and
+        then leaving without paying within ${esc(Number.isFinite(Number(combos.window_sec)) ? `${Math.round(combos.window_sec)} s` : DASH)} is always Critical;
+        two different signs from the same person in that time, or ${esc(String(combos.burst_min_incidents != null ? combos.burst_min_incidents : DASH))} or more incidents at the
+        same shelf within ${esc(Number.isFinite(Number(combos.burst_window_min)) ? `${Math.round(combos.burst_window_min)} min` : DASH)}, raise it by one; and some camera roles set a minimum level.
+        ${Number.isFinite(Number(p.min_confidence)) ? `Below ${esc(pctText(p.min_confidence))} confidence nothing is raised at all (Alerts and detection).` : ''}</p>
+      ${p.formula ? `<div class="ra-hint ta-formula">${esc(p.formula)}</div>` : ''}`;
+    const tiers = Array.isArray(p.tiers) ? p.tiers : [];
+    const tierRows = tiers.slice().reverse().map((t) => {
+      const ch = t.channels || {};
+      const range = t.id === 'review' ? `below ${pctText(t.max_risk)}` : `from ${pctText(t.min_risk)}`;
+      return `<tr>
+          <td>${tierBadgeHtml(t.id, t.label)}</td>
+          <td class="num">${esc(range)}</td>
+          <td>${yesNo(ch.banner, 'dashboard banner')}</td>
+          <td>${yesNo(ch.sound, 'alarm sound')}</td>
+          <td>${yesNo(ch.push, 'phones')}</td>
+          <td>${yesNo(ch.escalate, 'escalation')}${ch.repeat ? ', repeated' : ''}</td>
+          <td class="ta-desc">${esc(t.description || '')}${(t.editable_settings || []).length ? ' <span class="ta-note">Switchable below.</span>' : ''}</td>
+        </tr>`;
+    }).join('');
+    const tiersTable = tiers.length ? `<div class="ss-cap-wrap"><table class="table table-compact ta-table">
+        <thead><tr><th>Level</th><th class="num">Risk</th><th>Banner</th><th>Sound</th><th>Phones</th><th>Escalate</th><th>What happens</th></tr></thead>
+        <tbody>${tierRows}</tbody></table></div>` : '';
+    const ex = Array.isArray(p.examples) ? p.examples : [];
+    const exTable = ex.length ? `<div class="ta-sub">Worked examples with the current settings</div>
+      <div class="ss-cap-wrap"><table class="table table-compact ta-table">
+        <thead><tr><th>Example</th><th class="num">Confidence</th><th class="num">Risk</th><th>Level</th></tr></thead>
+        <tbody>${ex.map((e) => `<tr><td>${esc(e.label)}</td><td class="num">${esc(pctText(e.confidence))}</td>
+          <td class="num">${esc(pctText(e.risk_score))}</td><td>${tierBadgeHtml(e.alert_tier)}</td></tr>`).join('')}</tbody></table></div>
+      <div class="ra-hint">Illustrations worked out by the box with today's settings, not recorded incidents.</div>` : '';
+    const roles = Array.isArray(p.roles) ? p.roles : [];
+    const roleRows = roles.map((r) => `<tr><td>${esc(r.label || r.role)}</td>
+        <td class="num">${Number.isFinite(Number(r.place_weight)) ? `x${Number(r.place_weight).toFixed(2)}` : DASH}</td>
+        <td>${r.min_tier ? tierBadgeHtml(r.min_tier) : '<span class="ta-no">none</span>'}</td>
+        <td class="num">${Number.isFinite(Number(r.min_confidence)) ? esc(pctText(r.min_confidence)) : DASH}</td></tr>`).join('');
+    const rolesTable = roles.length ? `<div class="ta-sub">Camera roles</div>
+      <div class="ss-cap-wrap"><table class="table table-compact ta-table">
+        <thead><tr><th>Role</th><th class="num">Place weight</th><th>Minimum level</th><th class="num">Raised from confidence</th></tr></thead>
+        <tbody>${roleRows}</tbody></table></div>
+      <div class="ra-hint">A minimum level applies only to incidents whose risk reached Watch; weaker evidence stays in Review. A camera's role is set in its Settings.</div>` : '';
+    const rules = Array.isArray(combos.rules) ? combos.rules : [];
+    const rulesList = rules.length ? `<div class="ta-sub">Combined and repeated signs</div>
+      <ul class="ta-rules">${rules.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>
+      ${Number.isFinite(Number(combos.critical_max_repeats)) ? `<div class="ra-hint">A Critical alert nobody acknowledges is sent again at most ${esc(String(combos.critical_max_repeats))} times.</div>` : ''}` : '';
+    const ph = p.phone_alerts || {};
+    const phone = ph.min_confidence_applies_to
+      ? `<div class="ra-hint">Phone alert level in Phone alerts (${esc(pctText(ph.min_confidence))}): applies to ${esc(ph.min_confidence_applies_to)}.</div>` : '';
+    return `<div class="ta-explain">
+        <div class="ta-sub">How the level is worked out</div>
+        ${plain}
+        ${tiersTable}
+        <details class="ta-more"><summary>Examples, camera roles and combined signs</summary>
+          ${exTable}${rolesTable}${rulesList}
+        </details>
+        ${phone}
+      </div>`;
   }
 
   function renderAll(statusText, isError) {
@@ -376,7 +539,7 @@
     box.innerHTML = `<div class="ss-confirm" role="group" aria-label="Confirm lower limit">
         <span>Lower limit (${esc(labels)}): the oldest evidence above it is deleted straight away.</span>
         <button type="button" class="btn btn-primary btn-sm" id="ss_yes_${name}">Yes, save</button>
-        <button type="button" class="btn btn-sm" id="ss_no_${name}">Keep editing</button>
+        <button type="button" class="btn btn-secondary btn-sm" id="ss_no_${name}">Keep editing</button>
       </div>`;
     $(`ss_yes_${name}`).addEventListener('click', () => send(name, pending[name]));
     $(`ss_no_${name}`).addEventListener('click', () => { delete pending[name]; restoreActions(name); });
@@ -385,6 +548,7 @@
   function onSave(name) {
     if (!data) return;
     clearErrors(name);
+    if (name === 'theftAlerts' && !checkTierOrder(false)) return;
     const values = {};
     cardKeys(CARDS[name]).forEach((k) => {
       const s = data.settings[k];
@@ -418,6 +582,7 @@
       delete pending[name];
       await loadEvidence();
       if (name === 'analysis') await loadCapacity();
+      if (name === 'theftAlerts') await loadPolicy();
       renderCard(name);
       setStatus(name, (data.changed || []).length ? 'Saved. Applies now.' : 'Nothing changed.');
       applyStoreName();
@@ -450,7 +615,7 @@
         box.innerHTML = `<div class="ss-confirm" role="group" aria-label="Confirm reset">
             <span>The default (${esc(key === 'EVIDENCE_MAX_GB' && Number(s.default) === 0 ? autoLabel() : shown(s, s.default))}) is lower: the oldest evidence above it is deleted straight away.</span>
             <button type="button" class="btn btn-primary btn-sm" id="ss_yes_${name}">Yes, reset</button>
-            <button type="button" class="btn btn-sm" id="ss_no_${name}">Keep editing</button>
+            <button type="button" class="btn btn-secondary btn-sm" id="ss_no_${name}">Keep editing</button>
           </div>`;
         $(`ss_yes_${name}`).addEventListener('click', () => send(name, key, 'DELETE'));
         $(`ss_no_${name}`).addEventListener('click', () => { delete pending[name]; restoreActions(name); });
@@ -504,7 +669,7 @@
 
   /** What the box can sustain now, per camera: given (allocated) vs really analysed (measured). */
   function capacityHtml() {
-    const refresh = '<button type="button" class="btn btn-xs" data-ss-capacity="refresh">Refresh</button>';
+    const refresh = '<button type="button" class="btn btn-secondary btn-xs" data-ss-capacity="refresh">Refresh</button>';
     if (!capacity) return `<div class="ss-cap"><div class="ss-cap-head"><span class="ss-cap-title">Capacity now</span>${refresh}</div><div class="ra-hint">Loading…</div></div>`;
     if (capacity.error) {
       const why = capacity.error === 'missing' ? 'This box does not report its analysis capacity yet.' : `Capacity not available (${esc(capacity.error)}).`;
@@ -568,7 +733,7 @@
   async function load() {
     if (!data) renderAll();
     try {
-      const [res] = await Promise.all([fetch(API, { cache: 'no-store' }), loadEvidence(), loadZones(), loadCapacity()]);
+      const [res] = await Promise.all([fetch(API, { cache: 'no-store' }), loadEvidence(), loadZones(), loadCapacity(), loadPolicy()]);
       if (!res.ok) throw new Error((await errorOf(res, 'Site settings unavailable')).message);
       data = await res.json();
       pending = {};
@@ -601,5 +766,5 @@
   else if (document.readyState !== 'loading') boot();
   else document.addEventListener('DOMContentLoaded', boot);
 
-  window.edgeSiteSettings = { reload: load };
+  window.edgeSiteSettings = { reload: load, _test: { CARDS, TIER_KEYS } };
 })();

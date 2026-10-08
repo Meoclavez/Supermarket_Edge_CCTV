@@ -47,7 +47,7 @@ import math
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session_factory
@@ -86,6 +86,20 @@ _TARGET_WHERE = {
 
 EXIT_CATEGORIES = ("ENTRANCE", "EXIT")
 CHECKOUT_CATEGORY = "CHECKOUT"
+
+# Alert levels (services/theft_alert_policy.py). Rows recorded before levels
+# existed have none and are counted as "unclassified" (never inferred).
+TIERS = ("review", "watch", "alert", "critical")
+UNCLASSIFIED = "unclassified"
+
+
+def tier_key(value: Optional[str]) -> str:
+    t = str(value or "").strip().lower()
+    return t if t in TIERS else UNCLASSIFIED
+
+
+def tier_counts() -> Dict[str, int]:
+    return {t: 0 for t in (*TIERS, UNCLASSIFIED)}
 
 
 # ============================================================================
@@ -753,9 +767,21 @@ class TheftDetectionService:
         department: Optional[str] = None,
         limit: int = 50,
         rule: Optional[str] = None,
+        tiers: Optional[Sequence[str]] = None,
     ) -> List[TheftIncidentModel]:
-        """Query theft incidents from database with filters."""
+        """Query theft incidents from database with filters.
+
+        ``tiers``: alert levels to keep (``review``/``watch``/``alert``/
+        ``critical``, or ``unclassified`` for rows recorded before levels).
+        """
         stmt = select(TheftIncidentModel).order_by(desc(TheftIncidentModel.timestamp)).limit(limit)
+        if tiers:
+            T = TheftIncidentModel
+            named = [t for t in tiers if t != UNCLASSIFIED]
+            conds = [T.alert_tier.in_(named)] if named else []
+            if UNCLASSIFIED in tiers:
+                conds.append(T.alert_tier.is_(None))
+            stmt = stmt.where(or_(*conds))
 
         if status:
             stmt = stmt.where(TheftIncidentModel.status == status.upper())
@@ -800,7 +826,7 @@ class TheftDetectionService:
 
         rows = (await db.execute(
             select(T.status, T.resolution, T.resolved_by, T.estimated_loss_value, T.recovered_value,
-                   T.rule, T.theft_type)
+                   T.rule, T.theft_type, T.alert_tier, T.timestamp)
         )).all()
         value_actioned = 0.0
         value_pending = 0.0
@@ -808,12 +834,19 @@ class TheftDetectionService:
         outcomes: Dict[str, int] = {}
         per_rule: Dict[str, List[int]] = {}
         legacy_unverified = 0
-        for status, resolution, resolved_by, est, rec_val, rule, theft_type in rows:
+        by_tier, today_by_tier, active_by_tier = tier_counts(), tier_counts(), tier_counts()
+        tier_reviewed: Dict[str, List[int]] = {}
+        for status, resolution, resolved_by, est, rec_val, rule, theft_type, alert_tier, ts in rows:
+            tk = tier_key(alert_tier)
+            by_tier[tk] += 1
+            if ts is not None and ts >= start_of_today:
+                today_by_tier[tk] += 1
             # A RESOLVED row without resolved_by predates required outcomes:
             # its outcome may be the old RECOVERED_GOODS default. Only an
             # explicit false alarm is trusted from that era (review_outcome).
             kind, outcome = review_outcome(status, resolution, resolved_by)
             if kind == "open":
+                active_by_tier[tk] += 1
                 value_pending += float(est or 0.0)
                 continue
             if kind == "legacy":
@@ -821,6 +854,10 @@ class TheftDetectionService:
                 continue
             if kind != "reviewed":
                 continue
+            tstat = tier_reviewed.setdefault(tk, [0, 0])
+            tstat[0] += 1
+            if outcome == "FALSE_ALARM":
+                tstat[1] += 1
             outcomes[outcome] = outcomes.get(outcome, 0) + 1
             key = rule or theft_type or "UNKNOWN"
             stat = per_rule.setdefault(key, [0, 0])
@@ -855,6 +892,11 @@ class TheftDetectionService:
             false_alarm_rate=round(false_alarms / reviewed, 4) if reviewed else None,
             false_alarm_rate_by_rule=by_rule,
             unverified_legacy_resolutions=legacy_unverified,
+            by_tier=by_tier,
+            today_by_tier=today_by_tier,
+            active_by_tier=active_by_tier,
+            false_alarm_rate_by_tier={t: (round(fa / n, 4) if n else None)
+                                      for t, (n, fa) in ((t, tier_reviewed.get(t, [0, 0])) for t in by_tier)},
         )
 
     async def acknowledge_incident(
@@ -1093,7 +1135,7 @@ async def get_patterns(db: AsyncSession, days: int = 28, burst_minutes: int = 30
     T = TheftIncidentModel
     rows = (await db.execute(
         select(T.id, T.timestamp, T.camera_id, T.camera_name, T.zone_id, T.shelf_zone_id,
-               T.rule, T.theft_type, T.severity, T.status, T.resolution, T.resolved_by)
+               T.rule, T.theft_type, T.severity, T.status, T.resolution, T.resolved_by, T.alert_tier)
         .where(T.timestamp >= since)
         .order_by(T.timestamp)
     )).all()
@@ -1120,7 +1162,8 @@ async def get_patterns(db: AsyncSession, days: int = 28, burst_minutes: int = 30
     if not rows:
         return {**base,
                 "summary": {"incidents": 0, "open": 0, "reviewed": 0, "false_alarms": 0,
-                            "confirmed": 0, "false_alarm_rate": None, "unverified_legacy": 0},
+                            "confirmed": 0, "false_alarm_rate": None, "unverified_legacy": 0,
+                            "tiers": tier_counts()},
                 "hotspots": {"cameras": [], "zones": [], "unzoned_incidents": 0},
                 "hour_dow": {"days": list(WEEKDAY_NAMES), "hours": list(range(24)), "matrix": [],
                              "max": 0, "peak": None},
@@ -1130,10 +1173,12 @@ async def get_patterns(db: AsyncSession, days: int = 28, burst_minutes: int = 30
 
     def tally() -> Dict[str, Any]:
         return {"incidents": 0, "reviewed": 0, "false_alarms": 0, "confirmed": 0, "open": 0,
-                "rules": {}, "last": None}
+                "rules": {}, "last": None, "tiers": tier_counts()}
 
-    def add(t: Dict[str, Any], rule: str, kind: str, outcome: Optional[str], ts: datetime) -> None:
+    def add(t: Dict[str, Any], rule: str, kind: str, outcome: Optional[str], ts: datetime,
+            tier: str = UNCLASSIFIED) -> None:
         t["incidents"] += 1
+        t["tiers"][tier] += 1
         t["rules"][rule] = t["rules"].get(rule, 0) + 1
         t["last"] = ts if t["last"] is None or ts > t["last"] else t["last"]
         if kind == "open":
@@ -1164,23 +1209,24 @@ async def get_patterns(db: AsyncSession, days: int = 28, burst_minutes: int = 30
 
     for r in rows:
         rule = r.rule or r.theft_type or "UNKNOWN"
+        tk = tier_key(r.alert_tier)
         kind, outcome = review_outcome(r.status, r.resolution, r.resolved_by)
         if kind == "legacy":
             legacy += 1
         cam_label[r.camera_id] = cam_names.get(r.camera_id) or r.camera_name or r.camera_id
         zone = r.zone_id or r.shelf_zone_id
-        add(total, rule, kind, outcome, r.timestamp)
-        add(by_cam.setdefault(r.camera_id, tally()), rule, kind, outcome, r.timestamp)
-        add(by_rule.setdefault(rule, tally()), rule, kind, outcome, r.timestamp)
+        add(total, rule, kind, outcome, r.timestamp, tk)
+        add(by_cam.setdefault(r.camera_id, tally()), rule, kind, outcome, r.timestamp, tk)
+        add(by_rule.setdefault(rule, tally()), rule, kind, outcome, r.timestamp, tk)
         if zone:
-            add(by_zone.setdefault((r.camera_id, zone), tally()), rule, kind, outcome, r.timestamp)
+            add(by_zone.setdefault((r.camera_id, zone), tally()), rule, kind, outcome, r.timestamp, tk)
         else:
             unzoned += 1
         local = to_local(r.timestamp)
         matrix[local.weekday()][local.hour] += 1
         week = local.date() - timedelta(days=local.weekday())
-        add(weeks.setdefault(week, tally()), rule, kind, outcome, r.timestamp)
-        places.setdefault((r.camera_id, zone), []).append((r.timestamp, r.id, rule, kind, outcome))
+        add(weeks.setdefault(week, tally()), rule, kind, outcome, r.timestamp, tk)
+        places.setdefault((r.camera_id, zone), []).append((r.timestamp, r.id, rule, kind, outcome, tk))
 
     n = total["incidents"]
 
@@ -1190,7 +1236,7 @@ async def get_patterns(db: AsyncSession, days: int = 28, burst_minutes: int = 30
                 "open": t["open"], "reviewed": t["reviewed"], "false_alarms": t["false_alarms"],
                 "confirmed": t["confirmed"], "false_alarm_rate": rate(t),
                 "top_rule": tr, "top_rule_label": RULE_LABELS.get(tr, tr) if tr else None,
-                "last_at": _iso_utc(t["last"])}
+                "last_at": _iso_utc(t["last"]), "tiers": dict(t["tiers"])}
 
     cameras = sorted(({"camera_id": cid, "camera_name": cam_label[cid], **summary_of(t)}
                       for cid, t in by_cam.items()),
@@ -1213,7 +1259,8 @@ async def get_patterns(db: AsyncSession, days: int = 28, burst_minutes: int = 30
             t = weeks.get(wk) or tally()
             weekly.append({"week_start": wk.isoformat(), "incidents": t["incidents"],
                            "reviewed": t["reviewed"], "false_alarms": t["false_alarms"],
-                           "confirmed": t["confirmed"], "false_alarm_rate": rate(t)})
+                           "confirmed": t["confirmed"], "false_alarm_rate": rate(t),
+                           "tiers": dict(t["tiers"])})
             wk += timedelta(days=7)
 
     # Bursts: runs on one camera + zone, each incident within the window of the previous.
@@ -1227,8 +1274,8 @@ async def get_patterns(db: AsyncSession, days: int = 28, burst_minutes: int = 30
                 continue
             if len(run) >= burst_min:
                 t = tally()
-                for ts, _iid, rule, kind, outcome in run:
-                    add(t, rule, kind, outcome, ts)
+                for ts, _iid, rule, kind, outcome, tk in run:
+                    add(t, rule, kind, outcome, ts, tk)
                 start, end = run[0][0], run[-1][0]
                 bursts.append({
                     "camera_id": cid, "camera_name": cam_label[cid],
@@ -1240,7 +1287,7 @@ async def get_patterns(db: AsyncSession, days: int = 28, burst_minutes: int = 30
                               for k, v in sorted(t["rules"].items(), key=lambda kv: (-kv[1], kv[0]))],
                     "incident_ids": [x[1] for x in run],
                     "open": t["open"], "reviewed": t["reviewed"], "false_alarms": t["false_alarms"],
-                    "confirmed": t["confirmed"],
+                    "confirmed": t["confirmed"], "tiers": dict(t["tiers"]),
                 })
             run = [item] if item is not None else []
     bursts.sort(key=lambda b: b["start"], reverse=True)
@@ -1255,7 +1302,8 @@ async def get_patterns(db: AsyncSession, days: int = 28, burst_minutes: int = 30
         **base,
         "summary": {"incidents": n, "open": total["open"], "reviewed": total["reviewed"],
                     "false_alarms": total["false_alarms"], "confirmed": total["confirmed"],
-                    "false_alarm_rate": rate(total), "unverified_legacy": legacy},
+                    "false_alarm_rate": rate(total), "unverified_legacy": legacy,
+                    "tiers": dict(total["tiers"])},
         "hotspots": {"cameras": cameras, "zones": zones, "unzoned_incidents": unzoned},
         "hour_dow": {"days": list(WEEKDAY_NAMES), "hours": list(range(24)), "matrix": matrix,
                      "max": mx, "peak": peak},

@@ -1,4 +1,4 @@
-// Settings → Online access → Live video (#settings-remote-video).
+// Settings > Online access > Live video (#settings-remote-video).
 //
 // Live video never passes through the online-access server: a remote viewer
 // gets it over a direct WebRTC connection to this box, and the server only
@@ -283,7 +283,7 @@
 
   function sessionsBlock(s) {
     if (!s) return '';
-    const head = `<div class="ra-inline rv-sub"><span>Watching now</span><button type="button" class="btn btn-xs" id="rvSessionsRefresh">Refresh</button></div>`;
+    const head = `<div class="ra-inline rv-sub"><span>Watching now</span><button type="button" class="btn btn-secondary btn-xs" id="rvSessionsRefresh">Refresh</button></div>`;
     if (s.error) return `${head}<div class="form-status form-status-error">${esc(s.error)}</div>`;
     const rows = s.rows || [];
     if (!rows.length) return `${head}<div class="ra-hint">Nobody is watching live video right now.</div>`;

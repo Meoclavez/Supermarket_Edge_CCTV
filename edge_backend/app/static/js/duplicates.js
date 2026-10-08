@@ -16,6 +16,11 @@
 (function () {
   'use strict';
 
+  /** Icon markup from js/icons.js (window.EdgeIcon); '' when that script is missing. Never throws. */
+  const ico = (name, opts) => {
+    try { return window.EdgeIcon && typeof window.EdgeIcon.svg === 'function' ? window.EdgeIcon.svg(name, opts) : ''; } catch (_) { return ''; }
+  };
+
   const MOUNTS = ['dupBannerCameras', 'dupBannerMap'];
   let report = null;
   let inflight = null;
@@ -74,7 +79,7 @@
     const others = g.cameras.filter((c) => !c.primary);
     const A = esc(primary.name);
     let html = `<div class="dup-banner" data-dup-group="${esc(g.id)}" role="group" aria-label="Duplicate camera">
-      <div class="dup-title"><span aria-hidden="true">⚠</span> ${esc(g.message)}</div>
+      <div class="dup-title">${ico('triangle-alert')} ${esc(g.message)}</div>
       <div class="dup-sub">Only <b>${A}</b> counts in store totals (visitors, in store now, heatmaps). ${
         others.map((c) => `<b>${esc(c.name)}</b>`).join(', ')} ${others.length === 1 ? 'is' : 'are'} marked
         <span class="dev-tag warn">duplicate — excluded from store totals</span> and still viewable.
@@ -88,10 +93,10 @@
     ? `<button type="button" class="btn btn-xs btn-primary" data-dup="off" data-cam="${id}"${dis}
           title="Stop ${B}: no video and no analysis until it is turned on again">Keep ${A}, turn off ${B}</button>`
     : `<span class="dev-tag">${B} is turned off</span>`}
-        <button type="button" class="btn btn-xs" data-dup="ask-remove" data-cam="${id}"${dis}>Keep ${A}, remove ${B}</button>
-        <button type="button" class="btn btn-xs" data-dup="primary" data-cam="${id}"${dis}
+        <button type="button" class="btn btn-secondary btn-xs" data-dup="ask-remove" data-cam="${id}"${dis}>Keep ${A}, remove ${B}</button>
+        <button type="button" class="btn btn-secondary btn-xs" data-dup="primary" data-cam="${id}"${dis}
           title="Count ${B} in store totals instead of ${A}">Make ${B} primary</button>
-        <button type="button" class="btn btn-xs" data-dup="dismiss" data-cam="${id}" data-primary="${esc(primary.camera_id)}"${dis}
+        <button type="button" class="btn btn-secondary btn-xs" data-dup="dismiss" data-cam="${id}" data-primary="${esc(primary.camera_id)}"${dis}
           title="Not the same camera: both count in store totals and this warning is not shown again">They're different cameras</button>
       </div>`;
       if (st.remove === b.camera_id) {
@@ -104,7 +109,7 @@
             <div class="dev-hint">${esc(imp.note || '')}</div>
             <div class="fp-actions">
               <button type="button" class="btn btn-xs btn-danger" data-dup="do-remove" data-cam="${id}"${dis}>Remove ${B}</button>
-              <button type="button" class="btn btn-xs" data-dup="cancel"${dis}>Cancel</button>
+              <button type="button" class="btn btn-secondary btn-xs" data-dup="cancel"${dis}>Cancel</button>
             </div></div>`
           : '<div class="dev-hint">Checking what removing it would delete…</div>';
       }
@@ -116,7 +121,7 @@
   function recordersHtml() {
     const recs = (report && report.recorders) || [];
     return recs.filter((r) => !r.ok).map((r) => `<div class="dup-recorder dev-hint">Recorder ${esc(r.host)}: ${esc(r.note || '')}
-      <button type="button" class="btn btn-xs" data-dup="refresh" data-host="${esc(r.host)}"${r.refreshing ? ' disabled' : ''}
+      <button type="button" class="btn btn-secondary btn-xs" data-dup="refresh" data-host="${esc(r.host)}"${r.refreshing ? ' disabled' : ''}
         title="Signs in to the recorder once and reads which camera is on each channel">Read its camera list now</button></div>`).join('');
   }
 
@@ -227,12 +232,12 @@
     const chans = (d.channels || []).map((c) => `<li>Channel ${esc(c.channel)}: already added as ${
       (c.existing || []).map((x) => esc(x.name)).join(', ')}</li>`).join('');
     return `<div class="dup-conflict" role="alert">
-      <div class="dup-title"><span aria-hidden="true">⚠</span> Same camera already added</div>
+      <div class="dup-title">${ico('triangle-alert')} Same camera already added</div>
       <div class="dup-sub">${esc(d.message || 'This camera is already configured.')}</div>
       ${names || chans ? `<ul class="dup-list">${names}${chans}</ul>` : ''}
       <div class="fp-actions">
         <button type="button" class="btn btn-xs btn-primary" data-dup-conflict="use">${esc(o.useLabel || 'Use existing camera')}</button>
-        <button type="button" class="btn btn-xs" data-dup-conflict="anyway"
+        <button type="button" class="btn btn-secondary btn-xs" data-dup-conflict="anyway"
           title="Only for a genuine second stream, e.g. a main-stream close-up: it will be excluded from store totals">${esc(o.anywayLabel || 'Add anyway')}</button>
       </div></div>`;
   }

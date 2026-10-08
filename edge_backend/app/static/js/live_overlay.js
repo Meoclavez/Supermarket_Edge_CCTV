@@ -2,6 +2,9 @@
  * Live AI overlay drawn by the page: every confirmed person the box tracks on
  * a live view, with its box, its pose skeleton (17 COCO keypoints) and its
  * live behaviour (normal / watch / alert, with the cues that make it so).
+ * A person at "alert" (an incident fired) is coloured by the incident's alert
+ * level (behaviour.tier: critical / alert / watch / review) and the chip names
+ * that level; an alert without a level keeps the old alert colour and "ALERT".
  *
  * Data: GET /api/v1/live/tracks?cameras=<id>,<id>... (one request for every
  * view on screen, at most 16 cameras), polled at about the analysed rate of
@@ -48,6 +51,11 @@
   const LIMBS = [[15, 13], [13, 11], [16, 14], [14, 12], [11, 12], [5, 11], [6, 12], [5, 6], [5, 7], [6, 8],
     [7, 9], [8, 10], [1, 2], [0, 1], [0, 2], [1, 3], [2, 4], [3, 5], [4, 6]];
   const LEVEL_WORD = { alert: 'ALERT', watch: 'Watch' };
+  // Alert level of the fired incident (services/theft_alert_policy.py), ascending.
+  const TIERS = ['review', 'watch', 'alert', 'critical'];
+  const TIER_WORD = { critical: 'CRITICAL', alert: 'ALERT', watch: 'WATCH LEVEL', review: 'REVIEW LEVEL' };
+  // Palette key per level (the --lo-tier-* colours in css/live_view.css).
+  const TIER_COLOR = { critical: 'tierCritical', alert: 'tierAlert', watch: 'tierWatch', review: 'tierReview' };
 
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
   const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
@@ -79,6 +87,19 @@
     return lvl === 'alert' || lvl === 'watch' ? lvl : 'normal';
   }
 
+  /** The alert level of the incident fired on this person (only at level "alert"), or null. */
+  function tierOf(track) {
+    if (levelOf(track) !== 'alert') return null;
+    const t = track.behaviour.tier;
+    return TIERS.includes(t) ? t : null;
+  }
+
+  /** Palette key of a track: its level's, or for a fired incident with a level, that level's. */
+  function colorKey(track) {
+    const tier = tierOf(track);
+    return tier ? TIER_COLOR[tier] : levelOf(track);
+  }
+
   /** The chip over a track, or '' for an ordinary person. */
   function chipText(track) {
     const level = levelOf(track);
@@ -86,7 +107,8 @@
     const b = track && track.behaviour;
     const labels = b && Array.isArray(b.labels) ? b.labels.filter((x) => typeof x === 'string' && x) : [];
     if (level === 'normal') return labels.slice(0, 2).join(' · ');
-    return [LEVEL_WORD[level], ...labels.slice(0, 3)].join(' · ');
+    const tier = tierOf(track);
+    return [tier ? TIER_WORD[tier] : LEVEL_WORD[level], ...labels.slice(0, 3)].join(' · ');
   }
 
   /** Normalised box moved on by dt seconds: [x1, y1, x2, y2] or null. */
@@ -175,6 +197,10 @@
       watch: cssVar('--lo-watch', '#ffb020'),
       alert: cssVar('--lo-alert', '#ff4d5e'),
       static: cssVar('--lo-static', '#9aa4b2'),
+      tierCritical: cssVar('--lo-tier-critical', '#ff2d55'),
+      tierAlert: cssVar('--lo-tier-alert', '#ff4d5e'),
+      tierWatch: cssVar('--lo-tier-watch', '#ff9f43'),
+      tierReview: cssVar('--lo-tier-review', '#8fb8ff'),
       highlight: cssVar('--lo-highlight', '#ffffff'),
       chipText: cssVar('--lo-chip-text', '#0b0f14'),
       joint: cssVar('--lo-joint', '#ffffff'),
@@ -266,14 +292,14 @@
     return {
       text: fps !== null ? `AI ${fps < 10 ? fps.toFixed(1) : Math.round(fps)} fps` : 'AI live',
       kind: 'ok',
-      tip: fps !== null ? `Frames analysed per second on this camera (measured). Change it in Settings → Analysis speed.` : '',
+      tip: fps !== null ? `Frames analysed per second on this camera (measured). Change it in Settings > Analysis speed.` : '',
     };
   }
 
   /** A label ending at y; kept inside the W x H picture (a person at the edge would cut it off). */
   function chip(g, text, x, y, color, textColor, scale, W, H) {
     const fs = 11 / scale;
-    g.font = `700 ${fs}px "Plus Jakarta Sans", system-ui, sans-serif`;
+    g.font = `700 ${fs}px ui-sans-serif, system-ui, sans-serif`;
     const padX = 4 / scale;
     const h = fs + 6 / scale;
     const w = g.measureText(text).width + padX * 2;
@@ -322,7 +348,8 @@
       const box = movedBox(t, dt);
       if (!box) return;
       const level = levelOf(t);
-      const color = pal[level];
+      const tier = tierOf(t);
+      const color = pal[colorKey(t)] || pal[level];
       const dx = dt && Array.isArray(t.velocity) ? (t.velocity[0] || 0) * dt : 0;
       const dy = dt && Array.isArray(t.velocity) ? (t.velocity[1] || 0) * dt : 0;
       const x = box[0] * W;
@@ -332,9 +359,14 @@
       g.save();
       g.globalAlpha = t.fresh ? 1 : 0.75;
       g.strokeStyle = color;
-      g.lineWidth = (level === 'alert' ? 2.6 : 1.8) / zoom;
+      g.lineWidth = (tier === 'critical' ? 3.4 : level === 'alert' ? 2.6 : 1.8) / zoom;
       g.setLineDash(t.fresh ? [] : [6 / zoom, 4 / zoom]);
       g.strokeRect(x, y, w, h);
+      if (tier === 'critical') {
+        // A second, outer box: Critical stands out on footage even for colour-blind viewers.
+        g.lineWidth = 1.4 / zoom;
+        g.strokeRect(x - 4 / zoom, y - 4 / zoom, w + 8 / zoom, h + 8 / zoom);
+      }
       g.restore();
 
       // Skeleton: the last matched pose, kept for a second while the track coasts.
@@ -571,6 +603,6 @@
     status: () => ({ state: net.state, reason: net.reason }),
     highlight,
     refresh: () => { redrawAll(); schedule(0); },
-    _test: { contentRect, extrapolationSeconds, levelOf, chipText, movedBox, pollDelayMs, LIMBS, VIS_MIN },
+    _test: { contentRect, extrapolationSeconds, levelOf, tierOf, colorKey, chipText, movedBox, pollDelayMs, LIMBS, VIS_MIN },
   };
 })();

@@ -1,35 +1,35 @@
 /* Your account + Accounts (js/users.js). Theme tokens only, so light and dark both work. */
 
-.us-kv { display: flex; gap: 10px; align-items: baseline; font-size: 12.5px; margin: 4px 0; flex-wrap: wrap; }
-.us-k { min-width: 84px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em;
+.us-kv { display: flex; gap: 12px; align-items: baseline; font-size: 13px; margin: 4px 0; flex-wrap: wrap; }
+.us-k { min-width: 84px; font-size: 12px; font-weight: 600;
   color: var(--text-dim); }
 .us-v { color: var(--text-main); }
-.us-mono { font-family: var(--font-mono); font-size: 11.5px; }
+.us-mono { font-family: var(--font-mono); font-size: 12px; }
 .us-ok { color: var(--ok); }
 
-.us-form { margin-top: 10px; max-width: 640px; }
-.us-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0 10px; }
+.us-form { margin-top: 12px; max-width: 640px; }
+.us-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0 12px; }
 
-.us-roles { font-size: 12px; color: var(--text-dim); line-height: 1.6; margin: 2px 0 10px; }
+.us-roles { font-size: 12px; color: var(--text-dim); line-height: 1.6; margin: 2px 0 12px; }
 .us-roles b { color: var(--text-main); font-weight: 600; }
 
 .us-table-wrap { overflow-x: auto; }
-.us-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-.us-table th { text-align: left; font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em;
-  color: var(--text-dim); padding: 6px 8px; border-bottom: 1px solid rgba(var(--tint-rgb), 0.12); }
-.us-table td { padding: 8px; border-bottom: 1px solid rgba(var(--tint-rgb), 0.06); vertical-align: middle; color: var(--text-main); }
+.us-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.us-table th { text-align: left; font-size: 12px; font-weight: 600; background: var(--surface-2);
+  color: var(--text-secondary); padding: 8px 12px; border-bottom: 1px solid var(--border); }
+.us-table td { padding: 8px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; color: var(--text); }
 .us-table tr.us-panel-row td { padding-top: 0; }
 .us-actions { white-space: nowrap; text-align: right; }
 .us-actions .btn { margin-left: 4px; }
 .us-inline { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 0; }
 .us-inline .form-input, .us-inline .form-select { width: auto; min-width: 160px; }
-.us-inline-label { font-size: 11px; color: var(--text-dim); }
+.us-inline-label { font-size: 12px; color: var(--text-dim); }
 .us-full { flex-basis: 100%; }
 
-.us-role { text-transform: none; letter-spacing: 0; }
-.us-role-owner, .us-role-admin { background: rgba(var(--info-rgb), 0.14); color: var(--accent-cyan); }
-.us-role-operator { background: rgba(var(--tint-rgb), 0.08); color: var(--text-dim); }
-.us-you { background: rgba(var(--ok-rgb), 0.14); color: var(--ok); text-transform: none; letter-spacing: 0; }
+.us-role { text-transform: none; }
+.us-role-owner, .us-role-admin { background: var(--info-bg); border-color: var(--info-border); color: var(--info); }
+.us-role-operator { background: var(--neutral-bg); border-color: var(--neutral-border); color: var(--neutral); }
+.us-you { background: var(--success-bg); border-color: var(--success-border); color: var(--success); text-transform: none; }
 
 /* Operators cannot change setup (the server refuses it); hide the obvious entry points. */
 html[data-edge-role="operator"] [data-admin-only],
@@ -38,10 +38,10 @@ html[data-edge-role="operator"] button[onclick="openDeviceManager()"] { display:
 @media (max-width: 640px) {
   .us-table thead { display: none; }
   .us-table, .us-table tbody, .us-table tr, .us-table td { display: block; width: 100%; }
-  .us-table tr { padding: 6px 0; border-bottom: 1px solid rgba(var(--tint-rgb), 0.08); }
-  .us-table td { border: 0; padding: 3px 0; }
+  .us-table tr { padding: 8px 0; border-bottom: 1px solid var(--border); }
+  .us-table td { border: 0; padding: 4px 0; }
   .us-actions { text-align: left; white-space: normal; }
-  .us-actions .btn { margin: 4px 6px 0 0; }
+  .us-actions .btn { margin: 4px 8px 0 0; }
 }
 
 #settings-accounts[hidden] { display: none !important; }

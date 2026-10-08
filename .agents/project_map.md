@@ -586,6 +586,42 @@ than firing on empty data.
 * **[`docs/supermarket_cctv/Supermarket_Edge_AI_CCTV_Hardware_and_Services_Guide.pdf`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/docs/supermarket_cctv/Supermarket_Edge_AI_CCTV_Hardware_and_Services_Guide.pdf):** Print-ready formal PDF document (5 pages, A4) detailing 32-camera deterministic mathematical sizing, single NVDEC decode throughput, 10-Pillar Foolproof Engineering Validation Matrix, itemized BOM, 32-channel store layout, and procurement checklist.
 * **[`docs/supermarket_cctv/Supermarket_Edge_AI_CCTV_Hardware_and_Services_Guide.html`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/docs/supermarket_cctv/Supermarket_Edge_AI_CCTV_Hardware_and_Services_Guide.html):** Paged-media HTML source for regenerating the 32-camera PDF specification document.
 
+## Enterprise UI and tiered theft alerts (2026-10-08)
+
+* **Design system** (`static/css/style.css`): flat slate theme, dark default + light (`data-theme`,
+  prefers-color-scheme), system font stack, one blue accent (#4c8dff dark / #2563eb light), semantic
+  success/warning/danger/info/neutral tokens (AA), tier tokens `--tier-*`, spacing 4-32, radius 4/6/8 (12
+  modals). Components: `.btn` (+primary/secondary/ghost/danger/success/warning, xs/sm/lg, `.btn-icon`),
+  `.badge-*`, `.status-dot.is-*`, `.card*`, `.table`, `.field`/`.input`/`.select`, `.kpi*`, `.empty-state`,
+  `.tier-badge.tier-*`; old neon class/variable names are aliases. No glows/gradients/blur/web fonts.
+* **Icons:** Lucide `lucide-static@1.53.0` (ISC) as `static/icons/sprite.svg` (80 symbols `i-NAME`),
+  `js/icons.js` `window.EdgeIcon.svg(name,{size,label})` / `.el()`; rebuild with
+  `edge_backend/scripts/build_icon_sprite.py`; licence in `static/icons/LICENSE-lucide.txt` and
+  THIRD_PARTY_NOTICES.md. `tests/test_ui_design_system.py` fails on any emoji/pictograph in static/.
+* **Tiered theft alerts** (`services/theft_alert_policy.py`, migration `m0019_theft_alert_tiers` adds
+  `alert_tier`, `risk_score`, `risk_factors` to theft_incidents): risk = confidence x place (high value
+  x1.25, low value x0.85, exit zone x1.25 or door camera x1.15, checkout camera x1.1; cap x1.5) x case
+  (pocket/chest 1.0, behind back 0.85, sweeping 0.9, exit 0.9, loitering 0.55, pattern 0.65). Levels:
+  review < 0.35 <= watch < 0.55 <= alert < 0.80 <= critical; concealment then exit (same track, 300 s) =
+  critical; two rules on a track or >= 3 incidents per camera+zone in 30 min = +1 level; High-value role
+  floor = alert only if already >= watch. Routing: review = queue only; watch = banner (sound/push
+  switchable, off); alert = banner + sound + push (escalate switchable, off); critical = everything +
+  repeats until acknowledged, bypasses the camera cooldown. Severity kept: critical/alert HIGH, watch
+  MEDIUM, review LOW. Site settings group `theft_alerts` (Settings > Theft alert levels,
+  `#settings-theft-alerts`); GET `/api/v1/theft/alert-policy`; incidents `?tier=` / `?min_tier=`;
+  statistics `by_tier`/`active_by_tier`/`false_alarm_rate_by_tier`; `/live/tracks` and `/live/behaviour`
+  carry `tier` + `risk_score`. Tier routing supersedes the phone roster `min_confidence` for theft
+  incidents (it still gates untiered theft alerts). Dashboard: level KPIs `#lossTierKpis`, chips
+  `#lossTierChips`, "Why this level" on cards, banner/sound gated by `alert_channels`.
+* **Audit (owner decisions 2026-10-08, kept as recommended):** exit-without-checkout only fires on one
+  camera seeing shelves, checkout and exit (no cross-camera re-id), so concealment-then-exit is rare;
+  sweethearting unwired (needs POS per-item scans); critical respects phone quiet hours and camera mute;
+  behind-back discounted x0.8 x 0.85. Dead settings: THEFT_POS_MATCH_TOLERANCE_SEC,
+  THEFT_CONFIDENCE_DURATION_REF_SEC. Fixed: phone severity ignored role floors; FCM pushed every incident
+  while Web Push used confidence >= 0.75; Web Push escalated every theft alert.
+* Tests: test_theft_tiers.py, test_theft_end_to_end.py, test_theft_tier_ui.py (+ fixtures/theft_tier_harness.js),
+  test_ui_design_system.py.
+
 ## Live skeleton/behaviour overlay, analysis speed and zoom (2026-10-08)
 
 * **Model:** RTMO-s pose only (box + 17 keypoints per person); boxes without a skeleton were a

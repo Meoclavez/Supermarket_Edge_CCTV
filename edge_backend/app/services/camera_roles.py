@@ -22,7 +22,10 @@ It does three things:
      and track fallbacks all exclude them);
    * theft-rule thresholds scale by ``theft_sensitivity``
      (``scaled_theft_thresholds``); on a ``high_value`` camera every product
-     zone counts as high value and incidents are raised at least HIGH;
+     zone counts as high value and incidents are raised at least at the
+     ``alert`` tier (``min_alert_tier``; the theft risk score and tiers are
+     in ``theft_alert_policy``); door and checkout roles add a place weight
+     to that score (``place_weight_key``);
    * ``EXIT_WITHOUT_CHECKOUT`` is a single-camera rule (there is no
      cross-camera re-identification), so it is suppressed on cameras that by
      their role cannot see a checkout when the store has dedicated checkout
@@ -81,8 +84,13 @@ class RolePreset:
     primary_footfall: bool = False
     required_setup: Tuple[str, ...] = ()
     optional_setup: Tuple[str, ...] = ()
-    # Minimum severity of theft incidents raised on this camera (None = by confidence).
+    # Minimum severity of theft incidents raised on this camera (None = by
+    # risk). Maps to a minimum alert tier (min_alert_tier): HIGH -> alert,
+    # MEDIUM -> watch.
     alert_severity_floor: Optional[str] = None
+    # Site setting holding this role's place weight in the theft risk score
+    # (services/theft_alert_policy.py); None = no role weight.
+    place_weight_key: Optional[str] = None
     # Every product zone on this camera is treated as high value (loitering rule).
     all_zones_high_value: bool = False
     # What the role enables, one short phrase each (for pickers and docs).
@@ -108,6 +116,7 @@ ROLE_PRESETS: Dict[str, RolePreset] = {
                       "crosses the frame, then draw a counting line across the doorway."),
         features=_f(True, False, False),
         primary_footfall=True,
+        place_weight_key="THEFT_PLACE_WEIGHT_DOOR_CAMERA",
         required_setup=("entrance_tripwire",),
         optional_setup=("calibrate", "ignore_area", "privacy_mask"),
         analytics=("Footfall in", "Hourly traffic", "Occupancy (with exit counts)"),
@@ -121,6 +130,7 @@ ROLE_PRESETS: Dict[str, RolePreset] = {
         # Its line's "in" crossings are real entries (people walking in the
         # exit), so door lines of every kind are the preferred footfall source.
         primary_footfall=True,
+        place_weight_key="THEFT_PLACE_WEIGHT_DOOR_CAMERA",
         required_setup=("exit_tripwire",),
         optional_setup=("calibrate", "ignore_area", "privacy_mask"),
         analytics=("Footfall out", "Occupancy (with entrance counts)", "Exit without checkout (same-camera)"),
@@ -132,6 +142,7 @@ ROLE_PRESETS: Dict[str, RolePreset] = {
                       "the arrow marks the inside."),
         features=_f(True, False, True),
         primary_footfall=True,
+        place_weight_key="THEFT_PLACE_WEIGHT_DOOR_CAMERA",
         required_setup=("entrance_tripwire",),
         optional_setup=("calibrate", "ignore_area", "privacy_mask"),
         analytics=("Footfall in and out", "Occupancy", "Hourly traffic"),
@@ -145,6 +156,7 @@ ROLE_PRESETS: Dict[str, RolePreset] = {
         features=_f(True, True, True),
         theft_sensitivity=1.25,
         person_max_frame_fraction=0.6,
+        place_weight_key="THEFT_PLACE_WEIGHT_CHECKOUT_CAMERA",
         required_setup=("checkout_zone",),
         optional_setup=("queue_zone", "pos_register_link", "product_zones", "calibrate", "ignore_area", "privacy_mask"),
         analytics=("Queue length now", "Time at the lane / wait", "Lane sales per customer (POS)",
@@ -163,8 +175,8 @@ ROLE_PRESETS: Dict[str, RolePreset] = {
     ),
     "high_value": RolePreset(
         id="high_value", label="High-value area",
-        description=("Liquor, cosmetics, electronics, pharmacy: theft rules are more sensitive and "
-                     "alerts are raised HIGH."),
+        description=("Liquor, cosmetics, electronics, pharmacy: theft rules are more sensitive, every "
+                     "product area counts as high value, and incidents are raised at least at the Alert level."),
         mounting_tip=("Mount close, facing the display, so hands and pockets are clearly visible; draw a "
                       "product area over each high-value section."),
         features=_f(True, True, True),
@@ -269,6 +281,29 @@ def scaled_theft_thresholds(sensitivity: float = 1.0) -> Dict[str, Any]:
         # distinct cue types stay required whatever the sensitivity.
         "pattern_score_threshold": max(0.6, float(settings.THEFT_PATTERN_SCORE_THRESHOLD) / s),
     }
+
+
+SEVERITY_MIN_TIER = {"LOW": "review", "MEDIUM": "watch", "HIGH": "alert", "CRITICAL": "critical"}
+
+
+def min_alert_tier(role: Optional[str]) -> Optional[str]:
+    """The lowest alert tier for theft incidents on a camera with ``role`` (None = no floor)."""
+    p = preset(role)
+    if p is None or not p.alert_severity_floor:
+        return None
+    return SEVERITY_MIN_TIER.get(str(p.alert_severity_floor).upper())
+
+
+def place_weight(role: Optional[str]) -> Tuple[Optional[str], Optional[float]]:
+    """(site-setting key, current value) of the role's theft place weight; (None, None) without one."""
+    p = preset(role)
+    key = p.place_weight_key if p is not None else None
+    if not key:
+        return None, None
+    try:
+        return key, float(getattr(settings, key))
+    except (AttributeError, TypeError, ValueError):
+        return key, None
 
 
 def exit_rule_allowed(role: Optional[str], store_roles: Iterable[Optional[str]]) -> bool:

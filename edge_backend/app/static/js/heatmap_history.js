@@ -192,25 +192,25 @@
         <label class="hm-field"><span class="hm-field-label">Where</span>
           <select id="hmSpace" class="form-select hm-select"><option value="floor">Whole store (map)</option></select></label>
         <div class="hm-seg" role="group" aria-label="What to show">
-          ${KINDS.map((k) => `<button type="button" class="btn btn-sm hm-seg-btn" data-hm-kind="${k.kind}" title="${escapeHtml(k.title)}" aria-pressed="false">${escapeHtml(k.label)}</button>`).join('')}
+          ${KINDS.map((k) => `<button type="button" class="btn btn-secondary btn-sm hm-seg-btn" data-hm-kind="${k.kind}" title="${escapeHtml(k.title)}" aria-pressed="false">${escapeHtml(k.label)}</button>`).join('')}
         </div>
         <div class="hm-seg" role="group" aria-label="Time range">
-          ${RANGES.map((r) => `<button type="button" class="btn btn-sm hm-seg-btn" data-hm-range="${r.range}" aria-pressed="false">${r.label}</button>`).join('')}
+          ${RANGES.map((r) => `<button type="button" class="btn btn-secondary btn-sm hm-seg-btn" data-hm-range="${r.range}" aria-pressed="false">${r.label}</button>`).join('')}
         </div>
         <label class="hm-field"><span class="hm-field-label">Date</span>
           <input type="date" id="hmDate" class="form-input hm-select" /></label>
         <label class="hm-field" id="hmHourField"><span class="hm-field-label">Hour</span>
           <select id="hmHour" class="form-select hm-select"></select></label>
         <div class="hm-actions">
-          <button type="button" class="btn btn-sm" data-action="hm-play" aria-pressed="false" title="Step through the recorded hours of this day">Play day</button>
-          <button type="button" class="btn btn-sm" data-action="hm-compare" aria-pressed="false" aria-controls="hmComparePanel">Compare with…</button>
+          <button type="button" class="btn btn-secondary btn-sm" data-action="hm-play" aria-pressed="false" title="Step through the recorded hours of this day">Play day</button>
+          <button type="button" class="btn btn-secondary btn-sm" data-action="hm-compare" aria-pressed="false" aria-controls="hmComparePanel">Compare with…</button>
           <button type="button" class="btn btn-sm btn-secondary" data-action="hm-record-now" title="Write the current hour so far now instead of waiting for it to end">Record now</button>
-          <button type="button" class="btn btn-sm" data-action="hm-bg-refresh" hidden title="Take a new picture from this camera for the background">New camera picture</button>
+          <button type="button" class="btn btn-secondary btn-sm" data-action="hm-bg-refresh" hidden title="Take a new picture from this camera for the background">New camera picture</button>
         </div>
       </div>
       <div class="hm-compare-panel" id="hmComparePanel" hidden>
         <div class="hm-seg hm-presets" role="group" aria-label="Compare periods">
-          ${PRESETS.map((p) => `<button type="button" class="btn btn-sm hm-seg-btn" data-hm-preset="${p.id}" aria-pressed="false">${escapeHtml(p.label)}</button>`).join('')}
+          ${PRESETS.map((p) => `<button type="button" class="btn btn-secondary btn-sm hm-seg-btn" data-hm-preset="${p.id}" aria-pressed="false">${escapeHtml(p.label)}</button>`).join('')}
         </div>
         <div class="hm-custom" id="hmCustom" hidden>
           <fieldset class="hm-period"><legend>Before (A)</legend>
@@ -342,11 +342,13 @@
     sec.querySelectorAll('[data-hm-kind]').forEach((b) => {
       const on = b.dataset.hmKind === S.kind;
       b.classList.toggle('btn-primary', on);
+      b.classList.toggle('btn-secondary', !on);
       b.setAttribute('aria-pressed', on ? 'true' : 'false');
     });
     sec.querySelectorAll('[data-hm-range]').forEach((b) => {
       const on = !S.compare && b.dataset.hmRange === S.range;
       b.classList.toggle('btn-primary', on);
+      b.classList.toggle('btn-secondary', !on);
       b.setAttribute('aria-pressed', on ? 'true' : 'false');
     });
     const sp = el('hmSpace');
@@ -360,6 +362,7 @@
     const cmpBtn = sec.querySelector('[data-action="hm-compare"]');
     if (cmpBtn) {
       cmpBtn.classList.toggle('btn-primary', !!S.compareOpen);
+      cmpBtn.classList.toggle('btn-secondary', !S.compareOpen);
       cmpBtn.setAttribute('aria-pressed', S.compareOpen ? 'true' : 'false');
     }
     const panel = el('hmComparePanel');
@@ -367,6 +370,7 @@
     sec.querySelectorAll('[data-hm-preset]').forEach((b) => {
       const on = !!S.compare && S.compare.preset === b.dataset.hmPreset;
       b.classList.toggle('btn-primary', on);
+      b.classList.toggle('btn-secondary', !on);
       b.setAttribute('aria-pressed', on ? 'true' : 'false');
     });
     const strip = el('hmStripWrap');
@@ -376,6 +380,7 @@
       play.textContent = S.playTimer ? 'Pause' : 'Play day';
       play.setAttribute('aria-pressed', S.playTimer ? 'true' : 'false');
       play.classList.toggle('btn-primary', !!S.playTimer);
+      play.classList.toggle('btn-secondary', !S.playTimer);
       play.disabled = !!S.compare;
     }
   }
@@ -1469,7 +1474,7 @@
       list.forEach((c) => {
         const b = document.createElement('button');
         b.type = 'button';
-        b.className = 'btn btn-xs hm-cite';
+        b.className = 'btn btn-secondary btn-xs hm-cite';
         b.dataset.hmCite = '1';
         b.textContent = c.text;
         b.title = 'Show this on the heatmap above';

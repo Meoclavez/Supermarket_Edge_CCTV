@@ -90,10 +90,10 @@
     INFO: { label: 'Summary', cls: 'badge-neutral' },
   };
   const STATUS_BUTTON = {
-    REVIEWED: { label: 'Mark reviewed', cls: '' },
+    REVIEWED: { label: 'Mark reviewed', cls: 'btn-secondary' },
     APPLIED: { label: 'Done', cls: 'btn-primary' },
-    DISMISSED: { label: 'Dismiss', cls: '' },
-    PENDING: { label: 'Reopen', cls: '' },
+    DISMISSED: { label: 'Dismiss', cls: 'btn-secondary' },
+    PENDING: { label: 'Reopen', cls: 'btn-secondary' },
   };
   const STATUS_TOAST = {
     REVIEWED: 'Marked as reviewed', APPLIED: 'Marked as done', DISMISSED: 'Dismissed', PENDING: 'Reopened',

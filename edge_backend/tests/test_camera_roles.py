@@ -429,7 +429,10 @@ def test_theft_sensitivity_scaling_and_role_gates(api):
     cr.role_cache.set_override({"cr_hv": "aisle"})
     pa._refresh_role(cam)
     pa._refresh_product_zones(cam)
-    assert [z.high_value for z in cam.zones] == [False] and pa._severity(cam, 0.35) == "LOW"
+    # Severity now follows the alert tier (theft_alert_policy): 0.35 is the
+    # default Watch threshold (MEDIUM), below it Review (LOW); no role floor.
+    assert [z.high_value for z in cam.zones] == [False] and pa._severity(cam, 0.35) == "MEDIUM"
+    assert pa._severity(cam, 0.3) == "LOW"
     assert cam.exit_rule_on is True                          # no checkout camera: no information
     assert cam.thresholds["sweep_min_reaches"] == base["sweep_min_reaches"]
 

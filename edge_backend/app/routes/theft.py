@@ -10,6 +10,7 @@ All endpoints use the same authentication as the camera snapshot endpoints
 dashboard session cookie), so an ``<img>`` tag can load the evidence image.
 """
 
+import asyncio
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -34,8 +35,9 @@ from app.models.schemas import (
 )
 from app.services.actor import describe_actor
 from app.services.auth_service import auth_service
+from app.services import theft_alert_policy
 from app.services.pose_analytics import pose_analytics
-from app.services.theft_detection_service import RULE_LABELS, theft_detection_service
+from app.services.theft_detection_service import RULE_LABELS, TIERS, UNCLASSIFIED, theft_detection_service
 
 logger = logging.getLogger("TheftRoutes")
 
@@ -73,6 +75,11 @@ class TheftIncidentOut(TheftIncident):
     studio_url: Optional[str] = None
     # Evidence clip (camera feature theft_clip): the URL when the file exists.
     clip_url: Optional[str] = None
+    # Alert level label ("Watch"...) and what that level does now (banner,
+    # sound, push, escalate) under the current routing settings; null for
+    # incidents recorded before levels existed.
+    alert_tier_label: Optional[str] = None
+    alert_channels: Optional[Dict[str, bool]] = None
 
 
 class TheftIncidentOutList(BaseModel):
@@ -97,7 +104,34 @@ def _serialize(inc: TheftIncidentModel) -> TheftIncidentOut:
         out.outcome = inc.resolution
         out.outcome_label = THEFT_OUTCOME_LABELS.get(inc.resolution, inc.resolution.replace("_", " ").capitalize())
     out.studio_url = f"/dashboard/studio?camera_id={inc.camera_id}" if inc.camera_id else None
+    tier = theft_alert_policy.normalise_tier(inc.alert_tier)
+    out.alert_tier = tier
+    if tier:
+        out.alert_tier_label = theft_alert_policy.TIER_LABELS[tier]
+        out.alert_channels = theft_alert_policy.channels(tier)
     return out
+
+
+def _parse_tiers(tier: Optional[str], min_tier: Optional[str]) -> Optional[List[str]]:
+    """``?tier=watch,alert`` and/or ``?min_tier=alert`` -> the tiers to keep (422 on unknown names)."""
+    wanted: Optional[set] = None
+    if tier:
+        names = [t.strip().lower() for t in tier.split(",") if t.strip()]
+        bad = [t for t in names if t not in TIERS and t != UNCLASSIFIED]
+        if bad:
+            raise HTTPException(status_code=422, detail=(
+                f"Unknown alert level {', '.join(bad)}. Use {', '.join(TIERS)} or {UNCLASSIFIED}."))
+        wanted = set(names)
+    if min_tier:
+        m = min_tier.strip().lower()
+        if m not in TIERS:
+            raise HTTPException(status_code=422, detail=f"Unknown alert level {m}. Use {', '.join(TIERS)}.")
+        at_least = set(TIERS[TIERS.index(m):])
+        wanted = at_least if wanted is None else wanted & at_least
+    if wanted is None:
+        return None
+    # Ordered; an empty intersection keeps nothing (never "no filter").
+    return [t for t in (*TIERS, UNCLASSIFIED) if t in wanted] or ["__none__"]
 
 
 @router.get("/incidents", response_model=TheftIncidentOutList)
@@ -106,10 +140,13 @@ async def get_theft_incidents(
     severity: Optional[str] = Query(None, description="Filter by severity (HIGH, MEDIUM, LOW)"),
     department: Optional[str] = Query(None, description="Filter by department name"),
     rule: Optional[str] = Query(None, description="Filter by rule (CONCEALMENT, SHELF_SWEEPING, SUSPICIOUS_LOITERING, EXIT_WITHOUT_CHECKOUT, SWEETHEARTING, BEHAVIOUR_PATTERN)"),
+    tier: Optional[str] = Query(None, description="Filter by alert level: review, watch, alert, critical or unclassified (comma-separated for several)"),
+    min_tier: Optional[str] = Query(None, description="Only this alert level and above (review, watch, alert, critical)"),
     limit: int = Query(50, ge=1, le=200, description="Max incidents to retrieve"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Loss-prevention incidents, newest first, with rule, evidence and snapshot URL."""
+    """Loss-prevention incidents, newest first, with rule, evidence, alert level and snapshot URL."""
+    tiers = _parse_tiers(tier, min_tier)
     try:
         incidents = await theft_detection_service.get_incidents(
             db=db,
@@ -118,6 +155,7 @@ async def get_theft_incidents(
             department=department,
             limit=limit,
             rule=rule,
+            tiers=tiers,
         )
         return TheftIncidentOutList(
             incidents=[_serialize(inc) for inc in incidents],
@@ -183,6 +221,19 @@ async def get_theft_incident_clip(incident_id: str, db: AsyncSession = Depends(g
         raise HTTPException(status_code=404, detail="Evidence clip not found")
     return FileResponse(str(path), media_type="video/mp4",
                         headers={"Cache-Control": "private, max-age=3600"})
+
+
+@router.get("/alert-policy")
+async def get_theft_alert_policy():
+    """How incidents get their alert level, with the current settings.
+
+    Thresholds per level, what each level does (banner, sound, phone push,
+    escalation) and which of those the store may switch, the case and place
+    weights, combination rules, each camera role's weight and minimum level,
+    the phone roster's escalation delay, the site-setting keys (group
+    ``theft_alerts``) and worked examples computed with the current values.
+    """
+    return await asyncio.to_thread(theft_alert_policy.policy)
 
 
 @router.get("/patterns")

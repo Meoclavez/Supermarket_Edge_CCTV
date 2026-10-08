@@ -7,33 +7,35 @@
 .bk-table-wrap { overflow-x: auto; max-width: 100%; }
 .bk-table { width: 100%; }
 .bk-table td { vertical-align: middle; }
-.bk-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
-.bk-confirm-row td { background: rgba(var(--rose-rgb), 0.06); }
-.bk-confirm p { margin: 0 0 8px; font-size: 12px; color: var(--text-soft); line-height: 1.5; }
+.bk-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.bk-confirm-row td { background: var(--danger-bg); }
+.bk-confirm p { margin: 0 0 8px; font-size: 13px; color: var(--text-soft); line-height: 1.5; }
 .bk-confirm-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .bk-reload { margin-left: 8px; }
 
 .bk-danger {
   margin-top: 16px;
-  padding: 12px 14px;
-  border: 1px solid rgba(var(--rose-rgb), 0.35);
-  border-radius: 10px;
-  background: rgba(var(--rose-rgb), 0.05);
+  padding: 12px 16px;
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-md);
+  background: var(--danger-bg);
 }
-.bk-danger-title { font-weight: 700; color: var(--rose); margin-bottom: 6px; }
-.bk-danger p { margin: 0 0 6px; font-size: 12px; color: var(--text-soft); line-height: 1.5; }
+.bk-danger-title { font-weight: 600; color: var(--danger); margin-bottom: 8px; }
+.bk-danger p { margin: 0 0 8px; font-size: 13px; color: var(--text-soft); line-height: 1.5; }
 .bk-reset-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
-.bk-reset-row label { font-size: 12px; font-weight: 700; color: var(--text-soft); }
+.bk-reset-row label { font-size: 12px; font-weight: 600; color: var(--text-soft); }
 .bk-reset-input { flex: 0 1 160px; min-width: 100px; }
+/* The button sits beside a full-height input: match it (btn-sm alone is 28px, the input 32px). */
+.bk-reset-row > .btn { min-height: var(--control-h); }
 
-.tk-box { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--card-border); }
-.tk-title { font-weight: 700; margin-bottom: 4px; }
+.tk-box { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--card-border); }
+.tk-title { font-weight: 600; margin-bottom: 4px; }
 .tk-status { font-size: 13px; color: var(--text-soft); margin: 4px 0 8px; }
 .tk-actions, .tk-confirm { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; font-size: 12px; color: var(--text-soft); }
-.tk-new { margin: 8px 0; padding: 10px 12px; border: 1px solid var(--control-border-accent, var(--card-border)); border-radius: 10px; }
+.tk-new { margin: 8px 0; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface-2); }
 .tk-new-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-.tk-key { flex: 1 1 260px; min-width: 0; word-break: break-all; font-size: 13px; user-select: all; }
-.tk-warn { margin: 6px 0 0; font-weight: 700; color: var(--amber); font-size: 12px; }
+.tk-key { flex: 1 1 260px; min-width: 0; word-break: break-all; font-family: var(--font-mono); font-size: 13px; user-select: all; }
+.tk-warn { margin: 8px 0 0; font-weight: 600; color: var(--amber); font-size: 12px; }
 
 @media (max-width: 600px) {
   .bk-actions { justify-content: flex-start; }
