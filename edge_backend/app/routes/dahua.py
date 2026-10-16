@@ -156,6 +156,9 @@ async def adopt_dahua_channels(
         raise HTTPException(status_code=400, detail="NVR host is required")
     if not payload.channels:
         raise HTTPException(status_code=400, detail="At least one channel must be specified")
+    from app.services.entitlements import ensure_camera_room
+
+    ensure_camera_room(len(payload.channels))  # 409 camera_limit beyond the iKorex plan
 
     from app.models.schemas import CameraFeatureConfig
     from app.services import camera_roles

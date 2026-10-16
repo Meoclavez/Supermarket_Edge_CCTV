@@ -277,6 +277,9 @@ async def add_cameras(
 
     from app.services import camera_source
 
+    from app.services.entitlements import ensure_camera_room
+
+    ensure_camera_room(len(req.cameras))  # 409 camera_limit beyond the iKorex plan
     added = []
     for c in req.cameras:
         cam_id = f"cam_{uuid.uuid4().hex[:8]}"

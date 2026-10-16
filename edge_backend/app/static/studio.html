@@ -8,20 +8,43 @@
   <title>Edge AI CCTV - Camera setup</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/css/style.css?v=2.6.0">
+  <!-- iKorex logo + intro screen; render-blocking on purpose so the intro paints first. -->
+  <link rel="stylesheet" href="/static/css/brand.css?v=2.6.0">
   <link rel="stylesheet" href="/static/css/studio_tools.css?v=2.6.0">
   <link rel="stylesheet" href="/static/css/live_video.css?v=2.6.0">
   <link rel="stylesheet" href="/static/css/ignore_areas.css?v=2.6.0">
   <link rel="stylesheet" href="/static/css/live_view.css?v=2.6.0">
+  <!-- iKorex service: full-screen "Service paused" page and licence banner (fleet.js). -->
+  <link rel="stylesheet" href="/static/css/fleet.css?v=2.6.0">
   <script src="/static/js/auth.js?v=2.6.0"></script>
   <!-- Icons (Lucide sprite, icons/sprite.svg): window.EdgeIcon, used by every module below. -->
   <script src="/static/js/icons.js?v=2.6.0" defer></script>
+  <!-- Intro screen (#edgeSplash below): fades out once sign-in has been checked. -->
+  <script src="/static/js/splash.js?v=2.6.0" defer></script>
+  <noscript><style>.edge-splash { display: none !important; }</style></noscript>
 </head>
 <body>
+  <!-- Intro screen (css/brand.css, js/splash.js): decorative, removed once the page is ready. -->
+  <div id="edgeSplash" class="edge-splash" aria-hidden="true">
+    <div class="edge-splash-inner">
+      <div class="edge-splash-logo">
+        <img class="ikorex-on-dark" src="/static/brand/ikorex-stacked-light-text.webp?v=2.6.0" width="160" height="117" alt="" decoding="async" fetchpriority="high">
+        <img class="ikorex-on-light" src="/static/brand/ikorex-stacked-dark-text.webp?v=2.6.0" width="160" height="117" alt="" decoding="async" fetchpriority="high">
+      </div>
+      <div class="edge-splash-product">Edge AI CCTV</div>
+      <div class="edge-splash-tagline">Private. On-premise.</div>
+      <div class="edge-splash-progress"></div>
+    </div>
+  </div>
   <div class="app-container">
     <header class="header">
       <div class="logo-group studio-logo-group">
         <div class="studio-title-block">
-          <span class="logo-icon" aria-hidden="true"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-cctv"></use></svg></span>
+          <span class="brand-ikorex">
+            <img class="ikorex-wordmark ikorex-on-dark" src="/static/brand/ikorex-h-light-text.webp?v=2.6.0" width="93" height="32" alt="iKorex">
+            <img class="ikorex-wordmark ikorex-on-light" src="/static/brand/ikorex-h-dark-text.webp?v=2.6.0" width="93" height="32" alt="iKorex">
+            <img class="ikorex-mark" src="/static/brand/ikorex-mark.webp?v=2.6.0" width="28" height="28" alt="iKorex">
+          </span>
           <div class="studio-title-text">
             <h1 class="logo-title">Camera setup</h1>
             <div class="logo-sub">Draw counting lines, staff-only areas, checkout and queue areas, privacy masks, ignore areas and product shelves on one camera</div>
@@ -409,6 +432,8 @@
   <script src="/static/js/webrtc_live.js?v=2.6.0" defer></script>
   <script src="/static/js/view_zoom.js?v=2.6.0" defer></script>
   <script src="/static/js/live_overlay.js?v=2.6.0" defer></script>
+  <!-- iKorex service: paused page on 423 service_paused and from GET /api/v1/fleet/status. -->
+  <script src="/static/js/fleet.js?v=2.6.0" defer></script>
   <script src="/static/js/studio.js?v=2.6.0" defer></script>
   <script src="/static/js/theme.js?v=2.6.0" defer></script>
 </body>

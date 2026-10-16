@@ -14,7 +14,10 @@
   <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
   <meta name="apple-mobile-web-app-title" content="Store CCTV">
   <link rel="stylesheet" href="/static/css/style.css?v=2.6.0" />
+  <!-- iKorex logo + intro screen; render-blocking on purpose so the intro paints first. -->
+  <link rel="stylesheet" href="/static/css/brand.css?v=2.6.0" />
   <link rel="stylesheet" href="/static/css/floorplan.css?v=2.6.0" />
+  <link rel="stylesheet" href="/static/css/camera_gallery.css?v=2.6.0" />
   <link rel="stylesheet" href="/static/css/loss.css?v=2.6.0" />
   <link rel="stylesheet" href="/static/css/zone_alerts.css?v=2.6.0" />
   <link rel="stylesheet" href="/static/css/insights.css?v=2.6.0" />
@@ -27,6 +30,7 @@
   <link rel="stylesheet" href="/static/css/backups.css?v=2.6.0" />
   <link rel="stylesheet" href="/static/css/phone_alerts.css?v=2.6.0" />
   <link rel="stylesheet" href="/static/css/live_view.css?v=2.6.0" />
+  <link rel="stylesheet" href="/static/css/fleet.css?v=2.6.0" />
   <!-- auth.js stays a classic (blocking) script: it must wrap fetch before any
        module runs. Everything else is deferred and runs in document order after
        parsing; theme.js is listed last so it still runs after the modules.
@@ -34,17 +38,36 @@
   <script src="/static/js/auth.js?v=2.6.0"></script>
   <!-- Icons (Lucide sprite, icons/sprite.svg): window.EdgeIcon, used by every module below. -->
   <script src="/static/js/icons.js?v=2.6.0" defer></script>
+  <!-- Intro screen (#edgeSplash below): fades out once sign-in has been checked. -->
+  <script src="/static/js/splash.js?v=2.6.0" defer></script>
+  <noscript><style>.edge-splash { display: none !important; }</style></noscript>
 
   <!-- Chart.js 4.4.1 for the visitors-by-hour charts (vendored: vendor/chartjs/SOURCE.txt) -->
   <script src="/static/vendor/chartjs/chart.umd.min.js" defer></script>
 </head>
 <body>
+  <!-- Intro screen (css/brand.css, js/splash.js): decorative, removed once the dashboard is ready. -->
+  <div id="edgeSplash" class="edge-splash" aria-hidden="true">
+    <div class="edge-splash-inner">
+      <div class="edge-splash-logo">
+        <img class="ikorex-on-dark" src="/static/brand/ikorex-stacked-light-text.webp?v=2.6.0" width="160" height="117" alt="" decoding="async" fetchpriority="high">
+        <img class="ikorex-on-light" src="/static/brand/ikorex-stacked-dark-text.webp?v=2.6.0" width="160" height="117" alt="" decoding="async" fetchpriority="high">
+      </div>
+      <div class="edge-splash-product">Edge AI CCTV</div>
+      <div class="edge-splash-tagline">Private. On-premise.</div>
+      <div class="edge-splash-progress"></div>
+    </div>
+  </div>
   <div class="dashboard-shell">
     <!-- Header: store name, the five destinations, and Settings behind the gear.
          theme.js and auth.js mount the theme switch and Sign out into .header-actions. -->
     <header class="top-nav-header">
       <div class="brand-group">
-        <span class="brand-logo-glow" aria-hidden="true"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-cctv"></use></svg></span>
+        <span class="brand-ikorex">
+          <img class="ikorex-wordmark ikorex-on-dark" src="/static/brand/ikorex-h-light-text.webp?v=2.6.0" width="93" height="32" alt="iKorex">
+          <img class="ikorex-wordmark ikorex-on-light" src="/static/brand/ikorex-h-dark-text.webp?v=2.6.0" width="93" height="32" alt="iKorex">
+          <img class="ikorex-mark" src="/static/brand/ikorex-mark.webp?v=2.6.0" width="28" height="28" alt="iKorex">
+        </span>
         <div class="brand-titles">
           <div class="brand-line"><span class="brand-product">Edge AI CCTV</span><h1 class="brand-title" id="brandTitle">Store dashboard</h1></div>
           <span class="brand-subtitle" id="brandSubtitle" title="Camera status">&mdash;</span>
@@ -255,17 +278,28 @@
               <button type="button" class="btn btn-sm" onclick="blueprintEditor.resetView()" title="Fit the whole store in view"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-scan"></use></svg>Fit</button>
             </div>
             <span class="fp-sep fp-edit-only"></span>
-            <div class="fp-tool-group fp-edit-only" id="fpTools">
-              <button type="button" class="btn btn-sm fp-tool active" data-tool="view" onclick="blueprintEditor.setTool('view')" title="Select, move shapes, drag corners (V)">Select</button>
-              <button type="button" class="btn btn-sm fp-tool" data-tool="ROOM" onclick="blueprintEditor.startDraw('ROOM')" title="Draw a room outline (R)"><span class="fp-tool-swatch fp-swatch-room"></span>Room</button>
-              <button type="button" class="btn btn-sm fp-tool" data-tool="WALL" onclick="blueprintEditor.startDraw('WALL')" title="Draw a wall (W), hold Shift for straight segments"><span class="fp-tool-swatch fp-swatch-wall"></span>Wall</button>
-              <button type="button" class="btn btn-sm fp-tool" data-tool="SHELF" onclick="blueprintEditor.startDraw('SHELF')" title="Draw a shelf, counter or obstacle (S)"><span class="fp-tool-swatch fp-swatch-shelf"></span>Shelf</button>
-              <button type="button" class="btn btn-sm fp-tool" data-tool="DOOR" onclick="blueprintEditor.startDraw('DOOR')" title="Draw a door opening (D)"><span class="fp-tool-swatch fp-swatch-door"></span>Door</button>
-              <button type="button" class="btn btn-sm fp-tool btn-primary" data-tool="ZONE" onclick="blueprintEditor.startDrawZone()" title="Draw an area of the floor to measure, in metres on this map (Z). Shelf areas for hand reaches are drawn on the camera picture in Camera setup.">Store area</button>
-              <button type="button" class="btn btn-sm" onclick="blueprintEditor.resizeStore()" title="Floor name and dimensions">Store size</button>
+            <div class="fp-tool-group fp-edit-only fp-tool-palette" id="fpTools" role="toolbar" aria-label="Map tools">
+              <button type="button" class="btn btn-sm fp-tool active" data-tool="view" aria-pressed="true" onclick="blueprintEditor.setTool('view')" title="Select: pick, move, resize and turn things on the map (V)"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-maximize-2"></use></svg>Select</button>
+              <button type="button" class="btn btn-sm fp-tool" data-tool="ROOM" aria-pressed="false" onclick="blueprintEditor.setTool('ROOM')" title="Room: press and drag to draw a room of the building (R)"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-house"></use></svg>Room</button>
+              <button type="button" class="btn btn-sm fp-tool" data-tool="OUTDOOR" aria-pressed="false" onclick="blueprintEditor.setTool('OUTDOOR')" title="Outdoor area: car park, loading dock or side lane (O)"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-sun"></use></svg>Outdoor area</button>
+              <button type="button" class="btn btn-sm fp-tool" data-tool="WALL" aria-pressed="false" onclick="blueprintEditor.setTool('WALL')" title="Wall: click along it, Shift for straight segments (W)"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-minus"></use></svg>Wall</button>
+              <button type="button" class="btn btn-sm fp-tool" data-tool="DOOR" aria-pressed="false" onclick="blueprintEditor.setTool('DOOR')" title="Door: click both sides of the opening (D)"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-door-open"></use></svg>Door</button>
+              <button type="button" class="btn btn-sm fp-tool" data-tool="SHELF" aria-pressed="false" onclick="blueprintEditor.setTool('SHELF')" title="Shelf: press and drag to draw a shelf run (S)"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-package"></use></svg>Shelf</button>
+              <button type="button" class="btn btn-sm fp-tool" data-tool="COUNTER" aria-pressed="false" onclick="blueprintEditor.setTool('COUNTER')" title="Counter: checkouts and service counters (C)"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-receipt"></use></svg>Counter</button>
+              <button type="button" class="btn btn-sm fp-tool" data-tool="OBSTACLE" aria-pressed="false" onclick="blueprintEditor.setTool('OBSTACLE')" title="Obstacle: pillars, displays and anything people walk around (B)"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-ban"></use></svg>Obstacle</button>
+              <button type="button" class="btn btn-sm fp-tool" data-tool="ZONE" aria-pressed="false" onclick="blueprintEditor.setTool('ZONE')" title="Zone: an area of the floor to measure, in metres on this map (Z). Shelf areas for hand reaches are drawn on the camera picture in Camera setup."><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-footprints"></use></svg>Zone</button>
+              <button type="button" class="btn btn-sm fp-tool" data-tool="MEASURE" aria-pressed="false" onclick="blueprintEditor.setTool('MEASURE')" title="Measure: click two points to see the distance; Esc clears (M)"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-move-horizontal"></use></svg>Measure</button>
             </div>
             <span class="fp-sep fp-edit-only"></span>
-            <label class="fp-toggle fp-edit-only" for="fpSnap" title="Snap points to a 0.5 m grid"><input type="checkbox" id="fpSnap" name="fpSnap" checked onchange="blueprintEditor.toggleSnap(this.checked)"> Snap 0.5 m</label>
+            <div class="fp-tool-group fp-edit-only" id="fpEditActions">
+              <label class="fp-toggle" for="fpFreeShape" title="Off: rooms, shelves and zones are dragged out as rectangles. On: click each corner, and drag single corners of a selected shape."><input type="checkbox" id="fpFreeShape" name="fpFreeShape" onchange="blueprintEditor.setFreeShape(this.checked)"> Free shape</label>
+              <label class="fp-toggle" for="fpSnap" title="Snap points and sizes to a 0.5 m grid"><input type="checkbox" id="fpSnap" name="fpSnap" checked onchange="blueprintEditor.toggleSnap(this.checked)"> Snap 0.5 m</label>
+              <button type="button" class="btn btn-sm btn-icon" id="fpUndo" onclick="blueprintEditor.undo()" title="Nothing to undo" aria-label="Undo" disabled><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-undo-2"></use></svg></button>
+              <button type="button" class="btn btn-sm btn-icon" id="fpRedo" onclick="blueprintEditor.redo()" title="Nothing to redo" aria-label="Redo" disabled><svg class="icon icon-md fp-icon-flip" aria-hidden="true"><use href="/static/icons/sprite.svg#i-undo-2"></use></svg></button>
+              <button type="button" class="btn btn-sm" id="fpDuplicate" onclick="blueprintEditor.duplicateSelected()" title="Duplicate the selected item (Ctrl+D)" disabled><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-copy"></use></svg>Duplicate</button>
+              <button type="button" class="btn btn-sm" onclick="blueprintEditor.resizeStore()" title="Map size: add space on any side, or fit the map to what is on it"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-map"></use></svg>Map size</button>
+            </div>
+            <span class="fp-sep fp-edit-only"></span>
             <span class="fp-mode fp-edit-only" title="What a click on the map does now">Now: <b id="fpMode">view</b></span>
             <button type="button" class="btn btn-sm fp-edit-toggle" id="fpEditToggle" aria-pressed="false" onclick="toggleMapEditing()"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-pencil"></use></svg>Edit map</button>
           </div>
@@ -310,6 +344,9 @@
               </div>
             </div>
           </div>
+
+          <!-- Camera gallery (js/camera_gallery.js builds everything inside). -->
+          <div id="cameraGalleryMount"></div>
 
           <!-- One chip per camera (js/floorplan.js renderLiveDom). Its own row under
                the plan, never over it: bounded height, scrolls, and starts closed
@@ -806,6 +843,7 @@
     <section id="tab-settings" class="tab-view">
       <div class="settings-jump" aria-label="Settings sections">
         <button type="button" class="btn btn-sm" onclick="openDeviceManager()">Cameras &amp; recorders</button>
+        <a class="btn btn-sm" href="#settings-fleet" onclick="return jumpTo('settings-fleet')">iKorex service</a>
         <a class="btn btn-sm" href="#settings-account" onclick="return jumpTo('settings-account')">Your account</a>
         <a class="btn btn-sm" href="#settings-accounts" onclick="return jumpTo('settings-accounts')" data-admin-only>Accounts</a>
         <a class="btn btn-sm" href="#settings-recorder-streams" onclick="return jumpTo('settings-recorder-streams')">Recorder sub-streams</a>
@@ -824,6 +862,8 @@
         <a class="btn btn-sm" href="#settings-appearance" onclick="return jumpTo('settings-appearance')">Appearance</a>
       </div>
       <div class="glass-card" id="settings-device"></div>
+      <!-- iKorex service: plan, licence, features included, last contact, control key (fleet.js). -->
+      <div class="glass-card" id="settings-fleet"></div>
       <!-- Phone alerts: this phone, who gets alerts (first priority / backup, escalation,
            alert level, store-offline watchdog), connected phones (phone_alerts.js). -->
       <div class="glass-card" id="settings-phone-alerts"></div>
@@ -1120,6 +1160,8 @@
   <!-- Direct peer-to-peer live video (WebRTC); used by the modules below. -->
   <script src="/static/js/webrtc_live.js?v=2.6.0" defer></script>
   <script src="/static/js/floorplan.js?v=2.6.0" defer></script>
+  <script src="/static/js/still_cache.js?v=2.6.0" defer></script>
+  <script src="/static/js/camera_gallery.js?v=2.6.0" defer></script>
   <script src="/static/js/duplicates.js?v=2.6.0" defer></script>
   <script src="/static/js/devices.js?v=2.6.0" defer></script>
   <script src="/static/js/calibration.js?v=2.6.0" defer></script>
@@ -1145,6 +1187,7 @@
   <script src="/static/js/pos_key.js?v=2.6.0" defer></script>
   <script src="/static/js/users.js?v=2.6.0" defer></script>
   <script src="/static/js/phone_alerts.js?v=2.6.0" defer></script>
+  <script src="/static/js/fleet.js?v=2.6.0" defer></script>
   <script src="/static/js/theme.js?v=2.6.0" defer></script>
 </body>
 </html>

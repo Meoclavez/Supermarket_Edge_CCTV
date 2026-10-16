@@ -99,8 +99,18 @@ def normalize_products(value: Any) -> list[str]:
 # Structure kinds: what the operator draws so the plan resembles their store.
 # WALL and DOOR are polylines with a thickness; the rest are closed polygons.
 # None of these affect analytics -- zones remain the attribution regions.
-STRUCTURE_KINDS = ("ROOM", "WALL", "SHELF", "COUNTER", "DOOR", "OBSTACLE")
+# OUTDOOR is a polygon for space outside the building on the same site (car
+# park, loading dock, side lane); ``properties.area_type`` may label it.
+STRUCTURE_KINDS = ("ROOM", "WALL", "SHELF", "COUNTER", "DOOR", "OBSTACLE", "OUTDOOR")
 POLYLINE_KINDS = ("WALL", "DOOR")
+
+# Limits of the site (store_layouts.width_m/height_m: the whole drawable
+# canvas, building plus outdoor areas) and of one extend call per side.
+SITE_MIN_M = 1.0
+SITE_MAX_M = 1000.0
+EXTEND_MAX_M = 500.0
+# Positions within this distance of the site edge still count as inside.
+EDGE_TOLERANCE_M = 1e-6
 
 STRUCTURE_DEFAULT_COLORS = {
     "ROOM": "#3a4358",
@@ -109,7 +119,48 @@ STRUCTURE_DEFAULT_COLORS = {
     "COUNTER": "#f2a541",
     "DOOR": "#5ad38a",
     "OBSTACLE": "#8b93a7",
+    "OUTDOOR": "#6b8f71",
 }
+
+
+class ItemsOutsideError(StoreLayoutError):
+    """A site change would leave placed items outside the map.
+
+    ``items`` lists them as ``{"type", "id", "name"}`` so the UI can say which
+    ones; nothing was changed.
+    """
+
+    def __init__(self, items: list[dict], message: str = ""):
+        self.items = items
+        n = len(items)
+        super().__init__(message or (
+            f"{n} item{'s' if n != 1 else ''} would end up outside the map; move "
+            f"{'them' if n != 1 else 'it'} first or keep that space"))
+
+    def detail(self) -> dict:
+        return {"code": "items_outside", "message": str(self), "items": self.items}
+
+
+def translate_homography(matrix: Any, dx: float, dy: float) -> Optional[list[list[float]]]:
+    """``T(dx, dy) @ H`` for an image-to-floor homography (row-major 3x3).
+
+    H maps image pixels to floor metres; moving the floor origin so every
+    floor point gains (dx, dy) composes a translation on the floor side. The
+    same pixel then projects to the same physical spot in the new frame.
+    Returns None for a matrix that is not a 3x3 of numbers.
+    """
+    try:
+        rows = [[float(v) for v in row] for row in matrix]
+    except (TypeError, ValueError):
+        return None
+    if len(rows) != 3 or any(len(r) != 3 for r in rows):
+        return None
+    r0, r1, r2 = rows
+    return [
+        [r0[i] + dx * r2[i] for i in range(3)],
+        [r1[i] + dy * r2[i] for i in range(3)],
+        list(r2),
+    ]
 
 
 def _duplicate_fields(camera_id: str) -> dict:
@@ -248,6 +299,22 @@ def point_in_polygon(x: float, y: float, polygon: list[dict]) -> bool:
     return inside
 
 
+# Adds (:dx, :dy) to the floor point {"x", "y"} of every trajectory sample of
+# customer_tracks, in place; image-only samples ({"u", "v"}) are untouched.
+_TRANSLATE_TRAJECTORIES_SQL = """
+UPDATE customer_tracks SET trajectory_points = (
+  SELECT json_group_array(
+    CASE WHEN json_type(je.value, '$.x') IN ('integer', 'real')
+          AND json_type(je.value, '$.y') IN ('integer', 'real')
+      THEN json_set(je.value, '$.x', json_extract(je.value, '$.x') + :dx,
+                              '$.y', json_extract(je.value, '$.y') + :dy)
+      ELSE json(je.value) END)
+  FROM (SELECT value FROM json_each(customer_tracks.trajectory_points) ORDER BY key) AS je)
+WHERE json_valid(trajectory_points) AND json_type(trajectory_points) = 'array'
+  AND trajectory_points LIKE '%"x"%'
+"""
+
+
 class StoreLayoutService:
     """CRUD for the blueprint. All coordinates in metres."""
 
@@ -283,23 +350,286 @@ class StoreLayoutService:
         name: Optional[str] = None,
         width_m: Optional[float] = None,
         height_m: Optional[float] = None,
+        clamp: bool = False,
     ) -> StoreLayoutModel:
+        """Rename and/or set the site size (the right and bottom edges move).
+
+        Shrinking is refused with ``ItemsOutsideError`` when a zone, structure
+        or camera would end up outside, unless ``clamp`` is set: then those
+        items are pulled inside the new edges (shapes can lose their form).
+        """
         layout = await db.get(StoreLayoutModel, layout_id)
         if layout is None:
             raise StoreLayoutError(f"layout {layout_id} not found")
+        new_w = self._check_site_size(width_m, "width") if width_m is not None else float(layout.width_m)
+        new_h = self._check_site_size(height_m, "depth") if height_m is not None else float(layout.height_m)
         if name is not None:
             layout.name = name
-        if width_m is not None:
-            if not 1.0 <= float(width_m) <= 1000.0:
-                raise StoreLayoutError("store width must be between 1 and 1000 metres")
-            layout.width_m = float(width_m)
-        if height_m is not None:
-            if not 1.0 <= float(height_m) <= 1000.0:
-                raise StoreLayoutError("store height must be between 1 and 1000 metres")
-            layout.height_m = float(height_m)
+        if new_w < layout.width_m or new_h < layout.height_m:
+            outside = await self.items_outside(db, layout, 0.0, 0.0, new_w, new_h)
+            if outside and not clamp:
+                raise ItemsOutsideError(outside)
+            if outside:
+                await self._clamp_items(db, layout, new_w, new_h)
+            await self._keep_unplaced_inside(db, new_w, new_h)
+        layout.width_m = new_w
+        layout.height_m = new_h
         await db.commit()
         await db.refresh(layout)
         return layout
+
+    @staticmethod
+    def _check_site_size(value: Any, what: str) -> float:
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            raise StoreLayoutError(f"map {what} must be a number")
+        if not math.isfinite(v) or not SITE_MIN_M <= v <= SITE_MAX_M:
+            raise StoreLayoutError(
+                f"map {what} must be between {SITE_MIN_M:g} and {SITE_MAX_M:g} metres")
+        return round(v, 3)
+
+    # ------------------------------------------------------- site changes
+
+    async def placed_items(self, db: AsyncSession, layout: StoreLayoutModel) -> list[dict]:
+        """Every zone, structure and camera with the floor points it occupies."""
+        items: list[dict] = []
+        for z in await self.list_zones(db, layout.id):
+            items.append({"type": "zone", "id": z.id, "name": z.name, "points": list(z.polygon or [])})
+        for st in await self.list_structures(db, layout.id):
+            items.append({"type": "structure", "id": st.id, "name": st.name, "kind": st.kind,
+                          "points": list(st.polygon or [])})
+        res = await db.execute(select(CameraModel).order_by(CameraModel.channel_number))
+        for cam in res.scalars().all():
+            if cam.floor_x is None or cam.floor_y is None:
+                continue
+            # A camera never put on the map sits at a default spot (often 0, 0):
+            # it must not pin "Fit to content" to the origin or block a shrink.
+            # Site changes keep it inside the map instead (_keep_unplaced_inside).
+            if getattr(cam, "map_placed", None) is False:
+                continue
+            items.append({"type": "camera", "id": cam.id, "name": cam.name,
+                          "points": [{"x": cam.floor_x, "y": cam.floor_y}]})
+        return items
+
+    async def items_outside(
+        self, db: AsyncSession, layout: StoreLayoutModel,
+        dx: float, dy: float, new_w: float, new_h: float,
+    ) -> list[dict]:
+        """Items that, moved by (dx, dy), would not fit in ``new_w`` x ``new_h``."""
+        tol = EDGE_TOLERANCE_M
+        out: list[dict] = []
+        for it in await self.placed_items(db, layout):
+            for p in it["points"]:
+                try:
+                    x, y = float(p["x"]) + dx, float(p["y"]) + dy
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if x < -tol or y < -tol or x > new_w + tol or y > new_h + tol:
+                    entry = {"type": it["type"], "id": it["id"], "name": it["name"]}
+                    if it.get("kind"):
+                        entry["kind"] = it["kind"]
+                    out.append(entry)
+                    break
+        return out
+
+    async def content_bounds(self, db: AsyncSession, layout: StoreLayoutModel) -> Optional[tuple[float, float, float, float]]:
+        """(min_x, min_y, max_x, max_y) over every placed item, or None when the map is empty."""
+        xs: list[float] = []
+        ys: list[float] = []
+        for it in await self.placed_items(db, layout):
+            for p in it["points"]:
+                try:
+                    xs.append(float(p["x"]))
+                    ys.append(float(p["y"]))
+                except (KeyError, TypeError, ValueError):
+                    continue
+        if not xs:
+            return None
+        return min(xs), min(ys), max(xs), max(ys)
+
+    async def extend_site(
+        self,
+        db: AsyncSession,
+        layout: StoreLayoutModel,
+        *,
+        left_m: float = 0.0,
+        top_m: float = 0.0,
+        right_m: float = 0.0,
+        bottom_m: float = 0.0,
+    ) -> dict:
+        """Add (positive) or remove (negative) space on each side of the site.
+
+        Space added on the left or top moves the origin, so every zone,
+        structure, camera position and camera calibration (floor points and
+        homography) is translated by (+left, +top) and stays on the same
+        physical spot. Removing space is refused with ``ItemsOutsideError``
+        when an item would end up outside. Recorded floor positions in the
+        same database (shopper paths, shelf reaches) are translated too.
+        Everything happens in one transaction. Returns
+        ``{"dx", "dy", "width_m", "height_m", "translated": {...}}``.
+        """
+        sides = {}
+        for key, value in (("left", left_m), ("top", top_m), ("right", right_m), ("bottom", bottom_m)):
+            try:
+                v = float(value or 0.0)
+            except (TypeError, ValueError):
+                raise StoreLayoutError(f"{key}_m must be a number")
+            if not math.isfinite(v) or v > EXTEND_MAX_M or v < -SITE_MAX_M:
+                raise StoreLayoutError(f"{key}_m must be at most {EXTEND_MAX_M:g} metres")
+            sides[key] = round(v, 3)
+        if not any(abs(v) > 0 for v in sides.values()):
+            raise StoreLayoutError("give at least one side an amount of space to add or remove")
+        new_w = round(float(layout.width_m) + sides["left"] + sides["right"], 3)
+        new_h = round(float(layout.height_m) + sides["top"] + sides["bottom"], 3)
+        if not SITE_MIN_M <= new_w <= SITE_MAX_M or not SITE_MIN_M <= new_h <= SITE_MAX_M:
+            raise StoreLayoutError(
+                f"the map would be {new_w:g} x {new_h:g} m; each side must stay between "
+                f"{SITE_MIN_M:g} and {SITE_MAX_M:g} metres")
+        dx, dy = sides["left"], sides["top"]
+        if any(v < 0 for v in sides.values()):
+            outside = await self.items_outside(db, layout, dx, dy, new_w, new_h)
+            if outside:
+                raise ItemsOutsideError(outside)
+        translated = await self._translate_all(db, layout, dx, dy) if (dx or dy) else {}
+        await self._keep_unplaced_inside(db, new_w, new_h)
+        layout.width_m = new_w
+        layout.height_m = new_h
+        await db.commit()
+        await db.refresh(layout)
+        if dx or dy:
+            self._reload_projectors_after_translate(translated.pop("_homographies", []))
+        else:
+            translated.pop("_homographies", None)
+        return {"dx": dx, "dy": dy, "width_m": layout.width_m, "height_m": layout.height_m,
+                "translated": translated}
+
+    async def fit_site(self, db: AsyncSession, layout: StoreLayoutModel, margin_m: float = 2.0) -> dict:
+        """Shrink-wrap the site to the bounding box of every item plus ``margin_m``."""
+        try:
+            margin = float(margin_m)
+        except (TypeError, ValueError):
+            raise StoreLayoutError("margin_m must be a number")
+        if not math.isfinite(margin) or not 0.0 <= margin <= 50.0:
+            raise StoreLayoutError("margin_m must be between 0 and 50 metres")
+        bounds = await self.content_bounds(db, layout)
+        if bounds is None:
+            raise StoreLayoutError("the map is empty: draw or place something first")
+        min_x, min_y, max_x, max_y = bounds
+        # The new site, in the current frame, before rounding to centimetres.
+        x0, y0 = min_x - margin, min_y - margin
+        w = max(SITE_MIN_M, (max_x + margin) - x0)
+        h = max(SITE_MIN_M, (max_y + margin) - y0)
+        left = round(-x0, 3)
+        top = round(-y0, 3)
+        right = round((x0 + w) - float(layout.width_m), 3)
+        bottom = round((y0 + h) - float(layout.height_m), 3)
+        if not any(abs(v) >= 0.001 for v in (left, top, right, bottom)):
+            return {"dx": 0.0, "dy": 0.0, "width_m": layout.width_m, "height_m": layout.height_m,
+                    "translated": {}, "unchanged": True}
+        return await self.extend_site(db, layout, left_m=left, top_m=top, right_m=right, bottom_m=bottom)
+
+    async def _translate_all(self, db: AsyncSession, layout: StoreLayoutModel, dx: float, dy: float) -> dict:
+        """Move every floor-metre record of this site by (dx, dy). No commit."""
+        from sqlalchemy import text, update
+
+        from app.models.db_models import ShelfInteractionModel
+
+        def move(points: Any) -> list[dict]:
+            out = []
+            for p in points or []:
+                q = dict(p)
+                q["x"] = round(float(p["x"]) + dx, 3)
+                q["y"] = round(float(p["y"]) + dy, 3)
+                out.append(q)
+            return out
+
+        counts = {"zones": 0, "structures": 0, "cameras": 0, "calibrations": 0,
+                  "shelf_interactions": 0, "customer_tracks": 0}
+        for z in await self.list_zones(db, layout.id):
+            z.polygon = move(z.polygon)
+            counts["zones"] += 1
+        for st in await self.list_structures(db, layout.id):
+            st.polygon = move(st.polygon)
+            counts["structures"] += 1
+        homographies: list[tuple[str, list, Any]] = []
+        res = await db.execute(select(CameraModel))
+        for cam in res.scalars().all():
+            if cam.floor_x is not None and cam.floor_y is not None:
+                cam.floor_x = round(float(cam.floor_x) + dx, 3)
+                cam.floor_y = round(float(cam.floor_y) + dy, 3)
+                counts["cameras"] += 1
+            cp = cam.calibration_points
+            if isinstance(cp, dict) and isinstance(cp.get("floor_points"), list):
+                cp = dict(cp)
+                try:
+                    cp["floor_points"] = move(cp["floor_points"])
+                except (KeyError, TypeError, ValueError):
+                    pass
+                cam.calibration_points = cp
+            if cam.homography_matrix:
+                moved = translate_homography(cam.homography_matrix, dx, dy)
+                if moved is not None:
+                    cam.homography_matrix = moved
+                    counts["calibrations"] += 1
+                    homographies.append((cam.id, moved, cam.calibration_points))
+
+        # Recorded floor positions live in the same database: shelf reaches
+        # (floor_x/floor_y) and the floor part ({"x","y"}) of shopper paths.
+        r = await db.execute(
+            update(ShelfInteractionModel)
+            .where(ShelfInteractionModel.floor_x.is_not(None), ShelfInteractionModel.floor_y.is_not(None))
+            .values(floor_x=ShelfInteractionModel.floor_x + dx, floor_y=ShelfInteractionModel.floor_y + dy)
+        )
+        counts["shelf_interactions"] = int(r.rowcount or 0)
+        try:
+            async with db.begin_nested():
+                r = await db.execute(text(_TRANSLATE_TRAJECTORIES_SQL), {"dx": dx, "dy": dy})
+                counts["customer_tracks"] = int(r.rowcount or 0)
+        except Exception as e:  # noqa: BLE001 - SQLite without JSON1: layout still moves
+            logger.warning(f"site extend: shopper paths not translated ({type(e).__name__}: {e})")
+            counts["customer_tracks"] = None
+        counts["_homographies"] = homographies
+        logger.info(f"Site origin moved by ({dx:+g}, {dy:+g}) m: {counts | {'_homographies': len(homographies)}}")
+        return counts
+
+    @staticmethod
+    def _reload_projectors_after_translate(homographies: list) -> None:
+        """Install the translated matrices in the running projector at once."""
+        if not homographies:
+            return
+        try:
+            from app.services.frame_geometry import calibration_frame_size
+            from app.services.tracking_service import floor_projector
+
+            for cam_id, matrix, cp in homographies:
+                floor_projector.set_homography(cam_id, matrix, calibration_frame_size(cp))
+        except Exception as e:  # noqa: BLE001 - the reconcile loop reloads them anyway
+            logger.warning(f"site extend: projector reload deferred to the reconcile loop: {e}")
+
+    async def _keep_unplaced_inside(self, db: AsyncSession, w: float, h: float) -> None:
+        """Cameras not placed on the map yet stay at a spot inside the site. No commit."""
+        res = await db.execute(select(CameraModel))
+        for cam in res.scalars().all():
+            if getattr(cam, "map_placed", None) is not False:
+                continue
+            if cam.floor_x is not None:
+                cam.floor_x = min(max(float(cam.floor_x), 0.0), w)
+            if cam.floor_y is not None:
+                cam.floor_y = min(max(float(cam.floor_y), 0.0), h)
+
+    async def _clamp_items(self, db: AsyncSession, layout: StoreLayoutModel, w: float, h: float) -> None:
+        """Pull every zone, structure and camera inside a smaller site. No commit."""
+        for z in await self.list_zones(db, layout.id):
+            z.polygon = validate_polygon(z.polygon or [], w, h)
+        for st in await self.list_structures(db, layout.id):
+            st.kind, st.polygon = validate_structure(st.kind, st.polygon or [], w, h)
+        res = await db.execute(select(CameraModel))
+        for cam in res.scalars().all():
+            if cam.floor_x is not None:
+                cam.floor_x = min(max(float(cam.floor_x), 0.0), w)
+            if cam.floor_y is not None:
+                cam.floor_y = min(max(float(cam.floor_y), 0.0), h)
 
     async def list_zones(self, db: AsyncSession, layout_id: str) -> list[StoreZoneModel]:
         res = await db.execute(
@@ -623,6 +953,8 @@ class StoreLayoutService:
                     "has_homography": bool(cam.homography_matrix),
                     # Zone an uncalibrated camera counts into (m0017); unused once calibrated.
                     "watch_zone_id": getattr(cam, "watch_zone_id", None),
+                    # Put on the map by the operator (m0020); False = still at a default spot.
+                    "map_placed": bool(getattr(cam, "map_placed", False)),
                     "calibration_points": cam.calibration_points,
                     # Native pixel size of the frames the worker is reading.
                     # Calibration image points are in this space; the client

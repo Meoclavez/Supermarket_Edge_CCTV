@@ -2,7 +2,7 @@
  * In-page self-test for the blueprint editor. Loaded by floorplan.js ONLY when
  * the page URL carries ?__fptest=1; it is never referenced otherwise.
  *
- * It drives the real canvas with synthetic mouse events, checks the server
+ * It drives the real canvas with synthetic pointer events, checks the server
  * state afterwards, and prints everything into #selftestLog so a headless
  * --dump-dom run can be asserted on. Everything it creates is deleted again.
  */
@@ -38,27 +38,32 @@
     return a && b && a.length === b.length && a.every((p, i) => Math.abs(p.x - b[i].x) < 1e-6 && Math.abs(p.y - b[i].y) < 1e-6);
   }
 
+  // The editor listens to Pointer Events (mouse, touch and pen).
+  function pointer(canvas, type, init) {
+    const Ctor = typeof PointerEvent === 'function' ? PointerEvent : MouseEvent;
+    canvas.dispatchEvent(new Ctor(type, Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, init)));
+  }
   function clickWorld(ed, wx, wy, opts = {}) {
     const canvas = ed.canvas;
     const s = ed.toScreen(wx, wy);
     const r = canvas.getBoundingClientRect();
     const init = { bubbles: true, cancelable: true, clientX: r.left + s.x, clientY: r.top + s.y, button: 0, shiftKey: !!opts.shift };
-    canvas.dispatchEvent(new MouseEvent('mousemove', init));
-    canvas.dispatchEvent(new MouseEvent('mousedown', init));
-    window.dispatchEvent(new MouseEvent('mouseup', init));
+    pointer(canvas, 'pointermove', init);
+    pointer(canvas, 'pointerdown', init);
+    pointer(canvas, 'pointerup', init);
     canvas.dispatchEvent(new MouseEvent('click', init));
   }
-  function dragWorld(ed, from, to) {
+  function dragWorld(ed, from, to, opts = {}) {
     const canvas = ed.canvas;
     const r = canvas.getBoundingClientRect();
-    const a = ed.toScreen(from.x, from.y), b = ed.toScreen(to.x, to.y);
+    const a = opts.screen ? from : ed.toScreen(from.x, from.y), b = ed.toScreen(to.x, to.y);
     const mk = (p) => ({ bubbles: true, cancelable: true, clientX: r.left + p.x, clientY: r.top + p.y, button: 0 });
-    canvas.dispatchEvent(new MouseEvent('mousemove', mk(a)));
-    canvas.dispatchEvent(new MouseEvent('mousedown', mk(a)));
+    pointer(canvas, 'pointermove', mk(a));
+    pointer(canvas, 'pointerdown', mk(a));
     const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-    canvas.dispatchEvent(new MouseEvent('mousemove', mk(mid)));
-    canvas.dispatchEvent(new MouseEvent('mousemove', mk(b)));
-    window.dispatchEvent(new MouseEvent('mouseup', mk(b)));
+    pointer(canvas, 'pointermove', mk(mid));
+    pointer(canvas, 'pointermove', mk(b));
+    pointer(canvas, 'pointerup', mk(b));
   }
 
   async function cssClassAudit() {
@@ -73,7 +78,7 @@
     for (const f of ['/static/js/floorplan.js', '/static/js/devices.js', '/static/js/calibration.js']) {
       const src = await (await fetch(f)).text();
       (src.match(/class="([^"]*)"/g) || []).forEach((m) => {
-        m.slice(7, -1).replace(/\$\{[^}]*\}/g, ' ').split(/\s+/).forEach((c) => { if (/^[a-z][\w-]*$/i.test(c)) used.add(c); });
+        m.slice(7, -1).replace(/[\w-]*\$\{[^}]*\}[\w-]*/g, ' ').split(/\s+/).forEach((c) => { if (/^[a-z][\w-]*$/i.test(c)) used.add(c); });
       });
     }
     const missing = [...used].filter((c) => !defined.has(c) && !/^(active|done|pending|ok|err|warn|info|is-|dot-)/.test(c) && !['is-selected', 'is-cal', 'is-uncal', 'is-armed', 'error'].includes(c));
@@ -102,8 +107,11 @@
       const liveRes = await fetch('/api/v1/layout/live');
       out('GET /api/v1/layout/live', liveRes.ok, liveRes.ok ? JSON.stringify(await liveRes.json()).slice(0, 200) : `HTTP ${liveRes.status}`);
 
-      // ---- draw a room via synthetic clicks
+      out('window.FloorplanAPI is present', !!window.FloorplanAPI && typeof window.FloorplanAPI.placeCamera === 'function' && window.FloorplanAPI.ready instanceof Promise);
+
+      // ---- draw a room via synthetic clicks ("Free shape": corner by corner)
       const roomPts = [{ x: 2, y: 2 }, { x: 10, y: 2 }, { x: 10, y: 8 }, { x: 2, y: 8 }];
+      ed.setFreeShape(true);
       ed.startDraw('ROOM');
       out('mode after startDraw(ROOM)', ed.mode === 'draw' && ed.draftKind === 'ROOM', `mode=${ed.mode} kind=${ed.draftKind}`);
       roomPts.forEach((p) => clickWorld(ed, p.x, p.y));
@@ -145,9 +153,42 @@
         lay = await getLayout();
         const v = (lay.structures || []).find((s) => s.id === room.id);
         out('vertex drag persisted', !!v && v.polygon[0].x === 5 && v.polygon[0].y === 4, v ? JSON.stringify(v.polygon[0]) : 'missing');
+        // ---- undo the corner drag (PUT with the old geometry), then redo it
+        await ed.undo();
+        lay = await getLayout();
+        const u = (lay.structures || []).find((s) => s.id === room.id);
+        out('undo restores the corner on the server', !!u && u.polygon[0].x === 4 && u.polygon[0].y === 3, u ? JSON.stringify(u.polygon[0]) : 'missing');
+        await ed.redo();
+      }
+      ed.setFreeShape(false);
+
+      // ---- rectangle drag (the default for shelves), then resize with a handle
+      ed.startDraw('SHELF');
+      dragWorld(ed, { x: 12, y: 2 }, { x: 16, y: 3 });
+      await sleep(200);
+      lay = await getLayout();
+      const shelf = (lay.structures || []).find((s) => s.kind === 'SHELF' && samePoly(s.polygon, [{ x: 12, y: 2 }, { x: 16, y: 2 }, { x: 16, y: 3 }, { x: 12, y: 3 }]));
+      if (shelf) created.structures.push(shelf.id);
+      out('shelf drawn by press-drag-release', !!shelf, shelf ? `id=${shelf.id} area=${shelf.area_m2}` : 'not found');
+      if (shelf) {
+        ed.select({ type: 'structure', id: shelf.id });
+        const h = ed.frameHandles().find((q) => q.kind === 'resize' && q.sx === 1 && q.sy === 0);
+        if (h) dragWorld(ed, { x: h.x, y: h.y }, { x: 18, y: 2.5 }, { screen: true });
+        await sleep(200);
+        lay = await getLayout();
+        const rs = (lay.structures || []).find((s) => s.id === shelf.id);
+        out('resize handle persisted', !!rs && Math.max(...rs.polygon.map((q) => q.x)) === 18, rs ? JSON.stringify(rs.polygon) : 'missing');
       }
 
-      // ---- draw a zone
+      // ---- map size: add 1 m on the right, then remove it again
+      const w0 = ed.layout.width_m;
+      const grown = await ed.extendMap({ right_m: 1 });
+      out('POST /layout/extend grows the map', !!grown && ed.layout.width_m === w0 + 1, `width ${w0} -> ${ed.layout.width_m}`);
+      const shrunk = await ed.extendMap({ right_m: -1 });
+      out('negative extend removes empty space', !!shrunk && ed.layout.width_m === w0, `width ${ed.layout.width_m}`);
+
+      // ---- draw a zone (corner by corner)
+      ed.setFreeShape(true);
       const zonePts = [{ x: 20, y: 3 }, { x: 26, y: 3 }, { x: 26, y: 9 }, { x: 20, y: 9 }];
       ed.startDrawZone();
       zonePts.forEach((p) => clickWorld(ed, p.x, p.y));
@@ -156,14 +197,17 @@
       lay = await getLayout();
       const zone = (lay.zones || []).find((z) => samePoly(z.polygon, zonePts));
       if (zone) created.zones.push(zone.id);
+      ed.setFreeShape(false);
       out('zone persisted via POST /api/v1/layout/zones', !!zone, zone ? `id=${zone.id} area=${zone.area_m2}` : 'not found');
       out('zone inspector rendered', !!document.getElementById('zName'), document.getElementById('fpInspectorTitle') && document.getElementById('fpInspectorTitle').textContent);
 
       // ---- Escape cancels a draft
+      ed.setFreeShape(true);
       ed.startDraw('SHELF');
       clickWorld(ed, 30, 3); clickWorld(ed, 33, 3);
       window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
       out('Escape cancels drawing', ed.mode === 'view' && ed.draft.length === 0, `mode=${ed.mode}`);
+      ed.setFreeShape(false);
 
       // ---- setup panel / hint state
       const setupPanel = document.getElementById('fpSetupPanel');

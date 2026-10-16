@@ -398,6 +398,9 @@ async def test_camera_connection(req: TestConnectionRequest):
 @router.post("", response_model=CameraFeed)
 async def create_camera(cam_in: CameraCreateRequest, db: AsyncSession = Depends(get_db)):
     """Add a camera. Validated server-side; credentials go to the encrypted store."""
+    from ..services.entitlements import ensure_camera_room
+
+    ensure_camera_room(1)  # 409 camera_limit beyond the iKorex plan (new cameras start on)
     cam_id = (cam_in.id or "").strip() or f"cam_{uuid.uuid4().hex[:10]}"
     if not _CAMERA_ID_RE.match(cam_id):
         raise HTTPException(status_code=422, detail="Camera id may only contain letters, digits, '_', '-', '.', ':'.")
@@ -530,6 +533,10 @@ async def _set_enabled(camera_ids: list[str], enabled: bool, db: AsyncSession) -
     if missing:
         raise HTTPException(status_code=404, detail=f"Unknown camera(s): {', '.join(missing[:20])}")
     changed = [found[i] for i in ids if bool(found[i].is_ai_enabled) != enabled]
+    if enabled and changed:
+        from ..services.entitlements import ensure_camera_room
+
+        ensure_camera_room(len(changed))  # 409 camera_limit beyond the iKorex plan
     for cam in changed:
         cam.is_ai_enabled = enabled
     if changed:
@@ -681,6 +688,7 @@ async def update_camera_position(
     cam = await _get_camera_or_404(camera_id, db)
     cam.floor_x = pos.floor_x
     cam.floor_y = pos.floor_y
+    cam.map_placed = True
     if pos.floor_z is not None:
         cam.floor_z = pos.floor_z
     cam.azimuth_deg = pos.azimuth_deg

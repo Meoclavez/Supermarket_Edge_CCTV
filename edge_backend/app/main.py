@@ -126,6 +126,22 @@ async def lifespan(app: FastAPI):
         startup_log.error(f"Could not initialise the device identity: {exc}")
     await _announce_setup_code()  # first run only: prints the one-time setup code
 
+    # iKorex plan (services/entitlements.py): the last verified signed policy.
+    # Paused (suspended, or the licence ended past its grace days) = no
+    # analysis, alerts, phone alerts, night watch, heatmaps or recommendations;
+    # features not in the plan are not started. A box never set up for fleet
+    # control has the default policy: everything on.
+    from .services.fleet_control import fleet_control
+
+    _plan = fleet_control.record_boot()
+    paused = _plan["paused"]
+    plan_on = lambda key: bool(_plan["features"].get(key, True)) and not paused  # noqa: E731
+    if paused:
+        startup_log.warning("iKorex service is PAUSED: analysis, alerts and phone alerts are not started")
+    elif not all(_plan["features"].values()):
+        startup_log.info("iKorex plan: not included: %s",
+                         ", ".join(k for k, v in _plan["features"].items() if not v))
+
     # 2. Load and warm up the models explicitly, so the provider actually in
     #    use is known (and logged) before any camera worker starts.
     try:
@@ -153,17 +169,20 @@ async def lifespan(app: FastAPI):
 
     # 3. Bring up the capture/detect/track pipeline. Without this the database
     # never receives an observation and every metric would have to be faked.
-    await pipeline_supervisor.start()
+    if not paused:
+        await pipeline_supervisor.start()
 
     # 4. Bind pose analytics to this loop so loss-prevention alerts go out as
     # soon as an incident is detected, not after the first theft API request.
     from .services.pose_analytics import pose_analytics
-    await pose_analytics.start()
+    if not paused:
+        await pose_analytics.start()
 
     # 4b. Recorded heatmap history: hourly snapshots, daily roll-ups, backfill.
     from .services.heatmap_history import heatmap_recorder
     try:
-        await heatmap_recorder.start()
+        if plan_on("heatmaps"):
+            await heatmap_recorder.start()
     except Exception as exc:  # heatmap history must never block the store system
         startup_log.exception(f"Heatmap recorder failed to start: {exc}")
 
@@ -171,7 +190,8 @@ async def lifespan(app: FastAPI):
     # recommendations list is filled by a plain GET (recommendations_service).
     from .services.recommendations_service import recommendations_service
     try:
-        await recommendations_service.start()
+        if plan_on("business_insights"):
+            await recommendations_service.start()
     except Exception as exc:
         startup_log.exception(f"Analysis scheduler failed to start: {exc}")
 
@@ -205,8 +225,9 @@ async def lifespan(app: FastAPI):
     from .services.push_alerts import push_alerts
     from .services.offline_watchdog import offline_watchdog
     try:
-        await push_alerts.start()
-        await offline_watchdog.start()
+        if plan_on("phone_alerts"):
+            await push_alerts.start()
+            await offline_watchdog.start()
     except Exception as exc:
         startup_log.exception(f"Phone alert services failed to start: {exc}")
 
@@ -231,10 +252,17 @@ async def lifespan(app: FastAPI):
     # the drain waits for them forever (see services/shutdown_signal.py).
     from .services import shutdown_signal
     shutdown_signal.install()
+    # 7. iKorex fleet control check-in (health numbers out, signed policy and
+    # commands in). Runs while paused too; idle without a tunnel server/token.
+    try:
+        await fleet_control.start()
+    except Exception as exc:
+        startup_log.exception(f"Fleet control failed to start: {exc}")
     try:
         yield
     finally:
         shutdown_signal.request_shutdown()
+        await fleet_control.stop()
         # Before the pipeline: its final partial-hour record reads the live engine.
         await heatmap_recorder.stop()
         await pipeline_supervisor.stop()
@@ -271,12 +299,23 @@ app = FastAPI(
 # first-run setup / API docs through the public hostname (public_exposure.py).
 from .services import public_exposure
 from .services import web_delivery
+from .services import entitlements
 
+# Innermost of the three: 423 service_paused / 403 feature_disabled / 409
+# camera_limit answers still get the security headers and compression.
+app.add_middleware(entitlements.FleetGateMiddleware)
 public_exposure.install(app)
 # gzip for text responses, Cache-Control: no-store on the API; pages and
 # static files set their own caching (content-hash URLs, ETags).
 web_delivery.install(app)
 web_delivery.install_docs(app)
+
+
+@app.exception_handler(entitlements.GateError)
+async def _gate_error(_request: Request, exc: entitlements.GateError):
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse(exc.body, status_code=exc.status_code, headers={"Cache-Control": "no-store"})
 
 
 # Register API Routers
@@ -335,6 +374,10 @@ app.include_router(push_routes.ack_router)
 from .routes import live as live_routes  # noqa: E402
 
 app.include_router(live_routes.router)
+# iKorex service: plan status, control key reset, check in now (fleet_control.py).
+from .routes import fleet as fleet_routes  # noqa: E402
+
+app.include_router(fleet_routes.router)
 
 # Mount Static Files
 STATIC_DIR = Path(__file__).resolve().parent / "static"

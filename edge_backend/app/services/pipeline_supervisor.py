@@ -204,6 +204,21 @@ class PipelineSupervisor:
                 elif cam.rtsp_url:
                     wanted[cam.id] = cam
 
+            # iKorex plan camera limit: the oldest cameras up to the limit are
+            # analysed; newer ones beyond it are kept (not deleted) but get no worker.
+            try:
+                from app.services.entitlements import max_cameras
+
+                limit = max_cameras()
+            except Exception:  # noqa: BLE001 - an unreadable plan never stops cameras
+                limit = None
+            if limit is not None and len(wanted) > limit:
+                ordered = sorted(wanted.values(), key=lambda c: (c.created_at or datetime.min, c.id))
+                for cam in ordered[limit:]:
+                    off[cam.id] = wanted.pop(cam.id)
+                logger.warning("Camera limit %d of the iKorex plan: not analysing %s", limit,
+                               ", ".join(c.id for c in ordered[limit:][:20]))
+
             running = set(live_engine.runtimes.keys())
 
             for cam_id in running - set(wanted.keys()) - set(off.keys()):

@@ -1341,10 +1341,16 @@
     if (e.target.matches && e.target.matches('.loss-form input[type=radio]')) syncValueField(e.target.closest('.loss-form'));
   }
 
+  // Theft alerts not in the iKorex plan (fleet.js): the box answers 403, so do not poll.
+  function theftOff() {
+    const st = window.edgeFleet && typeof window.edgeFleet.status === 'function' ? window.edgeFleet.status() : null;
+    return !!(st && st.features && st.features.theft_detection === false);
+  }
+
   function schedule() {
     clearTimeout(state.timer);
     state.timer = setTimeout(async () => {
-      if (!document.hidden) await load(false);
+      if (!document.hidden && !theftOff()) await load(false);
       schedule();
     }, POLL_MS);
   }

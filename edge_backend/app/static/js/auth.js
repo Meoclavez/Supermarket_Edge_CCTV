@@ -231,7 +231,13 @@
     const first = !adminExists;
     return `
       <div class="auth-card">
-        <div class="auth-brand">EDGE AI CCTV</div>
+        <div class="auth-brand">
+          <span class="auth-brand-logo">
+            <img class="ikorex-on-dark" src="/static/brand/ikorex-h-light-text.webp" width="81" height="28" alt="iKorex">
+            <img class="ikorex-on-light" src="/static/brand/ikorex-h-dark-text.webp" width="81" height="28" alt="iKorex">
+          </span>
+          <span class="auth-brand-product">Edge AI CCTV</span>
+        </div>
         <div class="auth-title">${first ? 'Create the operator account' : 'Sign in'}</div>
         <div class="auth-sub">${first
           ? 'No operator account exists yet. Enter the setup code shown on the server, then choose the credentials that will control this store’s system.'
@@ -458,6 +464,8 @@
         } catch (_) { /* offline or refused: still sign out locally */ }
       }
       setToken(null);
+      // Browser-only data (cached camera pictures) is wiped on this signal.
+      try { window.dispatchEvent(new Event('edge:signed-out')); } catch (_) {}
       window.location.reload();
     },
     // The stored token, only once the server has accepted it.

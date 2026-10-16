@@ -586,6 +586,39 @@ than firing on empty data.
 * **[`docs/supermarket_cctv/Supermarket_Edge_AI_CCTV_Hardware_and_Services_Guide.pdf`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/docs/supermarket_cctv/Supermarket_Edge_AI_CCTV_Hardware_and_Services_Guide.pdf):** Print-ready formal PDF document (5 pages, A4) detailing 32-camera deterministic mathematical sizing, single NVDEC decode throughput, 10-Pillar Foolproof Engineering Validation Matrix, itemized BOM, 32-channel store layout, and procurement checklist.
 * **[`docs/supermarket_cctv/Supermarket_Edge_AI_CCTV_Hardware_and_Services_Guide.html`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/docs/supermarket_cctv/Supermarket_Edge_AI_CCTV_Hardware_and_Services_Guide.html):** Paged-media HTML source for regenerating the 32-camera PDF specification document.
 
+## Store map v2, camera gallery, iKorex branding, fleet control (2026-10-16)
+
+Contracts: `docs/STORE_MAP_V2_CONTRACT.md`, `docs/FLEET_CONTROL_CONTRACT.md`. Built and QA'd
+end-to-end on a scratch box (headless Chrome, all checks PASS); not yet deployed (box offline
+on 2026-10-16 from ~09:00 AEDT, both Tailscale and tunnel).
+* **Map = "site"**: `store_layouts.width_m/height_m` is the whole canvas (building = a ROOM).
+  `POST /api/v1/layout/extend {left_m,top_m,right_m,bottom_m}` (left/top translate zones,
+  structures, cameras, calibration points, homography `T@H`, shelf_interactions floor x/y,
+  customer_tracks `{x,y}`; heatmap_snapshots NOT moved), `POST /layout/fit {margin_m}`,
+  `PUT /layout` shrink -> 409 `items_outside` unless `clamp:true`. New kind `OUTDOOR`.
+  m0020 `cameras.map_placed` (unplaced cameras are excluded from fit and kept inside).
+* **Editor** (`floorplan.js`): tool palette (Room, Outdoor area, Wall, Door, Shelf, Counter,
+  Obstacle, Zone, Measure), drag-rectangle drawing + Free shape, 8 resize handles + rotate
+  (`properties.rotation_deg`), X/Y/Angle/Width/Depth, Duplicate (Ctrl+D), nudge, Undo/Redo,
+  Pointer Events (touch pan/pinch), "Extend the map to fit?" bar, Map size panel, scale-bar
+  plate. `window.FloorplanAPI` + `fp:*` events for the gallery. Self test `?__fptest=1`.
+* **Camera gallery** (`camera_gallery.js`, `still_cache.js`): drag cards onto the map; stills
+  cached per user in IndexedDB `edge-stills`, wiped on sign-out (`edge:signed-out` in auth.js);
+  LAN = snapshot fetch, public = one `WebRtcLive.grabFrame` at a time, never polls.
+* **Branding**: `static/brand/` (WebP used, PNG shipped), `brand.css`, `splash.js` intro.
+* **Fleet control, box side**: `services/entitlements.py` (policy cache, `FleetGateMiddleware`
+  423 service_paused / 403 feature_disabled / 409 camera_limit), `services/fleet_control.py`
+  (check-in every 300 s to `https://<tunnel host>/control/v1/checkin`, Ed25519 verify,
+  key pinned on first use or `.env FLEET_CONTROL_PUBLIC_KEY`; QA-only
+  `FLEET_CONTROL_DEV_URL` for 127.0.0.1), `routes/fleet.py`, `static/js/fleet.js` (Settings
+  "iKorex service" card, licence banner, paused page, also in studio.html). Pause/resume,
+  heatmaps, business_insights, phone_alerts changes restart the app (5 s debounce).
+  Offline never stops anything; licence end date judged on the box clock + grace days.
+* **Fleet control, VPS side**: `~/Projects-1/Server/cctv-tunnel/control` (cctv-control,
+  port 9200, `control.ikorex.com.au`), deploy runbook in that README "Fleet control".
+* Known gaps: older recorded heatmaps offset after extend-left/top; undo of a zone delete gives
+  a new id; edge API rate limiter (100/min/IP) can 429 under heavy page reloads.
+
 ## Enterprise UI and tiered theft alerts (2026-10-08)
 
 * **Design system** (`static/css/style.css`): flat slate theme, dark default + light (`data-theme`,

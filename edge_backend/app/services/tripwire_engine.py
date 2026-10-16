@@ -816,6 +816,14 @@ class TripwireEngine:
             return _fallback
 
     def _deliver(self, alert: PendingAlert) -> None:
+        from app.services.entitlements import feature_safe
+
+        if not feature_safe("zone_alerts"):
+            # Area and line alerts not in the iKorex plan (or paused): no
+            # snapshot, no alert. Crossings still count footfall.
+            alert.frame = None
+            self.stats["alerts_not_in_plan"] = self.stats.get("alerts_not_in_plan", 0) + 1
+            return
         snap = self._write_snapshot(alert)
         if snap:
             url = f"/api/zones/alerts/{alert.alert_id}/snapshot"

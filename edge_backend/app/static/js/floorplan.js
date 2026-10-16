@@ -12,13 +12,22 @@
  *   world  - metres, matching the database polygons
  *   screen - canvas CSS pixels, produced by scale + pan
  *
+ * The map is the whole *site* (store_layouts.width_m/height_m): the building
+ * is just a ROOM on it, next to OUTDOOR areas (car park, loading dock). The
+ * site grows on any side through POST /layout/extend, which moves everything
+ * placed (and every camera calibration) when space is added left or top.
+ *
  * Public surface (window.blueprintEditor):
  *   resize(), resetView(), zoom(f), toggleLayer(name, on), toggleSnap(on)
  *   setHeatmapKind('presence'|'dwell'|'interaction')
- *   setTool('view'), startDraw(kind), startDrawZone(), finishPolygon(),
- *   undoPoint(), cancelDraw(), resizeStore(), startPlaceCamera(),
- *   selectCamera(id), selectShape(type, id), load(),
- *   beginPick(cb), cancelPick(), setCalOverlay(overlay|null)
+ *   setTool('view'|'MEASURE'|kind|'ZONE'), startDraw(kind), startDrawZone(),
+ *   startMeasure(), setFreeShape(on), finishPolygon(), undoPoint(), cancelDraw(),
+ *   undo(), redo(), duplicateSelected(), resizeStore(), extendMap(sides),
+ *   fitMapToContent(), startPlaceCamera(), selectCamera(id), selectShape(type, id),
+ *   load(), beginPick(cb), cancelPick(), setCalOverlay(overlay|null)
+ *
+ * Stable API for other modules (window.FloorplanAPI, defined below), and the
+ * events 'fp:layout-changed', 'fp:camera-hover', 'fp:camera-selected' on window.
  */
 (function () {
   'use strict';
@@ -46,16 +55,24 @@
   };
 
   // Structure kinds are the backend whitelist. WALL and DOOR are polylines.
-  const STRUCT_KINDS = ['ROOM', 'WALL', 'SHELF', 'COUNTER', 'DOOR', 'OBSTACLE'];
+  const STRUCT_KINDS = ['ROOM', 'OUTDOOR', 'WALL', 'SHELF', 'COUNTER', 'DOOR', 'OBSTACLE'];
   const POLYLINE_KINDS = new Set(['WALL', 'DOOR']);
   const KIND_COLORS = {
     ROOM: '#4a90d9', WALL: '#c9d4e0', SHELF: '#f472b6',
-    COUNTER: '#fb923c', DOOR: '#fbbf24', OBSTACLE: '#94a3b8',
+    COUNTER: '#fb923c', DOOR: '#fbbf24', OBSTACLE: '#94a3b8', OUTDOOR: '#6b8f71',
   };
   const KIND_LABEL = {
     ROOM: 'Room', WALL: 'Wall', SHELF: 'Shelf', COUNTER: 'Counter', DOOR: 'Door', OBSTACLE: 'Obstacle',
+    OUTDOOR: 'Outdoor area',
   };
   const minPointsFor = (kind) => (POLYLINE_KINDS.has(kind) ? 2 : 3);
+  // Drawn by press-drag-release as a rectangle unless "Free shape" is on.
+  const RECT_KINDS = new Set(['ROOM', 'OUTDOOR', 'SHELF', 'COUNTER', 'OBSTACLE', 'ZONE']);
+  // Name suggestions for rooms and outdoor areas (inspector name field).
+  const ROOM_PRESETS = ['Sales floor', 'Storeroom', 'Cool room', 'Office', 'Staff room', 'Loading dock', 'Car park'];
+  const OUTDOOR_TYPES = ['Car park', 'Loading dock', 'Side lane', 'Trolley bay', 'Garden centre'];
+  // Keyboard shortcuts for the tool palette (no modifier keys).
+  const TOOL_KEYS = { v: 'view', r: 'ROOM', o: 'OUTDOOR', w: 'WALL', d: 'DOOR', s: 'SHELF', c: 'COUNTER', b: 'OBSTACLE', z: 'ZONE', m: 'MEASURE' };
 
   // One colour per camera so people can be traced back to the camera that
   // placed them. Assigned by camera order, stable while the list is stable.
@@ -63,6 +80,14 @@
 
   const GRID_SNAP_M = 0.5;
   const TRAIL_LEN = 10;
+  const NUDGE_M = 0.1;            // arrow keys; Shift = NUDGE_BIG_M
+  const NUDGE_BIG_M = 1;
+  const NUDGE_SAVE_MS = 450;      // a burst of arrow presses is saved (and undone) as one step
+  const UNDO_LIMIT = 100;
+  const EXTEND_MAX_M = 500;       // per side and call (POST /layout/extend)
+  const EXTEND_MARGIN_M = 1;      // room left around an item the map grows for
+  const SCALE_STEPS = [0.5, 1, 2, 5, 10, 20, 50];
+  const MIN_RECT_M = 0.2;
 
   // Canvas colours come from the theme tokens in style.css (--plan-*), read
   // at draw time. They are re-read on 'edge:theme' and the render loop picks
@@ -103,7 +128,7 @@
   const FAN_PX = 30;              // spacing of camera markers fanned out from one shared spot
   const CAM_LIST_AUTO_OPEN = 8;   // the camera list starts open only up to this many cameras
 
-  const MODE = { VIEW: 'view', DRAW: 'draw', PLACE_CAMERA: 'place-camera', PICK: 'pick-point' };
+  const MODE = { VIEW: 'view', DRAW: 'draw', PLACE_CAMERA: 'place-camera', PICK: 'pick-point', MEASURE: 'measure' };
 
   // Heatmap kinds served by GET /api/v1/analytics/heatmaps?kind=...
   const HEATMAP_KINDS = [
@@ -122,6 +147,8 @@
   ];
   const HEATMAP_RANGE_KEY = 'edge_cctv_heatmap_range';
   const HEATMAP_HISTORY_REFRESH_MS = 3 * 60 * 1000;
+  // After a 403 (heatmaps not in the plan) the live heatmap is asked for again only after this long.
+  const HEATMAP_REFUSED_RETRY_MS = 5 * 60 * 1000;
 
   class BlueprintEditor {
     constructor(canvas) {
@@ -176,6 +203,20 @@
       this.snapEnabled = true;
       this.pickCallback = null;
       this.calOverlay = null;       // {cameraId, pairs:[{floor:{x,y}}], reprojected:[{x,y}|null]}
+      this.freeShape = false;       // off: rooms, shelves... are dragged as rectangles
+      this.measure = null;          // {a:{x,y}, b:{x,y}|null} while measuring
+      this.dropPreview = null;      // ghost camera marker while a gallery card is dragged
+      this.undoStack = [];          // commands: {label, snaps, undo(), redo()}
+      this.redoStack = [];
+      this._idMap = new Map();      // id of a deleted-and-recreated shape -> its new id
+      this._busyUndo = false;
+      this._nudge = null;           // pending arrow-key move, saved after a pause
+      this._offer = null;           // open "Extend the map to fit?" offer
+      this._pointers = new Map();   // active pointers (touch: pinch zoom)
+      this._pinch = null;
+      this._hoverCam = null;
+      this._coarse = false;         // last input was touch or pen: bigger hit areas
+      this._dragLabel = null;
 
       this.showLayers = {
         structures: true, zones: true, cameras: true, heatmap: true,
@@ -267,6 +308,7 @@
         this.fitToView();
         this.emitState();
         this.renderSetup();
+        if (!this._readyFired) { this._readyFired = true; resolveReady(); }
         this.refreshMetrics();
         this.refreshLive();
         if (window.deviceManager && window.deviceManager.renderCameras) {
@@ -279,8 +321,11 @@
     }
 
     applyLayout(data) {
+      // Zones have no stored rotation: keep the in-memory hint across reloads.
+      const rot = new Map((this.zones || []).filter((z) => Number.isFinite(z._rotation_deg)).map((z) => [z.id, z._rotation_deg]));
       this.layout = data;
       this.zones = data.zones || [];
+      this.zones.forEach((z) => { if (rot.has(z.id)) z._rotation_deg = rot.get(z.id); });
       this.cameras = data.cameras || [];
       this.structuresSupported = Array.isArray(data.structures);
       this.structures = this.structuresSupported ? data.structures : [];
@@ -293,7 +338,10 @@
       };
       // Drop a selection that no longer exists.
       if (this.sel && !this.findSel()) this.select(null);
+      this.emitLayoutChanged();
     }
+
+    emitLayoutChanged() { emit('fp:layout-changed', { cameras: this.apiCameras() }); }
 
     recomputeSetup() {
       // Kept truthful after local edits without another round trip.
@@ -325,7 +373,13 @@
           (fp.zones || []).forEach((z) => { this.zoneMetrics[z.id] = z.metrics; });
           this.activeNow = (fp.active_shoppers_now === undefined) ? null : fp.active_shoppers_now;
         }
-        if (hmRes && hmRes.ok && kind === this.heatmapKind && range === this.heatmapRange) {
+        if (hmRes && hmRes.status === 403) {
+          // feature_disabled: not in the plan. Ask again only after a while.
+          this._heatmapRefusedAt = Date.now();
+          this.heatmap = null;
+          this._renderHeatmapNote({ observed: false, message: 'Heatmaps are not included in your plan' });
+        } else if (hmRes && hmRes.ok && kind === this.heatmapKind && range === this.heatmapRange) {
+          this._heatmapRefusedAt = 0;
           const hm = await hmRes.json();
           if (range !== 'today') { this._heatmapFetchedAt = Date.now(); this._heatmapFetchKey = `${range}|${kind}`; }
           this.heatmap = hm.observed ? hm : null;
@@ -399,9 +453,12 @@
 
     _bindEvents() {
       const c = this.canvas;
-      c.addEventListener('mousedown', (e) => this.onDown(e));
-      c.addEventListener('mousemove', (e) => this.onMove(e));
-      window.addEventListener('mouseup', (e) => this.onUp(e));
+      // Pointer Events: mouse, touch and pen. One finger pans or drags, two pinch-zoom.
+      c.addEventListener('pointerdown', (e) => this.onPointerDown(e));
+      c.addEventListener('pointermove', (e) => this.onPointerMove(e));
+      c.addEventListener('pointerup', (e) => this.onPointerUp(e, false));
+      c.addEventListener('pointercancel', (e) => this.onPointerUp(e, true));
+      c.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse') this._emitCameraHover(null); });
       c.addEventListener('wheel', (e) => this.onWheel(e), { passive: false });
       c.addEventListener('dblclick', (e) => this.onDoubleClick(e));
       c.addEventListener('contextmenu', (e) => { e.preventDefault(); if (this.mode === MODE.DRAW) this.finishPolygon(); });
@@ -447,10 +504,26 @@
       if (e.key === 'Shift') this.shiftDown = true;
       if (this.isTyping(e)) return;
       const k = e.key;
+      const mod = e.ctrlKey || e.metaKey;
       if (k === 'Escape') {
+        if (this._offer) { this._resolveOffer('keep'); return; }
         if (this.mode === MODE.PICK) { this.cancelPick(); return; }
+        if (this.mode === MODE.MEASURE && this.measure) { this.measure = null; this.setStatus('Measurement cleared. Click two points to measure again.'); return; }
         if (this.mode !== MODE.VIEW) { this.cancelDraw(); return; }
         this.select(null);
+        return;
+      }
+      if (!this.isVisible()) return;
+      // Undo / redo / duplicate work in every mode except while drawing a shape.
+      if (mod && !e.altKey && (k === 'z' || k === 'Z' || k === 'y' || k === 'Y')) {
+        if (this.mode === MODE.DRAW) return;
+        e.preventDefault();
+        if (k === 'y' || k === 'Y' || e.shiftKey) this.redo(); else this.undo();
+        return;
+      }
+      if (mod && !e.altKey && (k === 'd' || k === 'D')) {
+        e.preventDefault();
+        if (this.mode === MODE.VIEW) this.duplicateSelected();
         return;
       }
       if (k === 'Enter' && this.mode === MODE.DRAW) { e.preventDefault(); this.finishPolygon(); return; }
@@ -461,23 +534,99 @@
         else if (this.sel.type !== 'camera') this.deleteShape(this.sel.type, this.sel.id);
         return;
       }
-      if (this.mode !== MODE.VIEW && this.mode !== MODE.DRAW) return;
-      const shortcuts = { v: 'view', r: 'ROOM', w: 'WALL', s: 'SHELF', d: 'DOOR', z: 'ZONE' };
-      const t = shortcuts[k.toLowerCase()];
-      if (t && !e.ctrlKey && !e.metaKey && !e.altKey) {
-        if (t === 'view') this.setTool('view');
-        else if (t === 'ZONE') this.startDrawZone();
-        else this.startDraw(t);
+      const arrows = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+      if (arrows[k] && this.mode === MODE.VIEW && this.sel && !mod) {
+        e.preventDefault();
+        const step = e.shiftKey ? NUDGE_BIG_M : NUDGE_M;
+        this.nudge(arrows[k][0] * step, arrows[k][1] * step);
+        return;
+      }
+      if (this.mode !== MODE.VIEW && this.mode !== MODE.DRAW && this.mode !== MODE.MEASURE) return;
+      const t = TOOL_KEYS[k.toLowerCase()];
+      if (t && !mod && !e.altKey) this.setTool(t);
+    }
+
+    // ---------------------------------------------------------- pointer input
+
+    onPointerDown(e) {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      this._coarse = e.pointerType === 'touch' || e.pointerType === 'pen';
+      if (this._offer) { this._resolveOffer('keep'); return; }
+      try { this.canvas.setPointerCapture(e.pointerId); } catch (_) { /* not capturable */ }
+      this._pointers.set(e.pointerId, this.localPoint(e));
+      if (this._pointers.size === 2) { this._startPinch(); return; }
+      if (this._pointers.size > 2 || this._pinch) return;
+      this.onDown(e);
+    }
+
+    onPointerMove(e) {
+      if (e.pointerType === 'mouse' && !this._pointers.size) this._coarse = false;
+      if (this._pointers.has(e.pointerId)) this._pointers.set(e.pointerId, this.localPoint(e));
+      if (this._pinch) { if (this._pointers.size >= 2) this._movePinch(); return; }
+      this.onMove(e);
+    }
+
+    onPointerUp(e, cancelled) {
+      const had = this._pointers.delete(e.pointerId);
+      try { this.canvas.releasePointerCapture(e.pointerId); } catch (_) { /* already released */ }
+      if (this._pinch) { if (this._pointers.size < 2) this._pinch = null; return; }
+      if (!had) return;
+      if (cancelled) { this._abortDrag(); return; }
+      this.onUp(e);
+    }
+
+    /** Second finger down: drop whatever the first finger started and zoom instead. */
+    _startPinch() {
+      this._abortDrag();
+      if (this.mode === MODE.DRAW && this._lastDraftAt && Date.now() - this._lastDraftAt < 400) this.undoPoint();
+      const [a, b] = [...this._pointers.values()];
+      const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+      this._pinch = { dist: Math.max(10, Math.hypot(a.x - b.x, a.y - b.y)), world: this.toWorld(mid.x, mid.y), scale: this.scale };
+    }
+
+    _movePinch() {
+      const [a, b] = [...this._pointers.values()];
+      const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+      const d = Math.max(10, Math.hypot(a.x - b.x, a.y - b.y));
+      this.scale = Math.max(2, Math.min(400, this._pinch.scale * d / this._pinch.dist));
+      // The pinched spot stays under the fingers, so moving both fingers pans too.
+      this.offsetX = mid.x - this._pinch.world.x * this.scale;
+      this.offsetY = mid.y - this._pinch.world.y * this.scale;
+      this._userZoomed = true;
+    }
+
+    /** Undo the live effect of an unfinished drag (pinch started, pointer cancelled). */
+    _abortDrag() {
+      const d = this.dragging;
+      this.dragging = null;
+      this._dragLabel = null;
+      if (!d) return;
+      if (d.orig && ['shape', 'vertex', 'resize', 'rotate'].includes(d.kind)) {
+        const s = this.findShape(d.type, d.id);
+        if (s) { s.polygon = clonePts(d.orig); if (d.before) this.setRotation(d.type, s, snapRotation(d.before)); }
+      }
+      if ((d.kind === 'camera' || d.kind === 'camera-rotate') && d.before) {
+        const cam = this.cameras.find((c) => c.camera_id === d.id);
+        if (cam) Object.assign(cam, cameraFields(d.before));
       }
     }
 
     onDown(e) {
-      if (e.button !== 0) return;
       const p = this.localPoint(e);
       const w = this.toWorld(p.x, p.y);
       this.shiftDown = e.shiftKey;
+      this._emitCameraHover(null);
 
-      if (this.mode === MODE.DRAW) { this.addDraftPoint(w); return; }
+      if (this.mode === MODE.DRAW) {
+        if (this.isRectDraw()) {
+          const s = this.snap(w);
+          this.dragging = { kind: 'rect', start: s, end: s };
+        } else {
+          this.addDraftPoint(w);
+        }
+        return;
+      }
+      if (this.mode === MODE.MEASURE) { this.measureClick(w); return; }
       if (this.mode === MODE.PLACE_CAMERA) { this.placeCameraAt(w.x, w.y); return; }
       if (this.mode === MODE.PICK) {
         const cb = this.pickCallback;
@@ -490,23 +639,41 @@
       // Selected camera: the rotate handle has priority over everything.
       const handle = this.cameraHandleAt(p.x, p.y);
       if (handle) {
-        this.dragging = { kind: 'camera-rotate', id: handle.camera_id };
+        this.dragging = { kind: 'camera-rotate', id: handle.camera_id, before: cameraSnap(handle), moved: false };
         return;
       }
-      // Selected shape: vertices first, so a corner can always be grabbed.
-      const vi = this.vertexAt(p.x, p.y);
+      // Selected shape: the turn handle, then the resize handles of its box;
+      // corners themselves win over resizing only with "Free shape" on.
+      const fh = this.frameHandleAt(p.x, p.y);
+      let vi = this.vertexAt(p.x, p.y);
+      if (fh && (fh.kind === 'rotate' || !this.freeShape)) vi = null;
+      // Boxed shapes keep their form unless "Free shape" is on (corners resize the box).
+      if (vi !== null && !this.freeShape && this.sel && this.hasFrame(this.sel.type, this.findSel())) vi = null;
       if (vi !== null) {
         this.selVertex = vi;
         const shape = this.findSel();
-        this.dragging = { kind: 'vertex', type: this.sel.type, id: this.sel.id, index: vi, moved: false, orig: shape.polygon.map((q) => ({ x: q.x, y: q.y })) };
+        this.dragging = { kind: 'vertex', type: this.sel.type, id: this.sel.id, index: vi, moved: false,
+          orig: clonePts(shape.polygon), before: this.snapShape(this.sel.type, shape) };
         this.emitInspector();
+        return;
+      }
+      if (fh) {
+        const shape = this.findSel();
+        const f = this.shapeFrame(this.sel.type, shape);
+        // Where the press landed relative to the handle, so a press a few
+        // pixels off the handle does not resize the shape before it moves.
+        const hw = frameToWorld(f, (fh.sx || 0) * f.w / 2, (fh.sy || 0) * f.h / 2);
+        const pl = worldToFrame(f, w.x, w.y), hl = worldToFrame(f, hw.x, hw.y);
+        this.dragging = { kind: fh.kind, handle: fh, type: this.sel.type, id: this.sel.id, frame: f, moved: false,
+          orig: clonePts(shape.polygon), before: this.snapShape(this.sel.type, shape),
+          startAngle: Math.atan2(w.y - f.cy, w.x - f.cx), grab: { u: hl.u - pl.u, v: hl.v - pl.v } };
         return;
       }
 
       const cam = this.showLayers.cameras ? this.cameraAt(p.x, p.y) : null;
       if (cam) {
         this.select({ type: 'camera', id: cam.camera_id });
-        this.dragging = { kind: 'camera', id: cam.camera_id, moved: false };
+        this.dragging = { kind: 'camera', id: cam.camera_id, moved: false, before: cameraSnap(cam) };
         return;
       }
 
@@ -516,11 +683,12 @@
         const shape = this.findSel();
         this.dragging = {
           kind: 'shape', type: hit.type, id: hit.id, start: w, moved: false,
-          orig: shape.polygon.map((q) => ({ x: q.x, y: q.y })),
+          orig: clonePts(shape.polygon), before: this.snapShape(hit.type, shape),
         };
         return;
       }
 
+      // Empty space: deselect and pan (one finger on touch).
       this.select(null);
       this.dragging = { kind: 'pan', startX: p.x - this.offsetX, startY: p.y - this.offsetY };
     }
@@ -537,9 +705,18 @@
           this.offsetX = p.x - d.startX;
           this.offsetY = p.y - d.startY;
           this._userZoomed = true;
+        } else if (d.kind === 'rect') {
+          let end = this.snap(w);
+          if (this.shiftDown) {
+            // Shift: a square.
+            const side = Math.max(Math.abs(end.x - d.start.x), Math.abs(end.y - d.start.y));
+            end = { x: d.start.x + Math.sign(end.x - d.start.x || 1) * side, y: d.start.y + Math.sign(end.y - d.start.y || 1) * side };
+          }
+          d.end = end;
+          this._dragLabel = `${fmt(Math.abs(end.x - d.start.x))} × ${fmt(Math.abs(end.y - d.start.y))} m`;
         } else if (d.kind === 'camera') {
           const cam = this.cameras.find((c) => c.camera_id === d.id);
-          if (cam) { cam.floor_x = +this.clampX(w.x).toFixed(2); cam.floor_y = +this.clampY(w.y).toFixed(2); d.moved = true; }
+          if (cam) { cam.floor_x = +w.x.toFixed(2); cam.floor_y = +w.y.toFixed(2); d.moved = true; }
         } else if (d.kind === 'camera-rotate') {
           const cam = this.cameras.find((c) => c.camera_id === d.id);
           if (cam) {
@@ -553,8 +730,7 @@
         } else if (d.kind === 'vertex') {
           const shape = this.findSel();
           if (shape) {
-            const pt = this.snap({ x: this.clampX(w.x), y: this.clampY(w.y) });
-            shape.polygon[d.index] = pt;
+            shape.polygon[d.index] = this.snap({ x: w.x, y: w.y });
             d.moved = true;
           }
         } else if (d.kind === 'shape') {
@@ -562,44 +738,110 @@
           if (shape) {
             let dx = w.x - d.start.x, dy = w.y - d.start.y;
             if (this.snapEnabled) { dx = Math.round(dx / GRID_SNAP_M) * GRID_SNAP_M; dy = Math.round(dy / GRID_SNAP_M) * GRID_SNAP_M; }
-            // Keep the whole shape inside the store: limit the delta, not each point.
-            const xs = d.orig.map((q) => q.x), ys = d.orig.map((q) => q.y);
-            dx = Math.max(-Math.min(...xs), Math.min(this.layout.width_m - Math.max(...xs), dx));
-            dy = Math.max(-Math.min(...ys), Math.min(this.layout.height_m - Math.max(...ys), dy));
-            shape.polygon = d.orig.map((q) => ({ x: +(q.x + dx).toFixed(3), y: +(q.y + dy).toFixed(3) }));
+            // Not clamped: past the edge, releasing offers to extend the map.
+            shape.polygon = d.orig.map((q) => ({ x: r3(q.x + dx), y: r3(q.y + dy) }));
             d.moved = d.moved || dx !== 0 || dy !== 0;
           }
+        } else if (d.kind === 'resize') {
+          this._dragResize(d, w);
+        } else if (d.kind === 'rotate') {
+          this._dragRotate(d, w);
         }
         return;
       }
 
       // Hover feedback and cursor.
       let cursor = 'grab';
-      if (this.mode === MODE.DRAW || this.mode === MODE.PICK) cursor = 'crosshair';
+      let hoverCam = null;
+      if (this.mode === MODE.DRAW || this.mode === MODE.PICK || this.mode === MODE.MEASURE) cursor = 'crosshair';
       else if (this.mode === MODE.PLACE_CAMERA) cursor = 'copy';
       else if (this.cameraHandleAt(p.x, p.y)) cursor = 'alias';
-      else if (this.vertexAt(p.x, p.y) !== null) cursor = 'move';
       else {
-        const cam = this.showLayers.cameras ? this.cameraAt(p.x, p.y) : null;
-        const hit = cam ? null : this.shapeAt(p.x, p.y, w);
-        this.hover = cam ? { type: 'camera', id: cam.camera_id } : hit;
-        if (cam || hit) cursor = 'pointer';
+        const fh = this.frameHandleAt(p.x, p.y);
+        if (fh && (fh.kind === 'rotate' || !this.freeShape)) cursor = fh.kind === 'rotate' ? 'alias' : fh.cursor;
+        else if (this.vertexAt(p.x, p.y) !== null) cursor = 'move';
+        else {
+          const cam = this.showLayers.cameras ? this.cameraAt(p.x, p.y) : null;
+          const hit = cam ? null : this.shapeAt(p.x, p.y, w);
+          this.hover = cam ? { type: 'camera', id: cam.camera_id } : hit;
+          hoverCam = cam;
+          if (cam || hit) cursor = 'pointer';
+        }
       }
       this.canvas.style.cursor = cursor;
+      if (e.pointerType !== 'touch') this._emitCameraHover(hoverCam, e);
     }
 
-    onUp() {
+    /** 'fp:camera-hover' with the pointer position, and {camera_id:null} when it leaves. */
+    _emitCameraHover(cam, e) {
+      if (cam && e) {
+        this._hoverCam = cam.camera_id;
+        emit('fp:camera-hover', { camera_id: cam.camera_id, clientX: e.clientX, clientY: e.clientY });
+      } else if (this._hoverCam) {
+        this._hoverCam = null;
+        emit('fp:camera-hover', { camera_id: null });
+      }
+    }
+
+    async onUp() {
       if (!this.dragging) return;
       const d = this.dragging;
       this.dragging = null;
+      this._dragLabel = null;
+      if (d.kind === 'rect') { await this.finishRect(d); return; }
       if (d.kind === 'camera' || d.kind === 'camera-rotate') {
         const cam = this.cameras.find((c) => c.camera_id === d.id);
-        if (cam && d.moved) { this.saveCameraPlacement(cam); this.emitInspector(); }
-      } else if ((d.kind === 'shape' || d.kind === 'vertex') && d.moved) {
-        const shape = this.findSel();
-        if (shape) this.saveShape(d.type, shape, d.orig);
+        if (cam && d.moved) await this.commitCamera(cam, d.before, d.kind === 'camera' ? 'Move camera' : 'Turn camera');
         this.emitInspector();
+      } else if (['shape', 'vertex', 'resize', 'rotate'].includes(d.kind) && d.moved) {
+        const shape = this.findShape(d.type, d.id);
+        const labels = { shape: 'Move', vertex: 'Move corner', resize: 'Resize', rotate: 'Turn' };
+        if (shape) await this.commitGeometry(d.type, shape, d.before, `${labels[d.kind]} ${this.shapeLabel(d.type, shape)}`, d.kind === 'shape' ? d.orig : null);
       }
+    }
+
+    _dragResize(d, w) {
+      const shape = this.findShape(d.type, d.id);
+      if (!shape) return;
+      const f = d.frame, h = d.handle;
+      const L = worldToFrame(f, w.x, w.y);
+      if (d.grab) { L.u += d.grab.u; L.v += d.grab.v; }
+      const size = (span, along, sign) => {
+        let n = sign * (along - (-sign * span / 2));
+        if (this.snapEnabled) n = Math.round(n / GRID_SNAP_M) * GRID_SNAP_M;
+        return Math.max(0.1, n);
+      };
+      let sx = 1, sy = 1;
+      if (h.sx && f.w > 1e-6) sx = size(f.w, L.u, h.sx) / f.w;
+      if (h.sy && f.h > 1e-6) sy = size(f.h, L.v, h.sy) / f.h;
+      if (this.shiftDown && h.sx && h.sy) { const k = Math.max(sx, sy); sx = k; sy = k; }
+      const au = h.sx ? -h.sx * f.w / 2 : 0, av = h.sy ? -h.sy * f.h / 2 : 0;
+      shape.polygon = d.orig.map((q) => {
+        const l = worldToFrame(f, q.x, q.y);
+        const r = frameToWorld(f, au + (l.u - au) * sx, av + (l.v - av) * sy);
+        return { x: r3(r.x), y: r3(r.y) };
+      });
+      d.moved = true;
+      this._dragLabel = `${fmt(f.w * sx)} × ${fmt(f.h * sy)} m`;
+    }
+
+    _dragRotate(d, w) {
+      const shape = this.findShape(d.type, d.id);
+      if (!shape) return;
+      const f = d.frame;
+      const a = Math.atan2(w.y - f.cy, w.x - f.cx);
+      let deg = f.angle + (a - d.startAngle) * 180 / Math.PI;
+      deg = this.shiftDown ? Math.round(deg / 15) * 15 : Math.round(deg);
+      deg = ((deg % 360) + 360) % 360;
+      const t = (deg - f.angle) * Math.PI / 180;
+      const c = Math.cos(t), s = Math.sin(t);
+      shape.polygon = d.orig.map((q) => {
+        const x = q.x - f.cx, y = q.y - f.cy;
+        return { x: r3(f.cx + x * c - y * s), y: r3(f.cy + x * s + y * c) };
+      });
+      this.setRotation(d.type, shape, deg);
+      d.moved = true;
+      this._dragLabel = `${deg}°`;
     }
 
     onWheel(e) {
@@ -616,16 +858,16 @@
 
     onDoubleClick(e) {
       const p = this.localPoint(e);
-      if (this.mode === MODE.DRAW) { this.finishPolygon(); return; }
+      if (this.mode === MODE.DRAW) { if (!this.isRectDraw()) this.finishPolygon(); return; }
       if (this.mode !== MODE.VIEW) return;
       // Double-click on an edge of the selected shape inserts a vertex there.
       const edge = this.edgeAt(p.x, p.y);
       if (edge) {
         const shape = this.findSel();
-        const orig = shape.polygon.map((q) => ({ x: q.x, y: q.y }));
+        const before = this.snapShape(this.sel.type, shape);
         shape.polygon.splice(edge.index + 1, 0, this.snap(edge.point));
         this.selVertex = edge.index + 1;
-        this.saveShape(this.sel.type, shape, orig);
+        this.saveShape(this.sel.type, shape, before.polygon, { before, label: `Add a corner to ${this.shapeLabel(this.sel.type, shape)}` });
         this.emitInspector();
         return;
       }
@@ -652,7 +894,7 @@
       for (let i = this.cameras.length - 1; i >= 0; i--) {
         const c = this.cameras[i];
         const s = this.cameraScreenPos(c);
-        if (Math.hypot(s.x - px, s.y - py) <= 14) return c;
+        if (Math.hypot(s.x - px, s.y - py) <= (this._coarse ? 20 : 14)) return c;
       }
       return null;
     }
@@ -712,7 +954,7 @@
       const cam = this.cameras.find((c) => c.camera_id === this.sel.id);
       if (!cam) return null;
       const h = this.cameraHandlePos(cam);
-      return Math.hypot(h.x - px, h.y - py) <= 10 ? cam : null;
+      return Math.hypot(h.x - px, h.y - py) <= (this._coarse ? 16 : 10) ? cam : null;
     }
 
     findSel() {
@@ -723,13 +965,122 @@
       return null;
     }
 
+    findShape(type, id) {
+      if (type === 'zone') return this.zones.find((z) => z.id === id) || null;
+      if (type === 'structure') return this.structures.find((s) => s.id === id) || null;
+      return null;
+    }
+
+    hitPx() { return this._coarse ? 14 : HIT_PX; }
+
+    /** Polygons get a box with resize and turn handles; walls and doors only corners. */
+    hasFrame(type, shape) {
+      return !!shape && (type === 'zone' || (type === 'structure' && !POLYLINE_KINDS.has(shape.kind))) && (shape.polygon || []).length >= 3;
+    }
+
+    /** Rotation hint in degrees: structures keep it in properties, zones only in memory. */
+    getRotation(type, shape) {
+      if (!shape) return 0;
+      const v = type === 'structure' ? (shape.properties || {}).rotation_deg : shape._rotation_deg;
+      return Number.isFinite(+v) ? +v : 0;
+    }
+
+    setRotation(type, shape, deg) {
+      if (!shape) return;
+      const v = Number.isFinite(+deg) ? ((Math.round(+deg * 10) / 10) % 360 + 360) % 360 : 0;
+      if (type === 'structure') {
+        if (POLYLINE_KINDS.has(shape.kind)) return;
+        shape.properties = Object.assign({}, shape.properties || {}, { rotation_deg: v });
+      } else {
+        shape._rotation_deg = v;
+      }
+    }
+
+    /**
+     * The shape's box in its own turned frame: centre (cx, cy), size w x h in
+     * metres and angle (degrees, clockwise on screen). Walls and doors: the
+     * plain bounding box.
+     */
+    shapeFrame(type, shape) {
+      const pts = (shape && shape.polygon) || [];
+      const angle = this.hasFrame(type, shape) ? this.getRotation(type, shape) : 0;
+      const rad = angle * Math.PI / 180;
+      const base = { cx: 0, cy: 0, rad };
+      let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+      pts.forEach((p) => {
+        const l = worldToFrame(base, p.x, p.y);
+        minU = Math.min(minU, l.u); maxU = Math.max(maxU, l.u);
+        minV = Math.min(minV, l.v); maxV = Math.max(maxV, l.v);
+      });
+      if (!pts.length) { minU = maxU = minV = maxV = 0; }
+      const c = frameToWorld(base, (minU + maxU) / 2, (minV + maxV) / 2);
+      return { cx: c.x, cy: c.y, w: maxU - minU, h: maxV - minV, angle, rad };
+    }
+
+    /** Screen positions of the 8 resize handles and the turn handle of the selected shape. */
+    frameHandles() {
+      if (!this.sel || this.sel.type === 'camera' || this.mode !== MODE.VIEW) return [];
+      const shape = this.findSel();
+      if (!this.hasFrame(this.sel.type, shape)) return [];
+      const f = this.shapeFrame(this.sel.type, shape);
+      const out = [];
+      const cursors = ['ew-resize', 'nwse-resize', 'ns-resize', 'nesw-resize'];   // 0, 45, 90, 135 degrees (y down)
+      [-1, 0, 1].forEach((sy) => [-1, 0, 1].forEach((sx) => {
+        if (!sx && !sy) return;
+        const wpt = frameToWorld(f, sx * f.w / 2, sy * f.h / 2);
+        const s = this.toScreen(wpt.x, wpt.y);
+        // Cursor follows the handle's direction on screen, turned with the shape.
+        const dir = ((Math.atan2(sy, sx) + f.rad) * 180 / Math.PI + 360) % 180;
+        const cursor = cursors[Math.round(dir / 45) % 4];
+        out.push({ kind: 'resize', sx, sy, x: s.x, y: s.y, cursor });
+      }));
+      const topW = frameToWorld(f, 0, -f.h / 2);
+      const top = this.toScreen(topW.x, topW.y);
+      const off = this._coarse ? 34 : 26;
+      out.push({ kind: 'rotate', x: top.x + Math.sin(f.rad) * off, y: top.y - Math.cos(f.rad) * off, from: top });
+      return out;
+    }
+
+    frameHandleAt(px, py) {
+      const r = this._coarse ? 16 : 9;
+      const hs = this.frameHandles();
+      if (!hs.length) return null;
+      // The turn handle first: it never sits on a corner.
+      const rot = hs.find((h) => h.kind === 'rotate');
+      if (rot && Math.hypot(rot.x - px, rot.y - py) <= r) return rot;
+      // A shape only a few pixels deep on screen (a shelf when zoomed out) is
+      // covered by its own handles: pressed inside its body, the handles'
+      // reach shrinks so the press moves the shape; from outside they keep
+      // their full reach. The nearest handle wins, never just the first listed.
+      const shape = this.findSel();
+      const f = shape ? this.shapeFrame(this.sel.type, shape) : null;
+      const minPx = f ? Math.min(f.w, f.h) * this.scale : Infinity;
+      const w = this.toWorld(px, py);
+      const inside = !!(shape && shape.polygon && shape.polygon.length >= 3 && pointInPolygon(w.x, w.y, shape.polygon));
+      const reach = inside ? Math.min(r, minPx / 3) : r;
+      let best = null, bestD = Infinity;
+      hs.forEach((h) => {
+        if (h.kind !== 'resize') return;
+        const d = Math.hypot(h.x - px, h.y - py);
+        if (d <= reach && d < bestD) { best = h; bestD = d; }
+      });
+      return best;
+    }
+
+    shapeLabel(type, shape) {
+      if (!shape) return 'item';
+      if (type === 'zone') return `zone "${shape.name}"`;
+      return `${(KIND_LABEL[shape.kind] || 'item').toLowerCase()} "${shape.name}"`;
+    }
+
+
     vertexAt(px, py) {
       if (!this.sel || this.sel.type === 'camera') return null;
       const shape = this.findSel();
       if (!shape) return null;
       for (let i = 0; i < shape.polygon.length; i++) {
         const s = this.toScreen(shape.polygon[i].x, shape.polygon[i].y);
-        if (Math.hypot(s.x - px, s.y - py) <= HIT_PX) return i;
+        if (Math.hypot(s.x - px, s.y - py) <= this.hitPx()) return i;
       }
       return null;
     }
@@ -745,7 +1096,7 @@
         const a = this.toScreen(poly[i].x, poly[i].y);
         const b = this.toScreen(poly[(i + 1) % poly.length].x, poly[(i + 1) % poly.length].y);
         const r = segDist(px, py, a.x, a.y, b.x, b.y);
-        if (r.d <= HIT_PX) return { index: i, point: this.toWorld(r.x, r.y) };
+        if (r.d <= this.hitPx()) return { index: i, point: this.toWorld(r.x, r.y) };
       }
       return null;
     }
@@ -782,6 +1133,8 @@
     setMode(mode) {
       this.mode = mode;
       if (mode !== MODE.DRAW) { this.draft = []; this.draftKind = null; }
+      if (mode !== MODE.MEASURE) this.measure = null;
+      if (this.dragging && this.dragging.kind === 'rect') this.dragging = null;
       this.updateDrawBanner();
       this.updateToolButtons();
       this.emitState();
@@ -789,7 +1142,27 @@
 
     setTool(tool) {
       if (tool === 'view') { this.cancelDraw(); return; }
+      if (tool === 'MEASURE') { this.startMeasure(); return; }
       if (tool === 'ZONE') this.startDrawZone(); else this.startDraw(tool);
+    }
+
+    isRectDraw() { return this.mode === MODE.DRAW && RECT_KINDS.has(this.draftKind) && !this.freeShape; }
+
+    /** "Free shape": draw by clicking corners, and drag single corners of a selected shape. */
+    setFreeShape(on) {
+      this.freeShape = !!on;
+      const cb = document.getElementById('fpFreeShape');
+      if (cb && cb.checked !== this.freeShape) cb.checked = this.freeShape;
+      if (this.mode === MODE.DRAW) {
+        const kind = this.draftKind;
+        if (kind === 'ZONE') this.startDrawZone(); else this.startDraw(kind);
+      }
+    }
+
+    _drawHelp(label, kind) {
+      if (POLYLINE_KINDS.has(kind)) return `Drawing a ${label}: click along its path. Hold Shift for straight segments. Enter or double-click to finish.`;
+      if (RECT_KINDS.has(kind) && !this.freeShape) return `Drawing a ${label}: press and drag on the map. Hold Shift for a square. Turn on "Free shape" to click each corner instead.`;
+      return `Drawing a ${label}: click each corner. Enter or double-click to finish, Escape to cancel.`;
     }
 
     startDraw(kind) {
@@ -802,9 +1175,7 @@
       this.draftKind = kind;
       this.draft = [];
       this.setMode(MODE.DRAW);
-      this.setStatus(POLYLINE_KINDS.has(kind)
-        ? `Drawing a ${KIND_LABEL[kind].toLowerCase()}: click along its path. Hold Shift for straight segments. Enter or double-click to finish.`
-        : `Drawing a ${KIND_LABEL[kind].toLowerCase()}: click each corner. Enter or double-click to finish, Escape to cancel.`);
+      this.setStatus(this._drawHelp(KIND_LABEL[kind].toLowerCase(), kind));
     }
 
     startDrawZone() {
@@ -812,7 +1183,21 @@
       this.draftKind = 'ZONE';
       this.draft = [];
       this.setMode(MODE.DRAW);
-      this.setStatus('Drawing a zone: click each corner. Enter or double-click to finish, Escape to cancel.');
+      this.setStatus(this._drawHelp('zone', 'ZONE'));
+    }
+
+    startMeasure() {
+      this.select(null);
+      this.setMode(MODE.MEASURE);
+      this.setStatus('Measuring: click two points on the map. Hold Shift for a straight line. Escape clears.');
+    }
+
+    measureClick(w) {
+      const pt = { x: r3(w.x), y: r3(w.y) };
+      if (!this.measure || this.measure.b) { this.measure = { a: pt, b: null }; return; }
+      this.measure.b = this.shiftDown ? orthoTo(this.measure.a, pt) : pt;
+      const d = Math.hypot(this.measure.b.x - this.measure.a.x, this.measure.b.y - this.measure.a.y);
+      this.setStatus(`Distance: ${d.toFixed(2)} m. Click again to start a new measurement.`);
     }
 
     startPlaceCamera() {
@@ -833,7 +1218,8 @@
     }
 
     addDraftPoint(w) {
-      let pt = { x: this.clampX(w.x), y: this.clampY(w.y) };
+      // Not clamped: a shape drawn past the edge offers to extend the map when finished.
+      let pt = { x: w.x, y: w.y };
       const prev = this.draft[this.draft.length - 1];
       if (prev && this.shiftDown && POLYLINE_KINDS.has(this.draftKind)) pt = orthoTo(prev, pt);
       pt = this.snap(pt);
@@ -841,12 +1227,13 @@
       // exact repeats so a double-click finish never leaves a zero-length edge.
       if (prev && Math.abs(prev.x - pt.x) < 1e-6 && Math.abs(prev.y - pt.y) < 1e-6) return;
       this.draft.push(pt);
+      this._lastDraftAt = Date.now();
       this.updateDrawBanner();
     }
 
     draftPreviewPoint() {
       if (!this.cursorWorld) return null;
-      let pt = { x: this.clampX(this.cursorWorld.x), y: this.clampY(this.cursorWorld.y) };
+      let pt = { x: this.cursorWorld.x, y: this.cursorWorld.y };
       const prev = this.draft[this.draft.length - 1];
       if (prev && this.shiftDown && POLYLINE_KINDS.has(this.draftKind)) pt = orthoTo(prev, pt);
       return this.snap(pt);
@@ -863,20 +1250,29 @@
       const finish = document.getElementById('fpDrawFinish');
       const need = this.draftKind === 'ZONE' ? 3 : minPointsFor(this.draftKind);
       const label = this.draftKind === 'ZONE' ? 'zone' : KIND_LABEL[this.draftKind].toLowerCase();
+      const rect = this.isRectDraw();
       if (count) count.textContent = this.draft.length;
-      if (finish) { finish.textContent = `Finish ${label}`; finish.disabled = this.draft.length < need; }
+      if (count && count.parentElement) count.parentElement.style.display = rect ? 'none' : '';
+      if (finish) { finish.textContent = `Finish ${label}`; finish.disabled = rect || this.draft.length < need; finish.style.display = rect ? 'none' : ''; }
       if (hint) {
-        hint.textContent = this.draft.length < need
-          ? `${cap(label)}: click on the plan to add points — at least ${need}.${POLYLINE_KINDS.has(this.draftKind) ? ' Shift = straight.' : ''}`
-          : `Add more points, or finish (Enter / double-click) to save this ${label}.`;
+        hint.textContent = rect
+          ? `${cap(label)}: press and drag on the map to draw it. Escape cancels.`
+          : this.draft.length < need
+            ? `${cap(label)}: click on the plan to add points, at least ${need}.${POLYLINE_KINDS.has(this.draftKind) ? ' Shift = straight.' : ''}`
+            : `Add more points, or finish (Enter / double-click) to save this ${label}.`;
       }
     }
 
     updateToolButtons() {
-      const active = this.mode === MODE.DRAW ? this.draftKind : (this.mode === MODE.VIEW ? 'view' : null);
+      const active = this.mode === MODE.DRAW ? this.draftKind
+        : this.mode === MODE.MEASURE ? 'MEASURE' : (this.mode === MODE.VIEW ? 'view' : null);
       document.querySelectorAll('#fpTools .fp-tool').forEach((b) => {
-        b.classList.toggle('active', b.dataset.tool === active);
+        const on = b.dataset.tool === active;
+        b.classList.toggle('active', on);
+        b.setAttribute('aria-pressed', on ? 'true' : 'false');
       });
+      const dup = document.getElementById('fpDuplicate');
+      if (dup) dup.disabled = !(this.sel && this.sel.type !== 'camera' && this.mode === MODE.VIEW);
     }
 
     /**
@@ -885,7 +1281,7 @@
      * edits it in place.
      */
     async finishPolygon() {
-      if (this.mode !== MODE.DRAW) return;
+      if (this.mode !== MODE.DRAW || this.isRectDraw()) return;
       const kind = this.draftKind;
       const need = kind === 'ZONE' ? 3 : minPointsFor(kind);
       if (this.draft.length < need) {
@@ -895,68 +1291,108 @@
       const polygon = this.draft.slice();
       this.draft = [];
       this.setMode(MODE.VIEW);
+      await this.createShape(kind, polygon, false);
+    }
 
+    async finishRect(d) {
+      const a = d.start, b = d.end || d.start;
+      if (Math.abs(b.x - a.x) < MIN_RECT_M || Math.abs(b.y - a.y) < MIN_RECT_M) {
+        this.setStatus('Press and drag on the map to draw the rectangle (or turn on "Free shape" to click each corner).');
+        return;
+      }
+      const x0 = Math.min(a.x, b.x), x1 = Math.max(a.x, b.x), y0 = Math.min(a.y, b.y), y1 = Math.max(a.y, b.y);
+      const kind = this.draftKind;
+      this.setMode(MODE.VIEW);
+      await this.createShape(kind, [{ x: x0, y: y0 }, { x: x1, y: y0 }, { x: x1, y: y1 }, { x: x0, y: y1 }], true);
+    }
+
+    /** New zone or structure from drawn points; past the edge it offers to extend the map. */
+    async createShape(kind, polygon, isRect) {
+      const type = kind === 'ZONE' ? 'zone' : 'structure';
+      let snap;
+      if (type === 'zone') {
+        snap = { type, name: `Zone ${this.zones.length + 1}`, category: 'AISLE', polygon, color: CATEGORY_COLORS.AISLE, products: [] };
+      } else {
+        const count = this.structures.filter((s) => s.kind === kind).length;
+        snap = { type, kind, name: `${KIND_LABEL[kind]} ${count + 1}`, polygon, color: KIND_COLORS[kind],
+          properties: POLYLINE_KINDS.has(kind) ? {} : { rotation_deg: 0 } };
+        if (POLYLINE_KINDS.has(kind)) snap.thickness_m = kind === 'DOOR' ? 0.1 : 0.2;
+        if (kind === 'OUTDOOR') snap.properties.area_type = '';
+      }
+      if (isRect && type === 'zone') snap._rotation_deg = 0;
+      const placed = await this.fitIntoSite(snap.polygon);
+      if (!placed) return null;
+      snap.polygon = placed;
       try {
-        if (kind === 'ZONE') {
-          const zone = await this.post(`${API}/zones`, {
-            name: `Zone ${this.zones.length + 1}`, category: 'AISLE', polygon, color: CATEGORY_COLORS.AISLE,
-          });
-          this.zones.push(zone);
-          this.select({ type: 'zone', id: zone.id });
-          this.setStatus(`Zone created (${zone.area_m2} m²). Name it in the inspector.`, 'ok');
-        } else {
-          const count = this.structures.filter((s) => s.kind === kind).length;
-          const body = { kind, name: `${KIND_LABEL[kind]} ${count + 1}`, polygon, color: KIND_COLORS[kind] };
-          if (POLYLINE_KINDS.has(kind)) body.thickness_m = kind === 'DOOR' ? 0.1 : 0.2;
-          const st = await this.post(`${API}/structures`, body);
-          this.structures.push(st);
-          this.select({ type: 'structure', id: st.id });
-          const size = POLYLINE_KINDS.has(kind) ? `${fmt(st.length_m)} m long` : `${fmt(st.area_m2)} m²`;
+        const obj = await this.postSnap(type, snap);
+        this.pushCmd(this.cmdCreate(type, this.snapShape(type, obj), `Draw ${this.shapeLabel(type, obj)}`));
+        this.select({ type, id: obj.id });
+        if (type === 'zone') this.setStatus(`Zone created (${obj.area_m2} m²). Name it in the details panel.`, 'ok');
+        else {
+          const size = POLYLINE_KINDS.has(kind) ? `${fmt(obj.length_m)} m long` : `${fmt(obj.area_m2)} m²`;
           this.setStatus(`${KIND_LABEL[kind]} saved (${size}).`, 'ok');
         }
         this.recomputeSetup();
+        return obj;
       } catch (e) {
         this.setStatus(`Could not save: ${e.message}`, 'error');
+        return null;
       }
     }
 
     async post(url, body, method = 'POST') {
       const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-      if (res.status === 404 && url.includes('/structures')) {
+      if (res.status === 404 && url.includes('/structures') && method === 'POST') {
         this.structuresSupported = false;
         throw new Error('the structures API is not available on this server');
       }
       if (!res.ok) {
         let detail = res.statusText;
         try { detail = (await res.json()).detail || detail; } catch (_) { /* not json */ }
-        throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+        const msg = typeof detail === 'string' ? detail : (detail && detail.message) || JSON.stringify(detail);
+        const err = new Error(msg);
+        err.status = res.status;
+        err.detail = detail;
+        throw err;
       }
       return res.json();
     }
 
     // ---------------------------------------------------------- persistence
 
-    async saveShape(type, shape, orig) {
+    /**
+     * Save a zone or structure as it is now. ``opts.before`` (a snapShape of
+     * the state before the edit) records an undo step labelled ``opts.label``.
+     * Returns true when the server accepted it.
+     */
+    async saveShape(type, shape, orig, opts) {
+      const o = opts || {};
+      let ok = false;
       try {
-        if (type === 'zone') {
-          const z = await this.post(`${API}/zones/${shape.id}`, {
-            polygon: shape.polygon, name: shape.name, category: shape.category, color: shape.color,
-            products: shape.products || [],
-          }, 'PUT');
-          Object.assign(shape, z);
-          this.setStatus(`Zone "${shape.name}" saved.`, 'ok');
-        } else {
-          const body = { polygon: shape.polygon, name: shape.name, kind: shape.kind, color: shape.color, thickness_m: shape.thickness_m };
-          if (shape.properties) body.properties = shape.properties;
-          const s = await this.post(`${API}/structures/${shape.id}`, body, 'PUT');
-          Object.assign(shape, s);
-          this.setStatus(`${KIND_LABEL[shape.kind] || 'Structure'} "${shape.name}" saved.`, 'ok');
-        }
+        const saved = await this._putShape(type, shape);
+        Object.assign(shape, saved);
+        if (o.before) this.pushCmd(this.cmdUpdate(type, o.before, this.snapShape(type, shape), o.label || `Edit ${this.shapeLabel(type, shape)}`));
+        this.setStatus(type === 'zone' ? `Zone "${shape.name}" saved.` : `${KIND_LABEL[shape.kind] || 'Structure'} "${shape.name}" saved.`, 'ok');
+        ok = true;
       } catch (e) {
-        if (orig) shape.polygon = orig;   // the server rejected it: show what is actually stored
+        // The server rejected it: show what is actually stored.
+        if (o.before) restoreSnap(shape, o.before);
+        else if (orig) shape.polygon = orig;
         this.setStatus(`Could not save: ${e.message}`, 'error');
       }
       this.emitInspector();
+      return ok;
+    }
+
+    _putShape(type, shape) {
+      if (type === 'zone') {
+        const body = { polygon: shape.polygon, name: shape.name, category: shape.category, color: shape.color, products: shape.products || [] };
+        if ('sku_id' in shape) body.sku_id = shape.sku_id || null;
+        return this.post(`${API}/zones/${encodeURIComponent(shape.id)}`, body, 'PUT');
+      }
+      const body = { polygon: shape.polygon, name: shape.name, kind: shape.kind, color: shape.color, thickness_m: shape.thickness_m };
+      if (shape.properties) body.properties = shape.properties;
+      return this.post(`${API}/structures/${encodeURIComponent(shape.id)}`, body, 'PUT');
     }
 
     deleteSelectedVertex() {
@@ -967,22 +1403,22 @@
         this.setStatus(`This shape needs at least ${need} points. Delete the whole shape instead.`, 'error');
         return;
       }
-      const orig = shape.polygon.map((q) => ({ x: q.x, y: q.y }));
+      const before = this.snapShape(this.sel.type, shape);
       shape.polygon.splice(this.selVertex, 1);
       this.selVertex = null;
-      this.saveShape(this.sel.type, shape, orig);
+      this.saveShape(this.sel.type, shape, before.polygon, { before, label: `Remove a corner of ${this.shapeLabel(this.sel.type, shape)}` });
     }
 
     /** Two-step delete rendered inside the inspector, never a modal. */
     deleteShape(type, id) {
-      const shape = type === 'zone' ? this.zones.find((z) => z.id === id) : this.structures.find((s) => s.id === id);
+      const shape = this.findShape(type, id);
       if (!shape) return;
       const panel = document.getElementById('zoneInspectorBody');
       const actions = panel && panel.querySelector('.fp-actions');
       if (actions && !actions.dataset.confirming) {
         actions.dataset.confirming = '1';
         actions.innerHTML =
-          `<span class="fp-empty" style="padding:0">Delete "${escapeHtml(shape.name)}"?${type === 'zone' ? ' Recorded visits are kept.' : ''}</span>
+          `<span class="fp-empty" style="padding:0">Delete "${escapeHtml(shape.name)}"?${type === 'zone' ? ' Recorded visits are kept.' : ''} Undo (Ctrl+Z) brings it back.</span>
            <button class="btn btn-sm btn-danger" id="fpConfirmDel">Yes, delete</button>
            <button class="btn btn-secondary btn-sm" id="fpAbortDel">Keep</button>`;
         actions.querySelector('#fpAbortDel').addEventListener('click', () => this.emitInspector());
@@ -993,30 +1429,74 @@
     }
 
     async _doDelete(type, id) {
-      const url = type === 'zone' ? `${API}/zones/${id}` : `${API}/structures/${id}`;
+      const shape = this.findShape(type, id);
+      const before = shape ? this.snapShape(type, shape) : null;
       try {
-        const res = await fetch(url, { method: 'DELETE' });
-        if (!res.ok) throw new Error(res.statusText);
-        if (type === 'zone') this.zones = this.zones.filter((z) => z.id !== id);
-        else this.structures = this.structures.filter((s) => s.id !== id);
-        this.select(null);
-        this.setStatus('Deleted.', 'ok');
+        await this.deleteRemote(type, id);
+        if (before) this.pushCmd(this.cmdDelete(type, before, `Delete ${this.shapeLabel(type, before)}`));
+        this.setStatus('Deleted. Undo (Ctrl+Z) brings it back.', 'ok');
         this.recomputeSetup();
       } catch (e) {
         this.setStatus(`Could not delete: ${e.message}`, 'error');
       }
     }
 
-    async saveCameraPlacement(cam) {
+    async deleteRemote(type, id) {
+      const url = type === 'zone' ? `${API}/zones/${encodeURIComponent(id)}` : `${API}/structures/${encodeURIComponent(id)}`;
+      const res = await fetch(url, { method: 'DELETE' });
+      if (!res.ok && res.status !== 404) throw new Error(res.statusText || `HTTP ${res.status}`);
+      if (type === 'zone') this.zones = this.zones.filter((z) => z.id !== id);
+      else this.structures = this.structures.filter((s) => s.id !== id);
+      if (this.sel && this.sel.type === type && this.sel.id === id) this.select(null);
+    }
+
+    /** Create a zone or structure from a snapshot (drawing, duplicate, undo of a delete). */
+    async postSnap(type, snap) {
+      if (type === 'zone') {
+        const z = await this.post(`${API}/zones`, {
+          name: snap.name, category: snap.category || 'AISLE', polygon: snap.polygon,
+          color: snap.color || CATEGORY_COLORS.AISLE, sku_id: snap.sku_id || null, products: snap.products || [],
+        });
+        if (Number.isFinite(snap._rotation_deg)) z._rotation_deg = snap._rotation_deg;
+        this.zones.push(z);
+        return z;
+      }
+      const body = { kind: snap.kind, name: snap.name, polygon: snap.polygon, color: snap.color || KIND_COLORS[snap.kind],
+        properties: Object.assign({}, snap.properties || {}) };
+      if (snap.thickness_m) body.thickness_m = snap.thickness_m;
+      const st = await this.post(`${API}/structures`, body);
+      this.structures.push(st);
+      return st;
+    }
+
+    /** Store a snapshot's fields on the (possibly re-created) shape it belongs to. */
+    async putSnap(type, snap) {
+      const id = this.resolveId(snap.id);
+      const shape = this.findShape(type, id);
+      if (!shape) throw new Error('it is no longer on the map');
+      restoreSnap(shape, snap);
+      const saved = await this._putShape(type, shape);
+      Object.assign(shape, saved);
+      if (this.sel && this.sel.type === type && this.sel.id === id) this.emitInspector();
+    }
+
+    async saveCameraPlacement(cam, opts) {
+      const o = opts || {};
       try {
-        await this.post(`${API}/cameras/${cam.camera_id}/placement`, {
+        await this.post(`${API}/cameras/${encodeURIComponent(cam.camera_id)}/placement`, {
           floor_x: cam.floor_x, floor_y: cam.floor_y, floor_z: cam.floor_z,
           azimuth_deg: cam.azimuth_deg, fov_deg: cam.fov_deg,
         }, 'PATCH');
-        this.setStatus(`"${cam.name}" at ${cam.floor_x.toFixed(1)}, ${cam.floor_y.toFixed(1)} m, bearing ${Math.round(cam.azimuth_deg)}°.`, 'ok');
-        if (window.deviceManager) window.deviceManager.renderCameras();
+        cam.map_placed = true;
+        if (o.before) this.pushCmd(this.cmdCamera(o.before, cameraSnap(cam), o.label || `Move camera "${cam.name}"`));
+        this.setStatus(`"${cam.name}" at ${(+cam.floor_x).toFixed(1)}, ${(+cam.floor_y).toFixed(1)} m, bearing ${Math.round(cam.azimuth_deg || 0)}°.`, 'ok');
+        if (window.deviceManager && window.deviceManager.renderCameras) window.deviceManager.renderCameras();
+        this.emitLayoutChanged();
+        return true;
       } catch (e) {
+        if (o.before) Object.assign(cam, cameraFields(o.before));
         this.setStatus(`Could not save placement: ${e.message}`, 'error');
+        return false;
       }
     }
 
@@ -1027,37 +1507,483 @@
         this.setMode(MODE.VIEW);
         return;
       }
-      const cam = this.cameras.find((c) => c.camera_id === pending);
-      if (cam) {
-        cam.floor_x = +this.clampX(xm).toFixed(2);
-        cam.floor_y = +this.clampY(ym).toFixed(2);
-        await this.saveCameraPlacement(cam);
-        this.select({ type: 'camera', id: cam.camera_id });
-      }
       window.__pendingCameraPlacement = null;
       this.setMode(MODE.VIEW);
+      await this.placeCameraById(pending, xm, ym);
     }
 
-    async saveStoreSize(name, w, h) {
-      const data = await this.post(API, { width_m: w, height_m: h, name }, 'PUT');
+    /** Put a camera at (x, y) metres and save it; past the edge it offers to extend the map. */
+    async placeCameraById(cameraId, xm, ym) {
+      const cam = this.cameras.find((c) => c.camera_id === cameraId);
+      if (!cam) throw new Error('this camera is not on the map; reload the page');
+      const before = cameraSnap(cam);
+      cam.floor_x = +(+xm).toFixed(2);
+      cam.floor_y = +(+ym).toFixed(2);
+      const ok = await this.commitCamera(cam, before, `Place camera "${cam.name}"`);
+      const now = this.cameras.find((c) => c.camera_id === cameraId);
+      if (now) this.select({ type: 'camera', id: cameraId });
+      if (!ok) throw new Error('the camera position was not saved');
+    }
+
+    /** Save a moved or turned camera; past the edge it offers to extend the map first. */
+    async commitCamera(cam, before, label) {
+      const id = cam.camera_id;
+      if (!this.insideSite(cam.floor_x, cam.floor_y)) {
+        const box = { minX: cam.floor_x, maxX: cam.floor_x, minY: cam.floor_y, maxY: cam.floor_y };
+        const choice = await this.offerExtend(box, `"${cam.name}"`);
+        if (choice === 'extend') {
+          const pending = cameraSnap(cam);
+          const ch = await this.extendMap(this.sidesToFit(box));
+          const fresh = this.cameras.find((c) => c.camera_id === id);
+          if (!ch || !fresh) { if (fresh) Object.assign(fresh, cameraFields(before)); return false; }
+          shiftSnap(before, ch.dx, ch.dy);
+          shiftSnap(pending, ch.dx, ch.dy);
+          Object.assign(fresh, cameraFields(pending));
+          cam = fresh;
+        } else {
+          cam.floor_x = +this.clampX(cam.floor_x).toFixed(2);
+          cam.floor_y = +this.clampY(cam.floor_y).toFixed(2);
+        }
+      }
+      return this.saveCameraPlacement(cam, { before, label });
+    }
+
+    async saveStoreSize(name, w, h, clamp) {
+      const body = { width_m: w, height_m: h, name };
+      if (clamp) body.clamp = true;
+      const data = await this.post(API, body, 'PUT');
       // PUT returns the full layout; keep our richer local copies where the
       // server response lacks them (older servers omit structures).
       this.applyLayout(Object.assign({}, this.layout, data));
+      if (clamp) this.clearHistory('Undo history cleared: items were moved inside the smaller map.');
       this._userZoomed = false;
       this.fitToView();
       this.recomputeSetup();
       return data;
     }
 
+    // ------------------------------------------------------ map size (site)
+
+    insideSite(x, y) {
+      if (!this.layout) return true;
+      const e = 1e-6;
+      return x >= -e && y >= -e && x <= this.layout.width_m + e && y <= this.layout.height_m + e;
+    }
+
+    fitsSite(points) { return (points || []).every((p) => this.insideSite(p.x, p.y)); }
+
+    /** Metres to add on each side so a box fits, with a margin, in 0.5 m steps. */
+    sidesToFit(b) {
+      const W = this.layout.width_m, H = this.layout.height_m;
+      const up = (v) => Math.min(EXTEND_MAX_M, Math.ceil((v + EXTEND_MARGIN_M) / GRID_SNAP_M) * GRID_SNAP_M);
+      return {
+        left_m: b.minX < 0 ? up(-b.minX) : 0,
+        top_m: b.minY < 0 ? up(-b.minY) : 0,
+        right_m: b.maxX > W ? up(b.maxX - W) : 0,
+        bottom_m: b.maxY > H ? up(b.maxY - H) : 0,
+      };
+    }
+
+    /**
+     * New geometry that may be past the edge: ask, then either extend the map
+     * (the points are returned in the new, possibly shifted frame) or keep it
+     * inside (points pulled to the edge). Null when extending failed.
+     */
+    async fitIntoSite(points, what) {
+      if (this.fitsSite(points)) return points;
+      const box = boundsOf(points);
+      const choice = await this.offerExtend(box, what);
+      if (choice !== 'extend') return points.map((q) => ({ x: r3(this.clampX(q.x)), y: r3(this.clampY(q.y)) }));
+      const ch = await this.extendMap(this.sidesToFit(box));
+      if (!ch) return null;
+      return points.map((q) => ({ x: r3(q.x + ch.dx), y: r3(q.y + ch.dy) }));
+    }
+
+    /**
+     * Save an edited shape. Past the edge, offers to extend the map; "Keep it
+     * inside" moves a dragged shape back by the overshoot (``moveOrig``) or
+     * pulls single points to the edge.
+     */
+    async commitGeometry(type, shape, before, label, moveOrig) {
+      const id = shape.id;
+      if (!this.fitsSite(shape.polygon)) {
+        const box = boundsOf(shape.polygon);
+        const choice = await this.offerExtend(box, this.shapeLabel(type, shape));
+        if (choice === 'extend') {
+          const pending = clonePts(shape.polygon);
+          const rot = this.getRotation(type, shape);
+          const ch = await this.extendMap(this.sidesToFit(box));
+          const fresh = this.findShape(type, id);
+          if (!fresh) return false;
+          if (!ch) { restoreSnap(fresh, before); return false; }
+          shiftSnap(before, ch.dx, ch.dy);
+          fresh.polygon = pending.map((q) => ({ x: r3(q.x + ch.dx), y: r3(q.y + ch.dy) }));
+          this.setRotation(type, fresh, rot);
+          shape = fresh;
+        } else if (moveOrig) {
+          shape.polygon = this.keepInsideByDelta(moveOrig, shape.polygon);
+        } else {
+          shape.polygon = shape.polygon.map((q) => ({ x: r3(this.clampX(q.x)), y: r3(this.clampY(q.y)) }));
+        }
+      }
+      return this.saveShape(type, shape, before.polygon, { before, label });
+    }
+
+    /** A moved copy of ``orig`` whose move is cut short at the map edge (shape unchanged). */
+    keepInsideByDelta(orig, moved) {
+      const W = this.layout.width_m, H = this.layout.height_m;
+      let dx = moved[0].x - orig[0].x, dy = moved[0].y - orig[0].y;
+      const b = boundsOf(orig);
+      dx = Math.max(-b.minX, Math.min(W - b.maxX, dx));
+      dy = Math.max(-b.minY, Math.min(H - b.maxY, dy));
+      return orig.map((q) => ({ x: r3(q.x + dx), y: r3(q.y + dy) }));
+    }
+
+    /**
+     * Non-modal question inside the map: resolves 'extend' or 'keep'. Any
+     * other click on the map, or Escape, means "keep it inside".
+     */
+    offerExtend(box, what) {
+      if (this._offer) this._resolveOffer('keep');
+      const wrap = document.getElementById('fpWrapper');
+      if (!wrap || !this.layout) return Promise.resolve('keep');
+      const sides = this.sidesToFit(box);
+      const el = document.createElement('div');
+      el.className = 'fp-extend-offer';
+      el.setAttribute('role', 'alertdialog');
+      el.setAttribute('aria-label', 'Extend the map to fit?');
+      el.innerHTML = `
+        <span class="fp-extend-text"><b>${what ? escapeHtml(cap(what)) + ' goes' : 'This goes'} past the edge of the map.</b>
+          Extend the map to fit? (${escapeHtml(describeSides(sides))})</span>
+        <span class="fp-extend-actions">
+          <button type="button" class="btn btn-sm btn-primary" data-act="extend">Extend the map</button>
+          <button type="button" class="btn btn-sm btn-secondary" data-act="keep">Keep it inside</button>
+        </span>`;
+      wrap.appendChild(el);
+      return new Promise((resolve) => {
+        this._offer = { el, resolve };
+        el.querySelectorAll('[data-act]').forEach((b) => b.addEventListener('click', () => this._resolveOffer(b.dataset.act)));
+        const first = el.querySelector('[data-act="extend"]');
+        if (first) { try { first.focus({ preventScroll: true }); } catch (_) { /* old browser */ } }
+      });
+    }
+
+    _resolveOffer(choice) {
+      const o = this._offer;
+      if (!o) return;
+      this._offer = null;
+      o.el.remove();
+      o.resolve(choice);
+    }
+
+    /**
+     * Add (positive) or remove (negative) metres on each side through
+     * POST /layout/extend. Space added left or top moves everything on the
+     * server; the view, the undo history and anything in progress move with
+     * it. Returns {dx, dy} or null (the reason is shown in the status line).
+     */
+    async extendMap(sides) {
+      const body = {
+        left_m: +sides.left_m || 0, top_m: +sides.top_m || 0,
+        right_m: +sides.right_m || 0, bottom_m: +sides.bottom_m || 0,
+      };
+      await this.flushNudge();
+      try {
+        const data = await this.post(`${API}/extend`, body);
+        const ch = this._afterSiteChange(data);
+        this.setStatus(`The map is now ${fmt(data.width_m)} × ${fmt(data.height_m)} m.`, 'ok');
+        return ch;
+      } catch (e) {
+        this.setStatus(e.detail && e.detail.code === 'items_outside'
+          ? `Not changed: ${describeItems(e.detail.items)} would end up outside the map. Move ${e.detail.items.length === 1 ? 'it' : 'them'} first.`
+          : `Could not change the map size: ${e.message}`, 'error');
+        if (e.detail && e.detail.code === 'items_outside') this._lastOutside = e.detail.items;
+        return null;
+      }
+    }
+
+    /** POST /layout/fit: the map shrinks or grows to what is on it, plus a margin. */
+    async fitMapToContent(margin) {
+      await this.flushNudge();
+      try {
+        const data = await this.post(`${API}/fit`, { margin_m: Number.isFinite(+margin) ? +margin : 2 });
+        this._afterSiteChange(data);
+        this.setStatus(data.site_change && data.site_change.unchanged
+          ? 'The map already fits what is on it.'
+          : `The map now fits what is on it: ${fmt(data.width_m)} × ${fmt(data.height_m)} m.`, 'ok');
+        return data;
+      } catch (e) {
+        this.setStatus(`Could not fit the map: ${e.message}`, 'error');
+        return null;
+      }
+    }
+
+    _afterSiteChange(data) {
+      const ch = data.site_change || {};
+      const dx = +ch.dx || 0, dy = +ch.dy || 0;
+      this.applyLayout(Object.assign({}, this.layout, data));
+      if (dx || dy) {
+        this._shiftHistory(dx, dy);
+        const mv = (p) => { if (p) { p.x = r3(p.x + dx); p.y = r3(p.y + dy); } };
+        if (this.measure) { mv(this.measure.a); mv(this.measure.b); }
+        this.draft.forEach(mv);
+        this.tracks.forEach((t) => t.points.forEach(mv));
+        // What is on screen stays where it was; only the map edges move.
+        if (this._userZoomed) { this.offsetX -= dx * this.scale; this.offsetY -= dy * this.scale; }
+      }
+      if (!this._userZoomed) this.fitToView();
+      // A heatmap drawn in the old frame would be misplaced until the next fetch.
+      if (dx || dy) { this.heatmap = null; this._heatmapFetchKey = null; }
+      this.recomputeSetup();
+      this.refreshMetrics();
+      if (this.sel) this.emitInspector();
+      return { dx, dy };
+    }
+
+    // ---------------------------------------------------------- undo / redo
+    //
+    // Each command replays API calls: create <-> delete, update old <-> new.
+    // Snapshots hold metres in the current map frame; when the map origin
+    // moves (space added left or top) every snapshot moves with it.
+
+    snapShape(type, s) {
+      const snap = { type, id: s.id, name: s.name, polygon: clonePts(s.polygon || []), color: s.color };
+      if (type === 'zone') {
+        snap.category = s.category;
+        snap.products = (s.products || []).slice();
+        if ('sku_id' in s) snap.sku_id = s.sku_id;
+        if (Number.isFinite(s._rotation_deg)) snap._rotation_deg = s._rotation_deg;
+      } else {
+        snap.kind = s.kind;
+        snap.thickness_m = s.thickness_m;
+        snap.properties = JSON.parse(JSON.stringify(s.properties || {}));
+      }
+      return snap;
+    }
+
+    resolveId(id) {
+      let cur = id;
+      for (let i = 0; i < 1000 && this._idMap.has(cur); i++) cur = this._idMap.get(cur);
+      return cur;
+    }
+
+    pushCmd(cmd) {
+      if (this._busyUndo) return;   // replaying a command never records a new one
+      this.undoStack.push(cmd);
+      if (this.undoStack.length > UNDO_LIMIT) this.undoStack.shift();
+      this.redoStack = [];
+      this.updateUndoButtons();
+    }
+
+    clearHistory(msg) {
+      this.undoStack = [];
+      this.redoStack = [];
+      this.updateUndoButtons();
+      if (msg) this.setStatus(msg);
+    }
+
+    cmdUpdate(type, before, after, label) {
+      return { label, snaps: [before, after], undo: () => this.putSnap(type, before), redo: () => this.putSnap(type, after) };
+    }
+
+    cmdCreate(type, snap, label) {
+      const remove = async () => { await this.deleteRemote(type, this.resolveId(snap.id)); this.recomputeSetup(); };
+      const restore = async () => {
+        const prev = this.resolveId(snap.id);
+        const obj = await this.postSnap(type, snap);
+        if (obj.id !== prev) this._idMap.set(prev, obj.id);
+        this.select({ type, id: obj.id });
+        this.recomputeSetup();
+      };
+      return { label, snaps: [snap], undo: remove, redo: restore };
+    }
+
+    cmdDelete(type, snap, label) {
+      const c = this.cmdCreate(type, snap, label);
+      return { label, snaps: c.snaps, undo: c.redo, redo: c.undo };
+    }
+
+    cmdCamera(before, after, label) {
+      const put = async (snap) => {
+        const cam = this.cameras.find((c) => c.camera_id === snap.camera_id);
+        if (!cam) throw new Error('the camera was removed');
+        Object.assign(cam, cameraFields(snap));
+        await this.post(`${API}/cameras/${encodeURIComponent(cam.camera_id)}/placement`, {
+          floor_x: cam.floor_x, floor_y: cam.floor_y, floor_z: cam.floor_z, azimuth_deg: cam.azimuth_deg, fov_deg: cam.fov_deg,
+        }, 'PATCH');
+        if (this.sel && this.sel.type === 'camera' && this.sel.id === cam.camera_id) this.emitInspector();
+        this.emitLayoutChanged();
+      };
+      return { label, snaps: [before, after], undo: () => put(before), redo: () => put(after) };
+    }
+
+    _shiftHistory(dx, dy) {
+      const seen = new Set();
+      const all = this.undoStack.concat(this.redoStack);
+      all.forEach((c) => (c.snaps || []).forEach((snap) => {
+        if (!snap || seen.has(snap)) return;
+        seen.add(snap);
+        shiftSnap(snap, dx, dy);
+      }));
+      if (this._nudge && this._nudge.before) shiftSnap(this._nudge.before, dx, dy);
+    }
+
+    async undo() { return this._replay(this.undoStack, this.redoStack, 'undo', 'Undone'); }
+
+    async redo() { return this._replay(this.redoStack, this.undoStack, 'redo', 'Redone'); }
+
+    async _replay(from, to, fn, verb) {
+      if (this._busyUndo) return;
+      await this.flushNudge();
+      const cmd = from.pop();
+      if (!cmd) { this.setStatus(fn === 'undo' ? 'Nothing to undo.' : 'Nothing to redo.'); this.updateUndoButtons(); return; }
+      this._busyUndo = true;
+      this.updateUndoButtons();
+      try {
+        await cmd[fn]();
+        to.push(cmd);
+        this.setStatus(`${verb}: ${cmd.label}.`, 'ok');
+      } catch (e) {
+        this.setStatus(`Could not ${fn} "${cmd.label}": ${e.message}`, 'error');
+      } finally {
+        this._busyUndo = false;
+        this.updateUndoButtons();
+        this.emitInspector();
+      }
+    }
+
+    updateUndoButtons() {
+      const u = document.getElementById('fpUndo'), r = document.getElementById('fpRedo');
+      const last = this.undoStack[this.undoStack.length - 1], next = this.redoStack[this.redoStack.length - 1];
+      if (u) { u.disabled = this._busyUndo || !last; u.title = last ? `Undo: ${last.label} (Ctrl+Z)` : 'Nothing to undo'; }
+      if (r) { r.disabled = this._busyUndo || !next; r.title = next ? `Redo: ${next.label} (Ctrl+Shift+Z)` : 'Nothing to redo'; }
+    }
+
+    // ------------------------------------------------- duplicate and nudge
+
+    async duplicateSelected() {
+      if (!this.sel || this.sel.type === 'camera') {
+        this.setStatus(this.sel ? 'Cameras cannot be duplicated: each one is a real device.' : 'Select a room, shelf, wall or zone first.');
+        return;
+      }
+      const type = this.sel.type;
+      const shape = this.findSel();
+      if (!shape) return;
+      await this.flushNudge();
+      const snap = this.snapShape(type, shape);
+      delete snap.id;
+      snap.name = `${shape.name} copy`;
+      // 1 m right and down, or the other way when that would leave the map.
+      const b = boundsOf(snap.polygon);
+      const ox = b.maxX + 1 <= this.layout.width_m ? 1 : (b.minX - 1 >= 0 ? -1 : 0);
+      const oy = b.maxY + 1 <= this.layout.height_m ? 1 : (b.minY - 1 >= 0 ? -1 : 0);
+      snap.polygon = snap.polygon.map((q) => ({ x: r3(q.x + ox), y: r3(q.y + oy) }));
+      try {
+        const obj = await this.postSnap(type, snap);
+        this.pushCmd(this.cmdCreate(type, this.snapShape(type, obj), `Duplicate ${this.shapeLabel(type, shape)}`));
+        this.select({ type, id: obj.id });
+        this.setStatus(`Copied as "${obj.name}". Drag it into place.`, 'ok');
+        this.recomputeSetup();
+      } catch (e) {
+        this.setStatus(`Could not duplicate: ${e.message}`, 'error');
+      }
+    }
+
+    /** Arrow keys: move the selection; a burst of presses is saved and undone as one step. */
+    nudge(dx, dy) {
+      const sel = this.sel;
+      const obj = this.findSel();
+      if (!sel || !obj || !this.layout) return;
+      if (!this._nudge || this._nudge.type !== sel.type || this._nudge.id !== sel.id) {
+        this.flushNudge();
+        this._nudge = { type: sel.type, id: sel.id, before: sel.type === 'camera' ? cameraSnap(obj) : this.snapShape(sel.type, obj) };
+      }
+      if (sel.type === 'camera') {
+        obj.floor_x = r3(this.clampX((+obj.floor_x || 0) + dx));
+        obj.floor_y = r3(this.clampY((+obj.floor_y || 0) + dy));
+      } else {
+        // The whole shape stays on the map; the map is grown with drag or "Map size".
+        const b = boundsOf(obj.polygon);
+        const mx = Math.max(-b.minX, Math.min(this.layout.width_m - b.maxX, dx));
+        const my = Math.max(-b.minY, Math.min(this.layout.height_m - b.maxY, dy));
+        obj.polygon = obj.polygon.map((q) => ({ x: r3(q.x + mx), y: r3(q.y + my) }));
+      }
+      clearTimeout(this._nudge.timer);
+      this._nudge.timer = setTimeout(() => this.flushNudge(), NUDGE_SAVE_MS);
+    }
+
+    flushNudge() {
+      const n = this._nudge;
+      if (!n) return Promise.resolve();
+      this._nudge = null;
+      clearTimeout(n.timer);
+      if (n.type === 'camera') {
+        const cam = this.cameras.find((c) => c.camera_id === n.id);
+        return cam ? this.saveCameraPlacement(cam, { before: n.before, label: `Nudge camera "${cam.name}"` }) : Promise.resolve();
+      }
+      const shape = this.findShape(n.type, n.id);
+      return shape ? this.saveShape(n.type, shape, n.before.polygon, { before: n.before, label: `Nudge ${this.shapeLabel(n.type, shape)}` }) : Promise.resolve();
+    }
+
+    // ------------------------------------------------ API for other modules
+
+    apiCameras() {
+      return (this.cameras || []).map((c) => ({
+        camera_id: c.camera_id,
+        name: c.name || c.camera_id,
+        // Older servers do not report map_placed: a camera with a spot counts as placed.
+        placed: typeof c.map_placed === 'boolean' ? c.map_placed : Number.isFinite(c.floor_x) && Number.isFinite(c.floor_y),
+        x_m: Number.isFinite(+c.floor_x) ? +c.floor_x : null,
+        y_m: Number.isFinite(+c.floor_y) ? +c.floor_y : null,
+        azimuth_deg: Number.isFinite(+c.azimuth_deg) ? +c.azimuth_deg : 0,
+        fov_deg: Number.isFinite(+c.fov_deg) ? +c.fov_deg : 85,
+        calibrated: !!c.has_homography,
+        enabled: c.is_ai_enabled !== false && c.status !== 'DISABLED',
+      }));
+    }
+
+    apiClientToWorld(clientX, clientY) {
+      const r = this.canvas.getBoundingClientRect();
+      if (!(r.width > 0) || clientX < r.left || clientX > r.right || clientY < r.top || clientY > r.bottom) return null;
+      const w = this.toWorld(clientX - r.left, clientY - r.top);
+      return { x_m: r3(w.x), y_m: r3(w.y), inside: this.insideSite(w.x, w.y) };
+    }
+
+    /** Select a camera, bring it into view and show its details. */
+    focusCamera(cameraId) {
+      const cam = this.cameras.find((c) => c.camera_id === cameraId);
+      if (!cam) return;
+      this.select({ type: 'camera', id: cameraId });
+      const s = this.cameraScreenPos(cam);
+      const W = this.canvas.clientWidth, H = this.canvas.clientHeight;
+      const mx = W * 0.15, my = H * 0.15;
+      if (s.x < mx || s.y < my || s.x > W - mx || s.y > H - my - this.hudReserve()) {
+        this.offsetX += W / 2 - s.x;
+        this.offsetY += (H - this.hudReserve()) / 2 - s.y;
+        this._userZoomed = true;
+      }
+    }
+
+    setDropPreview(xm, ym) {
+      this.dropPreview = (xm === null || xm === undefined || ym === null || ym === undefined || !Number.isFinite(+xm) || !Number.isFinite(+ym))
+        ? null : { x: +xm, y: +ym };
+    }
+
     // ------------------------------------------------------------ selection
 
     select(sel) {
+      if (this._nudge && (!sel || sel.type !== this._nudge.type || sel.id !== this._nudge.id)) this.flushNudge();
+      const was = this.sel;
       this.sel = sel;
       this.selVertex = null;
       this._stopThumb();
       this.emitInspector();
+      this.updateToolButtons();
       if (window.deviceManager && window.deviceManager.highlight) {
         window.deviceManager.highlight(sel && sel.type === 'camera' ? sel.id : null);
+      }
+      if (sel && sel.type === 'camera' && !(was && was.type === 'camera' && was.id === sel.id)) {
+        emit('fp:camera-selected', { camera_id: sel.id });
       }
     }
 
@@ -1111,6 +2037,7 @@
         <div class="fp-field"><label for="zProducts">Products sold here</label>
           <textarea id="zProducts" name="zoneProducts" rows="2" placeholder="e.g. Chips, Lollies, Chocolate">${escapeHtml((zone.products || []).join(', '))}</textarea>
           <span class="fp-hintline">Comma-separated. Insights and the AI summary name these when they talk about this zone.</span></div>
+        ${this.geometryFieldsHtml('zone', zone)}
         <div class="fp-zone-sub">${fmt(zone.area_m2)} m² · ${zone.polygon.length} corners${this.selVertex !== null ? ` · corner ${this.selVertex + 1} selected` : ''}${this.camerasLinkedTo(zone.id).length ? ` · counted by ${this.camerasLinkedTo(zone.id).length} uncalibrated camera${this.camerasLinkedTo(zone.id).length === 1 ? '' : 's'}` : ''}</div>
         ${this.editHints()}
         <div class="fp-saved" id="zSaved"></div>
@@ -1122,19 +2049,24 @@
           <div class="metric-pill"><span class="metric-pill-label">In zone now</span><span class="metric-pill-val">${val(m && m.occupancy_now)}</span></div>
         </div>
         <div class="fp-actions">
+          <button class="btn btn-secondary btn-sm" id="fpDup" title="Duplicate (Ctrl+D)">${ico('copy', { size: 'sm' })}Duplicate</button>
           <button class="btn btn-sm btn-danger" id="fpDelete">Delete zone</button>
           <button class="btn btn-secondary btn-sm" id="fpDone">Done</button>
         </div>`;
 
       const commit = async () => {
-        zone.name = panel.querySelector('#zName').value.trim() || zone.name;
+        const before = this.snapShape('zone', zone);
+        const name = panel.querySelector('#zName').value.trim() || zone.name;
+        zone.name = name;
         zone.category = panel.querySelector('#zCat').value;
         zone.color = panel.querySelector('#zColor').value;
         zone.products = panel.querySelector('#zProducts').value.split(/[,\n]/).map((p) => p.trim()).filter(Boolean);
-        await this.saveShape('zone', zone);
-        flashSaved('zSaved');
+        const label = name !== before.name ? `Rename zone "${before.name}"` : `Edit zone "${name}"`;
+        if (await this.saveShape('zone', zone, null, { before, label })) flashSaved('zSaved');
       };
       ['zName', 'zCat', 'zColor', 'zProducts'].forEach((id) => panel.querySelector(`#${id}`).addEventListener('change', commit));
+      this.bindGeometryFields(panel, 'zone', zone);
+      panel.querySelector('#fpDup').addEventListener('click', () => this.duplicateSelected());
       panel.querySelector('#fpDelete').addEventListener('click', () => this.deleteShape('zone', zone.id));
       panel.querySelector('#fpDone').addEventListener('click', () => this.select(null));
     }
@@ -1144,10 +2076,16 @@
       const isLine = POLYLINE_KINDS.has(st.kind);
       const canBePolygon = st.polygon.length >= 3;
       const props = st.properties || {};
+      const presets = st.kind === 'ROOM' || st.kind === 'OUTDOOR';
       panel.innerHTML = `
-        <div class="fp-inspector-kind">${escapeHtml(st.kind)}</div>
+        <div class="fp-inspector-kind">${escapeHtml(KIND_LABEL[st.kind] || st.kind)}</div>
         <div class="fp-field"><label for="stName">Name</label>
-          <input id="stName" name="structureName" type="text" value="${escapeHtml(st.name)}"></div>
+          <input id="stName" name="structureName" type="text" value="${escapeHtml(st.name)}"${presets ? ' list="fpRoomPresets" autocomplete="off"' : ''}>
+          ${presets ? `<datalist id="fpRoomPresets">${ROOM_PRESETS.map((n) => `<option value="${escapeHtml(n)}"></option>`).join('')}</datalist>
+          <span class="fp-hintline">Pick a suggestion (Sales floor, Storeroom, Cool room...) or type your own.</span>` : ''}</div>
+        ${st.kind === 'OUTDOOR' ? `<div class="fp-field"><label for="stArea">Type of area (optional)</label>
+          <input id="stArea" name="structureAreaType" type="text" list="fpOutdoorTypes" autocomplete="off" value="${escapeHtml(props.area_type || '')}" placeholder="e.g. Car park">
+          <datalist id="fpOutdoorTypes">${OUTDOOR_TYPES.map((n) => `<option value="${escapeHtml(n)}"></option>`).join('')}</datalist></div>` : ''}
         <div class="fp-field-row">
           <div class="fp-field"><label for="stKind">Kind</label>
             <select id="stKind" name="structureKind">${STRUCT_KINDS.map((k) => {
@@ -1163,18 +2101,21 @@
           <div class="fp-field"><label for="stHeight">Height (m, optional)</label>
             <input id="stHeight" name="structureHeight" type="number" step="0.1" min="0" max="30" value="${props.height_m != null ? props.height_m : ''}" placeholder="not set"></div>
         </div>
+        ${this.geometryFieldsHtml('structure', st)}
         <div class="fp-kv">
           <span>${isLine ? 'Length' : 'Area'}</span><b>${isLine ? fmt(st.length_m) + ' m' : fmt(st.area_m2) + ' m²'}</b>
           <span>Points</span><b>${st.polygon.length}${this.selVertex !== null ? ` (point ${this.selVertex + 1} selected)` : ''}</b>
         </div>
-        ${this.editHints()}
+        ${this.editHints(isLine)}
         <div class="fp-saved" id="stSaved"></div>
         <div class="fp-actions">
-          <button class="btn btn-sm btn-danger" id="fpDelete">Delete ${KIND_LABEL[st.kind].toLowerCase()}</button>
+          <button class="btn btn-secondary btn-sm" id="fpDup" title="Duplicate (Ctrl+D)">${ico('copy', { size: 'sm' })}Duplicate</button>
+          <button class="btn btn-sm btn-danger" id="fpDelete">Delete ${(KIND_LABEL[st.kind] || 'item').toLowerCase()}</button>
           <button class="btn btn-secondary btn-sm" id="fpDone">Done</button>
         </div>`;
 
       const commit = async () => {
+        const before = this.snapShape('structure', st);
         st.name = panel.querySelector('#stName').value.trim() || st.name;
         st.kind = panel.querySelector('#stKind').value;
         st.color = panel.querySelector('#stColor').value;
@@ -1182,17 +2123,86 @@
         const h = panel.querySelector('#stHeight').value;
         st.properties = Object.assign({}, st.properties || {});
         if (h === '') delete st.properties.height_m; else st.properties.height_m = parseFloat(h);
-        await this.saveShape('structure', st);
-        flashSaved('stSaved');
+        const area = panel.querySelector('#stArea');
+        if (area) st.properties.area_type = area.value.trim();
+        // A kind picked without a colour of its own keeps the look of that kind.
+        if (st.kind !== before.kind && before.color === KIND_COLORS[before.kind]) st.color = KIND_COLORS[st.kind];
+        const label = st.name !== before.name ? `Rename ${this.shapeLabel('structure', before)}` : `Edit ${this.shapeLabel('structure', st)}`;
+        if (await this.saveShape('structure', st, null, { before, label })) flashSaved('stSaved');
         this.emitInspector();
       };
-      ['stName', 'stKind', 'stColor', 'stThick', 'stHeight'].forEach((id) => panel.querySelector(`#${id}`).addEventListener('change', commit));
+      ['stName', 'stKind', 'stColor', 'stThick', 'stHeight', 'stArea'].forEach((id) => {
+        const el = panel.querySelector(`#${id}`);
+        if (el) el.addEventListener('change', commit);
+      });
+      this.bindGeometryFields(panel, 'structure', st);
+      panel.querySelector('#fpDup').addEventListener('click', () => this.duplicateSelected());
       panel.querySelector('#fpDelete').addEventListener('click', () => this.deleteShape('structure', st.id));
       panel.querySelector('#fpDone').addEventListener('click', () => this.select(null));
     }
 
-    editHints() {
-      return `<div class="fp-hintline">Drag the shape to move it · drag a corner to reshape · double-click an edge to add a corner · <kbd>Del</kbd> removes the selected corner or the shape.</div>`;
+    /** Position (centre), size and angle in metres / degrees, typed in exactly. */
+    geometryFieldsHtml(type, shape) {
+      const f = this.shapeFrame(type, shape);
+      const box = this.hasFrame(type, shape);
+      const n = (v, d) => (Math.round(v * 10 ** d) / 10 ** d).toString();
+      return `
+        <div class="fp-geom">
+          <div class="fp-field-row-3">
+            <div class="fp-field"><label for="gX">X (m)</label>
+              <input id="gX" name="shapeX" type="number" step="0.1" value="${n(f.cx, 2)}" title="Centre, metres from the left edge of the map"></div>
+            <div class="fp-field"><label for="gY">Y (m)</label>
+              <input id="gY" name="shapeY" type="number" step="0.1" value="${n(f.cy, 2)}" title="Centre, metres from the top edge of the map"></div>
+            ${box ? `<div class="fp-field"><label for="gA">Angle (°)</label>
+              <input id="gA" name="shapeAngle" type="number" step="1" min="-360" max="360" value="${n(f.angle, 1)}"></div>` : '<div></div>'}
+          </div>
+          ${box ? `<div class="fp-field-row">
+            <div class="fp-field"><label for="gW">Width (m)</label>
+              <input id="gW" name="shapeWidth" type="number" step="0.1" min="0.1" max="1000" value="${n(f.w, 2)}"></div>
+            <div class="fp-field"><label for="gD">Depth (m)</label>
+              <input id="gD" name="shapeDepth" type="number" step="0.1" min="0.1" max="1000" value="${n(f.h, 2)}"></div>
+          </div>` : ''}
+          <span class="fp-hintline">X and Y are the centre, measured from the top-left corner of the map.</span>
+        </div>`;
+    }
+
+    bindGeometryFields(panel, type, shape) {
+      const read = (id) => { const el = panel.querySelector(`#${id}`); return el ? parseFloat(el.value) : NaN; };
+      const apply = () => this.applyGeometry(type, shape, { x: read('gX'), y: read('gY'), w: read('gW'), h: read('gD'), a: read('gA') });
+      ['gX', 'gY', 'gW', 'gD', 'gA'].forEach((id) => {
+        const el = panel.querySelector(`#${id}`);
+        if (el) el.addEventListener('change', apply);
+      });
+    }
+
+    /** Move / resize / turn a shape to typed values; past the edge it offers to extend the map. */
+    async applyGeometry(type, shape, v) {
+      const before = this.snapShape(type, shape);
+      const f = this.shapeFrame(type, shape);
+      const box = this.hasFrame(type, shape);
+      const num = (x, dflt) => (Number.isFinite(x) ? x : dflt);
+      const nw = box ? Math.max(0.1, num(v.w, f.w)) : f.w;
+      const nh = box ? Math.max(0.1, num(v.h, f.h)) : f.h;
+      const na = box ? ((num(v.a, f.angle) % 360) + 360) % 360 : 0;
+      const sx = box && f.w > 1e-6 ? nw / f.w : 1;
+      const sy = box && f.h > 1e-6 ? nh / f.h : 1;
+      const nf = { cx: num(v.x, f.cx), cy: num(v.y, f.cy), rad: na * Math.PI / 180 };
+      shape.polygon = shape.polygon.map((q) => {
+        const l = worldToFrame(f, q.x, q.y);
+        const r = box ? frameToWorld(nf, l.u * sx, l.v * sy) : { x: q.x + (nf.cx - f.cx), y: q.y + (nf.cy - f.cy) };
+        return { x: r3(r.x), y: r3(r.y) };
+      });
+      if (box) this.setRotation(type, shape, na);
+      const what = this.shapeLabel(type, shape);
+      if (await this.commitGeometry(type, shape, before, `Change size or position of ${what}`)) {
+        flashSaved(type === 'zone' ? 'zSaved' : 'stSaved');
+      }
+    }
+
+    editHints(isLine) {
+      return isLine
+        ? `<div class="fp-hintline">Drag to move · drag a point to reshape · double-click the line to add a point · arrow keys nudge (<kbd>Shift</kbd> = 1 m) · <kbd>Ctrl</kbd>+<kbd>D</kbd> duplicates · <kbd>Ctrl</kbd>+<kbd>Z</kbd> undoes · <kbd>Del</kbd> removes the selected point or the whole item.</div>`
+        : `<div class="fp-hintline">Drag to move · the square handles resize · the round handle turns it · arrow keys nudge (<kbd>Shift</kbd> = 1 m) · <kbd>Ctrl</kbd>+<kbd>D</kbd> duplicates · <kbd>Ctrl</kbd>+<kbd>Z</kbd> undoes. Turn on <b>Free shape</b> to drag single corners; double-click an edge to add one; <kbd>Del</kbd> removes the selected corner or the whole item.</div>`;
     }
 
     camerasLinkedTo(zoneId) {
@@ -1218,12 +2228,12 @@
           <span>Frame</span><b>${frame}</b>
           <span>Live tracks</span><b id="fpCamLive">${this.liveCountFor(cam.camera_id)}</b>
         </div>
-        <div class="fp-zone-sub">Drag the marker to move it, drag the wedge tip to turn it, or set exact values.</div>
+        <div class="fp-zone-sub">Drag the marker to move it (outside the building too, e.g. the car park), drag the wedge tip to turn it, use the arrow keys, or set exact values.${cam.map_placed === false ? ' <b>Not placed yet</b>: it sits at a default spot.' : ''}</div>
         <div class="fp-field-row">
           <div class="fp-field"><label for="cX">X (metres)</label>
-            <input id="cX" name="cameraX" type="number" step="0.1" min="0" value="${(+cam.floor_x || 0).toFixed(1)}"></div>
+            <input id="cX" name="cameraX" type="number" step="0.1" value="${(+cam.floor_x || 0).toFixed(1)}"></div>
           <div class="fp-field"><label for="cY">Y (metres)</label>
-            <input id="cY" name="cameraY" type="number" step="0.1" min="0" value="${(+cam.floor_y || 0).toFixed(1)}"></div>
+            <input id="cY" name="cameraY" type="number" step="0.1" value="${(+cam.floor_y || 0).toFixed(1)}"></div>
         </div>
         <div class="fp-field-row-3">
           <div class="fp-field"><label for="cAz">Bearing (°)</label>
@@ -1253,13 +2263,14 @@
         </div>`;
 
       const commit = async () => {
-        cam.floor_x = this.clampX(parseFloat(panel.querySelector('#cX').value) || 0);
-        cam.floor_y = this.clampY(parseFloat(panel.querySelector('#cY').value) || 0);
-        cam.azimuth_deg = ((parseFloat(panel.querySelector('#cAz').value) || 0) % 360 + 360) % 360;
-        cam.fov_deg = Math.max(10, Math.min(360, parseFloat(panel.querySelector('#cFov').value) || 85));
-        cam.floor_z = parseFloat(panel.querySelector('#cZ').value) || 3;
-        await this.saveCameraPlacement(cam);
-        flashSaved('cSaved');
+        const before = cameraSnap(cam);
+        const num = (id, dflt) => { const v = parseFloat(panel.querySelector(`#${id}`).value); return Number.isFinite(v) ? v : dflt; };
+        cam.floor_x = num('cX', +cam.floor_x || 0);
+        cam.floor_y = num('cY', +cam.floor_y || 0);
+        cam.azimuth_deg = (num('cAz', 0) % 360 + 360) % 360;
+        cam.fov_deg = Math.max(10, Math.min(360, num('cFov', 85)));
+        cam.floor_z = Math.max(0, Math.min(20, num('cZ', 3)));
+        if (await this.commitCamera(cam, before, `Edit camera "${cam.name}"`)) flashSaved('cSaved');
       };
       ['cX', 'cY', 'cAz', 'cFov', 'cZ'].forEach((id) => panel.querySelector(`#${id}`).addEventListener('change', commit));
       panel.querySelector('#cZone').addEventListener('change', async (ev) => {
@@ -1371,41 +2382,130 @@
       return `${d.live_tracks}${d.calibrated ? '' : ' (not placeable)'}`;
     }
 
+    /**
+     * "Map size": the site is the whole map (building plus outdoor areas).
+     * Space is added on any side with POST /layout/extend; "Fit to content"
+     * shrink-wraps it; exact width/depth (right and bottom edges) via PUT.
+     */
     resizeStore() {
       const panel = document.getElementById('zoneInspectorBody');
       const title = document.getElementById('fpInspectorTitle');
       if (!panel || !this.layout) return;
+      this.flushNudge();
       this.sel = null; this.selVertex = null; this._stopThumb();
-      if (title) title.textContent = 'Store';
+      this.updateToolButtons();
+      if (title) title.textContent = 'Map size';
+      const L = this.layout;
+      const side = (key, label) => `<button type="button" class="btn btn-secondary btn-sm fp-site-btn fp-site-${key}" data-side="${key}">${label} <span data-amt>+5 m</span></button>`;
       panel.innerHTML = `
-        <div class="fp-zone-sub">The physical extent of the premises, in metres. Shapes outside the new bounds are clamped to fit.</div>
-        <div class="fp-field"><label for="sName">Floor name</label>
-          <input id="sName" name="storeName" type="text" value="${escapeHtml(this.layout.name || '')}"></div>
-        <div class="fp-field-row">
-          <div class="fp-field"><label for="sW">Width (m)</label>
-            <input id="sW" name="storeWidth" type="number" step="0.5" min="1" max="1000" value="${this.layout.width_m}"></div>
-          <div class="fp-field"><label for="sH">Depth (m)</label>
-            <input id="sH" name="storeHeight" type="number" step="0.5" min="1" max="1000" value="${this.layout.height_m}"></div>
+        <div class="fp-zone-sub">The map is the whole site: the building plus any outdoor areas such as the car park or loading dock. Add space on the side you need it; everything already drawn stays where it is.</div>
+        <div class="fp-site-now">Map size now: <b>${fmt(L.width_m)} × ${fmt(L.height_m)} m</b></div>
+        <div class="fp-field"><label for="sAmt">Metres to add on one side</label>
+          <input id="sAmt" name="siteAmount" type="number" step="0.5" min="-500" max="500" value="5">
+          <span class="fp-hintline">Then pick the side. A minus number removes empty space from that side.</span></div>
+        <div class="fp-site-grid" role="group" aria-label="Add space on a side">
+          ${side('top', 'Top')}
+          ${side('left', 'Left')}
+          <div class="fp-site-box" aria-hidden="true">${fmt(L.width_m)} × ${fmt(L.height_m)} m</div>
+          ${side('right', 'Right')}
+          ${side('bottom', 'Bottom')}
+        </div>
+        <div class="fp-actions" style="margin-top:0">
+          <button type="button" class="btn btn-secondary btn-sm" id="sAll">Add 5 m all round</button>
+          <button type="button" class="btn btn-secondary btn-sm" id="sFit" title="Shrink or grow the map to what is drawn on it, plus 2 m">Fit to content</button>
         </div>
         <div class="fp-saved" id="sSaved"></div>
+        <div class="fp-site-outside" id="sOutside" hidden></div>
+        <details class="fp-site-exact">
+          <summary>Name and exact size</summary>
+          <div class="fp-field"><label for="sName">Floor name</label>
+            <input id="sName" name="storeName" type="text" value="${escapeHtml(L.name || '')}"></div>
+          <div class="fp-field-row">
+            <div class="fp-field"><label for="sW">Width (m)</label>
+              <input id="sW" name="storeWidth" type="number" step="0.5" min="1" max="1000" value="${L.width_m}"></div>
+            <div class="fp-field"><label for="sH">Depth (m)</label>
+              <input id="sH" name="storeHeight" type="number" step="0.5" min="1" max="1000" value="${L.height_m}"></div>
+          </div>
+          <span class="fp-hintline">Width and depth move the right and bottom edges. Shrinking past something on the map is refused, so nothing is cut off by accident.</span>
+          <div class="fp-actions">
+            <button type="button" class="btn btn-sm btn-primary" id="sApply">Apply</button>
+          </div>
+        </details>
         <div class="fp-actions">
-          <button class="btn btn-sm btn-primary" id="sApply">Apply</button>
-          <button class="btn btn-secondary btn-sm" id="sCancel">Cancel</button>
+          <button type="button" class="btn btn-secondary btn-sm" id="sCancel">Done</button>
         </div>`;
+
+      const amount = () => {
+        const v = parseFloat(panel.querySelector('#sAmt').value);
+        return Number.isFinite(v) ? Math.max(-500, Math.min(500, v)) : 0;
+      };
+      const syncAmt = () => {
+        const v = amount();
+        panel.querySelectorAll('[data-amt]').forEach((el) => { el.textContent = `${v >= 0 ? '+' : ''}${fmt(v)} m`; });
+      };
+      const done = (ok) => {
+        const saved = document.getElementById('sSaved');
+        if (saved && ok && this.layout) saved.textContent = `Map is now ${fmt(this.layout.width_m)} × ${fmt(this.layout.height_m)} m.`;
+      };
+      const rerender = () => { if (this.sel === null) this.resizeStore(); };
+      panel.querySelector('#sAmt').addEventListener('input', syncAmt);
+      panel.querySelectorAll('[data-side]').forEach((b) => b.addEventListener('click', async () => {
+        const v = amount();
+        if (!v) { this.setStatus('Type how many metres to add first.', 'error'); return; }
+        const ch = await this.extendMap({ [`${b.dataset.side}_m`]: v });
+        if (ch) { rerender(); done(true); } else this._showOutside(panel);
+      }));
+      panel.querySelector('#sAll').addEventListener('click', async () => {
+        const ch = await this.extendMap({ left_m: 5, top_m: 5, right_m: 5, bottom_m: 5 });
+        if (ch) { rerender(); done(true); }
+      });
+      panel.querySelector('#sFit').addEventListener('click', async () => {
+        if (await this.fitMapToContent(2)) { rerender(); done(true); }
+      });
       panel.querySelector('#sApply').addEventListener('click', async () => {
+        const name = panel.querySelector('#sName').value;
+        const w = parseFloat(panel.querySelector('#sW').value), h = parseFloat(panel.querySelector('#sH').value);
         try {
-          const data = await this.saveStoreSize(
-            panel.querySelector('#sName').value,
-            parseFloat(panel.querySelector('#sW').value),
-            parseFloat(panel.querySelector('#sH').value));
-          const saved = document.getElementById('sSaved');
-          if (saved) saved.textContent = `Saved — ${data.width_m} × ${data.height_m} m`;
-          this.setStatus(`Store set to ${data.width_m} × ${data.height_m} m.`, 'ok');
+          await this.saveStoreSize(name, w, h);
+          rerender(); done(true);
+          this.setStatus(`Map set to ${fmt(this.layout.width_m)} × ${fmt(this.layout.height_m)} m.`, 'ok');
         } catch (e) {
-          this.setStatus(`Could not resize: ${e.message}`, 'error');
+          if (e.detail && e.detail.code === 'items_outside') {
+            this._lastOutside = e.detail.items;
+            this._showOutside(panel, async () => {
+              try {
+                await this.saveStoreSize(name, w, h, true);
+                rerender(); done(true);
+              } catch (e2) { this.setStatus(`Could not resize: ${e2.message}`, 'error'); }
+            });
+            this.setStatus('Not resized: some items would be cut off. See the list in the panel.', 'error');
+          } else {
+            this.setStatus(`Could not resize: ${e.message}`, 'error');
+          }
         }
       });
       panel.querySelector('#sCancel').addEventListener('click', () => this.select(null));
+    }
+
+    /** The items a refused shrink would have cut off, with an optional "do it anyway". */
+    _showOutside(panel, force) {
+      const box = panel.querySelector('#sOutside');
+      const items = this._lastOutside || [];
+      if (!box || !items.length) return;
+      box.hidden = false;
+      box.innerHTML = `
+        <div><b>Not changed.</b> ${items.length === 1 ? 'This item' : `These ${items.length} items`} would end up outside the map:</div>
+        <ul>${items.slice(0, 8).map((i) => `<li>${escapeHtml(describeItem(i))}</li>`).join('')}${items.length > 8 ? `<li>and ${items.length - 8} more</li>` : ''}</ul>
+        <div class="fp-actions" style="margin-top:4px">
+          <button type="button" class="btn btn-secondary btn-xs" id="sShowFirst">Show ${items.length === 1 ? 'it' : 'the first'}</button>
+          ${force ? '<button type="button" class="btn btn-danger btn-xs" id="sForce">Shrink anyway (moves them inside)</button>' : ''}
+        </div>`;
+      box.querySelector('#sShowFirst').addEventListener('click', () => {
+        const i = items[0];
+        if (i.type === 'camera') this.focusCamera(i.id); else this.selectShape(i.type, i.id);
+      });
+      const f = box.querySelector('#sForce');
+      if (f) f.addEventListener('click', force);
     }
 
     // ------------------------------------------------------- setup / status
@@ -1443,7 +2543,7 @@
           <button class="btn btn-sm btn-primary" id="suApply">Save floor</button>
         </div>
         <div class="fp-setup-steps">
-          ${step(1, s.structures > 0, 'Draw the room outline', 'Click each corner of the shop floor.', 'Draw room', 'room')}
+          ${step(1, s.structures > 0, 'Draw the room outline', 'Press and drag across the shop floor. Add outdoor areas (car park, loading dock) the same way.', 'Draw room', 'room')}
           ${step(2, false, 'Add walls and shelving', 'Optional, but makes the map readable.', 'Draw wall', 'wall')}
           ${step(3, s.zones > 0, 'Draw analytics zones', 'Entrances, aisles, checkouts — what you want measured.', 'Draw zone', 'zone')}
           ${step(4, s.cameras > 0, 'Add cameras', 'Scan the network and USB for cameras, then place and calibrate them.', 'Scan for cameras', 'scan')}
@@ -1471,8 +2571,8 @@
       if (hint) {
         hint.style.display = this.mode === MODE.VIEW ? '' : 'none';
         hint.innerHTML = `<div class="fp-hint-title">This floor is empty</div>
-          Use <b>Room</b> to trace the shop outline, <b>Wall</b>/<b>Shelf</b>/<b>Door</b> for the building, <b>Zone</b> for the areas to measure.
-          Scroll to zoom, drag the background to pan. The panel on the right walks you through it.`;
+          Use <b>Room</b> to drag out the shop floor, <b>Outdoor area</b> for the car park, <b>Wall</b>/<b>Shelf</b>/<b>Door</b> for the building, <b>Zone</b> for the areas to measure.
+          Scroll or pinch to zoom, drag the background to pan. <b>Map size</b> adds space on any side.`;
       }
     }
 
@@ -1556,7 +2656,7 @@
       if (modeEl) {
         modeEl.textContent = this.mode === MODE.DRAW
           ? `draw ${this.draftKind === 'ZONE' ? 'zone' : KIND_LABEL[this.draftKind].toLowerCase()}`
-          : this.mode.replace('-', ' ');
+          : this.mode === MODE.VIEW ? 'select' : this.mode.replace('-', ' ');
       }
       const hint = document.getElementById('fpHint');
       if (hint && this.setup && !this.setup.configured) hint.style.display = this.mode === MODE.VIEW ? '' : 'none';
@@ -1649,6 +2749,14 @@
      * Dates are sent without an offset: the server reads them as store time.
      */
     _heatmapUrl(range, kind) {
+      // Heatmaps not in the iKorex plan (fleet.js / 403 feature_disabled): do
+      // not ask every few seconds for something the box refuses.
+      const fleet = window.edgeFleet && typeof window.edgeFleet.status === 'function' ? window.edgeFleet.status() : null;
+      if ((fleet && fleet.features && fleet.features.heatmaps === false)
+          || (this._heatmapRefusedAt && Date.now() - this._heatmapRefusedAt < HEATMAP_REFUSED_RETRY_MS)) {
+        this.heatmap = null;
+        return null;
+      }
       const k = encodeURIComponent(kind);
       if (range === 'today' || !HEATMAP_RANGES.some((r) => r.range === range)) {
         return `/api/v1/analytics/heatmaps?resolution_w=60&resolution_h=40&kind=${k}`;
@@ -1791,6 +2899,9 @@
       if (this.showLayers.persons) this.drawPersons();
       this.flushLabels();
       this.drawCalOverlay();
+      this.drawMeasure();
+      this.drawDropPreview();
+      this.drawDragLabel();
       this.drawScaleBar();
     }
 
@@ -1944,7 +3055,8 @@
     drawStructures() {
       const ctx = this.ctx;
       // Rooms first, then fixtures, then walls and doors on top.
-      const order = { ROOM: 0, OBSTACLE: 1, SHELF: 2, COUNTER: 2, WALL: 3, DOOR: 4 };
+      // Outdoor areas lie under everything, then rooms, fixtures, walls and doors.
+      const order = { OUTDOOR: -1, ROOM: 0, OBSTACLE: 1, SHELF: 2, COUNTER: 2, WALL: 3, DOOR: 4 };
       const list = this.structures.slice().sort((a, b) => (order[a.kind] || 0) - (order[b.kind] || 0));
       list.forEach((st) => {
         const poly = st.polygon || [];
@@ -1993,6 +3105,15 @@
             ctx.lineWidth = selected ? 3 : 2;
             ctx.strokeStyle = selected ? T.select : color;
             ctx.stroke();
+          } else if (st.kind === 'OUTDOOR') {
+            // Open ground: a soft fill and a dashed edge, no hatching.
+            ctx.fillStyle = hexToRgba(color, selected ? 0.24 : hovered ? 0.2 : 0.14);
+            ctx.fill();
+            ctx.setLineDash([8, 5]);
+            ctx.lineWidth = selected ? 2.5 : 1.5;
+            ctx.strokeStyle = selected ? T.select : color;
+            ctx.stroke();
+            ctx.setLineDash([]);
           } else {
             ctx.fillStyle = hexToRgba(color, selected ? 0.32 : hovered ? 0.26 : 0.18);
             ctx.fill();
@@ -2021,10 +3142,11 @@
         if (this.showLayers.labels && st.name) {
           const c = POLYLINE_KINDS.has(st.kind) ? midpoint(poly) : polygonCentroid(poly);
           const s = this.toScreen(c.x, c.y);
-          ctx.fillStyle = st.kind === 'ROOM' ? hexToRgba(color, 0.9) : T.text;
-          ctx.font = st.kind === 'ROOM' ? '800 12px system-ui, sans-serif' : '600 10px system-ui, sans-serif';
+          const big = st.kind === 'ROOM' || st.kind === 'OUTDOOR';
+          ctx.fillStyle = big ? hexToRgba(color, 0.9) : T.text;
+          ctx.font = big ? '800 12px system-ui, sans-serif' : '600 10px system-ui, sans-serif';
           ctx.textAlign = 'center';
-          if (st.kind === 'ROOM') {
+          if (big) {
             const tl = this.toScreen(Math.min(...poly.map((p) => p.x)), Math.min(...poly.map((p) => p.y)));
             ctx.textAlign = 'left';
             ctx.fillText(st.name, tl.x + 6, tl.y + 14);
@@ -2129,17 +3251,130 @@
       if (!shape) return;
       const ctx = this.ctx;
       ctx.save();
+      const handles = this.frameHandles();
+      if (handles.length) {
+        // The box the resize handles belong to, turned with the shape.
+        const f = this.shapeFrame(this.sel.type, shape);
+        const corners = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([sx, sy]) => {
+          const w = frameToWorld(f, sx * f.w / 2, sy * f.h / 2);
+          return this.toScreen(w.x, w.y);
+        });
+        ctx.beginPath();
+        corners.forEach((c, i) => (i ? ctx.lineTo(c.x, c.y) : ctx.moveTo(c.x, c.y)));
+        ctx.closePath();
+        ctx.setLineDash([4, 3]);
+        ctx.strokeStyle = T.select;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      // Corners (vertices): small dots; draggable with "Free shape" on.
       shape.polygon.forEach((p, i) => {
         const s = this.toScreen(p.x, p.y);
         const active = i === this.selVertex;
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, active ? 5 : (handles.length && !this.freeShape ? 2.5 : 4), 0, Math.PI * 2);
         ctx.fillStyle = active ? T.select : T.marker;
+        ctx.fill();
         ctx.strokeStyle = T.outline;
         ctx.lineWidth = 1.5;
-        const r = active ? 5 : 4;
-        ctx.fillRect(s.x - r, s.y - r, r * 2, r * 2);
-        ctx.strokeRect(s.x - r, s.y - r, r * 2, r * 2);
+        ctx.stroke();
+      });
+      const hr = this._coarse ? 7 : 5;
+      handles.forEach((h) => {
+        if (h.kind === 'rotate') {
+          ctx.beginPath(); ctx.moveTo(h.from.x, h.from.y); ctx.lineTo(h.x, h.y);
+          ctx.strokeStyle = T.select; ctx.lineWidth = 1; ctx.stroke();
+          ctx.beginPath(); ctx.arc(h.x, h.y, hr + 2, 0, Math.PI * 2);
+          ctx.fillStyle = T.marker; ctx.fill();
+          ctx.strokeStyle = T.select; ctx.lineWidth = 2; ctx.stroke();
+          // A small turning arc inside the handle.
+          ctx.beginPath(); ctx.arc(h.x, h.y, hr - 2, -Math.PI * 0.9, Math.PI * 0.4);
+          ctx.lineWidth = 1.5; ctx.stroke();
+          return;
+        }
+        ctx.fillStyle = T.marker;
+        ctx.strokeStyle = T.select;
+        ctx.lineWidth = 1.5;
+        ctx.fillRect(h.x - hr, h.y - hr, hr * 2, hr * 2);
+        ctx.strokeRect(h.x - hr, h.y - hr, hr * 2, hr * 2);
       });
       ctx.restore();
+    }
+
+    /** Size / angle next to the pointer while drawing, resizing or turning. */
+    drawDragLabel() {
+      if (!this._dragLabel || !this.cursorWorld) return;
+      const s = this.toScreen(this.cursorWorld.x, this.cursorWorld.y);
+      this.drawPlateText(this._dragLabel, s.x + 14, s.y + 18, T.text);
+    }
+
+    drawPlateText(text, x, y, color) {
+      const ctx = this.ctx;
+      ctx.save();
+      ctx.font = '700 12px system-ui, sans-serif';
+      const w = Math.ceil(ctx.measureText(text).width) + 12, h = 20;
+      const W = this.canvas.clientWidth, H = this.canvas.clientHeight;
+      const bx = Math.max(2, Math.min(x, W - w - 2)), by = Math.max(2, Math.min(y - h / 2, H - h - 2));
+      ctx.globalAlpha = 0.92;
+      ctx.fillStyle = T.bg;
+      roundRect(ctx, bx, by, w, h, 4);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = T.outline;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.fillStyle = color || T.text;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(text, bx + 6, by + h / 2 + 0.5);
+      ctx.restore();
+    }
+
+    drawMeasure() {
+      if (this.mode !== MODE.MEASURE || !this.measure) return;
+      const a = this.measure.a;
+      let b = this.measure.b;
+      if (!b && this.cursorWorld) b = this.shiftDown ? orthoTo(a, this.cursorWorld) : this.cursorWorld;
+      if (!a || !b) return;
+      const ctx = this.ctx;
+      const sa = this.toScreen(a.x, a.y), sb = this.toScreen(b.x, b.y);
+      ctx.save();
+      ctx.strokeStyle = T.select;
+      ctx.lineWidth = 2;
+      if (!this.measure.b) ctx.setLineDash([6, 4]);
+      ctx.beginPath(); ctx.moveTo(sa.x, sa.y); ctx.lineTo(sb.x, sb.y); ctx.stroke();
+      ctx.setLineDash([]);
+      [sa, sb].forEach((p) => {
+        ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+        ctx.fillStyle = T.select; ctx.fill();
+        ctx.strokeStyle = T.outline; ctx.lineWidth = 1.5; ctx.stroke();
+      });
+      ctx.restore();
+      const d = Math.hypot(b.x - a.x, b.y - a.y);
+      this.drawPlateText(`${d.toFixed(2)} m`, (sa.x + sb.x) / 2 + 8, (sa.y + sb.y) / 2 - 12, T.text);
+    }
+
+    /** Ghost camera marker while a camera card is dragged over the map (camera gallery). */
+    drawDropPreview() {
+      const p = this.dropPreview;
+      if (!p) return;
+      const ctx = this.ctx;
+      const s = this.toScreen(p.x, p.y);
+      const inside = this.insideSite(p.x, p.y);
+      ctx.save();
+      ctx.beginPath(); ctx.arc(s.x, s.y, 12, 0, Math.PI * 2);
+      ctx.fillStyle = hexToRgba(inside ? T.select : T.warn, 0.25); ctx.fill();
+      ctx.setLineDash([4, 3]);
+      ctx.strokeStyle = inside ? T.select : T.warn; ctx.lineWidth = 2; ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.moveTo(s.x - 6, s.y); ctx.lineTo(s.x + 6, s.y);
+      ctx.moveTo(s.x, s.y - 6); ctx.lineTo(s.x, s.y + 6);
+      ctx.lineWidth = 1.5; ctx.stroke();
+      ctx.restore();
+      this.drawPlateText(inside ? `${p.x.toFixed(1)}, ${p.y.toFixed(1)} m` : 'Past the edge: the map can grow to fit',
+        s.x + 16, s.y - 16, inside ? T.text : T.warn);
     }
 
     drawDraft() {
@@ -2147,6 +3382,19 @@
       const ctx = this.ctx;
       const color = ink(this.draftKind === 'ZONE' ? CATEGORY_COLORS.ENTRANCE : (KIND_COLORS[this.draftKind] || CATEGORY_COLORS.ENTRANCE));
       const preview = this.draftPreviewPoint();
+      const d = this.dragging;
+      if (d && d.kind === 'rect') {
+        const a = this.toScreen(d.start.x, d.start.y), b = this.toScreen(d.end.x, d.end.y);
+        ctx.save();
+        ctx.fillStyle = hexToRgba(color, 0.15);
+        ctx.fillRect(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.abs(b.x - a.x), Math.abs(b.y - a.y));
+        ctx.setLineDash([6, 4]);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.strokeRect(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.abs(b.x - a.x), Math.abs(b.y - a.y));
+        ctx.restore();
+        return;
+      }
       ctx.save();
       if (this.draft.length) {
         ctx.beginPath();
@@ -2316,23 +3564,48 @@
       ctx.restore();
     }
 
+    /**
+     * Scale bar, always bottom-left above the summary: a plate in the plan
+     * colour with a two-part bar whose length is a round distance (0.5 m to
+     * 50 m) for the current zoom, so it reads in both themes at any size.
+     */
     drawScaleBar() {
       const ctx = this.ctx;
-      const metres = this.scale > 60 ? 1 : this.scale > 25 ? 2 : this.scale > 10 ? 5 : 10;
+      const target = this.canvas.clientWidth < 420 ? 64 : 90;
+      let metres = SCALE_STEPS[SCALE_STEPS.length - 1];
+      for (const m of SCALE_STEPS) { if (m * this.scale >= target) { metres = m; break; } }
       const px = metres * this.scale;
-      // Just above the summary overlay, never underneath it.
-      const x = 18, y = this.canvas.clientHeight - Math.max(24, this.hudReserve() + 12);
+      const label = `${fmt(metres)} m`;
       ctx.save();
-      ctx.strokeStyle = T.muted; ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(x, y); ctx.lineTo(x + px, y);
-      ctx.moveTo(x, y - 4); ctx.lineTo(x, y + 4);
-      ctx.moveTo(x + px, y - 4); ctx.lineTo(x + px, y + 4);
+      ctx.font = '700 12px system-ui, sans-serif';
+      const tw = Math.ceil(ctx.measureText(label).width);
+      const padX = 10, plateW = px + tw + padX * 3, plateH = 30;
+      // Just above the summary overlay, never underneath it.
+      const x = 10, y = this.canvas.clientHeight - Math.max(10, this.hudReserve() + 4) - plateH;
+      ctx.globalAlpha = 0.9;
+      ctx.fillStyle = T.bg;
+      roundRect(ctx, x, y, plateW, plateH, 6);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = T.outline;
+      ctx.lineWidth = 1;
       ctx.stroke();
-      ctx.fillStyle = T.muted;
-      ctx.font = '500 10px ui-monospace, monospace';
+      const bx = x + padX, by = y + plateH / 2 - 3, bh = 6;
+      ctx.fillStyle = T.text;
+      ctx.fillRect(bx, by, px / 2, bh);
+      ctx.fillStyle = T.bg;
+      ctx.fillRect(bx + px / 2, by, px / 2, bh);
+      ctx.strokeStyle = T.text;
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(bx, by, px, bh);
+      ctx.beginPath();
+      ctx.moveTo(bx, by - 4); ctx.lineTo(bx, by + bh + 4);
+      ctx.moveTo(bx + px, by - 4); ctx.lineTo(bx + px, by + bh + 4);
+      ctx.stroke();
+      ctx.fillStyle = T.text;
       ctx.textAlign = 'left';
-      ctx.fillText(`${metres} m`, x + px + 8, y + 4);
+      ctx.textBaseline = 'middle';
+      ctx.fillText(label, bx + px + padX, y + plateH / 2 + 0.5);
       ctx.restore();
     }
   }
@@ -2420,6 +3693,116 @@
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   }
+
+  // ------------------------------------------------- geometry and snapshots
+
+  function r3(v) { return Math.round(v * 1000) / 1000; }
+
+  function clonePts(pts) { return (pts || []).map((p) => ({ x: p.x, y: p.y })); }
+
+  function boundsOf(pts) {
+    const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
+    return { minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys) };
+  }
+
+  /** World point -> (u, v) in a frame centred on (cx, cy), turned by rad. */
+  function worldToFrame(f, x, y) {
+    const c = Math.cos(f.rad), s = Math.sin(f.rad), dx = x - f.cx, dy = y - f.cy;
+    return { u: dx * c + dy * s, v: -dx * s + dy * c };
+  }
+
+  function frameToWorld(f, u, v) {
+    const c = Math.cos(f.rad), s = Math.sin(f.rad);
+    return { x: f.cx + u * c - v * s, y: f.cy + u * s + v * c };
+  }
+
+  function roundRect(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function cameraSnap(cam) {
+    return { camera_id: cam.camera_id, floor_x: +cam.floor_x, floor_y: +cam.floor_y, floor_z: cam.floor_z,
+      azimuth_deg: cam.azimuth_deg, fov_deg: cam.fov_deg };
+  }
+
+  function cameraFields(snap) {
+    return { floor_x: snap.floor_x, floor_y: snap.floor_y, floor_z: snap.floor_z, azimuth_deg: snap.azimuth_deg, fov_deg: snap.fov_deg };
+  }
+
+  /** Move a shape or camera snapshot by (dx, dy) metres, in place. */
+  function shiftSnap(snap, dx, dy) {
+    if (!snap) return;
+    if (Array.isArray(snap.polygon)) snap.polygon = snap.polygon.map((p) => ({ x: r3(p.x + dx), y: r3(p.y + dy) }));
+    if (Number.isFinite(snap.floor_x)) snap.floor_x = r3(snap.floor_x + dx);
+    if (Number.isFinite(snap.floor_y)) snap.floor_y = r3(snap.floor_y + dy);
+  }
+
+  /** Put a shape snapshot's editable fields back on the shape object. */
+  function restoreSnap(shape, snap) {
+    shape.polygon = clonePts(snap.polygon);
+    ['name', 'color', 'category', 'kind', 'thickness_m', 'sku_id'].forEach((k) => { if (k in snap) shape[k] = snap[k]; });
+    if ('products' in snap) shape.products = (snap.products || []).slice();
+    if ('properties' in snap) shape.properties = JSON.parse(JSON.stringify(snap.properties || {}));
+    if ('_rotation_deg' in snap) shape._rotation_deg = snap._rotation_deg;
+  }
+
+  function snapRotation(snap) {
+    const v = snap && (snap.properties ? snap.properties.rotation_deg : snap._rotation_deg);
+    return Number.isFinite(+v) ? +v : 0;
+  }
+
+  function describeSides(sides) {
+    const names = { left_m: 'on the left', top_m: 'at the top', right_m: 'on the right', bottom_m: 'at the bottom' };
+    const parts = Object.keys(names).filter((k) => sides[k] > 0).map((k) => `${fmt(sides[k])} m ${names[k]}`);
+    return parts.length ? `adds ${parts.join(', ')}` : 'no change';
+  }
+
+  function describeItem(i) {
+    const what = i.type === 'camera' ? 'Camera' : i.type === 'zone' ? 'Zone' : (KIND_LABEL[i.kind] || 'Item');
+    return `${what} "${i.name || i.id}"`;
+  }
+
+  function describeItems(items) {
+    const list = (items || []).slice(0, 3).map(describeItem).join(', ');
+    return items.length > 3 ? `${list} and ${items.length - 3} more` : list;
+  }
+
+  function emit(name, detail) {
+    try { window.dispatchEvent(new CustomEvent(name, { detail })); } catch (_) { /* no CustomEvent */ }
+  }
+
+  // --------------------------------------------- window.FloorplanAPI (stable)
+  //
+  // For other modules (camera gallery). Exists from script load; methods that
+  // need the map wait for it (ready resolves after the first layout load).
+  //   ready, getCameras(), clientToWorld(clientX, clientY), canvasElement(),
+  //   placeCamera(cameraId, x_m, y_m), focusCamera(cameraId), setDropPreview(x_m, y_m | null)
+  // Events on window: 'fp:layout-changed' {cameras}, 'fp:camera-hover'
+  // {camera_id, clientX, clientY} | {camera_id: null}, 'fp:camera-selected' {camera_id}.
+  let resolveReady = () => {};
+  const readyPromise = new Promise((resolve) => { resolveReady = resolve; });
+  const editorNow = () => window.blueprintEditor || null;
+  window.FloorplanAPI = {
+    ready: readyPromise,
+    getCameras() { const ed = editorNow(); return ed ? ed.apiCameras() : []; },
+    clientToWorld(clientX, clientY) { const ed = editorNow(); return ed && ed.layout ? ed.apiClientToWorld(clientX, clientY) : null; },
+    canvasElement() { const ed = editorNow(); return ed ? ed.canvas : document.getElementById('floorplanCanvas'); },
+    async placeCamera(cameraId, xm, ym) {
+      await readyPromise;
+      const ed = editorNow();
+      if (!ed) throw new Error('The store map is not ready yet.');
+      if (!Number.isFinite(+xm) || !Number.isFinite(+ym)) throw new Error('A map position in metres is needed.');
+      await ed.placeCameraById(cameraId, +xm, +ym);
+    },
+    focusCamera(cameraId) { const ed = editorNow(); if (ed) ed.focusCamera(cameraId); },
+    setDropPreview(xm, ym) { const ed = editorNow(); if (ed) ed.setDropPreview(xm, ym); },
+  };
 
   function initFloorplan() {
     const canvas = document.getElementById('floorplanCanvas');

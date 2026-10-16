@@ -98,7 +98,11 @@ Opened from Cameras → tile → "Camera setup". All shapes are drawn on the cam
 
 | Feature | What it's for | Where / how to configure |
 |---|---|---|
-| Blueprint editor | Draws the building in metres: "Room", "Wall", "Shelf", "Door". | Store map → "Edit map" (on phones) → tools; "Store size", "Snap 0.5 m" |
+| Blueprint editor | Draws the site in metres by dragging: "Room", "Outdoor area" (car park, loading dock), "Wall", "Door", "Shelf", "Counter", "Obstacle", "Zone"; "Free shape" for odd outlines. Placed items have resize handles, a rotate handle, "X (m)", "Y (m)", "Width (m)", "Depth (m)", "Angle (°)", "Duplicate" (Ctrl+D), arrow-key nudge (0.1 m, Shift 1 m) and Undo / Redo (Ctrl+Z, Ctrl+Shift+Z / Ctrl+Y). One finger pans and two pinch on phones. | Store map → "Edit map" → tools; "Snap 0.5 m" |
+| "Map size" | The map is the whole site. Add space per side ("Top", "Left", "Right", "Bottom"), "Add 5 m all round", "Fit to content", or exact "Width (m)" / "Depth (m)" under "Name and exact size". A shrink that would cut something off is refused and lists the items; "Shrink anyway (moves them inside)" overrides. Dropping an item past the edge offers "Extend the map to fit?". | Store map → "Edit map" → "Map size" |
+| "Measure" and scale bar | Click two points for a distance; the scale bar at the bottom left always shows the scale. | Store map → "Edit map" → "Measure"; Escape clears |
+| Camera gallery | "Cameras" panel beside the map: a card per camera with picture and "Placed" / "Not placed" / "Calibrated" / "Off"; drag a card onto the map or press "Place" (middle of the map). Cameras may sit outside the building. Pictures are taken once and cached in this browser only (cleared on sign-out); "Old picture" after 24 h; "Refresh all pictures". On the public address pictures are taken one at a time over direct video. | Store map → "Cameras" panel |
+| iKorex branding | iKorex logo in the header and sign-in page (light and dark versions) and an intro screen while the page loads. | Automatic |
 | "Store area" | Floor areas where visits, unique people, dwell and occupancy are measured. "Products sold here" lists what the area sells; Insights and the AI summary name those products. | Store map → "Store area"; name, "Category", colour and "Products sold here" in the inspector |
 | "Counts into zone" | Counts every person an uncalibrated camera sees as a visit to one store area (the aisle it looks at), so area metrics and Insights work before calibration. Not used once the camera is calibrated. | Store map → select the camera → "Counts into zone" |
 | Live people | Positions of tracked people from calibrated cameras. | Store map → "Show:" "People" |
@@ -181,6 +185,20 @@ Opened from Cameras → tile → "Camera setup". All shapes are drawn on the cam
 | "Push notifications" | Firebase key for phone pushes; test sends and delivery log. | Settings → "Push notifications" → "Upload", "Send test alert" |
 | "Paired phones" | Controls which alerts each phone receives, or removes a phone. | "Alert settings" (types, "Minimum severity", cameras, "Quiet hours"), "Rename", "Revoke" |
 | Public-mode hardening | Blocks first-run setup and API docs remotely; counts failed sign-ins per visitor; adds strict security headers. | Automatic (docs/DEPLOYMENT.md §7a) |
+
+## iKorex service (fleet control)
+
+iKorex owns and rents out the box. The box checks in with the iKorex control server (`POST https://tunnel.ikorex.com.au/control/v1/checkin`, every 5 min ± 30 s, using the store ID and token from "Online access"; it works with online access turned off). It sends **health and usage numbers only** (CPU, memory, disk, GPU, temperatures, camera counts, alert counts by level, number of accounts and phones). It never sends video, pictures, camera, zone or user names, or addresses. The server answers with a signed plan (Ed25519; the server's key is pinned on first contact) and signed commands (only "restart the app", "check in now" and "run a health check"). Contract: `docs/FLEET_CONTROL_CONTRACT.md`.
+
+| Feature | What it's for | Where / how to configure |
+|---|---|---|
+| "iKorex service" card | Plan status (Active / Paused / Licence ended / Not connected), licence date, camera limit, last contact, control key fingerprint, and the features included in the plan. | Settings → "iKorex service"; administrators: "Check in now", "Reset control key" (inline confirm; only when iKorex says the key changed) |
+| "iKorex service" card | Shows plan, licence end date, camera limit, last contact with iKorex, control key and the features included. A licence warning banner shows during the grace days. Owners and administrators can press "Check in now" and "Reset control key". Only health and usage numbers go to iKorex; store video and data never leave the box. | Settings → "iKorex service" |
+| Service paused | When iKorex suspends the service or the licence has ended (after its grace days, 14 by default), analysis, alerts, phone alerts, night watch, heatmaps and recommendations stop, and every screen shows "Service paused" with iKorex's message. Recordings, evidence, settings and the database are kept; resuming restarts the app. Losing contact with iKorex never pauses anything. | Set by iKorex; "Check again" on the paused page |
+| Licence warning | From the day after the licence end date until the grace days are over, a banner says when the system will pause. Dates use the box's own clock, so this works offline. | Set by iKorex |
+| Features not in the plan | Theft alerts, area and line alerts, night watch, phone alerts, heatmaps, business insights, online access, live video from outside the store and sales data can each be left out of a plan. Their cards are replaced by "Not included in your plan", their API answers 403 `feature_disabled`, and their background services do not run. | Set by iKorex |
+| Camera limit | A plan may limit how many cameras are analysed. Adding or turning on more is refused ("Your plan includes N cameras"); existing extra cameras are kept, but the newest beyond the limit are not analysed. | Set by iKorex |
+| Fixed control key | Pins the iKorex control server's public key instead of trusting it on first contact. | Installer: `FLEET_CONTROL_PUBLIC_KEY=<base64>` in `edge_backend/.env` |
 
 ## Available through the API only
 

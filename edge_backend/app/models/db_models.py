@@ -75,6 +75,9 @@ class CameraModel(Base):
     pos_register_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     # Uncalibrated cameras: the blueprint zone the whole view belongs to (m0017).
     watch_zone_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    # True once the operator put the camera on the store map (m0020); cameras
+    # added at a default spot (adopt, recorder import) start False.
+    map_placed: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True, default=False)
 
     # Relationships
     events: Mapped[list["SecurityEventModel"]] = relationship(

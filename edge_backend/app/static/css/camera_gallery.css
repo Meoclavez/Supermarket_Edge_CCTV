@@ -1,0 +1,170 @@
+/* ===================================================================
+   Camera gallery for the store map (js/camera_gallery.js, stream B of
+   docs/STORE_MAP_V2_CONTRACT.md). A collapsible panel under the map on
+   wide screens, a bottom sheet above the tab bar on phones (<= 760 px).
+   Built only on the style.css tokens, so light and dark themes follow.
+   =================================================================== */
+
+/* The gallery sets display on many of its parts; [hidden] must still win. */
+.cg-panel [hidden], .cg-preview[hidden], .cg-preview [hidden] { display: none !important; }
+
+#cameraGalleryMount { flex: 0 0 auto; min-width: 0; }
+
+.cg-panel { display: flex; flex-direction: column; min-width: 0; border: 1px solid var(--border);
+  border-radius: var(--radius-md); background: var(--surface); color: var(--text); }
+
+/* Header: one button that opens and closes the panel. */
+.cg-head { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.cg-toggle { display: flex; align-items: center; gap: var(--space-2); flex: 1 1 auto; min-width: 0; min-height: 36px;
+  padding: 4px 12px; border: 0; border-radius: var(--radius-md); background: none; color: var(--text);
+  font: inherit; font-size: var(--fs-sm); text-align: left; cursor: pointer; }
+.cg-toggle:hover { color: var(--text-strong); background: var(--surface-2); }
+.cg-toggle:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.cg-caret { display: inline-flex; color: var(--text-tertiary); transition: transform var(--transition-fast); }
+.cg-panel.is-collapsed .cg-caret { transform: rotate(-90deg); }
+.cg-title { min-width: 0; font-weight: var(--fw-semibold); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cg-title-hint { font-weight: var(--fw-regular); color: var(--text-secondary); }
+.cg-count { margin-left: auto; flex: 0 0 auto; font-size: var(--fs-xs); color: var(--text-secondary); white-space: nowrap; }
+.cg-count.is-todo { color: var(--warning); font-weight: var(--fw-medium); }
+
+.cg-body { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; padding: 0 12px 12px; }
+
+/* Tools: search, filter, refresh all. Wrap onto as many rows as they need. */
+.cg-tools { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; }
+.cg-search-wrap { position: relative; display: flex; align-items: center; flex: 1 1 180px; min-width: 0; max-width: 320px; }
+.cg-search-icon { position: absolute; left: 9px; display: inline-flex; color: var(--text-tertiary); pointer-events: none; }
+.cg-search.input { padding-left: 30px; }
+.cg-seg { display: inline-flex; flex: 0 0 auto; }
+.cg-seg-btn { border-radius: 0; }
+.cg-seg-btn:first-child { border-radius: var(--radius-sm) 0 0 var(--radius-sm); }
+.cg-seg-btn:last-child { border-radius: 0 var(--radius-sm) var(--radius-sm) 0; margin-left: -1px; }
+.cg-refresh-all { flex: 0 0 auto; }
+.cg-refresh-all-label { white-space: nowrap; }
+.cg-refresh-all[aria-pressed="true"] { color: var(--danger); border-color: var(--danger-border); background: var(--surface); }
+
+.cg-progress { display: flex; align-items: center; gap: var(--space-2); min-width: 0; font-size: var(--fs-xs); color: var(--text-secondary); }
+.cg-progress-text { flex: 0 1 auto; min-width: 0; font-variant-numeric: tabular-nums; }
+.cg-progress-bar { flex: 1 1 120px; min-width: 60px; max-width: 280px; height: 6px; accent-color: var(--accent-solid); }
+.cg-progress-stop { flex: 0 0 auto; }
+
+.cg-hint { margin: 0; font-size: var(--fs-xs); color: var(--text-tertiary); line-height: 1.4; }
+.cg-empty { padding: var(--space-3); border: 1px dashed var(--border-strong); border-radius: var(--radius-sm);
+  font-size: var(--fs-sm); color: var(--text-secondary); line-height: 1.5; }
+.cg-empty .btn { margin-left: var(--space-2); }
+
+/* Cards: one horizontal strip under the map. */
+.cg-list { display: grid; grid-auto-flow: column; grid-auto-columns: 176px; gap: var(--space-2); margin: 0; padding: 2px 2px 6px;
+  list-style: none; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scroll-snap-type: x proximity; }
+.cg-card { position: relative; display: flex; flex-direction: column; gap: 6px; min-width: 0; padding: 6px;
+  border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface-2);
+  scroll-snap-align: start; cursor: grab; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast), opacity var(--transition-fast); }
+.cg-card:hover { border-color: var(--border-strong); }
+/* Cameras already on the map sit back a little; the ones still to place stand out. */
+.cg-card.is-placed { background: var(--surface); }
+.cg-card.is-selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.cg-card.is-dragging { opacity: 0.5; }
+.cg-card.is-off .cg-img { filter: grayscale(1); opacity: 0.7; }
+
+.cg-thumb { position: relative; display: flex; align-items: center; justify-content: center; aspect-ratio: 16 / 9;
+  min-width: 0; overflow: hidden; border-radius: var(--radius-sm); background: var(--surface-sunken); border: 1px solid var(--border); }
+.cg-thumb.has-picture { background: var(--media-bg); }
+.cg-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; pointer-events: none; }
+.cg-thumb-note { position: relative; z-index: 1; max-width: 100%; padding: 0 8px; font-size: var(--fs-xs); line-height: 1.35;
+  color: var(--text-secondary); text-align: center; }
+.cg-thumb.has-picture .cg-thumb-note { padding: 2px 6px; border-radius: var(--radius-xs); background: rgba(3, 5, 9, 0.7); color: #ffffff; }
+.cg-thumb.is-error .cg-thumb-note { color: var(--danger); }
+.cg-thumb.is-loading::after { content: ""; position: absolute; left: 6px; top: 6px; z-index: 2; width: 12px; height: 12px;
+  border: 2px solid var(--accent); border-right-color: transparent; border-radius: 50%; animation: cg-spin 0.8s linear infinite; }
+@keyframes cg-spin { to { transform: rotate(360deg); } }
+.cg-old { position: absolute; left: 4px; bottom: 4px; z-index: 2; height: 20px; padding: 0 6px; }
+.cg-shot { position: absolute; right: 4px; top: 4px; z-index: 2; opacity: 0.92; }
+.cg-thumb:not(.has-picture) .cg-shot { opacity: 1; }
+
+.cg-info { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.cg-name { display: block; width: 100%; min-width: 0; padding: 0; border: 0; background: none; color: var(--text);
+  font: inherit; font-size: var(--fs-sm); font-weight: var(--fw-semibold); text-align: left; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: var(--radius-xs); }
+.cg-name:hover { color: var(--accent-text); text-decoration: underline; }
+.cg-name:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.cg-chips { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
+.cg-chip { height: 20px; padding: 0 6px; font-size: 11px; }
+
+.cg-actions { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); min-height: 28px; }
+.cg-handle { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; flex: 0 0 auto;
+  border-radius: var(--radius-sm); color: var(--text-tertiary); cursor: grab; touch-action: none; }
+.cg-handle:hover { color: var(--text); background: var(--surface-3); }
+.cg-grip { display: block; width: 10px; height: 15px;
+  background-image: radial-gradient(circle, currentColor 1.3px, transparent 1.6px); background-size: 5px 5px; }
+.cg-place { margin-left: auto; }
+
+/* Floating picture card (map hover, card hover). */
+.cg-preview { position: fixed; left: 0; top: 0; z-index: 950; width: 280px; max-width: calc(100vw - 16px); overflow: hidden;
+  border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--surface);
+  box-shadow: var(--shadow-overlay); color: var(--text); pointer-events: none; }
+.cg-preview-pic { position: relative; display: flex; align-items: center; justify-content: center; aspect-ratio: 16 / 9; background: var(--media-bg); }
+.cg-preview-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; }
+.cg-preview-empty { padding: 0 12px; font-size: var(--fs-sm); color: #c9d0da; text-align: center; }
+.cg-preview-cap { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; min-width: 0; }
+.cg-preview-name { font-size: var(--fs-sm); font-weight: var(--fw-semibold); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cg-preview-time { font-size: var(--fs-xs); color: var(--text-secondary); }
+.cg-preview.is-stale .cg-preview-time { color: var(--warning); }
+
+/* What follows the pointer while a card is dragged. */
+.cg-ghost { position: fixed; left: 0; top: 0; z-index: 960; display: flex; align-items: center; gap: var(--space-2);
+  max-width: 240px; padding: 6px 10px 6px 6px; border: 1px solid var(--border-strong); border-radius: var(--radius-md);
+  background: var(--surface); color: var(--text); box-shadow: var(--shadow-overlay); pointer-events: none; will-change: transform; }
+.cg-ghost.is-over { border-color: var(--accent); box-shadow: var(--shadow-overlay), 0 0 0 1px var(--accent); }
+.cg-ghost.is-outside { border-color: var(--warning); box-shadow: var(--shadow-overlay), 0 0 0 1px var(--warning); }
+.cg-ghost-img { width: 64px; height: 36px; flex: 0 0 auto; object-fit: cover; border-radius: var(--radius-xs); background: var(--media-bg); }
+.cg-ghost-icon { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; flex: 0 0 auto;
+  border-radius: var(--radius-xs); background: var(--accent-bg); color: var(--accent-text); }
+.cg-ghost-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.cg-ghost-name { font-size: var(--fs-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cg-ghost-hint { font-size: var(--fs-xs); color: var(--text-secondary); }
+.cg-ghost.is-over .cg-ghost-hint { color: var(--accent-text); }
+.cg-ghost.is-outside .cg-ghost-hint { color: var(--warning); }
+
+html.cg-drag-active, html.cg-drag-active * { cursor: grabbing !important; user-select: none !important; -webkit-user-select: none !important; }
+
+/* Touch: bigger targets, like every other control (style.css). */
+@media (pointer: coarse) {
+  .cg-handle { width: 40px; height: 40px; background: var(--surface-3); color: var(--text-secondary); }
+  .cg-actions { min-height: 40px; }
+  .cg-toggle { min-height: 48px; }
+  .cg-card { cursor: default; }
+}
+
+/* Phones: a bottom sheet above the tab bar. The mount keeps the collapsed
+   sheet's height in the page so nothing ends up hidden under it. */
+@media (max-width: 760px) {
+  #cameraGalleryMount { min-height: 56px; }
+  .cg-panel { position: fixed; left: 0; right: 0; bottom: calc(57px + env(safe-area-inset-bottom)); z-index: 850;
+    max-height: min(60vh, 520px); border-radius: var(--radius-xl) var(--radius-xl) 0 0; border-bottom: 0;
+    box-shadow: var(--shadow-overlay); transition: transform 0.18s ease; }
+  .cg-head { position: relative; padding-top: 6px; }
+  .cg-head::before { content: ""; position: absolute; left: 50%; top: 4px; width: 36px; height: 4px; margin-left: -18px;
+    border-radius: var(--radius-pill); background: var(--border-strong); }
+  .cg-title-hint { display: none; }
+  .cg-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 12px 12px; }
+  .cg-search-wrap { flex: 1 1 100%; max-width: none; }
+  .cg-list { grid-auto-flow: row; grid-auto-columns: auto; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+    overflow: visible; scroll-snap-type: none; padding-bottom: 2px; }
+  .cg-preview { width: 240px; }
+  /* While a card is dragged the sheet slides down to its header. */
+  .cg-panel.is-drag-peek { transform: translateY(var(--cg-peek, 0px)); }
+}
+
+/* Short desktop screens (e.g. 1280 x 800): the panel sits under the map in the
+   same column, so keep it compact and leave the map as much height as possible. */
+@media (min-width: 761px) and (max-height: 900px) {
+  .cg-hint { display: none; }
+  .cg-body { gap: 6px; padding-bottom: 8px; }
+  .cg-list { grid-auto-columns: 148px; padding-bottom: 4px; }
+  .cg-card { gap: 4px; padding: 5px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cg-card, .cg-caret, .cg-panel { transition: none; }
+  .cg-thumb.is-loading::after { animation: none; border-right-color: var(--accent); opacity: 0.6; }
+}

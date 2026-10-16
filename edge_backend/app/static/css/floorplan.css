@@ -14,7 +14,9 @@
   height: clamp(520px, calc(100vh - var(--fp-offset, 124px)), 1600px); min-height: 0; align-items: stretch; }
 .fp-plan-col { display: flex; flex-direction: column; gap: 8px; min-width: 0; min-height: 0; }
 .floorplan-wrapper { position: relative; flex: 1 1 auto; min-height: 320px; height: auto; display: block; }
-#floorplanCanvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; }
+#floorplanCanvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab;
+  /* Pointer Events drive pan, pinch zoom and editing; the browser must not scroll or zoom the page here. */
+  touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 .blueprint-side { min-width: 0; min-height: 0; overflow-y: auto; overflow-x: hidden; }
 
 /* Calibration: the camera picture opens next to the plan and the side column
@@ -25,6 +27,16 @@
 #fpLayout.fp-cal-open { grid-template-columns: minmax(0, 1.15fr) minmax(360px, 1fr); }
 #fpLayout.fp-cal-open .blueprint-side { display: none; }
 #fpLayout.fp-cal-open .fp-cal-panel { display: flex; }
+/* Desktop: the plan column (toolbar, layer bar, map, camera gallery, camera
+   chips) may need more than one screen on short displays (1280 x 800). The map
+   keeps at least about half the screen height and the layout grows instead of
+   squeezing it; the side column never drives the height (contain: size) and
+   scrolls inside the row as before. */
+@media (min-width: 1025px) {
+  .blueprint-layout { height: auto; min-height: clamp(520px, calc(100vh - var(--fp-offset, 124px)), 1600px); }
+  .floorplan-wrapper { min-height: max(320px, 52vh); }
+  .blueprint-side { contain: size; }
+}
 @media (max-width: 1024px) {
   .blueprint-layout, #fpLayout.fp-cal-open { grid-template-columns: minmax(0, 1fr); height: auto; }
   .floorplan-wrapper { flex: none; height: 62vh; min-height: 360px; }
@@ -42,6 +54,9 @@
 .fp-swatch-wall { background: color-mix(in srgb, var(--hud-text), #000 var(--plan-ink-mix)); }
 .fp-swatch-shelf { background: color-mix(in srgb, #f472b6, #000 var(--plan-ink-mix)); }
 .fp-swatch-door { background: color-mix(in srgb, #fbbf24, #000 var(--plan-ink-mix)); }
+.fp-tool-palette { gap: 4px; }
+.fp-icon-flip { transform: scaleX(-1); }
+@media (pointer: coarse) { #fpToolbar .btn { min-height: 40px; } }
 
 .fp-layerbar { position: static; flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; min-width: 0;
   padding: 8px 12px; border-radius: var(--radius-md); background: var(--surface); border: 1px solid var(--border); }
@@ -57,9 +72,18 @@
   background: linear-gradient(90deg, rgba(40, 240, 120, 0.35), rgba(148, 140, 120, 0.55), rgba(255, 40, 120, 0.8)); }
 .fp-heat-note { font-size: 12px; color: var(--text-dim); min-width: 0; overflow-wrap: anywhere; }
 .fp-draw-banner { top: 8px; }
+/* The banner sits over the top of the map: presses on its text reach the canvas
+   (a rectangle can start under it); only its buttons take clicks. */
+.fp-draw-banner { pointer-events: none; }
+.fp-draw-banner .btn, .fp-draw-banner button { pointer-events: auto; }
 .fp-edit-toggle { display: none; }
 @media (max-width: 760px) {
   .fp-edit-toggle { display: inline-flex; margin-left: auto; }
+  /* Phones: the tool palette is one row that scrolls sideways inside the toolbar, labels kept. */
+  .fp-plan-col.fp-editing .fp-tool-palette { flex-wrap: nowrap; overflow-x: auto; max-width: 100%; padding-bottom: 4px;
+    scrollbar-width: thin; overscroll-behavior-x: contain; }
+  .fp-tool-palette .btn { flex: 0 0 auto; }
+  .fp-plan-col.fp-editing .fp-sep { display: none; }
   /* Phones: the map is view-only (heatmap + people) until "Edit map". */
   .fp-plan-col:not(.fp-editing) .fp-edit-only, .fp-plan-col:not(.fp-editing) .fp-layer-opt { display: none !important; }
   .fp-layerbar { gap: 4px 12px; }
@@ -201,3 +225,39 @@ button.fp-badge { line-height: inherit; text-align: left; }
 
 /* ---- self-test log (only rendered with ?__fptest=1) --------------- */
 #selftestLog { font-variant-numeric: tabular-nums; font-size: 12px; white-space: pre-wrap; color: var(--hud-text); background: var(--media-bg); border: 1px solid var(--hud-border); border-radius: var(--radius-md); padding: 12px; margin-top: 12px; font-family: var(--font-mono); }
+
+/* ---- map editor additions (store map v2) --------------------------- */
+/* "Extend the map to fit?" offer, inside the map, above the plan. */
+.fp-extend-offer { position: absolute; left: 50%; top: 8px; transform: translateX(-50%); z-index: 6; display: flex; flex-wrap: wrap;
+  align-items: center; gap: 8px 12px; width: max-content; max-width: calc(100% - 16px); padding: 8px 12px; border-radius: var(--radius-md);
+  background: var(--surface); border: 1px solid var(--warning-border); box-shadow: var(--shadow-overlay); font-size: 13px; color: var(--text-2); }
+.fp-extend-text { min-width: 0; flex: 1 1 220px; line-height: 1.45; overflow-wrap: anywhere; }
+.fp-extend-text b { color: var(--text-strong); font-weight: 600; }
+.fp-extend-actions { display: inline-flex; flex-wrap: wrap; gap: 8px; }
+
+/* Inspector: typed position / size / angle. */
+.fp-geom { margin: 8px 0; padding: 8px; border-radius: var(--radius-sm); background: var(--surface-2); border: 1px solid var(--border); }
+.fp-geom .fp-field { margin-bottom: 4px; }
+.fp-geom input { min-width: 0; }
+
+/* Map size panel: add space on a side, laid out around a small map. */
+.fp-site-now { font-size: 13px; color: var(--text-dim); margin: 8px 0; font-variant-numeric: tabular-nums; }
+.fp-site-now b { color: var(--text-strong); }
+.fp-site-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) minmax(0, 1fr); grid-template-rows: auto auto auto;
+  gap: 6px; align-items: center; margin: 8px 0 12px; }
+.fp-site-btn { min-width: 0; white-space: normal; text-align: center; padding: 4px 6px; }
+.fp-site-btn [data-amt] { font-variant-numeric: tabular-nums; color: var(--text-dim); }
+.fp-site-top { grid-column: 2; grid-row: 1; }
+.fp-site-left { grid-column: 1; grid-row: 2; }
+.fp-site-right { grid-column: 3; grid-row: 2; }
+.fp-site-bottom { grid-column: 2; grid-row: 3; }
+.fp-site-box { grid-column: 2; grid-row: 2; min-height: 56px; display: flex; align-items: center; justify-content: center; text-align: center;
+  padding: 4px; border-radius: var(--radius-sm); border: 2px solid var(--border-strong); background: var(--surface-2);
+  font-size: 12px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.fp-site-outside { margin: 8px 0; padding: 8px 12px; border-radius: var(--radius-sm); background: var(--warning-bg);
+  border: 1px solid var(--warning-border); color: var(--text-2); font-size: 13px; line-height: 1.5; }
+.fp-site-outside[hidden] { display: none; }
+.fp-site-outside ul { margin: 4px 0 0; padding-left: 18px; }
+.fp-site-exact { margin: 8px 0; font-size: 13px; }
+.fp-site-exact summary { cursor: pointer; color: var(--text-2); font-weight: 500; min-height: 28px; display: flex; align-items: center; }
+.fp-site-exact[open] summary { margin-bottom: 8px; }

@@ -314,7 +314,9 @@ function toggleMapEditing(force) {
   col.classList.toggle('fp-editing', on);
   if (btn) {
     btn.setAttribute('aria-pressed', on ? 'true' : 'false');
-    btn.textContent = on ? 'Done editing' : 'Edit map';
+    // Keep the pencil icon: textContent alone would drop it.
+    const icon = window.EdgeIcon && typeof window.EdgeIcon.svg === 'function' ? window.EdgeIcon.svg(on ? 'check' : 'pencil') : '';
+    btn.innerHTML = `${icon}${on ? 'Done editing' : 'Edit map'}`;
   }
   if (!on && window.blueprintEditor) {
     try { window.blueprintEditor.setTool('view'); } catch (_) { /* editor not ready */ }

@@ -948,6 +948,12 @@ class Settings(BaseSettings):
     FOOTFALL_MIN_TRACK_SECONDS: float = float(os.getenv("FOOTFALL_MIN_TRACK_SECONDS", "3.0"))
     FOOTFALL_MIN_TRACK_HITS: int = int(os.getenv("FOOTFALL_MIN_TRACK_HITS", os.getenv("TRACK_MIN_HITS", "3")))
 
+    # ---------------- iKorex fleet control (services/fleet_control.py) ----------------
+    # Base64 raw Ed25519 public key of the iKorex control server. When set it is
+    # the only key trusted for signed policies/commands; empty = pin the key the
+    # server presents on the first authenticated check-in (trust on first use).
+    FLEET_CONTROL_PUBLIC_KEY: str = ""
+
     # ---------------- Recorded heatmap history (services/heatmap_history.py) ----------------
     # Persisted track path: one sample (normalised image foot point, plus floor
     # metres when calibrated) at most every TRAJECTORY_SAMPLE_SEC, at most

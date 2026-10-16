@@ -45,6 +45,8 @@ from app.services.frame_geometry import calibration_frame_size
 from app.services.live_analytics_engine import live_engine
 from app.services.pipeline_supervisor import pipeline_supervisor
 from app.services.store_layout_service import (
+    EXTEND_MAX_M,
+    ItemsOutsideError,
     StoreLayoutError,
     store_layout_service,
 )
@@ -67,6 +69,21 @@ class LayoutUpdate(BaseModel):
     name: Optional[str] = None
     width_m: Optional[float] = Field(None, gt=0, le=1000)
     height_m: Optional[float] = Field(None, gt=0, le=1000)
+    # Shrinking past placed items is refused (409 items_outside) unless set:
+    # then those items are pulled inside the new edges.
+    clamp: bool = False
+
+
+class SiteExtend(BaseModel):
+    """Metres to add on each side of the site; negative removes space there."""
+    left_m: float = Field(0.0, ge=-1000, le=EXTEND_MAX_M)
+    top_m: float = Field(0.0, ge=-1000, le=EXTEND_MAX_M)
+    right_m: float = Field(0.0, ge=-1000, le=EXTEND_MAX_M)
+    bottom_m: float = Field(0.0, ge=-1000, le=EXTEND_MAX_M)
+
+
+class SiteFit(BaseModel):
+    margin_m: float = Field(2.0, ge=0, le=50)
 
 
 class ZoneCreate(BaseModel):
@@ -178,9 +195,8 @@ class AdoptRequest(BaseModel):
 # ------------------------------------------------------------------ layout
 
 
-@router.get("")
-async def get_layout(db: AsyncSession = Depends(get_db), _: bool = Depends(auth_service.verify_api_access)):
-    """The blueprint: store extent, zones and placed cameras, all in metres."""
+async def _layout_payload(db: AsyncSession) -> dict:
+    """The full blueprint as ``GET /layout`` returns it."""
     layout = await store_layout_service.get_active_layout(db)
     zones = await store_layout_service.list_zones(db, layout.id)
     structures = await store_layout_service.list_structures(db, layout.id)
@@ -195,22 +211,84 @@ async def get_layout(db: AsyncSession = Depends(get_db), _: bool = Depends(auth_
     return payload
 
 
+def _layout_error(e: StoreLayoutError) -> HTTPException:
+    if isinstance(e, ItemsOutsideError):
+        return HTTPException(status_code=409, detail=e.detail())
+    return HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("")
+async def get_layout(db: AsyncSession = Depends(get_db), _: bool = Depends(auth_service.verify_api_access)):
+    """The blueprint: store extent, zones and placed cameras, all in metres."""
+    return await _layout_payload(db)
+
+
 @router.put("")
 async def update_layout(
     req: LayoutUpdate,
     db: AsyncSession = Depends(get_db),
     _: bool = Depends(auth_service.verify_api_access),
 ):
+    """Rename the floor and/or set the site size (right and bottom edges move).
+
+    A shrink that would leave a zone, structure or camera outside is refused
+    with 409 ``{"code": "items_outside", "items": [...]}`` unless
+    ``clamp: true``, which pulls those items inside. Returns the full layout.
+    """
     layout = await store_layout_service.get_active_layout(db)
     try:
-        layout = await store_layout_service.update_layout(
-            db, layout.id, name=req.name, width_m=req.width_m, height_m=req.height_m
+        await store_layout_service.update_layout(
+            db, layout.id, name=req.name, width_m=req.width_m, height_m=req.height_m, clamp=req.clamp,
         )
     except StoreLayoutError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise _layout_error(e)
     await pipeline_supervisor.reload_layout()
-    zones = await store_layout_service.list_zones(db, layout.id)
-    return store_layout_service.serialize_layout(layout, zones)
+    return await _layout_payload(db)
+
+
+@router.post("/extend")
+async def extend_site(
+    req: SiteExtend,
+    db: AsyncSession = Depends(get_db),
+    _: bool = Depends(auth_service.verify_api_access),
+):
+    """Add space on any side of the map (negative values remove space).
+
+    Space added on the left or top moves every zone, structure, camera and
+    camera calibration with it, so nothing changes physical place; a
+    calibrated camera still projects onto the same spot. Removing space that
+    holds an item is refused with 409 ``items_outside``. One transaction.
+    Returns the full layout (as ``GET /layout``) plus ``site_change``.
+    """
+    layout = await store_layout_service.get_active_layout(db)
+    try:
+        change = await store_layout_service.extend_site(
+            db, layout, left_m=req.left_m, top_m=req.top_m, right_m=req.right_m, bottom_m=req.bottom_m,
+        )
+    except StoreLayoutError as e:
+        raise _layout_error(e)
+    await pipeline_supervisor.reload_layout()
+    payload = await _layout_payload(db)
+    payload["site_change"] = change
+    return payload
+
+
+@router.post("/fit")
+async def fit_site(
+    req: Optional[SiteFit] = None,
+    db: AsyncSession = Depends(get_db),
+    _: bool = Depends(auth_service.verify_api_access),
+):
+    """Shrink-wrap the map to everything placed on it plus a margin (default 2 m)."""
+    layout = await store_layout_service.get_active_layout(db)
+    try:
+        change = await store_layout_service.fit_site(db, layout, (req or SiteFit()).margin_m)
+    except StoreLayoutError as e:
+        raise _layout_error(e)
+    await pipeline_supervisor.reload_layout()
+    payload = await _layout_payload(db)
+    payload["site_change"] = change
+    return payload
 
 
 # ------------------------------------------------------------------- zones
@@ -373,8 +451,11 @@ async def place_camera(
         raise HTTPException(status_code=404, detail="camera not found")
 
     layout = await store_layout_service.get_active_layout(db)
+    # Still clamped to the site: the map offers "Extend the map to fit?"
+    # (POST /extend) before saving a spot past the edge.
     cam.floor_x = min(max(req.floor_x, 0.0), layout.width_m)
     cam.floor_y = min(max(req.floor_y, 0.0), layout.height_m)
+    cam.map_placed = True
     if req.floor_z is not None:
         cam.floor_z = req.floor_z
     if req.azimuth_deg is not None:
@@ -390,6 +471,7 @@ async def place_camera(
         "floor_z": cam.floor_z,
         "azimuth_deg": cam.azimuth_deg,
         "fov_deg": cam.fov_deg,
+        "map_placed": True,
     }
 
 

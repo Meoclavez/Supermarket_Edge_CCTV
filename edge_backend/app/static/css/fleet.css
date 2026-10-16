@@ -1,0 +1,155 @@
+/* iKorex service (fleet control): Settings card, licence banner, paused page,
+   "not included in your plan" notes (js/fleet.js). Tokens from style.css. */
+
+/* Features not in the plan: hidden whatever their own script does with [hidden]. */
+.fleet-off { display: none !important; }
+
+.fleet-off-note {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+}
+.fleet-off-note b { color: var(--text); font-weight: 600; }
+.fleet-off-icon { color: var(--text-tertiary); flex: 0 0 auto; padding-top: 2px; }
+
+/* ---------------------------------------------------------------- licence banner */
+.fleet-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--warning-border);
+  border-radius: var(--radius-md);
+  background: var(--warning-bg);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+}
+.fleet-banner[hidden] { display: none; }
+.fleet-banner-icon { color: var(--warning); flex: 0 0 auto; padding-top: 1px; }
+.fleet-banner-text { flex: 1 1 auto; min-width: 0; }
+.fleet-banner-close { flex: 0 0 auto; margin: -4px -6px -4px 0; }
+
+/* ---------------------------------------------------------------- Settings card */
+.fleet-grid {
+  display: grid;
+  grid-template-columns: minmax(96px, max-content) 1fr;
+  gap: var(--space-2) var(--space-4);
+  margin: 0 0 var(--space-3);
+  font-size: var(--fs-sm);
+}
+.fleet-grid dt { color: var(--text-secondary); }
+.fleet-grid dd { margin: 0; color: var(--text); min-width: 0; overflow-wrap: anywhere; }
+.fleet-muted { color: var(--text-secondary); font-size: var(--fs-sm); }
+.fleet-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--fs-xs);
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--surface-sunken);
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+.fleet-sub {
+  margin: var(--space-3) 0 var(--space-2);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+.fleet-features {
+  list-style: none;
+  margin: 0 0 var(--space-3);
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--space-1) var(--space-4);
+  font-size: var(--fs-sm);
+}
+.fleet-feature { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.fleet-feature.is-on .icon { color: var(--success); }
+.fleet-feature.is-off { color: var(--text-secondary); }
+.fleet-feature.is-off .icon { color: var(--text-tertiary); }
+.fleet-feature-note { font-size: var(--fs-xs); color: var(--text-tertiary); }
+.fleet-privacy { margin: 0 0 var(--space-3); line-height: 1.45; }
+.fleet-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+.fleet-warn, .fleet-confirm {
+  display: flex;
+  gap: var(--space-2);
+  align-items: flex-start;
+  margin: 0 0 var(--space-3);
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+}
+.fleet-warn { border: 1px solid var(--warning-border); background: var(--warning-bg); color: var(--text); }
+.fleet-warn .icon { color: var(--warning); flex: 0 0 auto; margin-top: 2px; }
+.fleet-confirm { flex-direction: column; border: 1px solid var(--danger-border); background: var(--danger-bg); color: var(--text); }
+
+/* ---------------------------------------------------------------- paused page */
+.fleet-paused {
+  position: fixed;
+  inset: 0;
+  z-index: 9000;              /* below the sign-in gate (10000) */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+  background: var(--bg);
+  overflow-y: auto;
+}
+.fleet-paused[hidden] { display: none; }
+html.fleet-is-paused body { overflow: hidden; }
+.fleet-paused-box {
+  width: 100%;
+  max-width: 440px;
+  padding: var(--space-6) var(--space-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  background: var(--surface);
+  box-shadow: var(--shadow-overlay);
+  text-align: center;
+}
+.fleet-paused-brand { display: flex; justify-content: center; margin-bottom: var(--space-4); min-height: 48px; }
+.fleet-logo { width: 160px; height: auto; max-width: 60vw; }
+.fleet-logo-on-light { display: none; }
+:root[data-theme="light"] .fleet-logo-on-dark { display: none; }
+:root[data-theme="light"] .fleet-logo-on-light { display: block; }
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) .fleet-logo-on-dark { display: none; }
+  :root:not([data-theme="dark"]) .fleet-logo-on-light { display: block; }
+}
+.fleet-logo-text { font-size: var(--fs-2xl); font-weight: 700; letter-spacing: 0.12em; color: var(--text); }
+.fleet-paused-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  margin-bottom: var(--space-3);
+  border-radius: 50%;
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
+  color: var(--warning);
+}
+.fleet-paused-title { margin: 0 0 var(--space-2); font-size: var(--fs-xl); font-weight: 600; color: var(--text); }
+.fleet-paused-msg { margin: 0 0 var(--space-3); font-size: var(--fs-lg); color: var(--text); overflow-wrap: anywhere; }
+.fleet-paused-note { margin: 0 0 var(--space-5); font-size: var(--fs-sm); color: var(--text-secondary); line-height: 1.5; }
+.fleet-paused-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: var(--space-2); }
+.fleet-paused-status { min-height: 1.4em; margin-top: var(--space-3); font-size: var(--fs-sm); color: var(--text-secondary); }
+
+@media (max-width: 480px) {
+  .fleet-grid { grid-template-columns: 1fr; gap: 2px; }
+  .fleet-grid dt { margin-top: var(--space-2); }
+  .fleet-grid dt:first-child { margin-top: 0; }
+  .fleet-features { grid-template-columns: 1fr; }
+  .fleet-paused-box { padding: var(--space-5) var(--space-4); }
+  .fleet-paused-actions .btn { flex: 1 1 100%; justify-content: center; }
+}

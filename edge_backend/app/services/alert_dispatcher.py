@@ -378,8 +378,32 @@ class AlertDispatcher:
         from app.services import device_identity
 
         data = dict(data or {})
+        # iKorex plan (services/entitlements.py): paused = no alerts at all; a
+        # feature not in the plan = none of its alerts; phone alerts off = the
+        # alert is logged and shown on the dashboard but not pushed to phones.
+        from app.services import entitlements
+
+        gated = None
+        try:
+            feature = entitlements.alert_feature(event_type, data)
+            if entitlements.is_paused():
+                gated = "service paused"
+            elif feature and not entitlements.feature_enabled(feature):
+                gated = f"{feature} not in plan"
+            elif push and not entitlements.feature_enabled("phone_alerts"):
+                push = False
+                data["_push_note"] = "not pushed: phone alerts are not included in the plan"
+        except Exception:  # noqa: BLE001 - an unreadable plan never drops an alert
+            gated = None
+        if gated:
+            return {"alert_id": data.get("alert_id"), "event_type": str(event_type or ""), "logged": False,
+                    "websocket_clients": 0, "skipped": gated,
+                    "push": {"provider": "fcm_v1", "sent": 0, "skipped": gated},
+                    "web_push": {"provider": "web_push", "pushed": False, "skipped": gated}}
+        push_note = data.pop("_push_note", None)
         persist, broadcast, push, bypass_cooldown, route_note = self._route_tier(
             data, persist, broadcast, push, bypass_cooldown)
+        route_note = route_note or push_note
         et = str(event_type or data.get("event_type") or EventType.THEFT_SUSPECTED.value)
         try:
             et_enum: Optional[EventType] = EventType(et)

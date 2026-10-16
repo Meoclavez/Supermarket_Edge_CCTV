@@ -183,6 +183,7 @@
     const host = el('todayIncidents');
     if (!host) return;
     if (!data) { host.innerHTML = emptyState('Incident list unavailable: the server did not respond.'); return; }
+    if (data.notInPlan) { host.innerHTML = emptyState('Theft alerts are not included in your plan. Please contact iKorex to add them.'); return; }
     const open = (data.incidents || [])
       .filter((i) => OPEN_STATUSES.includes(i.status))
       .sort((a, b) => String(b.timestamp).localeCompare(String(a.timestamp)));
@@ -217,6 +218,7 @@
     const host = el('todayRecs');
     if (!host) return;
     if (!data) { host.innerHTML = emptyState('Recommendations unavailable: the server did not respond.'); return; }
+    if (data.notInPlan) { host.innerHTML = emptyState('Business insights are not included in your plan. Please contact iKorex to add them.'); return; }
     const items = (data.items || []).filter((r) => r.source !== 'ai_summary' && ['PENDING', 'REVIEWED'].includes(r.status)).slice(0, 3);
     if (!items.length) {
       host.innerHTML = emptyState(data.empty_reason || 'No open recommendations. The analysis runs every hour on measured visits, dwell and queues.',
@@ -320,15 +322,18 @@
     if (loading || !visible()) return;
     loading = true;
     try {
+      // Features not in the iKorex plan (fleet.js) answer 403: skip them.
+      const fleet = window.edgeFleet && typeof window.edgeFleet.status === 'function' ? window.edgeFleet.status() : null;
+      const off = (k) => !!(fleet && fleet.features && fleet.features[k] === false);
       const [pipe, overview, hourly, incidents, recs, setup, layout, pos] = await Promise.all([
         getJSON('/api/v1/layout/pipeline/status', null),
         getJSON('/api/v1/analytics/overview', null),
         getJSON('/api/v1/analytics/footfall/hourly', null),
-        getJSON('/api/v1/theft/incidents', null),
-        getJSON('/api/v1/analytics/recommendations?days=7', null),
+        off('theft_detection') ? { notInPlan: true } : getJSON('/api/v1/theft/incidents', null),
+        off('business_insights') ? { notInPlan: true } : getJSON('/api/v1/analytics/recommendations?days=7', null),
         getJSON('/api/v1/store/setup', null),
         getJSON('/api/v1/layout', null),
-        getJSON('/api/v1/analytics/pos/status', null),
+        off('pos_integration') ? null : getJSON('/api/v1/analytics/pos/status', null),
       ]);
       renderCameras(pipe);
       renderOverview(overview, hourly, pos);

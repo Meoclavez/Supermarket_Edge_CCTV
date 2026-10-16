@@ -78,7 +78,7 @@ def test_layout_exposes_structures_and_setup_block(client, auth_headers):
     data = res.json()
     assert data["units"] == "metres"
     assert isinstance(data["structures"], list)
-    assert data["structure_kinds"] == ["ROOM", "WALL", "SHELF", "COUNTER", "DOOR", "OBSTACLE"]
+    assert data["structure_kinds"] == ["ROOM", "WALL", "SHELF", "COUNTER", "DOOR", "OBSTACLE", "OUTDOOR"]
 
     setup = data["setup"]
     for key in ("configured", "zones", "structures", "cameras", "cameras_calibrated"):

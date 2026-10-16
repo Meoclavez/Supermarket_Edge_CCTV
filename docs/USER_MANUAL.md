@@ -96,6 +96,10 @@ sudo systemctl restart edge-cctv     # needed after editing .env
 
 The camera setup page is at `/dashboard/studio`. The dashboard opens it for you; see 1.6.
 
+When a page opens you first see the iKorex intro screen with the logo for a moment. It disappears by
+itself once the sign-in check is done; there is nothing to press. The iKorex logo also sits at the
+left of the header and on the sign-in page, and changes to suit the Light or Dark theme.
+
 ### 1.4 Creating the owner account (first visit only)
 
 The first account must be created on the store network or the VPN, not through online access.
@@ -213,22 +217,53 @@ from the default (…)" and a "Reset to default" button.
 The plan is drawn in metres; there is no option to upload a floor-plan image. A new store shows a
 "Set up your store" guide.
 
-1. **Set the size.** Store map → "Store size". Enter "Floor name", "Width (m)" and "Depth (m)", then
-   press "Apply". Shapes outside a smaller size are moved inside it.
-2. **Draw the building** with the toolbar:
+1. **Set the map size.** The map is the whole site: the building plus any outdoor areas such as the
+   car park. Press "Edit map", then "Map size". The panel shows "Map size now" in metres. A new
+   store starts small; you do not have to guess the final size, because you can add space later on
+   any side and everything already drawn stays where it is.
+   - **Add space on one side.** Type the metres in "Metres to add on one side" (default 5), then press
+     "Top", "Left", "Right" or "Bottom".
+   - **"Add 5 m all round"** adds 5 metres on all four sides at once.
+   - **"Fit to content"** trims or grows the map to what is drawn on it, plus 2 m.
+   - **Exact size.** Open "Name and exact size", enter "Floor name", "Width (m)" and "Depth (m)",
+     then press "Apply". Width and depth move the right and bottom edges.
+   - **Shrinking is refused if it would cut something off.** The panel says "Not changed" and lists
+     the rooms, shapes or cameras that would end up outside the map. "Show it" selects the first
+     one so you can move it. If you really want the smaller map, press "Shrink anyway (moves them
+     inside)". Use a minus number (for example -3) to remove empty space from one side.
+
+   If you draw or drag something past the edge, the map asks "Extend the map to fit?". Press "Extend
+   the map" to grow it, or "Keep it inside" (or Escape) to keep it as it was.
+   Press "Done" to close the panel. "Snap 0.5 m" keeps sizes and corners on a half-metre grid.
+2. **Draw the building and outdoor areas.** Press "Edit map" and pick a tool. The line "Now:" shows
+   what a click on the map will do.
 
    | Tool | Key | Draws |
    |---|---|---|
-   | "Select" | V | Selects and moves shapes |
-   | "Room" | R | The outline of a room |
+   | "Select" | V | Selects, moves, resizes and turns things |
+   | "Room" | R | A room of the building |
+   | "Outdoor area" | O | A car park, loading dock, side lane, trolley bay or garden centre |
    | "Wall" | W | A wall; hold Shift for straight lines |
-   | "Shelf" | S | A shelf or gondola |
    | "Door" | D | A doorway |
-   | "Store area" | Z | A measured floor area (see step 3) |
+   | "Shelf" | S | A shelf or gondola |
+   | "Counter" | C | A checkout or service counter |
+   | "Obstacle" | B | A pillar, display or anything people walk around |
+   | "Zone" | Z | A measured floor area (see step 3) |
+   | "Measure" | M | A distance between two points (see below) |
 
-   Click to place each corner. To finish, press Enter, double-click, right-click or press "Finish".
-   Backspace or "Undo point" removes the last corner; Escape or "Cancel" abandons the shape.
-   "Snap 0.5 m" keeps corners on a half-metre grid, and "+", "−" and "Fit" zoom.
+   **Rooms, outdoor areas, shelves, counters, obstacles and zones are drawn by dragging:** press at
+   one corner, drag to the opposite corner and let go. For an L-shaped or other odd outline, tick
+   "Free shape", then click each corner; press Enter, double-click or press "Finish" to close it.
+   Backspace or "Undo point" removes the last corner; Escape or "Cancel" abandons the shape. Walls
+   and doors are always clicked point by point.
+
+   In the inspector, the name box offers room presets: "Sales floor", "Storeroom", "Cool room",
+   "Office", "Staff room", "Loading dock" and "Car park". Outdoor areas also have an area type
+   (for example "Car park", "Loading dock", "Side lane").
+
+   **Measure tool and scale bar.** The scale bar at the bottom left of the map always shows how long
+   a distance is; it changes as you zoom. With "Measure", click two points to see the distance
+   (hold Shift for a straight line). Escape clears the measurement.
 3. **Draw store areas.** Store areas are where visits, unique shoppers, dwell time and occupancy are
    measured, and where the floor heatmap is summarised. Draw one per aisle, department, entrance,
    checkout and so on. Then select each area and set, in the inspector:
@@ -245,12 +280,26 @@ The plan is drawn in metres; there is no option to upload a floor-plan image. A 
 
    The categories matter. ENTRANCE, EXIT and CHECKOUT areas drive the "Exit without passing checkout"
    check. EXCLUDED areas are never counted.
-4. **Edit shapes.** Each shape is saved as soon as you finish it, with a placeholder name such as
-   "Zone 4". Drag a shape to move it, drag a corner to reshape it, and double-click an edge to add a
-   corner. Del removes the selected corner or shape; deleting a shape asks for confirmation
-   ("Yes, delete" / "Keep"), and recorded visits are kept. A selected structure also has "Kind",
-   which includes Counter and Obstacle (these have no toolbar button), "Thickness (m)" and
-   "Height (m, optional)".
+4. **Edit what you have drawn.** Each shape is saved as soon as you finish it, with a placeholder
+   name such as "Zone 4". With "Select", click a shape:
+   - Drag it to move it. Drag a square **handle** on its edge or corner to resize it, and the round
+     handle above it to turn it (rotate). With "Free shape" ticked you can also drag a single corner,
+     and double-click an edge to add a corner.
+   - Or type exact values in the inspector: "X (m)" and "Y (m)" (the centre, measured from the
+     top-left corner of the map), "Width (m)", "Depth (m)" and "Angle (°)".
+   - The arrow keys nudge the selected item by 0.1 m; hold Shift for 1 m.
+   - "Duplicate" (or Ctrl+D; Cmd+D on a Mac) copies a room, shelf, wall or zone. Cameras cannot be
+     duplicated, because each one is a real device.
+   - Undo and Redo are the two arrow buttons in the toolbar. Ctrl+Z undoes, Ctrl+Shift+Z or Ctrl+Y
+     redoes. They cover drawing, moving, resizing, turning, corner edits, renaming and deleting. If
+     the map is made smaller with "Shrink anyway", the undo history is cleared.
+   - Del removes the selected corner or shape. Deleting a shape asks for confirmation ("Yes, delete"
+     / "Keep"), and recorded visits are kept. A selected structure also has "Kind" (which includes
+     Counter, Obstacle and Outdoor area), "Thickness (m)" and "Height (m, optional)".
+
+   **On a phone** the map is read-only until you press "Edit map" in the toolbar. In Select mode one
+   finger pans the map when you drag empty space, and two fingers pinch to zoom. Drawing, handles and
+   the inspector fields work by touch too.
 
 ### 2.3 Add the cameras
 
@@ -408,6 +457,35 @@ Store map. For each camera:
    ("Place by click"). You can also drag the camera marker.
 2. Drag the tip of the wedge to point it, or enter "Bearing (°)" and "FOV (°)" (field of view) in
    the inspector, with "X (metres)", "Y (metres)" and "Height (m)" (mounting height).
+
+You can also use the camera gallery, described next.
+
+**Cameras outside the building.** A camera can be anywhere on the map, including a car park, loading
+dock or side lane. Draw the outdoor area with "Outdoor area", then drag the camera marker there. If
+the spot is past the edge of the map, the map asks "Extend the map to fit?". With a camera selected,
+the arrow keys move it, and you can type exact values.
+
+**The camera gallery.** Beside the map is a "Cameras" panel (collapsible; on a phone it opens as a
+sheet). It has a card for each camera, with a picture, the name and small labels: "Placed" or "Not
+placed", "Calibrated" and "Off".
+- Type in "Find a camera" to search. "Not placed" shows only the cameras not yet on the map; "All"
+  shows every camera.
+- **Drag a card onto the map** (hold the dotted handle on a phone) and let go where the camera is
+  mounted. A marker follows your finger or mouse; it says "Let go to place here", or "Outside the map:
+  let go to choose" past the edge. Or press **"Place"** on a card to put the camera in the middle of
+  the map, then drag it into position.
+- Click a card to find that camera on the map. Hover over a camera on the map (or its card) to see
+  its picture and "captured … ago".
+- Only an administrator can place cameras.
+
+**Gallery pictures.** The pictures are not live. Each one is taken once and kept in this browser
+only; they are not stored on the device or sent anywhere. They are cleared when you sign out, and
+when a different person signs in on the browser. A picture older than 24 hours shows "Old picture".
+Press the refresh button on a card ("Take a new picture") to update one, or "Refresh all pictures"
+at the top to update every camera that is on; it shows "Getting pictures: 3 of 12" and a "Stop"
+button. Cameras that are turned off get no picture. On the public address (online access) the
+pictures are taken one at a time over the direct video link, so "Refresh all pictures" is slower; it
+stops if you switch to another tab, and you press it again to carry on.
 
 The same values are under "Placement on the blueprint" in the camera settings. Placement alone does
 not put people on the map; that needs calibration.
@@ -790,6 +868,10 @@ camera there takes about 1.5 s for H.264 cameras and about 4 s for H.265 ones. I
 - **People:** live positions from calibrated cameras.
 - **Heatmap:** "Walked", "Stopped" or "Touched shelves", for "Today", "Yesterday", "Last 7 days" or
   "Last 30 days".
+- **Moving around:** scroll or pinch to zoom, drag the background to pan, "Fit" shows the whole map.
+  The scale bar at the bottom left shows distances. Rooms and outdoor areas (car park, loading dock)
+  appear as separate shapes, and cameras outside the building are shown where they are mounted.
+- **Editing:** press "Edit map" to change the map (2.2). The camera gallery is beside the map (2.6).
 
 ### 3.4 Insights
 
@@ -1049,6 +1131,45 @@ sudo -u edgecctv ../.venv/bin/python scripts/manage_operator.py reset-setup   # 
 6. Press "Back up now" and "Download" the backup, and give the store a copy.
 7. Remove the installer's VPN access.
 
+### 4.8 The iKorex service card
+
+iKorex looks after the licence and plan for this system. Settings → "iKorex service" (the shortcut
+button is at the top of Settings) shows:
+
+| Line | Meaning |
+|---|---|
+| "Plan" | "Active.", "Paused by iKorex." or "Paused: the licence has ended." If iKorex has not sent a plan yet it says "Standard service (no plan received from iKorex yet). Everything is included." |
+| "Licence" | The end date, or "No end date." |
+| "Cameras" | "No camera limit." or "Up to N cameras." |
+| "Last contact" | When the system last checked in with iKorex. |
+| "Control key" | A short code that identifies iKorex's server. |
+| "Included in your plan" | Each feature, with "not included" next to any left out. |
+
+An owner or administrator also sees "Check in now" (contact iKorex straight away) and "Reset control
+key". If the card shows "Control key changed — ask iKorex", do not press "Reset the key" until iKorex
+has told you the key changed.
+
+**Licence warning.** When the licence end date has passed, a banner appears under the header: "Your
+iKorex service licence ended on …. The system keeps working until …, then it pauses. Please contact
+iKorex." Close it with the small cross; it returns in a new session. Nothing stops during these
+grace days.
+
+**Paused page.** If iKorex suspends the service, or the grace days run out, every screen shows
+"Service paused" (or "Service paused: licence ended") with iKorex's message. Analysis, alerts, phone
+alerts and night watch stop; recordings, evidence and settings are kept. Press "Check again" to see
+whether service has resumed. It restarts by itself when iKorex resumes it.
+
+**"Not included in your plan".** A feature left out of the plan (for example heatmaps or phone alerts)
+is replaced by a note "not included in your plan. Please contact iKorex to add it." Ask iKorex to
+switch it on.
+
+**Losing the internet never pauses anything.** If the system cannot reach iKorex, it carries on with
+the last plan it received.
+
+**Your data stays in the store.** iKorex receives only health and usage numbers (for example disk
+space and how many alerts there were). Store video, pictures, camera and area names and other store
+data never leave the box.
+
 ---
 
 ## Troubleshooting
@@ -1087,7 +1208,7 @@ they exist, use the workaround.
 | Muting one camera's alerts (for example during restocking) | Exists in the API only | Turn the camera's "Theft detection" off temporarily |
 | Queue and checkout waiting times on screen | Measured, but not shown; only the "Queue congested after (seconds)" threshold is in the dashboard | None in the dashboard |
 | Floor-plan image upload | The plan must be drawn | Draw it with the tools (2.2) |
-| Staff areas and uniform recognition; street front, loading dock and car-park camera positions; store trading hours and delivery windows | Planned | Use restricted areas with schedules and the "Stockroom / staff only" purpose |
+| Staff areas and uniform recognition; store trading hours and delivery windows | Planned | Use restricted areas with schedules and the "Stockroom / staff only" purpose |
 | Bulk export of incidents and evidence; daily report for a past date | One item at a time; report is today only | "Open in new tab" and save |
 | Multi-channel import for recorders other than Dahua | Add each channel by address | 2.3 B |
 | Undoing "They're different cameras" | Warning stays hidden | Ask the installer |

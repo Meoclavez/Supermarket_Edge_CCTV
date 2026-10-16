@@ -843,6 +843,13 @@ class RemoteAccessService:
         s = self.settings
         if not s.get("enabled"):
             return False, None
+        try:
+            from app.services.entitlements import feature_enabled
+
+            if not feature_enabled("online_access"):
+                return False, "Online access is not included in your iKorex plan."
+        except Exception:  # noqa: BLE001 - an unreadable plan never cuts the tunnel
+            pass
         if settings.AUTH_DISABLED:
             return False, "AUTH_DISABLED=true: the tunnel is not started while authentication is off."
         if not s.get("hostname"):

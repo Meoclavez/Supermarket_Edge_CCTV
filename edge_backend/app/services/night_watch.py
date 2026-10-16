@@ -451,6 +451,10 @@ class NightWatch:
         if self.config_override is not None:
             return self.config_override(camera_id)
         try:
+            from app.services.entitlements import feature_safe
+
+            if not feature_safe("night_watch"):
+                return None  # not in the iKorex plan, or paused: never armed
             from app.services.feature_manager import feature_manager
 
             return feature_manager.get_setting(camera_id, "night_watch")

@@ -89,6 +89,13 @@ class FeatureManager:
         """
         if flag not in FEATURE_FLAGS:
             raise KeyError(f"Unknown camera feature flag: {flag}")
+        if flag in ("theft_detection", "theft_clip"):
+            # Not in the iKorex plan (or service paused): off on every camera,
+            # whatever the camera's own switch says (services/entitlements.py).
+            from .entitlements import feature_safe
+
+            if not feature_safe("theft_detection"):
+                return False
         return bool(getattr(self._cached_or_stored(camera_id), flag))
 
     def get_setting(self, camera_id: str, name: str) -> Any:
