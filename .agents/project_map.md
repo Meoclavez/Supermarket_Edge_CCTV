@@ -590,7 +590,9 @@ than firing on empty data.
 
 Contracts: `docs/STORE_MAP_V2_CONTRACT.md`, `docs/FLEET_CONTROL_CONTRACT.md`. Built and QA'd
 end-to-end on a scratch box (headless Chrome, all checks PASS); commit c206a32. VPS side
-deployed 2026-10-21 (key sha256:3ee9e4f81f48d587); box deploy pending (box at 8767156). The
+deployed 2026-10-21 (key sha256:3ee9e4f81f48d587); box deployed 2026-10-21 20:43 AEDT at 3ec190d
+(m0020 applied with pre-v0020 backup, MIGraphX inference, first check-in 20:45:25 pinned the key; check-ins
+every ~5 min, telemetry numbers only). Follow-up: config.py APP_VERSION still 2.1.0. The
 2026-10-16/17 outage was the store's internet (DNS failures), the box stayed up.
 * **Map = "site"**: `store_layouts.width_m/height_m` is the whole canvas (building = a ROOM).
   `POST /api/v1/layout/extend {left_m,top_m,right_m,bottom_m}` (left/top translate zones,
