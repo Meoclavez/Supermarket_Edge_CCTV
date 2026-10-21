@@ -622,11 +622,11 @@ deployed 2026-10-21 (key sha256:3ee9e4f81f48d587); box deployed 2026-10-21 20:43
 (m0020 applied with pre-v0020 backup, MIGraphX inference, first check-in 20:45:25 pinned the key; check-ins
 every ~5 min, telemetry numbers only). The 2026-10-16/17 outage was the store's internet (DNS
 failures), the box stayed up.
-**2026-10-21 follow-up build (committed, deploy pending: VPS control rebuild + box pull):**
+**2026-10-21 follow-up build f423bbf (DEPLOYED 2026-10-22 ~02:30 AEDT, VPS control + box; verified: 2.7.0, signed acks, topics backfilled, map 40x25 aligned to backup+(2,2)):**
 APP_VERSION 2.7.0; offline standby (contract decision 5); atomic site changes (below); in-app
 help/onboarding; insight topics (m0021). Integration QA on a copy of the real 03:00 backup: all
-checks PASS, full suite 1510 passed, VPS control 43 passed. After deploy: run Fit once on the
-Pearcedale map (site still 79.2x29 from the 2026-10-21 incident, brain #388).
+checks PASS, full suite 1510 passed, VPS control 43 passed. Open: SUPPORT contact in
+static/js/help_content.js is null (owner to supply). Incident: brain #388.
 * **Atomic site changes** (`store_layout_service._site_change`): extend/fit/resize run in their
   own session behind a per-loop asyncio lock, `BEGIN IMMEDIATE` before the first read, one
   all-or-nothing txn, whole-op retry x3 then `SiteBusyError` -> 503 Retry-After; fit bounds are
