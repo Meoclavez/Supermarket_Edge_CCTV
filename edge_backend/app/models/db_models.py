@@ -283,6 +283,49 @@ class AIDecisionRecommendationModel(Base):
     # m0014: the metrics the rule cited, and which engine produced the row.
     evidence: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     source: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    # m0021: the insight topic (recurring issue) this finding was grouped into.
+    topic_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+
+
+class InsightTopicModel(Base):
+    """One recurring issue: the daily findings that describe it, grouped (m0021).
+
+    Written by services/insight_topics.py (grouping on every analysis run and
+    a batched startup backfill) and by the topic action endpoints in
+    routes/insights.py. ``status`` is the operator's: open, acknowledged,
+    snoozed (until ``snooze_until``) or resolved.
+    """
+    __tablename__ = "insight_topics"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    topic_key: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    alias_keys: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    family: Mapped[str] = mapped_column(String(64), nullable=False)
+    category: Mapped[str] = mapped_column(String(64), nullable=False)
+    zone_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    zone_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    subject: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    direction: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    first_seen: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)   # store-local YYYY-MM-DD
+    last_seen: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)
+    occurrences: Mapped[int] = mapped_column(Integer, nullable=False, default=0)   # distinct days
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="open", index=True)
+    snooze_until: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    trend: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    severity: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    unified_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    unified_actions: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    analysis: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    analysed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    data_window: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    needs_analysis: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    action_done_at: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    acknowledged_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    reopened_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
 class AnalysisRunModel(Base):

@@ -13,7 +13,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,8 +22,9 @@ from app.models.db_models import POSTransactionModel
 from app.routes import ResilientRoute
 from app.routes.analytics import verify_analytics_access
 from app.services.actor import describe_actor
-from app.services.auth_service import general_rate_limiter
+from app.services.auth_service import general_rate_limiter, operator_allowed, require_admin
 from app.services.hourly_traffic import hourly_visitors
+from app.services.insight_topics import insight_topic_service
 from app.services.recommendations_service import RunInProgress, RunRateLimited, recommendations_service
 from app.services.retail_metrics_service import day_bounds
 from app.services.timeutil import to_local
@@ -107,6 +108,177 @@ async def get_recommendations(
     """Every recommendation in one list (rule findings + latest AI summary). Read-only."""
     return await recommendations_service.consolidated(
         db, status=status, days=days, include_dismissed=include_dismissed)
+
+
+# ------------------------------------------------------------ insight topics
+# The daily findings above, grouped into recurring issues with one unified
+# analysis each (services/insight_topics.py). Under /recommendations, so the
+# fleet gate's business_insights rule covers them. Operators may handle
+# topics (daily use); the bulk backfill is for owners/administrators.
+
+_TOPIC_STATUSES = ("open", "acknowledged", "snoozed", "resolved")
+_TOPIC_TRENDS = ("worsening", "recurring", "new", "stable", "improving")
+
+
+class TopicSnoozeRequest(BaseModel):
+    days: int = Field(7, ge=1, le=90)
+
+
+class TopicActionDoneRequest(BaseModel):
+    action_id: Optional[str] = Field(None, max_length=64)
+    date: Optional[str] = Field(None, description="Store-local YYYY-MM-DD (default: today)")
+
+
+class TopicSplitRequest(BaseModel):
+    insight_id: str = Field(..., min_length=1, max_length=64)
+
+
+class TopicMergeRequest(BaseModel):
+    other_topic_id: str = Field(..., min_length=1, max_length=64)
+
+
+class TopicReanalyseRequest(BaseModel):
+    narrate: bool = False
+
+
+async def _topic_or_404(db: AsyncSession, topic_id: str):
+    t = await insight_topic_service.get(db, topic_id)
+    if t is None:
+        raise HTTPException(status_code=404, detail="Topic not found (it may have been merged).")
+    return t
+
+
+@router.get("/recommendations/topics")
+async def list_insight_topics(
+    status: Optional[str] = Query(None, description="open, acknowledged, snoozed or resolved"),
+    zone: Optional[str] = Query(None, max_length=128, description="Blueprint zone id or area name"),
+    trend: Optional[str] = Query(None, description="worsening, recurring, new, stable or improving"),
+    include_resolved: bool = Query(False),
+    db: AsyncSession = Depends(get_db),
+):
+    """Recurring issues (grouped findings), most urgent first. Read-only."""
+    if status and status.strip().lower() not in _TOPIC_STATUSES:
+        raise HTTPException(status_code=422, detail=f"'status' must be one of {', '.join(_TOPIC_STATUSES)}")
+    if trend and trend.strip().lower() not in _TOPIC_TRENDS:
+        raise HTTPException(status_code=422, detail=f"'trend' must be one of {', '.join(_TOPIC_TRENDS)}")
+    return await insight_topic_service.list_topics(db, status=status, zone=zone, trend=trend,
+                                                   include_resolved=include_resolved)
+
+
+@router.get("/recommendations/topics/{topic_id}")
+async def get_insight_topic(topic_id: str, db: AsyncSession = Depends(get_db)):
+    """One topic with its daily findings and the zone / product metric series. Read-only."""
+    out = await insight_topic_service.detail(db, topic_id)
+    if out is None:
+        raise HTTPException(status_code=404, detail="Topic not found (it may have been merged).")
+    return out
+
+
+async def _topic_status(db: AsyncSession, topic_id: str, status: str, days: int = 7) -> dict:
+    t = await _topic_or_404(db, topic_id)
+    await insight_topic_service.set_status(db, t, status, days=days)
+    return {"status": "success", "topic": insight_topic_service.serialize(t)}
+
+
+@router.post("/recommendations/topics/{topic_id}/acknowledge")
+@operator_allowed
+async def acknowledge_insight_topic(topic_id: str, db: AsyncSession = Depends(get_db)):
+    """Seen it: off the open count; new findings still join it."""
+    return await _topic_status(db, topic_id, "acknowledged")
+
+
+@router.post("/recommendations/topics/{topic_id}/snooze")
+@operator_allowed
+async def snooze_insight_topic(topic_id: str, payload: Optional[TopicSnoozeRequest] = Body(None),
+                               db: AsyncSession = Depends(get_db)):
+    """Hide for N days (default 7); it reopens by itself afterwards."""
+    return await _topic_status(db, topic_id, "snoozed", days=(payload.days if payload else 7))
+
+
+@router.post("/recommendations/topics/{topic_id}/resolve")
+@operator_allowed
+async def resolve_insight_topic(topic_id: str, db: AsyncSession = Depends(get_db)):
+    """Fixed. A finding on a later day reopens it and marks it as recurring."""
+    return await _topic_status(db, topic_id, "resolved")
+
+
+@router.post("/recommendations/topics/{topic_id}/reopen")
+@operator_allowed
+async def reopen_insight_topic(topic_id: str, db: AsyncSession = Depends(get_db)):
+    return await _topic_status(db, topic_id, "open")
+
+
+@router.post("/recommendations/topics/{topic_id}/action-done")
+@operator_allowed
+async def insight_topic_action_done(topic_id: str, payload: Optional[TopicActionDoneRequest] = Body(None),
+                                    db: AsyncSession = Depends(get_db)):
+    """Record that an action of the plan was done (date kept for the before/after comparison)."""
+    t = await _topic_or_404(db, topic_id)
+    on = None
+    if payload and payload.date:
+        try:
+            on = date.fromisoformat(payload.date)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="'date' must be YYYY-MM-DD")
+    try:
+        await insight_topic_service.mark_action_done(db, t, payload.action_id if payload else None, on)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="That action is not in this topic's plan.")
+    return {"status": "success", "topic": insight_topic_service.serialize(t)}
+
+
+@router.post("/recommendations/topics/{topic_id}/split")
+@operator_allowed
+async def split_insight_topic(topic_id: str, payload: TopicSplitRequest = Body(...),
+                              db: AsyncSession = Depends(get_db)):
+    """Take one finding out of a wrongly grouped topic into a topic of its own."""
+    t = await _topic_or_404(db, topic_id)
+    try:
+        new = await insight_topic_service.split(db, t, payload.insight_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="That finding is not in this topic.")
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"status": "success", "topic": insight_topic_service.serialize(t),
+            "new_topic": insight_topic_service.serialize(new)}
+
+
+@router.post("/recommendations/topics/{topic_id}/merge")
+@operator_allowed
+async def merge_insight_topics(topic_id: str, payload: TopicMergeRequest = Body(...),
+                               db: AsyncSession = Depends(get_db)):
+    """Fold another topic into this one; its future findings join this topic."""
+    t = await _topic_or_404(db, topic_id)
+    try:
+        await insight_topic_service.merge(db, t, payload.other_topic_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="The other topic was not found.")
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"status": "success", "topic": insight_topic_service.serialize(t)}
+
+
+@router.post("/recommendations/topics/{topic_id}/reanalyse")
+@operator_allowed
+async def reanalyse_insight_topic(topic_id: str, payload: Optional[TopicReanalyseRequest] = Body(None),
+                                  db: AsyncSession = Depends(get_db)):
+    """Recompute the unified analysis now; ``narrate`` asks the local model to word the summary."""
+    t = await _topic_or_404(db, topic_id)
+    await insight_topic_service.reanalyse(db, t, narrate=bool(payload and payload.narrate))
+    return {"status": "success", "topic": insight_topic_service.serialize(t)}
+
+
+@router.post("/recommendations/topics/backfill")
+async def backfill_insight_topics(
+    max_rows: int = Query(5000, ge=1, le=100000),
+    _admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Group findings that have no topic yet (owner/administrator). Idempotent and batched.
+
+    The same backfill runs by itself shortly after startup.
+    """
+    return await insight_topic_service.backfill(db, max_rows=max_rows)
 
 
 @router.get("/pos/status")

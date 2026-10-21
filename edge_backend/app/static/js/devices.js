@@ -251,7 +251,7 @@
       if (!host) return;
       const unadopted = this.devices.filter((d) => !d.adopted_camera_id);
       if (!unadopted.length) {
-        host.innerHTML = '<div class="fp-empty">Nothing new. Run a scan to look again.</div>';
+        host.innerHTML = '<div class="fp-empty">Nothing new found on the network. Press "Scan network" to look again, or use "Add camera" or "Dahua recorder" above.</div>';
         return;
       }
       host.innerHTML = unadopted.map((d) => `

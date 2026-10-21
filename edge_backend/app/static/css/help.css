@@ -1,0 +1,226 @@
+/* ==========================================================================
+   In-app help (js/help.js, js/onboarding.js): "?" popovers, the Help panel,
+   the Getting started checklist on Today and the first-run welcome.
+   Built on the style.css tokens, so both themes follow automatically.
+   Layers: welcome 1400, Help panel 1500, popover 1600 (modals are 1000,
+   the toast 2000, the sign-in gate 10000).
+   ========================================================================== */
+
+/* Header "Help" button: same shape as the Settings gear. */
+.header-help[aria-expanded="true"] { background: var(--accent-bg); border-color: var(--accent-border); color: var(--accent-text); }
+/* Laptop widths: icon-only header buttons (they keep aria-label/title) and a
+   shorter subtitle, so all five tabs stay visible at 1366px with the Help
+   button added (the tab bar scrolls without a scrollbar, so a clipped tab is
+   easy to miss). Phones (<=760px) have their own layout in style.css. */
+@media (min-width: 761px) and (max-width: 1599px) {
+  .header-actions .header-gear-label, .header-actions .pa-install-label { display: none; }
+  .brand-subtitle { max-width: 200px; }
+}
+
+/* ---- "?" button ---------------------------------------------------------- */
+.help-tip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  margin-left: var(--space-1);
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  vertical-align: middle;
+  transition: color var(--transition-fast), background-color var(--transition-fast);
+}
+.help-tip:hover { color: var(--accent-text); background: var(--accent-bg); }
+.help-tip[aria-expanded="true"] { color: var(--accent-text); background: var(--accent-bg); border-color: var(--accent-border); }
+.help-tip .icon { width: 16px; height: 16px; }
+.card-title .help-tip .icon { color: inherit; }
+/* A field label tied to its input gets its "?" right after it (never inside the
+   label): keep it on the label's row, at the right of the field. */
+.form-group:has(> label + .help-tip) { position: relative; }
+.form-group > label + .help-tip { position: absolute; top: -3px; right: 0; margin: 0; }
+@media (pointer: coarse) {
+  /* 32 px target on touch screens without making titles taller. */
+  .help-tip { width: 32px; height: 32px; margin: -5px 0 -5px 0; }
+}
+
+/* ---- popover -------------------------------------------------------------- */
+.help-pop {
+  position: fixed;
+  z-index: 1600;
+  max-width: calc(100vw - 32px);
+  max-height: min(70vh, 480px);
+  overflow-y: auto;
+  padding: var(--space-3) var(--space-4) var(--space-4);
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-overlay);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+.help-pop[hidden] { display: none; }
+.help-pop:focus { outline: none; }
+.help-pop:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.help-pop-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); margin-bottom: var(--space-1); }
+.help-pop-title { font-weight: var(--fw-semibold); font-size: var(--fs-md); }
+.help-pop-close { flex: 0 0 auto; }
+.help-pop-body p { margin: 0 0 var(--space-2); color: var(--text-2); }
+.help-pop-body ul { margin: 0 0 var(--space-2); padding-left: 18px; color: var(--text-2); }
+.help-pop-body li + li { margin-top: 2px; }
+.help-pop-foot:empty { display: none; }
+.help-pop-foot { padding-top: var(--space-1); }
+.help-pop-sheet {
+  left: 16px;
+  right: 16px;
+  bottom: calc(76px + env(safe-area-inset-bottom));
+  top: auto;
+  width: auto;
+}
+
+/* ---- Help panel ------------------------------------------------------------ */
+.help-scrim { position: fixed; inset: 0; z-index: 1500; background: var(--modal-scrim); }
+.help-scrim[hidden] { display: none; }
+.help-centre {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1501;
+  display: flex;
+  flex-direction: column;
+  width: min(440px, 100vw);
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  box-shadow: var(--shadow-overlay);
+}
+.help-centre[hidden] { display: none; }
+.help-centre-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+.help-centre-title { display: flex; align-items: center; gap: var(--space-2); margin: 0; font-size: var(--fs-lg); font-weight: var(--fw-semibold); color: var(--text); }
+.help-centre-title .icon { color: var(--accent-text); }
+.help-centre-search { padding: var(--space-3) var(--space-4) 0; }
+.help-search-field { display: flex; width: 100%; }
+.help-search-field > .icon { position: absolute; left: 10px; color: var(--text-tertiary); pointer-events: none; }
+.help-search-field .help-search-input { width: 100%; min-width: 0; padding-left: 34px; }
+.help-centre-body { flex: 1 1 auto; overflow-y: auto; padding: var(--space-3) var(--space-4) calc(var(--space-5) + env(safe-area-inset-bottom)); }
+.help-quick { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-3); }
+.help-count { margin: 0 0 var(--space-2); font-size: var(--fs-xs); color: var(--text-secondary); font-weight: var(--fw-medium); }
+.help-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+.help-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  text-align: left;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.help-item:hover { border-color: var(--accent-border); background: var(--accent-bg); }
+.help-item-title { display: flex; align-items: center; gap: var(--space-2); font-size: var(--fs-sm); font-weight: var(--fw-semibold); }
+.help-item-read { font-size: 11px; font-weight: var(--fw-medium); color: var(--success); }
+.help-item-sum { font-size: var(--fs-xs); color: var(--text-secondary); line-height: 1.45; }
+.help-empty { padding: var(--space-5) var(--space-2); }
+.help-back { margin-bottom: var(--space-2); }
+.help-article { display: flex; flex-direction: column; gap: var(--space-2); font-size: var(--fs-sm); line-height: 1.55; }
+.help-article-title { margin: 0; font-size: var(--fs-lg); font-weight: var(--fw-semibold); color: var(--text); }
+.help-article-title:focus { outline: none; }
+.help-article-sum { margin: 0; color: var(--text-2); }
+.help-steps { margin: 0; padding-left: 22px; color: var(--text); }
+.help-steps li + li { margin-top: var(--space-1); }
+.help-tips { padding: var(--space-2) var(--space-3); background: var(--info-bg); border: 1px solid var(--info-border); border-radius: var(--radius-sm); }
+.help-tips-title { display: flex; align-items: center; gap: var(--space-1); font-weight: var(--fw-semibold); color: var(--info); margin-bottom: 2px; }
+.help-tips ul { margin: 0; padding-left: 18px; color: var(--text-2); }
+.help-go { align-self: flex-start; margin-top: var(--space-1); }
+.help-support { margin-top: var(--space-5); padding-top: var(--space-3); border-top: 1px solid var(--border); font-size: var(--fs-sm); }
+.help-h3 { display: flex; align-items: center; gap: var(--space-2); margin: 0 0 var(--space-2); font-size: var(--fs-md); font-weight: var(--fw-semibold); color: var(--text); }
+.help-h3 .icon { color: var(--text-secondary); }
+.help-support-list { list-style: none; margin: 0 0 var(--space-2); padding: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.help-support-list li { display: flex; gap: var(--space-3); align-items: baseline; overflow-wrap: anywhere; }
+.help-support-list a { color: var(--accent-text); }
+.help-support-k { flex: 0 0 56px; color: var(--text-secondary); font-size: var(--fs-xs); }
+.help-muted { margin: 0 0 var(--space-2); color: var(--text-secondary); font-size: var(--fs-xs); line-height: 1.5; }
+/* No page scroll behind the Help panel or the welcome. */
+.help-open body { overflow: hidden; }
+
+/* ---- Getting started checklist (Today) --------------------------------------- */
+#gettingStartedMount[hidden] { display: none; }
+.gs-card .card-title > span:first-child .icon { color: var(--accent-text); }
+.gs-head-actions { display: inline-flex; align-items: center; gap: var(--space-1); }
+.gs-lede { margin: 0 0 var(--space-3); font-size: var(--fs-sm); color: var(--text-secondary); }
+.gs-progress { display: flex; flex-direction: column; gap: 6px; margin-bottom: var(--space-3); }
+.gs-progress-text { font-size: var(--fs-sm); color: var(--text-2); }
+.gs-bar { height: 8px; border-radius: var(--radius-pill); background: var(--surface-3); overflow: hidden; }
+.gs-bar-fill { display: block; height: 100%; width: 0; background: var(--success-solid); border-radius: inherit; transition: width 0.3s ease; }
+.gs-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+.gs-list[hidden] { display: none; }
+.gs-step {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.gs-step.gs-next { border-color: var(--accent-border); background: var(--accent-bg); }
+.gs-icon { display: inline-flex; padding-top: 1px; color: var(--text-tertiary); }
+.gs-done .gs-icon { color: var(--success); }
+.gs-partial .gs-icon { color: var(--warning); }
+.gs-todo .gs-icon, .gs-unknown .gs-icon { color: var(--text-tertiary); }
+.gs-main { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+/* Block, not flex: a long title wraps under its number instead of leaving "1." alone on a line (360px). */
+.gs-step-title { display: block; font-size: var(--fs-sm); font-weight: var(--fw-semibold); color: var(--text); }
+.gs-step-title .badge { margin-left: var(--space-2); vertical-align: middle; }
+.gs-done .gs-step-title { color: var(--text-2); }
+.gs-num { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.gs-why { font-size: var(--fs-xs); color: var(--text-secondary); line-height: 1.45; }
+.gs-detail { font-size: var(--fs-xs); color: var(--text-2); line-height: 1.45; overflow-wrap: anywhere; }
+.gs-detail:empty { display: none; }
+.gs-partial .gs-detail { color: var(--warning); }
+.gs-go { align-self: center; }
+.gs-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); margin-top: var(--space-3); font-size: var(--fs-xs); color: var(--text-secondary); }
+.gs-note { flex: 1 1 200px; }
+@media (max-width: 560px) {
+  .gs-step { grid-template-columns: 20px minmax(0, 1fr); }
+  .gs-go { grid-column: 2; justify-self: start; }
+}
+
+/* ---- First-run welcome --------------------------------------------------------- */
+.help-welcome-overlay { z-index: 1400; }
+.help-welcome { max-width: 520px; gap: var(--space-3); }
+.help-welcome-step { font-size: var(--fs-xs); font-weight: var(--fw-medium); color: var(--text-secondary); }
+.help-welcome-title { margin: 0; font-size: var(--fs-xl); font-weight: var(--fw-semibold); color: var(--text); line-height: 1.3; }
+.help-welcome-title:focus { outline: none; }
+.help-welcome-body { font-size: var(--fs-md); line-height: 1.55; color: var(--text-2); }
+.help-welcome-body p { margin: 0 0 var(--space-2); }
+.help-welcome-body ul { margin: 0 0 var(--space-2); padding-left: 20px; }
+.help-welcome-body li + li { margin-top: var(--space-1); }
+.help-welcome-dots { display: flex; gap: 6px; justify-content: center; }
+.help-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--surface-3); }
+.help-dot.is-on { background: var(--accent); }
+.help-welcome-foot { display: flex; justify-content: space-between; gap: var(--space-2); padding-top: var(--space-3); border-top: 1px solid var(--border); }
+
+@media print {
+  .help-tip, .help-pop, .help-centre, .help-scrim, .help-welcome-overlay, #gettingStartedMount { display: none !important; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .gs-bar-fill, .help-tip { transition: none; }
+}

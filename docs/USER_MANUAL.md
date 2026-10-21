@@ -146,7 +146,8 @@ key" show only a note that an owner or administrator is needed.
 ### 1.6 Finding your way around
 
 **Header:** the store name and a camera summary (for example "3 of 4 cameras working · 1 turned
-off"), then the "⚙️ Settings" gear, the Light / Dark / System theme switch, and "Sign out".
+off"), then "Help" (see 1.7), the "⚙️ Settings" gear, the Light / Dark / System theme switch, and
+"Sign out".
 
 **Main tabs**
 
@@ -165,6 +166,32 @@ view-only on a phone until you press "Edit map".
 **Camera setup** is a second page used to draw lines and areas on a camera's picture. Open it from a
 camera tile → "Camera setup", or from a setup checklist button. When you come from a checklist, use
 "← Back to setup checklist" to return.
+
+### 1.7 Getting help in the dashboard
+
+- **Welcome tour.** The first time an Owner or Administrator signs in on a browser, a short welcome
+  (four screens) explains what the system does, where things are and where help is. "Skip" or Esc
+  closes it; "Show me the checklist" ends at the Getting started checklist. Reopen it with Help →
+  "Welcome tour".
+- **Getting started** (top of Today). The store's setup steps in the order of Part 2, each with one
+  line on why it matters, its status read from the system ("Done", "Partly done", "To do", or "Not
+  checked" when the status could not be read) and a button that opens the right screen. The
+  progress bar counts the required steps; steps marked "Optional" are not counted. Steps for
+  features that are not in your iKorex plan are not shown. Operators see their own two steps:
+  alerts on their phone and the guide to reviewing an alert. "Hide steps" folds the list; the cross
+  closes the card (reopen it with Help → "Getting started checklist"). This is remembered per person
+  in this browser.
+- **"?" buttons.** The small question mark next to a card title or a tricky field opens a short
+  explanation in plain words, with a link to the full guide. Press it again, press Esc or click
+  elsewhere to close it.
+- **Help panel.** "Help" in the header opens searchable how-to guides (type a word such as
+  "calibrate", "phone" or "backup"). Each guide has the steps, tips and a button that takes you to
+  the right screen. The panel ends with how to contact iKorex support.
+- **Error messages** from the help screens are written in plain words, for example "Your sign-in has
+  ended. Please sign in again." or "Heatmaps is not included in your iKorex plan."
+
+The words of the "?" explanations, the guides and the iKorex support contact are kept in one file,
+`edge_backend/app/static/js/help_content.js` (the support phone and email are filled in there).
 
 ---
 
@@ -812,6 +839,8 @@ store token once) and add the Cloudflare DNS records. Install the device with
 
 ### 2.13 Check that everything is complete
 
+- Today → "Getting started" shows the store-wide steps (plan, cameras, calibration, areas, phones,
+  accounts, backups) with their status (1.7).
 - Today → "Store setup" shows a percentage ("N% DONE") and the "Next step". Each camera shows "No
   purpose set", "n/m done" or "Ready".
 - Store map → "Cameras & devices" → "Checklist" lists what is missing for that camera's purpose,
@@ -882,6 +911,25 @@ camera there takes about 1.5 s for H.264 cameras and about 4 s for H.265 ones. I
 - Each card has a priority, a "Why:" and a "Do:" line, and its evidence. Record what you did with
   "Mark reviewed", "Done" or "Dismiss" ("Reopen" brings it back).
 - Filters: "Open", "All", "Show dismissed".
+- **Grouped issues (the default view).** Findings that say the same thing on different days are
+  grouped into one card per issue, for example every "shoppers look at pet food but rarely pick it
+  up" finding of the last weeks. Each card shows:
+  - the trend: "Getting worse", "Improving", "Ongoing", "Keeps coming back" or "New";
+  - "Seen on 7 days since 3 Oct" and a strip of the last 28 days (tall bar = found that day);
+  - one summary over the whole history: what is happening, how it developed, the likely cause, and
+    any weekday or busy-hour pattern;
+  - an action plan in priority order, each step with why, what to expect, effort, who should do it
+    and when to check. "Mark done" records the date; from then on the card compares before and after
+    ("It looks like the action helped" or "No clear change yet; try the next step").
+- Buttons: "Acknowledge" (seen it; takes it off the count), "Snooze 7 days", "Resolve" (if it is
+  found again on a later day it reopens as "Keeps coming back"), "Reopen", "Re-analyse".
+- Wrongly grouped? Open "Daily findings" and choose "Not the same issue" on that day's finding.
+  Two cards about the same thing? "Merge…" on one, pick the other, "Merge".
+- The Insights badge counts open issues, not daily findings. Tick "Show every insight" for the old
+  list of single findings.
+- The grouping and the summary are worked out on this device from the measured figures. With "Add
+  AI summary (slower)" the local AI model may reword the summaries of the top three issues; it is
+  never required and nothing leaves the device.
 
 **"Shoppers & footfall"**
 

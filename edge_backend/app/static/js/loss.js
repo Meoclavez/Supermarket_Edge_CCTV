@@ -495,7 +495,8 @@
     if (!body) return;
     const rows = (state.stats && state.stats.false_alarm_rate_by_rule) || [];
     if (!rows.length) {
-      body.innerHTML = `<tr><td colspan="4"><div class="fp-empty">No outcomes recorded yet. Resolve incidents with an outcome (or mark them as false alarms) and each rule's false-alarm rate appears here.</div></td></tr>`;
+      body.innerHTML = `<tr><td colspan="4"><div class="fp-empty">No outcomes recorded yet. Resolve incidents with an outcome (or mark them as false alarms) and each rule's false-alarm rate appears here.
+        <button type="button" class="link-btn" data-help-open="review-alert">How to record an outcome</button></div></td></tr>`;
       return;
     }
     body.innerHTML = rows.map((r) => `
@@ -760,7 +761,8 @@
     const list = filtered();
     if (!list.length && state.tierFilter !== 'all') {
       const lvl = state.tierFilter === UNCLASSIFIED ? 'without a level' : `at ${TIER_LABEL[state.tierFilter]} level`;
-      host.innerHTML = `<div class="fp-empty">${esc(`No incidents ${lvl} in this view. Choose All levels to see the rest.`)}</div>`;
+      host.innerHTML = `<div class="fp-empty">${esc(`No incidents ${lvl} in this view.`)}
+        <button type="button" class="btn btn-xs" data-tier-filter="all">Show all levels</button></div>`;
       return;
     }
     if (!list.length) {
@@ -770,7 +772,13 @@
         legacy: 'Every older incident now has an outcome.',
         all: 'No incidents recorded. Loss-prevention checks run on cameras with theft detection switched on and product areas drawn in Camera setup.',
       }[state.filter];
-      host.innerHTML = `<div class="fp-empty">${esc(msg)}</div>`;
+      // Next action for each empty view (data-filter is handled by onClick; data-help-* by js/help.js).
+      const next = {
+        handled: '<button type="button" class="btn btn-xs" data-filter="open">Show incidents waiting for review</button>',
+        all: '<button type="button" class="link-btn" data-help-open="review-alert">How alerts work</button>',
+        open: '<button type="button" class="link-btn" data-help-open="review-alert">How to review an alert</button>',
+      }[state.filter] || '';
+      host.innerHTML = `<div class="fp-empty">${esc(msg)} ${next}</div>`;
       return;
     }
     let lastDay = null;

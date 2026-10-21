@@ -20,12 +20,20 @@ is derived from ``zone_visits`` at query time, never stored on the zone.
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
+import json
 import logging
 import math
+import sqlite3
+import time
 import uuid
+import weakref
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Optional
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -139,6 +147,60 @@ class ItemsOutsideError(StoreLayoutError):
 
     def detail(self) -> dict:
         return {"code": "items_outside", "message": str(self), "items": self.items}
+
+
+class SiteBusyError(StoreLayoutError):
+    """A site change could not get the database write lock; nothing changed."""
+
+    def detail(self) -> dict:
+        return {"code": "site_busy", "message": str(self)}
+
+
+# Site changes (extend / fit / resize): how long one attempt waits for the
+# SQLite write lock, how many whole attempts are made, the pause between them,
+# and how long a request waits behind other site changes of this process.
+SITE_CHANGE_LOCK_TIMEOUT_S = 15.0
+SITE_CHANGE_ATTEMPTS = 3
+SITE_CHANGE_RETRY_DELAY_S = 0.5
+SITE_CHANGE_QUEUE_TIMEOUT_S = 60.0
+# database.py sets this on every connection (PRAGMA busy_timeout).
+_DEFAULT_BUSY_TIMEOUT_MS = 15000
+
+_site_locks: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = weakref.WeakKeyDictionary()
+
+
+def _site_lock() -> asyncio.Lock:
+    """One lock per event loop: site changes of this process run one at a time."""
+    loop = asyncio.get_running_loop()
+    lock = _site_locks.get(loop)
+    if lock is None:
+        lock = _site_locks[loop] = asyncio.Lock()
+    return lock
+
+
+def _is_lock_error(e: BaseException) -> bool:
+    """SQLite 'database is locked' / 'database table is locked' / SQLITE_BUSY."""
+    if isinstance(e, OperationalError):
+        e = e.orig if e.orig is not None else e
+    if not isinstance(e, (sqlite3.OperationalError, OperationalError)):
+        return False
+    msg = str(e).lower()
+    return "locked" in msg or "busy" in msg
+
+
+async def _begin_immediate(session: AsyncSession, timeout_s: float) -> None:
+    """Take the SQLite write lock now, waiting up to ``timeout_s``.
+
+    With the lock held from the start, every read of the change sees the
+    latest committed map and no write inside it can hit ``database is
+    locked``: the operation commits whole or not at all.
+    """
+    conn = await session.connection()
+    await conn.exec_driver_sql(f"PRAGMA busy_timeout = {max(1, int(timeout_s * 1000))}")
+    try:
+        await conn.exec_driver_sql("BEGIN IMMEDIATE")
+    finally:
+        await conn.exec_driver_sql(f"PRAGMA busy_timeout = {_DEFAULT_BUSY_TIMEOUT_MS}")
 
 
 def translate_homography(matrix: Any, dx: float, dy: float) -> Optional[list[list[float]]]:
@@ -314,6 +376,46 @@ WHERE json_valid(trajectory_points) AND json_type(trajectory_points) = 'array'
   AND trajectory_points LIKE '%"x"%'
 """
 
+# Limits the update above to the rows a pre-scan found holding floor points,
+# plus every row inserted since (rowid > max_rowid) or started recently
+# (still being recorded, so possibly given floor points since the scan).
+_PRESCANNED_ROWS_SQL = """
+  AND (rowid IN (SELECT value FROM json_each(:rowids)) OR rowid > :max_rowid OR start_time >= :since)
+"""
+_PRESCAN_TRACKS_SQL = """
+SELECT rowid FROM customer_tracks
+WHERE json_valid(trajectory_points) AND json_type(trajectory_points) = 'array'
+  AND trajectory_points LIKE '%"x"%'
+"""
+# A track is recorded for minutes; 48 h also covers any local/UTC mix-up.
+PRESCAN_RECENT_WINDOW = timedelta(hours=48)
+
+# Set by _site_change for the duration of one change: {"rowids", "max_rowid", "since"}.
+_TRACK_PRESCAN: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar("track_prescan", default=None)
+
+
+async def _prescan_tracks(session: AsyncSession) -> Optional[dict]:
+    """Shopper paths with floor points, found without holding the write lock.
+
+    None (the change then scans inside its transaction, as before) when the
+    scan fails, e.g. SQLite without JSON1.
+    """
+    from sqlalchemy import text
+
+    try:
+        since = (datetime.now(timezone.utc).replace(tzinfo=None) - PRESCAN_RECENT_WINDOW).isoformat(sep=" ")
+        max_rowid = (await session.execute(text("SELECT COALESCE(MAX(rowid), 0) FROM customer_tracks"))).scalar()
+        rows = (await session.execute(text(_PRESCAN_TRACKS_SQL))).scalars().all()
+        await session.rollback()
+        return {"rowids": json.dumps([int(r) for r in rows]), "max_rowid": int(max_rowid or 0), "since": since}
+    except Exception as e:  # noqa: BLE001 - fall back to the in-transaction scan
+        logger.warning(f"site change: shopper path pre-scan failed ({type(e).__name__}: {e})")
+        try:
+            await session.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
 
 class StoreLayoutService:
     """CRUD for the blueprint. All coordinates in metres."""
@@ -357,25 +459,30 @@ class StoreLayoutService:
         Shrinking is refused with ``ItemsOutsideError`` when a zone, structure
         or camera would end up outside, unless ``clamp`` is set: then those
         items are pulled inside the new edges (shapes can lose their form).
+        A site change: one write transaction, serialised (``_site_change``).
         """
         layout = await db.get(StoreLayoutModel, layout_id)
         if layout is None:
             raise StoreLayoutError(f"layout {layout_id} not found")
-        new_w = self._check_site_size(width_m, "width") if width_m is not None else float(layout.width_m)
-        new_h = self._check_site_size(height_m, "depth") if height_m is not None else float(layout.height_m)
-        if name is not None:
-            layout.name = name
-        if new_w < layout.width_m or new_h < layout.height_m:
-            outside = await self.items_outside(db, layout, 0.0, 0.0, new_w, new_h)
-            if outside and not clamp:
-                raise ItemsOutsideError(outside)
-            if outside:
-                await self._clamp_items(db, layout, new_w, new_h)
-            await self._keep_unplaced_inside(db, new_w, new_h)
-        layout.width_m = new_w
-        layout.height_m = new_h
-        await db.commit()
-        await db.refresh(layout)
+        new_w_req = self._check_site_size(width_m, "width") if width_m is not None else None
+        new_h_req = self._check_site_size(height_m, "depth") if height_m is not None else None
+
+        async def op(s: AsyncSession, lay: StoreLayoutModel) -> None:
+            new_w = new_w_req if new_w_req is not None else float(lay.width_m)
+            new_h = new_h_req if new_h_req is not None else float(lay.height_m)
+            if name is not None:
+                lay.name = name
+            if new_w < lay.width_m or new_h < lay.height_m:
+                outside = await self.items_outside(s, lay, 0.0, 0.0, new_w, new_h)
+                if outside and not clamp:
+                    raise ItemsOutsideError(outside)
+                if outside:
+                    await self._clamp_items(s, lay, new_w, new_h)
+                await self._keep_unplaced_inside(s, new_w, new_h)
+            lay.width_m = new_w
+            lay.height_m = new_h
+
+        await self._site_change(db, layout, op, "resize")
         return layout
 
     @staticmethod
@@ -390,6 +497,94 @@ class StoreLayoutService:
         return round(v, 3)
 
     # ------------------------------------------------------- site changes
+    #
+    # Extend, fit and resize read every zone, structure and camera, compute
+    # the change and write it back. Before 2026-10-21 that was a deferred
+    # transaction on the request's session: two overlapping "Fit to content"
+    # clicks each read the map before either wrote, then one translated the
+    # zones from its stale read while the structures and cameras (read after
+    # it had waited for the other's write lock) moved twice -- zones and
+    # structures ended up metres apart. A site change now runs in its own
+    # session that takes the write lock first (BEGIN IMMEDIATE), so it reads
+    # the map as the last committed change left it, and commits all or
+    # nothing; a lock error retries the whole change from a fresh read.
+
+    async def _site_change(self, db: AsyncSession, layout: StoreLayoutModel, op, what: str,
+                           will_translate=None):
+        """Run ``op(session, layout)`` as one all-or-nothing write transaction.
+
+        Serialised in this process (an asyncio lock) and against every other
+        connection (BEGIN IMMEDIATE before the first read). On ``database is
+        locked`` the whole operation is retried from a fresh read; when the
+        lock cannot be had, ``SiteBusyError`` is raised and nothing changed.
+        Afterwards the caller's session sees the committed state.
+
+        ``will_translate(session, layout)``: a read-only guess whether the
+        change moves the origin. When it does, the shopper paths holding floor
+        points are found BEFORE the write lock is taken (a full scan of
+        customer_tracks: ~18 s on the 2.8 GB Pearcedale database), so the
+        lock is held for well under a second instead of the whole scan, and
+        the pipeline's writers are not starved (``_prescan_tracks``).
+        """
+        from app.database import async_session_factory
+
+        layout_id = layout.id
+        last: Optional[BaseException] = None
+        # End the caller's transaction first: it gives its pooled connection
+        # back (requests queued on the lock below must not hold the whole pool
+        # while the running change needs one) and holds no snapshot or lock.
+        await db.commit()
+        try:
+            async with asyncio.timeout(SITE_CHANGE_QUEUE_TIMEOUT_S):
+                await _site_lock().acquire()
+        except TimeoutError:
+            raise SiteBusyError("another map size change is still running; try again in a moment")
+        token = None
+        try:
+            if will_translate is not None:
+                async with async_session_factory() as s:
+                    fresh = await s.get(StoreLayoutModel, layout_id)
+                    if fresh is not None and await will_translate(s, fresh):
+                        token = _TRACK_PRESCAN.set(await _prescan_tracks(s))
+            result = None
+            for attempt in range(SITE_CHANGE_ATTEMPTS):
+                try:
+                    async with async_session_factory() as s:
+                        try:
+                            await _begin_immediate(s, SITE_CHANGE_LOCK_TIMEOUT_S)
+                            locked_at = time.monotonic()
+                            fresh = await s.get(StoreLayoutModel, layout_id)
+                            if fresh is None:
+                                raise StoreLayoutError(f"layout {layout_id} not found")
+                            result = await op(s, fresh)
+                            await s.commit()
+                            if not (isinstance(result, dict) and result.get("unchanged")):
+                                logger.info(f"Map {what} committed; write lock held "
+                                            f"{time.monotonic() - locked_at:.2f} s")
+                        except BaseException:
+                            await s.rollback()
+                            raise
+                    last = None
+                    break
+                except Exception as e:  # noqa: BLE001 - only lock errors are retried
+                    if not _is_lock_error(e):
+                        raise
+                    last = e
+                    logger.warning(f"Map {what}: database busy, retrying the whole change "
+                                   f"({attempt + 1}/{SITE_CHANGE_ATTEMPTS}): {e}")
+                    if attempt + 1 < SITE_CHANGE_ATTEMPTS:
+                        await asyncio.sleep(SITE_CHANGE_RETRY_DELAY_S * (attempt + 1))
+            if last is not None:
+                raise SiteBusyError(
+                    "the database is busy, so the map was not changed; try again in a moment") from last
+        finally:
+            if token is not None:
+                _TRACK_PRESCAN.reset(token)
+            _site_lock().release()
+        # The request's session may hold rows loaded before the change.
+        db.expire_all()
+        await db.refresh(layout)
+        return result
 
     async def placed_items(self, db: AsyncSession, layout: StoreLayoutModel) -> list[dict]:
         """Every zone, structure and camera with the floor points it occupies."""
@@ -466,9 +661,68 @@ class StoreLayoutService:
         physical spot. Removing space is refused with ``ItemsOutsideError``
         when an item would end up outside. Recorded floor positions in the
         same database (shopper paths, shelf reaches) are translated too.
-        Everything happens in one transaction. Returns
-        ``{"dx", "dy", "width_m", "height_m", "translated": {...}}``.
+        Everything happens in one write transaction (``_site_change``).
+        Returns ``{"dx", "dy", "width_m", "height_m", "translated": {...}}``.
         """
+        sides = self._check_sides(left_m, top_m, right_m, bottom_m)
+        if not any(abs(v) > 0 for v in sides.values()):
+            raise StoreLayoutError("give at least one side an amount of space to add or remove")
+
+        async def op(s: AsyncSession, lay: StoreLayoutModel) -> dict:
+            return await self._extend_in(s, lay, sides)
+
+        async def will_translate(s: AsyncSession, lay: StoreLayoutModel) -> bool:
+            return bool(sides["left"] or sides["top"])
+
+        return self._after_site_change(await self._site_change(db, layout, op, "extend", will_translate))
+
+    async def fit_site(self, db: AsyncSession, layout: StoreLayoutModel, margin_m: float = 2.0) -> dict:
+        """Shrink-wrap the site to the bounding box of every item plus ``margin_m``.
+
+        Idempotent: the bounds are read inside the change's write lock, so a
+        second fit (also one that overlapped the first) finds the map fitted
+        and returns ``unchanged``.
+        """
+        try:
+            margin = float(margin_m)
+        except (TypeError, ValueError):
+            raise StoreLayoutError("margin_m must be a number")
+        if not math.isfinite(margin) or not 0.0 <= margin <= 50.0:
+            raise StoreLayoutError("margin_m must be between 0 and 50 metres")
+
+        async def op(s: AsyncSession, lay: StoreLayoutModel) -> dict:
+            sides = await self._fit_sides(s, lay, margin)
+            if sides is None:
+                return {"dx": 0.0, "dy": 0.0, "width_m": lay.width_m, "height_m": lay.height_m,
+                        "translated": {}, "unchanged": True}
+            return await self._extend_in(s, lay, sides)
+
+        async def will_translate(s: AsyncSession, lay: StoreLayoutModel) -> bool:
+            sides = await self._fit_sides(s, lay, margin)
+            return bool(sides and (sides["left"] or sides["top"]))
+
+        return self._after_site_change(await self._site_change(db, layout, op, "fit", will_translate))
+
+    async def _fit_sides(self, db: AsyncSession, layout: StoreLayoutModel, margin: float) -> Optional[dict]:
+        """The sides a fit adds (+) or removes (-), or None when the map already fits."""
+        bounds = await self.content_bounds(db, layout)
+        if bounds is None:
+            raise StoreLayoutError("the map is empty: draw or place something first")
+        min_x, min_y, max_x, max_y = bounds
+        # The new site, in the current frame, before rounding to centimetres.
+        x0, y0 = min_x - margin, min_y - margin
+        w = max(SITE_MIN_M, (max_x + margin) - x0)
+        h = max(SITE_MIN_M, (max_y + margin) - y0)
+        left = round(-x0, 3)
+        top = round(-y0, 3)
+        right = round((x0 + w) - float(layout.width_m), 3)
+        bottom = round((y0 + h) - float(layout.height_m), 3)
+        if not any(abs(v) >= 0.001 for v in (left, top, right, bottom)):
+            return None
+        return self._check_sides(left, top, right, bottom)
+
+    @staticmethod
+    def _check_sides(left_m: Any, top_m: Any, right_m: Any, bottom_m: Any) -> dict:
         sides = {}
         for key, value in (("left", left_m), ("top", top_m), ("right", right_m), ("bottom", bottom_m)):
             try:
@@ -478,8 +732,10 @@ class StoreLayoutService:
             if not math.isfinite(v) or v > EXTEND_MAX_M or v < -SITE_MAX_M:
                 raise StoreLayoutError(f"{key}_m must be at most {EXTEND_MAX_M:g} metres")
             sides[key] = round(v, 3)
-        if not any(abs(v) > 0 for v in sides.values()):
-            raise StoreLayoutError("give at least one side an amount of space to add or remove")
+        return sides
+
+    async def _extend_in(self, db: AsyncSession, layout: StoreLayoutModel, sides: dict) -> dict:
+        """The extend itself, inside ``_site_change``'s transaction. No commit."""
         new_w = round(float(layout.width_m) + sides["left"] + sides["right"], 3)
         new_h = round(float(layout.height_m) + sides["top"] + sides["bottom"], 3)
         if not SITE_MIN_M <= new_w <= SITE_MAX_M or not SITE_MIN_M <= new_h <= SITE_MAX_M:
@@ -495,39 +751,15 @@ class StoreLayoutService:
         await self._keep_unplaced_inside(db, new_w, new_h)
         layout.width_m = new_w
         layout.height_m = new_h
-        await db.commit()
-        await db.refresh(layout)
-        if dx or dy:
-            self._reload_projectors_after_translate(translated.pop("_homographies", []))
-        else:
-            translated.pop("_homographies", None)
-        return {"dx": dx, "dy": dy, "width_m": layout.width_m, "height_m": layout.height_m,
-                "translated": translated}
+        return {"dx": dx, "dy": dy, "width_m": new_w, "height_m": new_h, "translated": translated}
 
-    async def fit_site(self, db: AsyncSession, layout: StoreLayoutModel, margin_m: float = 2.0) -> dict:
-        """Shrink-wrap the site to the bounding box of every item plus ``margin_m``."""
-        try:
-            margin = float(margin_m)
-        except (TypeError, ValueError):
-            raise StoreLayoutError("margin_m must be a number")
-        if not math.isfinite(margin) or not 0.0 <= margin <= 50.0:
-            raise StoreLayoutError("margin_m must be between 0 and 50 metres")
-        bounds = await self.content_bounds(db, layout)
-        if bounds is None:
-            raise StoreLayoutError("the map is empty: draw or place something first")
-        min_x, min_y, max_x, max_y = bounds
-        # The new site, in the current frame, before rounding to centimetres.
-        x0, y0 = min_x - margin, min_y - margin
-        w = max(SITE_MIN_M, (max_x + margin) - x0)
-        h = max(SITE_MIN_M, (max_y + margin) - y0)
-        left = round(-x0, 3)
-        top = round(-y0, 3)
-        right = round((x0 + w) - float(layout.width_m), 3)
-        bottom = round((y0 + h) - float(layout.height_m), 3)
-        if not any(abs(v) >= 0.001 for v in (left, top, right, bottom)):
-            return {"dx": 0.0, "dy": 0.0, "width_m": layout.width_m, "height_m": layout.height_m,
-                    "translated": {}, "unchanged": True}
-        return await self.extend_site(db, layout, left_m=left, top_m=top, right_m=right, bottom_m=bottom)
+    def _after_site_change(self, change: dict) -> dict:
+        """After the commit: install translated calibrations in the running projector."""
+        translated = change.get("translated") or {}
+        homographies = translated.pop("_homographies", [])
+        if change.get("dx") or change.get("dy"):
+            self._reload_projectors_after_translate(homographies)
+        return change
 
     async def _translate_all(self, db: AsyncSession, layout: StoreLayoutModel, dx: float, dy: float) -> dict:
         """Move every floor-metre record of this site by (dx, dy). No commit."""
@@ -584,9 +816,16 @@ class StoreLayoutService:
         counts["shelf_interactions"] = int(r.rowcount or 0)
         try:
             async with db.begin_nested():
-                r = await db.execute(text(_TRANSLATE_TRAJECTORIES_SQL), {"dx": dx, "dy": dy})
+                prescan = _TRACK_PRESCAN.get()
+                if prescan is None:
+                    r = await db.execute(text(_TRANSLATE_TRAJECTORIES_SQL), {"dx": dx, "dy": dy})
+                else:
+                    r = await db.execute(text(_TRANSLATE_TRAJECTORIES_SQL + _PRESCANNED_ROWS_SQL),
+                                         {"dx": dx, "dy": dy, **prescan})
                 counts["customer_tracks"] = int(r.rowcount or 0)
         except Exception as e:  # noqa: BLE001 - SQLite without JSON1: layout still moves
+            if _is_lock_error(e):
+                raise   # never commit a site change with the shopper paths left behind
             logger.warning(f"site extend: shopper paths not translated ({type(e).__name__}: {e})")
             counts["customer_tracks"] = None
         counts["_homographies"] = homographies

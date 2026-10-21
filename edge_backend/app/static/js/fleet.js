@@ -1,8 +1,12 @@
 // iKorex service (fleet control), dashboard side. docs/FLEET_CONTROL_CONTRACT.md
 //
 // GET /api/v1/fleet/status (any signed-in person) drives:
-//   * the full-screen "Service paused" page (also opened by any API 423 service_paused)
-//   * the licence warning banner (licence ended, within the grace days)
+//   * the full-screen "Service paused" page (also opened by any API 423 service_paused),
+//     and its "Standby" variant (423 service_standby: no verified contact with iKorex
+//     for longer than the plan's offline limit) with the last contact time and
+//     "Check connection now" (administrators: a check-in now)
+//   * the licence warning banner (licence ended, within the grace days) and the
+//     offline banner (less than 25 % of the offline limit left before standby)
 //   * hiding the cards/tabs of features not in the plan, with a short
 //     "Not included in your plan" note where a person would look for them
 //   * the Settings card #settings-fleet "iKorex service": plan status, licence date,
@@ -16,6 +20,7 @@
   const POLL_MS = 60000;
   const POLL_PAUSED_MS = 15000;
   const BANNER_KEY = 'edge_fleet_licence_banner_hidden';
+  const OFFLINE_BANNER_KEY = 'edge_fleet_offline_banner_hidden';
 
   let status = null;
   let pollTimer = null;
@@ -51,6 +56,25 @@
     return t.toLocaleString('en-AU', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
   }
 
+  // 3 h 20 min / 45 min / 2 days 4 h: rough, for people.
+  function fmtDuration(sec) {
+    const s = Math.max(0, Math.round(Number(sec) || 0));
+    if (s < 3600) return `${Math.max(1, Math.round(s / 60))} min`;
+    const h = Math.floor(s / 3600);
+    if (h < 48) {
+      const m = Math.round((s % 3600) / 60);
+      return m && h < 10 ? `${h} h ${m} min` : `${h} h`;
+    }
+    const d = Math.floor(h / 24);
+    const rh = h % 24;
+    return rh ? `${d} days ${rh} h` : `${d} days`;
+  }
+
+  function fmtGrace(hours) {
+    if (hours == null) return '';
+    return hours % 24 === 0 && hours >= 48 ? `${hours / 24} days` : `${hours} h`;
+  }
+
   function isAdmin() {
     return !!(window.EdgeAuth && window.EdgeAuth.isAdmin);
   }
@@ -64,8 +88,10 @@
       const url = typeof input === 'string' ? input : (input && input.url) || '';
       if (url.indexOf('/api/') !== -1) {
         res.clone().json().then((d) => {
-          if (d && d.code === 'service_paused') {
-            showPaused(Object.assign({}, status || {}, { paused: true, message: d.message || (status && status.message) }));
+          if (d && (d.code === 'service_paused' || d.code === 'service_standby')) {
+            const extra = { paused: true, message: d.message || (status && status.message) };
+            if (d.code === 'service_standby') { extra.paused_reason = 'standby'; extra.standby = true; }
+            showPaused(Object.assign({}, status || {}, extra));
             schedule(2000);
           }
         }).catch(() => {});
@@ -76,10 +102,26 @@
 
   // ------------------------------------------------------------------ paused page
 
+  function standbyNote(st) {
+    const last = st.last_verified_contact_at
+      ? `Last verified contact with iKorex: ${fmtTime(st.last_verified_contact_at)}.`
+      : 'No verified contact with iKorex yet.';
+    const limit = st.offline_grace_hours != null ? ` The plan allows ${fmtGrace(st.offline_grace_hours)} without contact.` : '';
+    return `${last}${limit} Check the store's internet connection. Your recordings, evidence and settings are kept.`;
+  }
+
   function pausedMarkup(st) {
     const expired = st.paused_reason === 'licence_expired';
-    const title = expired ? 'Service paused: licence ended' : 'Service paused';
-    const msg = st.message || 'Service paused. Please contact iKorex.';
+    const standby = st.paused_reason === 'standby';
+    const title = standby ? 'On standby: no connection to iKorex' : (expired ? 'Service paused: licence ended' : 'Service paused');
+    const msg = st.message || (standby
+      ? "Standby: this box can't reach iKorex. It will restart automatically once the connection is back and verified."
+      : 'Service paused. Please contact iKorex.');
+    // The title already says "standby"; drop the API message's own "Standby:" prefix.
+    const shownMsg = standby ? msg.replace(/^Standby:\s*/, '') : msg;
+    const note = standby ? esc(standbyNote(st)) : `Please contact iKorex to turn the service back on.
+          Your recordings, evidence and settings are kept.`;
+    const retryText = standby ? (isAdmin() ? 'Check connection now' : 'Check again') : 'Check again';
     // The stacked iKorex logo (white text on the dark theme, dark text on the light one).
     const logo = `
       <img class="fleet-logo fleet-logo-on-dark" src="/static/brand/ikorex-stacked-light-text.png" alt="iKorex" width="160" height="96">
@@ -87,13 +129,12 @@
     return `
       <div class="fleet-paused-box" role="alertdialog" aria-modal="true" aria-labelledby="fleetPausedTitle" aria-describedby="fleetPausedMsg">
         <div class="fleet-paused-brand">${logo}</div>
-        <div class="fleet-paused-icon" aria-hidden="true">${icon('pause', 'lg')}</div>
+        <div class="fleet-paused-icon${standby ? ' is-standby' : ''}" aria-hidden="true">${icon(standby ? 'clock' : 'pause', 'lg')}</div>
         <h2 class="fleet-paused-title" id="fleetPausedTitle">${esc(title)}</h2>
-        <p class="fleet-paused-msg" id="fleetPausedMsg">${esc(msg)}</p>
-        <p class="fleet-paused-note">Please contact iKorex to turn the service back on.
-          Your recordings, evidence and settings are kept.</p>
+        <p class="fleet-paused-msg" id="fleetPausedMsg">${esc(shownMsg)}</p>
+        <p class="fleet-paused-note">${note}</p>
         <div class="fleet-paused-actions">
-          <button type="button" class="btn btn-primary" id="fleetPausedRetry">${icon('refresh-cw')}Check again</button>
+          <button type="button" class="btn btn-primary" id="fleetPausedRetry">${icon('refresh-cw')}${esc(retryText)}</button>
           <button type="button" class="btn btn-secondary" id="fleetPausedSignOut">${icon('log-out')}Sign out</button>
         </div>
         <div class="fleet-paused-status" id="fleetPausedStatus" role="status" aria-live="polite"></div>
@@ -108,7 +149,7 @@
       el.className = 'fleet-paused';
       document.body.appendChild(el);
     }
-    const sig = `${st.paused_reason || ''}|${st.message || ''}`;
+    const sig = `${st.paused_reason || ''}|${st.message || ''}|${st.last_verified_contact_at || ''}|${isAdmin()}`;
     if (!el.hidden && el.dataset.sig === sig && el.firstElementChild) return;  // unchanged: keep focus and status line
     el.dataset.sig = sig;
     el.innerHTML = pausedMarkup(st);
@@ -137,12 +178,21 @@
 
   async function onRetry() {
     const line = $('fleetPausedStatus');
-    if (line) line.textContent = 'Checking…';
+    const btn = $('fleetPausedRetry');
+    if (line) line.textContent = isAdmin() ? 'Contacting iKorex…' : 'Checking…';
+    if (btn) btn.disabled = true;
     if (isAdmin()) {
       try { await fetch('/api/v1/fleet/checkin-now', { method: 'POST' }); } catch (_) { /* offline */ }
     }
     const st = await load();
-    if (line && st && st.paused) line.textContent = `Still paused (checked ${fmtTime(new Date().toISOString())}).`;
+    const b = $('fleetPausedRetry');
+    if (b) b.disabled = false;
+    const at = fmtTime(new Date().toISOString());
+    if (line && st && st.paused && st.paused_reason === 'standby') {
+      line.textContent = st.last_result === 'ok' && st.last_ack_error
+        ? `Reached iKorex, but the answer could not be verified (checked ${at}). Please contact iKorex.`
+        : `Still no verified connection to iKorex (checked ${at}).`;
+    } else if (line && st && st.paused) line.textContent = `Still paused (checked ${at}).`;
     else if (line && !st) line.textContent = 'Could not reach this system. Try again shortly.';
   }
 
@@ -173,6 +223,37 @@
     el.hidden = false;
     el.querySelector('.fleet-banner-close').addEventListener('click', () => {
       try { sessionStorage.setItem(BANNER_KEY, st.licence_valid_until || ''); } catch (_) {}
+      el.hidden = true;
+    });
+  }
+
+  // ------------------------------------------------------------------ offline banner
+
+  function renderOfflineBanner(st) {
+    let el = $('fleetOfflineBanner');
+    const key = st ? String(st.last_verified_contact_at || '') : '';
+    let hidden = false;
+    try { hidden = sessionStorage.getItem(OFFLINE_BANNER_KEY) === key; } catch (_) { hidden = false; }
+    const show = st && !st.paused && st.standby_warning && st.standby_in_s != null && !hidden;
+    if (!show) { if (el) el.hidden = true; return; }
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'fleetOfflineBanner';
+      el.className = 'fleet-banner';
+      el.setAttribute('role', 'status');
+      const header = document.querySelector('.top-nav-header');
+      if (header && header.parentNode) header.parentNode.insertBefore(el, header.nextSibling);
+      else document.body.insertBefore(el, document.body.firstChild);
+    }
+    const since = st.last_verified_contact_age_s != null ? fmtDuration(st.last_verified_contact_age_s) : 'a while';
+    el.innerHTML = `
+      <span class="fleet-banner-icon" aria-hidden="true">${icon('triangle-alert')}</span>
+      <span class="fleet-banner-text">This box hasn't reached iKorex for ${esc(since)}; it will stand by in
+        ${esc(fmtDuration(st.standby_in_s))}. Check the store's internet connection.</span>
+      <button type="button" class="btn btn-sm btn-ghost fleet-banner-close" aria-label="Hide this message">${icon('x', 'sm')}</button>`;
+    el.hidden = false;
+    el.querySelector('.fleet-banner-close').addEventListener('click', () => {
+      try { sessionStorage.setItem(OFFLINE_BANNER_KEY, key); } catch (_) {}
       el.hidden = true;
     });
   }
@@ -256,6 +337,7 @@
 
   function planBadge(st) {
     if (!st.managed && !st.configured) return '<span class="badge badge-neutral">Not connected</span>';
+    if (st.paused && st.paused_reason === 'standby') return '<span class="badge badge-warning">Standby</span>';
     if (st.paused) return '<span class="badge badge-danger">Paused</span>';
     if (st.licence_status === 'warning') return '<span class="badge badge-warning">Licence ended</span>';
     if (st.key_changed) return '<span class="badge badge-warning">Check needed</span>';
@@ -263,6 +345,7 @@
   }
 
   function planText(st) {
+    if (st.paused && st.paused_reason === 'standby') return 'Standby: no verified contact with iKorex for too long.';
     if (st.paused && st.paused_reason === 'licence_expired') return 'Paused: the licence has ended.';
     if (st.paused) return 'Paused by iKorex.';
     if (!st.managed) return 'Standard service (no plan received from iKorex yet). Everything is included.';
@@ -283,7 +366,28 @@
     if (!st.last_checkin_at) return 'Not yet (first contact about 20 seconds after start).';
     if (st.last_result === 'ok') return `Last contact ${fmtTime(st.last_ok_at)}.`;
     const ok = st.last_ok_at ? ` Last good contact ${fmtTime(st.last_ok_at)}.` : '';
-    return `Could not reach iKorex at ${fmtTime(st.last_checkin_at)}.${ok} The system keeps running as before.`;
+    const keeps = st.offline_grace_hours != null
+      ? (st.standby ? '' : ` The system keeps running for now; it stands by after ${fmtGrace(st.offline_grace_hours)} without contact.`)
+      : ' The system keeps running as before.';
+    return `Could not reach iKorex at ${fmtTime(st.last_checkin_at)}.${ok}${keeps}`;
+  }
+
+  function offlineText(st) {
+    if (st.offline_grace_hours == null) return 'No limit: keeps working without contact.';
+    const base = `Stands by after ${fmtGrace(st.offline_grace_hours)} without a verified contact.`;
+    if (st.standby) return `${base} In standby now.`;
+    if (st.standby_in_s != null && st.standby_warning) return `${base} Stands by in ${fmtDuration(st.standby_in_s)}.`;
+    return base;
+  }
+
+  function verifiedText(st) {
+    if (!st.last_verified_contact_at) {
+      return st.last_ack_error === 'ack_missing' ? 'Not yet (the iKorex server does not confirm contact yet).' : 'Not yet.';
+    }
+    let t = `${fmtTime(st.last_verified_contact_at)}`;
+    if (st.last_verified_contact_age_s != null) t += ` (${fmtDuration(st.last_verified_contact_age_s)} ago)`;
+    if (st.clock_skew_s != null) t += '. This box\'s clock is off; check its time settings';
+    return `${t}.`;
   }
 
   function renderCard() {
@@ -314,7 +418,7 @@
     let resetBlock = '';
     if (admin && st.control_key_source !== 'env' && st.control_key_fingerprint) {
       resetBlock = resetMode === 'confirm'
-        ? `<div class="fleet-confirm"><span>Trust the key the iKorex server presents next time? Only do this when iKorex has told you the key changed.</span>
+        ? `<div class="fleet-confirm"><span>Trust the key the iKorex server presents next time? Only do this when iKorex has told you the key changed.${st.standby ? ' Standby ends only after a verified contact with that key.' : ''}</span>
              <div class="fleet-actions"><button type="button" class="btn btn-danger btn-sm" id="fleetResetYes">Reset the key</button>
              <button type="button" class="btn btn-secondary btn-sm" id="fleetResetNo">Cancel</button></div></div>`
         : '<button type="button" class="btn btn-secondary btn-sm" id="fleetResetKey">Reset control key</button>';
@@ -326,7 +430,10 @@
         <dt>Licence</dt><dd>${esc(licenceText(st))}</dd>
         <dt>Cameras</dt><dd>${limit}</dd>
         <dt>Last contact</dt><dd>${esc(contactText(st))}</dd>
+        <dt>Verified contact</dt><dd>${esc(verifiedText(st))}</dd>
+        <dt>Offline limit</dt><dd>${esc(offlineText(st))}</dd>
         <dt>Control key</dt><dd>${keyBlock}</dd>
+        <dt>Software</dt><dd>${st.software_version ? `<code class="fleet-code">${esc(st.software_version)}</code>` : '–'}${st.git_commit ? ` <span class="fleet-muted">(${esc(st.git_commit)})</span>` : ''}</dd>
       </dl>
       ${keyWarn}
       <div class="fleet-sub">Included in your plan</div>
@@ -382,6 +489,7 @@
     if (status.paused) showPaused(status);
     else hidePaused();
     renderBanner(status);
+    renderOfflineBanner(status);
     applyFeatures(status);
     renderCard();
   }

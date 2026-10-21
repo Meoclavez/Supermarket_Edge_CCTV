@@ -294,7 +294,9 @@
     const z = s.store_timezone || {};
     const now = s.now ? `<div class="nw-clock">Store time now: ${whenHtml(s.now, true)} <span class="nw-meta">(${esc(zoneLabel(z))})</span></div>` : '';
     if (!s.cameras || !s.cameras.length) {
-      return `${now}<div class="fp-empty">Night watch is off on every camera. Turn it on in a camera's Settings (Cameras, then Settings on that camera).</div>`;
+      return `${now}<div class="fp-empty">Night watch is off on every camera. Turn it on in a camera's Settings (Cameras, then Settings on that camera):
+        tick "Watch this camera at night" and set the times. <button type="button" class="btn btn-xs" data-help-go="cameras">Open Cameras</button>
+        <button type="button" class="link-btn" data-help-open="night-watch">How it works</button></div>`;
     }
     const armed = s.cameras.filter((c) => (s.armed_now || []).includes(c.camera_id));
     let head;
@@ -321,7 +323,7 @@
   }
 
   function eventsHtml(list) {
-    if (!list || !list.length) return '<div class="fp-empty">No night events recorded.</div>';
+    if (!list || !list.length) return '<div class="fp-empty">No night events recorded yet. When a watched camera sees movement or a person while the store is closed, it is listed here with its picture.</div>';
     return `<ul class="nw-list">${list.map((e) => {
       const person = e.event_type === 'NIGHT_INTRUSION';
       const badge = person ? '<span class="badge badge-danger">Person</span>' : '<span class="badge badge-neutral">Motion</span>';

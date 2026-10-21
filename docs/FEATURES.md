@@ -143,6 +143,7 @@ Opened from Cameras → tile → "Camera setup". All shapes are drawn on the cam
 | Feature | What it's for | Where / how to configure |
 |---|---|---|
 | "Recommendations" | Suggested changes from measured visits, dwell, reaches and heatmaps. Runs hourly. | Insights → "Run analysis now"; "Mark reviewed", "Done", "Dismiss", "Reopen" |
+| Grouped issues | The same finding on different days (for example "pet food is looked at but not picked up") becomes one card: trend ("Getting worse", "Improving", "Ongoing", "Keeps coming back", "New"), "Seen on N days since …", a 28-day strip, one summary over the whole history and the zone's own figures (up to 6 weeks), a before/after check once an action is marked done, and a short action plan (action, why, expected effect, effort, who, check date). The badge counts open issues, not daily findings. Grouping is automatic; the AI model is optional and only words the summary. | Insights (default view) → "Acknowledge", "Snooze 7 days", "Resolve", "Reopen", "Mark done" per action, "Merge…", "Re-analyse", "Daily findings" → "Not the same issue"; "Show every insight" shows the old list |
 | AI summary | Optional short written summary by the local AI model. | "Add AI summary (slower)"; model address is installer-level |
 | "Visitors by hour" | Hourly visitors against yesterday and the same day last week. | Insights → "Shoppers & footfall" |
 | "Shopper journey" | Stages from visit to purchase; "BOUGHT" needs sales data. | Insights → "Shoppers & footfall" |

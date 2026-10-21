@@ -47,6 +47,7 @@ from app.services.pipeline_supervisor import pipeline_supervisor
 from app.services.store_layout_service import (
     EXTEND_MAX_M,
     ItemsOutsideError,
+    SiteBusyError,
     StoreLayoutError,
     store_layout_service,
 )
@@ -214,6 +215,9 @@ async def _layout_payload(db: AsyncSession) -> dict:
 def _layout_error(e: StoreLayoutError) -> HTTPException:
     if isinstance(e, ItemsOutsideError):
         return HTTPException(status_code=409, detail=e.detail())
+    if isinstance(e, SiteBusyError):
+        # Nothing was changed; the client may simply try again.
+        return HTTPException(status_code=503, detail=e.detail(), headers={"Retry-After": "2"})
     return HTTPException(status_code=400, detail=str(e))
 
 

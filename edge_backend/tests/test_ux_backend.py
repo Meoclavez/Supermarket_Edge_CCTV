@@ -387,7 +387,7 @@ def test_no_get_route_writes_to_the_database(api):
     inc = _seed_analysis_fixture()
     params = dict(_PARAMS, camera_id="ux_get_cam", incident_id=inc, zone_id="ux_checkout",
                   snapshot_id="1", event_id="ux_evt", segment_id="1", archive_id="ux", alert_id="ux",
-                  recorder_id="ux")
+                  recorder_id="ux", topic_id="ux")
     paths = [p for p, ops in app.openapi()["paths"].items() if "get" in ops and p not in _SKIP_GET]
     assert len(paths) > 60
 

@@ -153,6 +153,7 @@ class RecommendationsService:
                 result["narrative"] = await asyncio.to_thread(
                     business_analysis_service.narrate, findings, overview, heatmap_summary=hm)
             await self._attach_evidence(db, result["findings"])
+            await self._group_topics(db, narrate)
             inputs = await self._inputs_summary(db, started, result)
             row = AnalysisRunModel(
                 id=f"run_{uuid.uuid4().hex[:12]}",
@@ -168,6 +169,16 @@ class RecommendationsService:
             await db.commit()
             await self._prune(db)
             return serialize_run(row)
+
+    async def _group_topics(self, db: AsyncSession, narrate: bool) -> None:
+        """Group new findings into insight topics and refresh due analyses (never fails the run)."""
+        from app.services.insight_topics import insight_topic_service
+
+        try:
+            await insight_topic_service.sync(db, narrate_top=3 if narrate else 0)
+        except Exception as e:
+            logger.warning(f"Insight topic grouping failed: {e}")
+            await db.rollback()
 
     async def _attach_evidence(self, db: AsyncSession, findings: list[dict]) -> None:
         """Store each finding's cited metrics on today's recommendation row."""
@@ -291,6 +302,7 @@ class RecommendationsService:
                 "date": r.date,
                 "created_at": _iso_local(r.created_at),
                 "updated_at": _iso_local(r.updated_at),
+                "topic_id": getattr(r, "topic_id", None),
                 "status_endpoint": f"/api/v1/analytics/decisions/{r.id}/action",
                 "allowed_statuses": list(DECISION_STATUSES),
             })
@@ -356,11 +368,18 @@ class RecommendationsService:
     # ------------------------------------------------------------- scheduler
 
     async def start(self) -> None:
+        # Group findings recorded before insight topics existed (batched, in the background).
+        from app.services.insight_topics import insight_topic_service
+
+        insight_topic_service.start_background()
         if SCHEDULE_SEC <= 0 or (self._task is not None and not self._task.done()):
             return
         self._task = asyncio.create_task(self._loop(), name="analysis-scheduler")
 
     async def stop(self) -> None:
+        from app.services.insight_topics import insight_topic_service
+
+        await insight_topic_service.stop()
         task, self._task = self._task, None
         self.next_run_at = None
         if task is not None:

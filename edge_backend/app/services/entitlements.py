@@ -4,7 +4,10 @@ The signed policy that ``fleet_control`` verified and stored in
 ``system_setup['fleet_control']`` decides:
 
 * **paused** -- an explicit signed *Suspend*, or the licence end date plus its
-  grace days has passed (evaluated on this box's own clock, so it works offline);
+  grace days has passed (evaluated on this box's own clock, so it works offline),
+  or **standby**: the policy sets ``licence.offline_grace_hours`` and the box
+  has had no *verified* contact with iKorex (a signed check-in ack, see
+  ``fleet_control.verify_ack``) for longer than that (owner decision 2026-10-21);
 * **features** -- each paid feature on or off (a missing key means on);
 * **limits** -- ``max_cameras``.
 
@@ -26,7 +29,8 @@ import sqlite3
 import threading
 import time
 from contextlib import closing
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import HTTPException
@@ -40,6 +44,11 @@ CACHE_TTL_S = 30.0
 DEFAULT_GRACE_DAYS = 14
 MAX_GRACE_DAYS = 365
 MAX_MESSAGE_CHARS = 300
+# licence.offline_grace_hours: None = never stand by (the default), else 1..2160 (90 days).
+MIN_OFFLINE_GRACE_HOURS = 1
+MAX_OFFLINE_GRACE_HOURS = 2160
+# The "stands by soon" banner shows when less than this share of the grace is left.
+STANDBY_WARN_SHARE = 0.25
 
 FEATURES = (
     "theft_detection",    # theft / loss alerts (pose analytics incidents)
@@ -70,10 +79,14 @@ WORKS_WHILE_PAUSED = frozenset({"online_access"})
 
 PAUSED_MESSAGE = "Service paused. Please contact iKorex."
 EXPIRED_MESSAGE = "Your iKorex service licence has ended. Please contact iKorex."
+STANDBY_MESSAGE = ("Standby: this box can't reach iKorex. It will restart automatically once the connection "
+                   "is back and verified.")
 NOT_IN_PLAN = "Not included in your plan."
 
 _lock = threading.Lock()
-_cache: Dict[str, Any] = {"policy": None, "loaded_at": None}
+_cache: Dict[str, Any] = {"policy": None, "contact": {}, "loaded_at": None}
+# The fields of the stored state the offline standby rule needs (fleet_control writes them).
+CONTACT_FIELDS = ("last_verified_contact_at", "contact_anchor", "clock_skew_s", "policy_applied_at")
 
 
 class PolicyError(ValueError):
@@ -99,7 +112,8 @@ class GateError(HTTPException):
 
 def default_policy() -> Dict[str, Any]:
     return {"type": "policy", "store_id": None, "version": 0, "issued_at": None, "state": "active",
-            "message": "", "licence": {"valid_until": None, "grace_days": DEFAULT_GRACE_DAYS},
+            "message": "", "licence": {"valid_until": None, "grace_days": DEFAULT_GRACE_DAYS,
+                                       "offline_grace_hours": None},
             "features": {k: True for k in FEATURES}, "limits": {"max_cameras": None}}
 
 
@@ -143,6 +157,10 @@ def normalise_policy(payload: Any, store_id: Optional[str] = None) -> Dict[str, 
         grace = DEFAULT_GRACE_DAYS
     if not isinstance(grace, int) or isinstance(grace, bool) or not 0 <= grace <= MAX_GRACE_DAYS:
         raise PolicyError("bad_grace_days")
+    offline_grace = licence.get("offline_grace_hours")
+    if offline_grace is not None and (not isinstance(offline_grace, int) or isinstance(offline_grace, bool)
+                                      or not MIN_OFFLINE_GRACE_HOURS <= offline_grace <= MAX_OFFLINE_GRACE_HOURS):
+        raise PolicyError("bad_offline_grace_hours")
     raw_features = payload.get("features") or {}
     if not isinstance(raw_features, dict):
         raise PolicyError("bad_features")
@@ -164,7 +182,8 @@ def normalise_policy(payload: Any, store_id: Optional[str] = None) -> Dict[str, 
         "type": "policy", "store_id": payload.get("store_id"), "version": version,
         "issued_at": issued_at if isinstance(issued_at, str) else None,
         "state": state, "message": message,
-        "licence": {"valid_until": valid_until.isoformat() if valid_until else None, "grace_days": grace},
+        "licence": {"valid_until": valid_until.isoformat() if valid_until else None, "grace_days": grace,
+                    "offline_grace_hours": offline_grace},
         "features": features, "limits": {"max_cameras": max_cameras},
     }
 
@@ -193,22 +212,157 @@ def invalidate() -> None:
         _cache["loaded_at"] = None
 
 
-def stored_policy() -> Optional[Dict[str, Any]]:
-    """The last verified policy (None = never configured for fleet control)."""
+def _load_cached() -> Dict[str, Any]:
     now = time.monotonic()
     with _lock:
         if _cache["loaded_at"] is not None and now - _cache["loaded_at"] < CACHE_TTL_S:
-            return _cache["policy"]
-    policy = read_stored_state().get("policy")
+            return {"policy": _cache["policy"], "contact": _cache["contact"]}
+    stored = read_stored_state()
+    policy = stored.get("policy")
     if policy is not None:
         try:
             policy = normalise_policy(policy)
         except PolicyError as exc:  # stored by an older build or edited by hand
             logger.warning("Stored fleet policy unusable (%s); using the default policy", exc.code)
             policy = None
+    contact = {k: stored.get(k) for k in CONTACT_FIELDS}
     with _lock:
-        _cache.update(policy=policy, loaded_at=now)
-    return policy
+        _cache.update(policy=policy, contact=contact, loaded_at=now)
+    return {"policy": policy, "contact": contact}
+
+
+def stored_policy() -> Optional[Dict[str, Any]]:
+    """The last verified policy (None = never configured for fleet control)."""
+    return _load_cached()["policy"]
+
+
+def stored_contact() -> Dict[str, Any]:
+    """last_verified_contact_at, contact_anchor, clock_skew_s, policy_applied_at (cached)."""
+    return dict(_load_cached()["contact"])
+
+
+# --------------------------------------------------------------------------- offline standby clocks
+#
+# How long since the last verified contact, without trusting the wall clock
+# alone (a clock set back must not extend the grace forever):
+# * same boot as the contact: the boot clock (CLOCK_BOOTTIME: monotonic,
+#   counts suspend, ignores wall clock changes);
+# * rebooted since: the wall clock against the box-clock time of the contact
+#   (skew-neutral), but never less than the floor;
+# * the floor: ``floor_s`` as fleet_control last persisted it (every check-in
+#   attempt, i.e. at least every 15 min while offline, with the boot and boot
+#   clock it was taken on), plus the boot-clock time since then (all of this
+#   boot's uptime when the box has rebooted since).
+# So the time the box runs always counts; only time it is switched off with
+# its clock set back (and at most the 15 min before it was switched off) can
+# be lost. Tests replace these three functions.
+
+def wall_clock() -> float:
+    return time.time()
+
+
+def boot_clock() -> Optional[float]:
+    try:
+        return float(time.clock_gettime(time.CLOCK_BOOTTIME))
+    except (AttributeError, OSError, ValueError):
+        pass
+    try:
+        return float(Path("/proc/uptime").read_text(encoding="ascii").split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+_boot_id_value: Dict[str, Optional[str]] = {}
+
+
+def boot_id() -> Optional[str]:
+    if "id" not in _boot_id_value:
+        try:
+            value = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+        except OSError:
+            value = ""
+        _boot_id_value["id"] = value if re.fullmatch(r"[0-9a-f-]{36}", value) else None
+    return _boot_id_value["id"]
+
+
+def contact_anchor(source: str) -> Dict[str, Any]:
+    """A fresh anchor: "now" on every clock this module counts with."""
+    bid, bt = boot_id(), boot_clock()
+    return {"box_at": wall_clock(), "boot_id": bid, "boottime_s": bt, "source": source,
+            "floor_s": 0.0, "floor_boot_id": bid, "floor_boottime_s": bt}
+
+
+def _num(value: Any) -> Optional[float]:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def contact_elapsed_s(anchor: Any) -> Optional[float]:
+    """Seconds since ``anchor`` (see above); None without an anchor."""
+    if not isinstance(anchor, dict):
+        return None
+    now_boot, now_id = boot_clock(), boot_id()
+
+    def since(then_id: Any, then_boot: Optional[float]) -> Optional[float]:
+        """Boot-clock seconds since (then_id, then_boot); None when unknown."""
+        if not then_id or not now_id or now_boot is None:
+            return None
+        if then_id != now_id:
+            return now_boot              # rebooted since: at least this boot's uptime
+        if then_boot is None or now_boot < then_boot:
+            return None
+        return now_boot - then_boot
+
+    floor = max(_num(anchor.get("floor_s")) or 0.0, 0.0)
+    floor += since(anchor.get("floor_boot_id"), _num(anchor.get("floor_boottime_s"))) or 0.0
+    then_id = anchor.get("boot_id")
+    if then_id and then_id == now_id:
+        exact = since(then_id, _num(anchor.get("boottime_s")))
+        if exact is not None:
+            return max(exact, 0.0)
+    box_at = _num(anchor.get("box_at"))
+    elapsed = (wall_clock() - box_at) if box_at is not None else 0.0
+    return max(elapsed, floor, 0.0)
+
+
+def _parse_iso(value: Any) -> Optional[datetime]:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def offline_info(policy: Dict[str, Any], contact: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """The offline standby rule: grace, time since the last verified contact, standby, warning."""
+    contact = contact if contact is not None else stored_contact()
+    grace_h = (policy.get("licence") or {}).get("offline_grace_hours")
+    grace_h = grace_h if isinstance(grace_h, int) and not isinstance(grace_h, bool) and grace_h > 0 else None
+    elapsed = contact_elapsed_s(contact.get("contact_anchor"))
+    if elapsed is None and grace_h is not None:
+        # No anchor at all (state from an older build or edited by hand): count
+        # from when the policy was applied, on the wall clock.
+        applied = _parse_iso(contact.get("policy_applied_at"))
+        if applied is not None:
+            elapsed = max(0.0, wall_clock() - applied.timestamp())
+    standby = warning = False
+    remaining = None
+    if grace_h is not None and elapsed is not None:
+        grace_s = grace_h * 3600.0
+        remaining = grace_s - elapsed
+        standby = remaining < 0
+        warning = not standby and remaining < STANDBY_WARN_SHARE * grace_s
+    skew = _num(contact.get("clock_skew_s"))
+    return {
+        "grace_hours": grace_h,
+        "last_verified_contact_at": contact.get("last_verified_contact_at"),
+        "elapsed_s": int(elapsed) if elapsed is not None else None,
+        "remaining_s": int(max(remaining, 0)) if remaining is not None else None,
+        "standby": standby,
+        "warning": warning,
+        "clock_skew_s": int(skew) if skew is not None else None,
+    }
 
 
 # --------------------------------------------------------------------------- effective state
@@ -245,25 +399,32 @@ def licence_info(policy: Dict[str, Any], today: Optional[date] = None) -> Dict[s
 
 
 def effective_state(today: Optional[date] = None) -> Dict[str, Any]:
-    policy = stored_policy()
+    cached = _load_cached()
+    policy = cached["policy"]
     managed = policy is not None
     policy = policy or default_policy()
     lic = licence_info(policy, today)
+    offline = offline_info(policy, cached["contact"])  # the default policy has no grace: never standby
     suspended = policy.get("state") == "suspended"
     expired = lic["status"] == "expired"
-    paused = suspended or expired
+    standby = offline["standby"]
+    paused = suspended or expired or standby
     if suspended:
-        message = policy.get("message") or PAUSED_MESSAGE
+        message, reason = policy.get("message") or PAUSED_MESSAGE, "suspended"
     elif expired:
-        message = EXPIRED_MESSAGE
+        message, reason = EXPIRED_MESSAGE, "licence_expired"
+    elif standby:
+        message, reason = STANDBY_MESSAGE, "standby"
     else:
-        message = ""
+        message, reason = "", None
     return {
         "managed": managed,
         "version": int(policy.get("version") or 0),
         "state": policy.get("state") or "active",
         "paused": paused,
-        "paused_reason": "suspended" if suspended else ("licence_expired" if expired else None),
+        "paused_reason": reason,
+        "standby": standby,
+        "offline": offline,
         "message": message,
         "licence": lic,
         "features": dict(policy.get("features") or {}),
@@ -401,7 +562,7 @@ def paused_blocks(path: str) -> bool:
 
 
 class FleetGateMiddleware:
-    """423 service_paused, 403 feature_disabled and 409 camera_limit at the door.
+    """423 service_paused / service_standby, 403 feature_disabled and 409 camera_limit at the door.
 
     Pure ASGI (no buffering of MJPEG or websockets). A box with no policy
     passes straight through.
@@ -439,7 +600,8 @@ class FleetGateMiddleware:
         path = scope.get("path", "") or ""
         st = effective_state()
         if st["paused"] and paused_blocks(path):
-            return 423, {"code": "service_paused", "message": st["message"], "detail": st["message"]}
+            code = "service_standby" if st["paused_reason"] == "standby" else "service_paused"
+            return 423, {"code": code, "message": st["message"], "detail": st["message"]}
         feature = feature_for_path(path)
         if feature and not feature_enabled(feature):
             return 403, feature_disabled_body(feature)

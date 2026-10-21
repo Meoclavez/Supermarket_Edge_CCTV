@@ -3,9 +3,10 @@
 GET  /api/v1/fleet/status       any signed-in person: plan state, licence, features,
                                 last contact, control key fingerprint (never the token)
 POST /api/v1/fleet/reset-key    owner/administrator: forget the pinned control key
-POST /api/v1/fleet/checkin-now  owner/administrator: check in with iKorex now
+POST /api/v1/fleet/checkin-now  owner/administrator: check in with iKorex now (also the standby
+                                page's "Check connection now": a verified answer lifts standby)
 
-All three stay open while the service is paused (entitlements.FleetGateMiddleware).
+All three stay open while the service is paused or in standby (entitlements.FleetGateMiddleware).
 """
 
 from __future__ import annotations

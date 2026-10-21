@@ -210,6 +210,7 @@
       this.redoStack = [];
       this._idMap = new Map();      // id of a deleted-and-recreated shape -> its new id
       this._busyUndo = false;
+      this._siteBusy = false;       // a map size change (extend / fit / resize) is in flight
       this._nudge = null;           // pending arrow-key move, saved after a pause
       this._offer = null;           // open "Extend the map to fit?" offer
       this._pointers = new Map();   // active pointers (touch: pinch zoom)
@@ -356,6 +357,20 @@
     }
 
     async refreshMetrics() {
+      // One request pair at a time: on a big database these answers can take
+      // longer than the poll interval, and piled-up requests would use up the
+      // browser's connections (map saves then queue behind them).
+      if (this._metricsBusy) { this._metricsAgain = true; return; }
+      this._metricsBusy = true;
+      try {
+        await this._refreshMetricsOnce();
+      } finally {
+        this._metricsBusy = false;
+      }
+      if (this._metricsAgain) { this._metricsAgain = false; this.refreshMetrics(); }
+    }
+
+    async _refreshMetricsOnce() {
       if (!this.isVisible() || !this.layout) return;
       if (window.edgeAuth && typeof window.edgeAuth.isAuthenticated === 'function' && !window.edgeAuth.isAuthenticated()) return;
       const kind = this.heatmapKind;
@@ -514,6 +529,8 @@
         return;
       }
       if (!this.isVisible()) return;
+      // While the map size changes the frame may move: no edits until it is done.
+      if (this._siteBusy) return;
       // Undo / redo / duplicate work in every mode except while drawing a shape.
       if (mod && !e.altKey && (k === 'z' || k === 'Z' || k === 'y' || k === 'Y')) {
         if (this.mode === MODE.DRAW) return;
@@ -556,6 +573,7 @@
       this._pointers.set(e.pointerId, this.localPoint(e));
       if (this._pointers.size === 2) { this._startPinch(); return; }
       if (this._pointers.size > 2 || this._pinch) return;
+      if (this._siteBusy) { this.setStatus('Wait a moment: the map size is being changed.'); return; }
       this.onDown(e);
     }
 
@@ -1551,7 +1569,15 @@
     async saveStoreSize(name, w, h, clamp) {
       const body = { width_m: w, height_m: h, name };
       if (clamp) body.clamp = true;
-      const data = await this.post(API, body, 'PUT');
+      if (this._siteBusy) throw new Error('the map size is still being changed; wait a moment');
+      const data = await this._runSiteChange(async () => {
+        try {
+          return await this.post(API, body, 'PUT');
+        } catch (e) {
+          if (!(e.detail && e.detail.code === 'items_outside')) await this._reloadAfterSiteError();
+          throw e;
+        }
+      });
       // PUT returns the full layout; keep our richer local copies where the
       // server response lacks them (older servers omit structures).
       this.applyLayout(Object.assign({}, this.layout, data));
@@ -1687,35 +1713,104 @@
         left_m: +sides.left_m || 0, top_m: +sides.top_m || 0,
         right_m: +sides.right_m || 0, bottom_m: +sides.bottom_m || 0,
       };
+      if (this._siteBusy) { this._siteBusyNotice(); return null; }
       await this.flushNudge();
-      try {
-        const data = await this.post(`${API}/extend`, body);
-        const ch = this._afterSiteChange(data);
-        this.setStatus(`The map is now ${fmt(data.width_m)} × ${fmt(data.height_m)} m.`, 'ok');
-        return ch;
-      } catch (e) {
-        this.setStatus(e.detail && e.detail.code === 'items_outside'
-          ? `Not changed: ${describeItems(e.detail.items)} would end up outside the map. Move ${e.detail.items.length === 1 ? 'it' : 'them'} first.`
-          : `Could not change the map size: ${e.message}`, 'error');
-        if (e.detail && e.detail.code === 'items_outside') this._lastOutside = e.detail.items;
-        return null;
-      }
+      return this._runSiteChange(async () => {
+        try {
+          const data = await this.post(`${API}/extend`, body);
+          const ch = this._afterSiteChange(data);
+          this.setStatus(`The map is now ${fmt(data.width_m)} × ${fmt(data.height_m)} m.`, 'ok');
+          return ch;
+        } catch (e) {
+          const outside = e.detail && e.detail.code === 'items_outside';
+          this.setStatus(outside
+            ? `Not changed: ${describeItems(e.detail.items)} would end up outside the map. Move ${e.detail.items.length === 1 ? 'it' : 'them'} first.`
+            : `Could not change the map size: ${e.message}`, 'error');
+          if (outside) this._lastOutside = e.detail.items;
+          else await this._reloadAfterSiteError();
+          return null;
+        }
+      });
     }
 
     /** POST /layout/fit: the map shrinks or grows to what is on it, plus a margin. */
     async fitMapToContent(margin) {
+      if (this._siteBusy) { this._siteBusyNotice(); return null; }
       await this.flushNudge();
+      return this._runSiteChange(async () => {
+        try {
+          const data = await this.post(`${API}/fit`, { margin_m: Number.isFinite(+margin) ? +margin : 2 });
+          this._afterSiteChange(data);
+          this.setStatus(data.site_change && data.site_change.unchanged
+            ? 'The map already fits what is on it.'
+            : `The map now fits what is on it: ${fmt(data.width_m)} × ${fmt(data.height_m)} m.`, 'ok');
+          return data;
+        } catch (e) {
+          this.setStatus(`Could not fit the map: ${e.message}`, 'error');
+          await this._reloadAfterSiteError();
+          return null;
+        }
+      });
+    }
+
+    /**
+     * One map size change at a time. The site moves every item on the server,
+     * so overlapping requests (repeated clicks) are ignored, not queued, and
+     * the Map size / Fit buttons are disabled until the answer is in.
+     */
+    async _runSiteChange(fn) {
+      this._siteBusy = true;
+      this._syncSiteButtons();
+      // Moving everything can take a while on a big database.
+      this.setStatus('Changing the map size… everything on the map moves with it.');
       try {
-        const data = await this.post(`${API}/fit`, { margin_m: Number.isFinite(+margin) ? +margin : 2 });
-        this._afterSiteChange(data);
-        this.setStatus(data.site_change && data.site_change.unchanged
-          ? 'The map already fits what is on it.'
-          : `The map now fits what is on it: ${fmt(data.width_m)} × ${fmt(data.height_m)} m.`, 'ok');
-        return data;
-      } catch (e) {
-        this.setStatus(`Could not fit the map: ${e.message}`, 'error');
-        return null;
+        return await fn();
+      } finally {
+        this._siteBusy = false;
+        this._syncSiteButtons();
       }
+    }
+
+    _siteBusyNotice() {
+      this.setStatus('The map size is still being changed; wait a moment.', 'error');
+    }
+
+    _syncSiteButtons() {
+      const busy = !!this._siteBusy;
+      document.querySelectorAll('#zoneInspectorBody .fp-site-btn, #sAll, #sFit, #sApply, #sForce, .fp-extend-offer [data-act="extend"]')
+        .forEach((b) => { b.disabled = busy; b.setAttribute('aria-busy', busy ? 'true' : 'false'); });
+      this.updateUndoButtons();
+    }
+
+    /**
+     * After a failed map size change, show what the server really has rather
+     * than a local copy that may be stale (the request may have been applied
+     * before the answer was lost). When the frame moved, the undo history and
+     * anything in progress move with it, as after a successful change.
+     */
+    async _reloadAfterSiteError() {
+      const ref = this._siteRefPoint(this.layout);
+      let data;
+      try {
+        const res = await fetch(API);
+        if (!res.ok) return;
+        data = await res.json();
+      } catch (_) { return; }
+      if (!data || !Array.isArray(data.zones)) return;
+      const now = ref ? this._siteRefPoint(data, ref.key) : null;
+      const dx = now ? r3(now.x - ref.x) : 0, dy = now ? r3(now.y - ref.y) : 0;
+      this._afterSiteChange(Object.assign({}, data, { site_change: { dx, dy } }));
+    }
+
+    /** A point that moves with the frame: the first vertex of a zone or structure, or a camera. */
+    _siteRefPoint(layout, key) {
+      if (!layout) return null;
+      const pick = [];
+      (layout.zones || []).forEach((z) => { if (z.polygon && z.polygon[0]) pick.push([`z:${z.id}`, z.polygon[0]]); });
+      (layout.structures || []).forEach((st) => { if (st.polygon && st.polygon[0]) pick.push([`s:${st.id}`, st.polygon[0]]); });
+      (layout.cameras || []).forEach((c) => { if (c.map_placed && Number.isFinite(c.floor_x)) pick.push([`c:${c.camera_id}`, { x: c.floor_x, y: c.floor_y }]); });
+      const hit = key ? pick.find(([k]) => k === key) : pick[0];
+      return hit ? { key: hit[0], x: +hit[1].x, y: +hit[1].y } : null;
     }
 
     _afterSiteChange(data) {
@@ -1834,6 +1929,7 @@
 
     async _replay(from, to, fn, verb) {
       if (this._busyUndo) return;
+      if (this._siteBusy) { this._siteBusyNotice(); return; }
       await this.flushNudge();
       const cmd = from.pop();
       if (!cmd) { this.setStatus(fn === 'undo' ? 'Nothing to undo.' : 'Nothing to redo.'); this.updateUndoButtons(); return; }
@@ -1855,8 +1951,8 @@
     updateUndoButtons() {
       const u = document.getElementById('fpUndo'), r = document.getElementById('fpRedo');
       const last = this.undoStack[this.undoStack.length - 1], next = this.redoStack[this.redoStack.length - 1];
-      if (u) { u.disabled = this._busyUndo || !last; u.title = last ? `Undo: ${last.label} (Ctrl+Z)` : 'Nothing to undo'; }
-      if (r) { r.disabled = this._busyUndo || !next; r.title = next ? `Redo: ${next.label} (Ctrl+Shift+Z)` : 'Nothing to redo'; }
+      if (u) { u.disabled = this._busyUndo || this._siteBusy || !last; u.title = last ? `Undo: ${last.label} (Ctrl+Z)` : 'Nothing to undo'; }
+      if (r) { r.disabled = this._busyUndo || this._siteBusy || !next; r.title = next ? `Redo: ${next.label} (Ctrl+Shift+Z)` : 'Nothing to redo'; }
     }
 
     // ------------------------------------------------- duplicate and nudge
@@ -2452,6 +2548,8 @@
       panel.querySelectorAll('[data-side]').forEach((b) => b.addEventListener('click', async () => {
         const v = amount();
         if (!v) { this.setStatus('Type how many metres to add first.', 'error'); return; }
+        if (this._siteBusy) { this._siteBusyNotice(); return; }
+        this._lastOutside = null;
         const ch = await this.extendMap({ [`${b.dataset.side}_m`]: v });
         if (ch) { rerender(); done(true); } else this._showOutside(panel);
       }));
@@ -2485,6 +2583,8 @@
         }
       });
       panel.querySelector('#sCancel').addEventListener('click', () => this.select(null));
+      // Rendered while a change is in flight: its buttons start disabled.
+      this._syncSiteButtons();
     }
 
     /** The items a refused shrink would have cut off, with an optional "do it anyway". */

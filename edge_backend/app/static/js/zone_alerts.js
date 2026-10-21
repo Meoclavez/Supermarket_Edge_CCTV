@@ -262,10 +262,14 @@
     if (!list.length) {
       const msg = {
         open: 'No area or line alerts need attention. They appear when someone enters a restricted area during its hours, or crosses a line set to alert staff.',
-        acked: 'No acknowledged area or line alerts yet.',
+        acked: 'No acknowledged area or line alerts yet. An alert moves here when someone presses "Acknowledge".',
         all: 'No area or line alerts. They appear when someone enters a restricted area during its hours, or crosses a line set to alert staff.',
       }[state.filter];
-      host.innerHTML = `<div class="fp-empty">${esc(msg)}</div>`;
+      // Next action (data-za-filter is handled by onClick; data-help-open by js/help.js).
+      const next = state.filter === 'acked'
+        ? '<button type="button" class="btn btn-xs" data-za-filter="open">Show alerts needing attention</button>'
+        : '<button type="button" class="link-btn" data-help-open="area-line-alerts">How to set them up</button>';
+      host.innerHTML = `<div class="fp-empty">${esc(msg)} ${next}</div>`;
       return;
     }
     const more = state.filter === 'open' ? state.pendingCount - list.length : (state.viewCount || 0) - list.length;

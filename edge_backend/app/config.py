@@ -58,8 +58,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=str(Path(__file__).resolve().parent.parent / ".env"), extra="allow")
     
     APP_NAME: str = "Universal Edge AI CCTV System"
-    APP_VERSION: str = "2.1.0"
-    VERSION: str = "2.1.0"
+    # This release. Reported by the fleet check-in (box.software_version),
+    # /api/v1/health, / and the Settings > iKorex service card.
+    APP_VERSION: str = "2.7.0"
+    VERSION: str = APP_VERSION  # older alias (/api/v1/health); always the same value
     # DEBUG makes logging more verbose and serves the API docs (/docs, /redoc,
     # /openapi.json) on the local address; never through the public hostname.
     # It never disables authentication: the one switch that does is

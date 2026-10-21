@@ -75,7 +75,7 @@
               <td class="entrances-out">${cell(t.out)}</td>
               <td>${cell(t.net)}</td>
             </tr>`).join('')
-        : '<tr><td colspan="5"><div class="fp-empty">No counting lines yet. Draw one across each entrance in Camera setup (Tripwire tool) to count people in and out exactly.</div></td></tr>';
+        : '<tr><td colspan="5"><div class="fp-empty">No counting lines yet. Draw one across each entrance in Camera setup (Tripwire tool) to count people in and out exactly. <a class="link-btn" href="/dashboard/studio?tool=tripwire">Open Camera setup</a></div></td></tr>';
     }
     if (note) {
       note.textContent = data.observed

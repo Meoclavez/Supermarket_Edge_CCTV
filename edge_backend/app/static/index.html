@@ -31,6 +31,7 @@
   <link rel="stylesheet" href="/static/css/phone_alerts.css?v=2.6.0" />
   <link rel="stylesheet" href="/static/css/live_view.css?v=2.6.0" />
   <link rel="stylesheet" href="/static/css/fleet.css?v=2.6.0" />
+  <link rel="stylesheet" href="/static/css/help.css?v=2.6.0" />
   <!-- auth.js stays a classic (blocking) script: it must wrap fetch before any
        module runs. Everything else is deferred and runs in document order after
        parsing; theme.js is listed last so it still runs after the modules.
@@ -96,6 +97,11 @@
       </nav>
 
       <div class="header-actions">
+        <!-- Help panel: how-to guides, Getting started, iKorex support (js/help.js). -->
+        <button type="button" class="btn btn-sm btn-ghost header-help" id="navHelp" data-help-centre aria-haspopup="dialog" aria-expanded="false"
+                title="Help: how-to guides and iKorex support" aria-label="Help">
+          <svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-circle-help"></use></svg><span class="header-gear-label">Help</span>
+        </button>
         <button type="button" class="btn btn-sm btn-ghost header-gear" data-tab="settings" onclick="switchTab('settings')"
                 id="navSettings" title="Settings: cameras, phones, online access, sales data, system health" aria-label="Settings">
           <svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-settings"></use></svg><span class="header-gear-label">Settings</span>
@@ -132,6 +138,9 @@
          ========================================== -->
     <main id="tab-today" class="tab-view">
       <div id="dataStateBanner" class="data-state-banner" role="status" style="display:none;"></div>
+
+      <!-- Getting started checklist: setup steps in order with live status (js/onboarding.js). -->
+      <div id="gettingStartedMount" hidden></div>
 
       <section class="overview-strip today-kpis" aria-label="Today at a glance">
         <div class="stat-box" id="kpiCamerasBox">
@@ -170,7 +179,7 @@
         <div class="today-col today-col-main">
           <div class="glass-card today-chart-card">
             <div class="card-title">
-              <span>Visitors by hour</span>
+              <span data-help="visitors-by-hour">Visitors by hour</span>
               <span class="badge metric-unobserved" id="todayHourlySource">&mdash;</span>
             </div>
             <div class="hourly-legend" id="todayHourlyLegend"></div>
@@ -189,7 +198,7 @@
         <div class="today-col today-col-side">
           <div class="glass-card today-incidents-card" id="todayIncidentsCard">
             <div class="card-title">
-              <span>Needs review</span>
+              <span data-help="needs-review">Needs review</span>
               <button type="button" class="btn btn-sm" onclick="switchTab('loss')">Open loss prevention</button>
             </div>
             <div id="todayIncidents" class="today-list"><div class="fp-empty">Loading…</div></div>
@@ -197,7 +206,7 @@
 
           <div class="glass-card today-setup-card" id="todaySetupCard">
             <div class="card-title">
-              <span>Store setup</span>
+              <span data-help="store-setup">Store setup</span>
               <span class="badge metric-unobserved" id="todaySetupScore">&mdash;</span>
             </div>
             <div id="todaySetup"><div class="fp-empty">Loading…</div></div>
@@ -297,11 +306,11 @@
               <button type="button" class="btn btn-sm btn-icon" id="fpUndo" onclick="blueprintEditor.undo()" title="Nothing to undo" aria-label="Undo" disabled><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-undo-2"></use></svg></button>
               <button type="button" class="btn btn-sm btn-icon" id="fpRedo" onclick="blueprintEditor.redo()" title="Nothing to redo" aria-label="Redo" disabled><svg class="icon icon-md fp-icon-flip" aria-hidden="true"><use href="/static/icons/sprite.svg#i-undo-2"></use></svg></button>
               <button type="button" class="btn btn-sm" id="fpDuplicate" onclick="blueprintEditor.duplicateSelected()" title="Duplicate the selected item (Ctrl+D)" disabled><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-copy"></use></svg>Duplicate</button>
-              <button type="button" class="btn btn-sm" onclick="blueprintEditor.resizeStore()" title="Map size: add space on any side, or fit the map to what is on it"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-map"></use></svg>Map size</button>
+              <button type="button" class="btn btn-sm" onclick="blueprintEditor.resizeStore()" title="Map size: add space on any side, or fit the map to what is on it" data-help-after="map-size"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-map"></use></svg>Map size</button>
             </div>
             <span class="fp-sep fp-edit-only"></span>
             <span class="fp-mode fp-edit-only" title="What a click on the map does now">Now: <b id="fpMode">view</b></span>
-            <button type="button" class="btn btn-sm fp-edit-toggle" id="fpEditToggle" aria-pressed="false" onclick="toggleMapEditing()"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-pencil"></use></svg>Edit map</button>
+            <button type="button" class="btn btn-sm fp-edit-toggle" id="fpEditToggle" data-help-after="map-tools" aria-pressed="false" onclick="toggleMapEditing()"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-pencil"></use></svg>Edit map</button>
           </div>
 
           <!-- What is drawn on the map, and the heatmap kind (js/floorplan.js mounts
@@ -370,7 +379,7 @@
 
           <!-- Inspector: the selected area, structure, camera or store settings. -->
           <div class="glass-card zone-inspector-card">
-            <div class="card-title"><span id="fpInspectorTitle">Details</span></div>
+            <div class="card-title" data-help="inspector"><span id="fpInspectorTitle">Details</span></div>
             <div id="zoneInspectorBody">
               <div class="fp-empty">Select an area, shelf, wall or camera on the map to see and edit it.</div>
             </div>
@@ -378,7 +387,7 @@
 
           <!-- Device manager: scan, add, place, calibrate, remove. -->
           <div class="glass-card" id="deviceManagerCard">
-            <div class="card-title dev-card-title"><span>Cameras &amp; devices</span></div>
+            <div class="card-title dev-card-title"><span data-help="add-cameras">Cameras &amp; devices</span></div>
             <div class="dev-toolbar" role="group" aria-label="Add cameras">
               <button type="button" class="btn btn-sm btn-primary" onclick="deviceManager.scan()" id="btnScanDevices" title="Look for cameras on USB and the local network"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-search"></use></svg>Scan network</button>
               <button type="button" class="btn btn-sm btn-secondary" onclick="deviceManager.toggleAddPanel()" id="btnToggleAddCamera" aria-expanded="false" aria-controls="addCameraPanel" title="Add a camera by RTSP / MJPEG address, ONVIF address, USB device or video file"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-plus"></use></svg>Add camera</button>
@@ -522,7 +531,7 @@
         <!-- INSIGHTS-RECS:BEGIN (insights.js owns this region) -->
         <div class="glass-card ins-run-card">
           <div class="card-title ins-card-title">
-            <span>Recommendations</span>
+            <span data-help="recommendations">Recommendations</span>
             <span class="badge metric-unobserved" id="recsOpenBadge">&mdash;</span>
           </div>
           <p class="ins-intro">What the store analysis suggests you change, from measured visits, dwell, shelf reaches and recorded heatmaps. It runs by itself every hour; you can also run it now.</p>
@@ -575,7 +584,7 @@
           <!-- Entrances: today's in/out per Studio tripwire (js/entrances.js). -->
           <div class="glass-card" id="entrancesCard">
             <div class="card-title">
-              <span>Entrances today</span>
+              <span data-help="entrances">Entrances today</span>
               <span class="badge" id="entrancesSourceBadge" title="Which signal store footfall uses today">FOOTFALL: &mdash;</span>
             </div>
             <div class="entrances-summary">
@@ -607,7 +616,7 @@
         <div class="analytics-two-col">
           <div class="glass-card">
             <div class="card-title">
-              <span>Areas where shoppers leave without engaging</span>
+              <span data-help="friction">Areas where shoppers leave without engaging</span>
             </div>
             <div class="table-scroll">
               <table class="friction-table">
@@ -638,7 +647,7 @@
         <!-- Product shelf reaches: js/product_reach.js -->
         <div class="glass-card" id="productReachPanel">
           <div class="card-title">
-            <span>Product shelf reaches today</span>
+            <span data-help="product-reach">Product shelf reaches today</span>
             <span class="badge metric-unobserved" id="productReachBadge">REACHES: &mdash;</span>
           </div>
           <div id="productReachBody"><div class="fp-empty">Loading…</div></div>
@@ -672,7 +681,7 @@
       <!-- Live behaviour (js/live_behaviour.js): watch / alert cues on the cameras right now. -->
       <div class="glass-card" id="liveBehaviourCard">
         <div class="card-title">
-          <span>Live behaviour</span>
+          <span data-help="live-behaviour">Live behaviour</span>
           <span class="lb-note" id="liveBehaviourNote" aria-live="polite"></span>
         </div>
         <p class="loss-intro">
@@ -711,7 +720,7 @@
 
       <div class="glass-card">
         <div class="card-title">
-          <span>Review queue</span>
+          <span data-help="review-queue">Review queue</span>
           <button type="button" class="btn btn-sm" data-action="refresh">Refresh</button>
         </div>
         <p class="loss-intro">
@@ -729,7 +738,7 @@
       <!-- Area & line alerts (js/zone_alerts.js): restricted-area and line-crossing alerts from the alert log. -->
       <div class="glass-card" id="zoneAlertsCard">
         <div class="card-title">
-          <span>Area &amp; line alerts</span>
+          <span data-help="zone-alerts">Area &amp; line alerts</span>
           <button type="button" class="btn btn-sm" data-za="refresh">Refresh</button>
         </div>
         <p class="loss-intro">
@@ -741,7 +750,7 @@
       </div>
 
       <div class="glass-card">
-        <div class="card-title"><span>False alarms by rule</span></div>
+        <div class="card-title"><span data-help="false-alarms">False alarms by rule</span></div>
         <p class="loss-intro">How often each check was wrong, from the outcomes staff recorded. A high rate means the rule needs tuning for this store.</p>
         <div class="loss-table-wrap">
           <table class="friction-table loss-rule-table">
@@ -754,7 +763,7 @@
       <!-- Patterns (GET /api/v1/theft/patterns): built from recorded incidents only. -->
       <div class="glass-card" id="lossPatternsCard">
         <div class="card-title">
-          <span>Patterns</span>
+          <span data-help="patterns">Patterns</span>
           <span class="loss-chips loss-pattern-days" id="lossPatternDays" role="group" aria-label="Period">
             <button type="button" class="loss-chip" data-pattern-days="7" aria-pressed="false">7 days</button>
             <button type="button" class="loss-chip active" data-pattern-days="28" aria-pressed="true">4 weeks</button>
@@ -820,7 +829,7 @@
       <!-- Night watch (js/night_watch.js): cameras armed now, the next window, recent night events. -->
       <div class="glass-card" id="nightWatchCard">
         <div class="card-title">
-          <span>Night watch</span>
+          <span data-help="night-watch">Night watch</span>
           <button type="button" class="btn btn-sm" data-nw="refresh">Refresh</button>
         </div>
         <p class="loss-intro">
@@ -902,7 +911,7 @@
 
       <!-- Point of sale: whether sales data arrives and how to connect it (analytics.js). -->
       <div class="glass-card" id="settings-pos">
-        <div class="card-title"><span>Sales data (point of sale)</span><span class="badge metric-unobserved" id="posStatusBadge">&mdash;</span></div>
+        <div class="card-title"><span data-help="sales-data">Sales data (point of sale)</span><span class="badge metric-unobserved" id="posStatusBadge">&mdash;</span></div>
         <div id="posStatusBody"><div class="fp-empty">Loading…</div></div>
         <!-- Till key for POST /pos/ingest: status, create/replace, revoke (pos_key.js). -->
         <div id="posTillKey" class="tk-box"></div>
@@ -913,7 +922,7 @@
 
       <!-- System health: moved here from the page header (analytics.js). -->
       <div class="glass-card" id="settings-health">
-        <div class="card-title"><span>System health</span></div>
+        <div class="card-title"><span data-help="system-health">System health</span></div>
         <div class="health-grid">
           <div class="telemetry-item" title="How video is decoded on this device">
             <span class="telemetry-label">Video decoding</span>
@@ -979,7 +988,7 @@
 
         <div class="form-grid-2col" style="margin-top: 12px;">
           <div class="form-group">
-            <label for="configDepartment">Department label (optional)</label>
+            <label for="configDepartment" data-help-after="department">Department label (optional)</label>
             <!-- Free text, suggestions are departments already in use. What the
                  camera measures is its purpose (role), chosen below. -->
             <input type="text" class="form-input" id="configDepartment" name="department" maxlength="40" list="configDeptList" autocomplete="off" spellcheck="false" placeholder="e.g. LIQUOR" />
@@ -1025,7 +1034,7 @@
 
         <!-- Stream quality (Dahua recorder channels; services/stream_selection.py). -->
         <div class="form-group" style="margin-top: 12px;">
-          <label for="configStreamQuality">Stream quality (analysis)</label>
+          <label for="configStreamQuality" data-help-after="stream-quality">Stream quality (analysis)</label>
           <select class="form-input" id="configStreamQuality" name="streamQuality" aria-describedby="configStreamStatus">
             <option value="auto">Auto: smallest sub-stream of at least D1 (recommended)</option>
             <option value="sub">Sub-stream</option>
@@ -1036,7 +1045,7 @@
             title="Open each sub-stream once to read its size (read-only), then apply Auto's choice">Check sub-streams again</button>
         </div>
 
-        <div class="form-section-title">Placement on the blueprint (metres, origin top-left)</div>
+        <div class="form-section-title" data-help="placement">Placement on the blueprint (metres, origin top-left)</div>
         <div class="form-grid-2col">
           <div class="form-group">
             <label for="configFloorX">Floor X (m)</label>
@@ -1066,7 +1075,7 @@
         </div>
 
         <div class="form-group" style="margin-top: 12px;">
-          <label>AI features on this camera</label>
+          <label data-help="ai-features">AI features on this camera</label>
           <div class="checkbox-group-grid">
             <label class="checkbox-label" for="featPeopleCounting" title="Zone visits, dwell, queues and footfall from tracked people"><input type="checkbox" id="featPeopleCounting" name="featPeopleCounting" /> People counting &amp; dwell</label>
             <label class="checkbox-label" for="featShelfInteraction" title="Hand-to-shelf interactions from pose keypoints"><input type="checkbox" id="featShelfInteraction" name="featShelfInteraction" /> Shelf interaction</label>
@@ -1188,6 +1197,10 @@
   <script src="/static/js/users.js?v=2.6.0" defer></script>
   <script src="/static/js/phone_alerts.js?v=2.6.0" defer></script>
   <script src="/static/js/fleet.js?v=2.6.0" defer></script>
+  <!-- In-app help: words (help_content.js), "?" popovers + Help panel (help.js), Getting started + welcome (onboarding.js). -->
+  <script src="/static/js/help_content.js?v=2.6.0" defer></script>
+  <script src="/static/js/help.js?v=2.6.0" defer></script>
+  <script src="/static/js/onboarding.js?v=2.6.0" defer></script>
   <script src="/static/js/theme.js?v=2.6.0" defer></script>
 </body>
 </html>

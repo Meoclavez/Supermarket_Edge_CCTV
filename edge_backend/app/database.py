@@ -64,28 +64,26 @@ async def check_db_health():
         await asyncio.sleep(60)
 
 async def get_db():
-    """FastAPI dependency for obtaining async database sessions with automatic retry."""
-    max_retries = 3
-    retry_delay = 0.5
-    
-    for attempt in range(max_retries):
-        async with async_session_factory() as session:
+    """FastAPI dependency: one async session per request, rolled back on error.
+
+    A dependency with ``yield`` may yield exactly once. The old version caught
+    ``database is locked`` here, slept and yielded a second session: FastAPI
+    then failed with "generator didn't stop after athrow()" (a 500 after a
+    pointless 0.5 s wait) and nothing was retried -- the request had already
+    run. Work that must survive lock contention retries itself as one whole
+    transaction (e.g. ``store_layout_service._site_change``).
+    """
+    async with async_session_factory() as session:
+        try:
+            yield session
+        except Exception as e:
+            if isinstance(e, OperationalError) and "database is locked" in str(e):
+                logger.warning(f"Request failed on a locked database: {e.orig if e.orig else e}")
             try:
-                yield session
-                break
-            except OperationalError as e:
-                if "database is locked" in str(e) and attempt < max_retries - 1:
-                    logger.warning(f"Database locked, retrying ({attempt + 1}/{max_retries})...")
-                    await session.rollback()
-                    await asyncio.sleep(retry_delay)
-                else:
-                    await session.rollback()
-                    raise
-            except Exception:
                 await session.rollback()
-                raise
-            finally:
-                await session.close()
+            except Exception as rb:  # noqa: BLE001 - keep the original error
+                logger.debug(f"rollback after request error failed: {rb}")
+            raise
 
 
 async def _ensure_default_store_layout():

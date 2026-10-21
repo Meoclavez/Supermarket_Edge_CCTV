@@ -8,6 +8,12 @@
  * per-recommendation status change. This file never calls
  * /market/llm-optimize: opening a tab must not start an analysis.
  *
+ * Default view: findings grouped into recurring issues ("topics", GET
+ * /recommendations/topics) with one unified analysis and action plan each;
+ * "Show every insight" brings back the flat list. Topic writes are the
+ * acknowledge / snooze / resolve / reopen / action-done / split / merge /
+ * re-analyse POSTs. The badges count open topics, not raw findings.
+ *
  * Rules: nothing invented (empty states say why and what to do next), no
  * prompt/confirm/alert, every action shows a busy state and a result.
  */
@@ -110,7 +116,16 @@
     busy: new Set(),           // recommendation ids being saved
     retryTimer: null,
     running: false,
+    view: 'topics',            // 'topics' | 'flat' ("Show every insight")
+    topics: null,              // last GET /recommendations/topics
+    topicsOk: false,           // the topics endpoint answered
+    topicSig: null,
+    topicBusy: new Set(),      // topic ids being saved
+    members: {},               // topic id -> { loading, data }
+    openMembers: new Set(),    // topic ids whose daily findings are expanded
+    mergeOpen: null,           // topic id showing the merge picker
   };
+  try { if (localStorage.getItem('edge.insights.view') === 'flat') state.view = 'flat'; } catch (_) { /* private mode */ }
 
   // ------------------------------------------------------------ nav badge
   function setBadge(open) {
@@ -151,8 +166,338 @@
       return;
     }
     state.data = data;
-    setBadge(data.counts ? data.counts.open : null);
+    if (!state.topicsOk) setBadge(data.counts ? data.counts.open : null);
     if (isVisible('insights-recs') || force) renderRecs(force);
+  }
+
+  // ------------------------------------------------------------ topics
+  const TREND = {
+    worsening: { icon: 'trending-up', cls: 'ins-trend-worse' },
+    improving: { icon: 'trending-up', cls: 'ins-trend-better ins-trend-down' },
+    stable: { icon: 'minus', cls: 'ins-trend-stable' },
+    recurring: { icon: 'refresh-cw', cls: 'ins-trend-recurring' },
+    new: { icon: 'circle-alert', cls: 'ins-trend-new' },
+  };
+  const TOPIC_STATUS = {
+    open: { label: 'Open', cls: 'badge-warning' },
+    acknowledged: { label: 'Acknowledged', cls: 'badge-primary' },
+    snoozed: { label: 'Snoozed', cls: 'badge-neutral' },
+    resolved: { label: 'Resolved', cls: 'badge-green' },
+  };
+  const TOPIC_TOAST = {
+    acknowledge: 'Acknowledged', snooze: 'Snoozed for 7 days', resolve: 'Resolved', reopen: 'Reopened',
+    'action-done': 'Action marked done', split: 'Finding moved to its own topic', merge: 'Topics merged',
+    reanalyse: 'Analysis refreshed',
+  };
+  const icon = (name, cls) => (window.EdgeIcon && typeof window.EdgeIcon.svg === 'function'
+    ? window.EdgeIcon.svg(name, { size: 'sm', cls: cls || '' }) : '');
+
+  function shortDay(iso) {
+    if (!iso) return dash();
+    const d = new Date(`${String(iso).slice(0, 10)}T12:00:00`);
+    if (Number.isNaN(d.getTime())) return esc(iso);
+    const opts = { day: 'numeric', month: 'short' };
+    if (d.getFullYear() !== new Date().getFullYear()) opts.year = 'numeric';
+    return d.toLocaleDateString('en-AU', opts);
+  }
+
+  function ensureTopicDom() {
+    const list = $('recsList');
+    if (!list) return null;
+    let host = $('topicsList');
+    if (!host) {
+      host = document.createElement('div');
+      host.id = 'topicsList';
+      host.className = 'ins-list ins-topics';
+      list.parentNode.insertBefore(host, $('recsSummary') || list);
+    }
+    const row = document.querySelector('#insights-recs .ins-filter-row');
+    if (row && !$('recsShowEvery')) {
+      const lab = document.createElement('label');
+      lab.className = 'ins-check ins-every';
+      lab.setAttribute('for', 'recsShowEvery');
+      lab.title = 'Show each daily finding on its own instead of grouped issues';
+      lab.innerHTML = '<input type="checkbox" id="recsShowEvery" name="recsShowEvery"> Show every insight';
+      row.appendChild(lab);
+      const cb = lab.querySelector('input');
+      cb.checked = state.view === 'flat';
+      cb.addEventListener('change', () => {
+        state.view = cb.checked ? 'flat' : 'topics';
+        try { localStorage.setItem('edge.insights.view', state.view); } catch (_) { /* ignore */ }
+        applyView();
+        if (state.view === 'flat') renderRecs(true); else renderTopics(true);
+      });
+    }
+    return host;
+  }
+
+  function topicsMode() { return state.view === 'topics' && state.topicsOk; }
+
+  function applyView() {
+    const host = ensureTopicDom();
+    const on = topicsMode();
+    if (host) host.hidden = !on;
+    const list = $('recsList');
+    if (list) list.hidden = on;
+    const sum = $('recsSummary');
+    if (sum) sum.hidden = on;
+    const dis = $('recsShowDismissed');
+    const disLab = dis && dis.closest('label');
+    if (disLab) disLab.hidden = on;
+    const every = $('recsShowEvery');
+    if (every) every.checked = state.view === 'flat';
+    const lab = every && every.closest('label');
+    if (lab) lab.hidden = !state.topicsOk;
+  }
+
+  async function loadTopics(force) {
+    if (!signedIn()) return;
+    let data = null;
+    try {
+      const r = await fetch(`${API}/recommendations/topics${state.filter === 'all' ? '?include_resolved=true' : ''}`);
+      data = r.ok ? await r.json() : null;
+    } catch (_) { data = null; }
+    const was = state.topicsOk;
+    state.topicsOk = !!(data && Array.isArray(data.topics));
+    if (state.topicsOk) {
+      state.topics = data;
+      setBadge(data.counts ? data.counts.badge : null);
+    } else if (state.data) setBadge(state.data.counts ? state.data.counts.open : null);
+    if (was !== state.topicsOk) applyView();
+    if (isVisible('insights-recs') || force) {
+      applyView();
+      if (topicsMode()) renderTopics(force);
+      else if (!was && !state.topicsOk) renderRecs(force);
+    }
+  }
+
+  function visibleTopics() {
+    const all = (state.topics && state.topics.topics) || [];
+    if (state.filter === 'open') return all.filter((t) => t.status === 'open' || t.status === 'acknowledged');
+    return all;
+  }
+
+  function sparkline(t) {
+    const tl = t.timeline || [];
+    if (!tl.length) return '';
+    const w = 6;
+    const seen = tl.filter((d) => d.seen).length;
+    const bars = tl.map((d, i) => {
+      const h = d.seen ? 16 : (d.analysed ? 4 : 2);
+      const cls = d.seen ? 'ins-spark-seen' : (d.analysed ? 'ins-spark-clear' : 'ins-spark-none');
+      return `<rect class="${cls}" x="${i * w}" y="${18 - h}" width="${w - 2}" height="${h}" rx="1"><title>${esc(shortDay(d.date))}: ${d.seen ? 'found' : (d.analysed ? 'not found' : 'no analysis')}</title></rect>`;
+    }).join('');
+    return `<div class="ins-spark-wrap"><svg class="ins-spark" viewBox="0 0 ${tl.length * w} 18" preserveAspectRatio="none" role="img" aria-label="Found on ${seen} of the last ${tl.length} days">${bars}</svg>
+      <span class="ins-spark-axis"><span>${esc(shortDay(tl[0].date))}</span><span>today</span></span></div>`;
+  }
+
+  function renderPlan(t) {
+    const acts = t.actions || [];
+    if (!acts.length) return '';
+    const busy = state.topicBusy.has(t.id);
+    const items = acts.map((a) => {
+      const meta = [
+        a.why ? `<span><b>Why:</b> ${esc(a.why)}</span>` : '',
+        a.expected_effect ? `<span><b>Expect:</b> ${esc(a.expected_effect)}</span>` : '',
+        `<span><b>Effort:</b> ${esc(a.effort || dash())}</span>`,
+        a.owner_role ? `<span><b>Who:</b> ${esc(a.owner_role)}</span>` : '',
+        a.check_after ? `<span><b>Check:</b> ${esc(shortDay(a.check_after))}</span>` : '',
+      ].filter(Boolean).join('');
+      const ctl = a.done
+        ? `<span class="ins-plan-done">${icon('check')} Done${a.done_at ? ` ${esc(shortDay(a.done_at))}` : ''}</span>`
+        : `<button type="button" class="btn btn-sm btn-secondary" data-topic-act="action-done" data-topic-id="${esc(t.id)}" data-action-id="${esc(a.id)}" aria-label="Mark done: ${esc(a.action)}" ${busy ? 'disabled' : ''}>${icon('check')} Mark done</button>`;
+      return `<li class="ins-plan-item${a.done ? ' is-done' : ''}">
+          <div class="ins-plan-main"><span class="ins-plan-n" aria-hidden="true">${esc(a.priority || '')}</span><span class="ins-plan-text">${esc(a.action)}</span>${ctl}</div>
+          <div class="ins-plan-meta">${meta}</div>
+        </li>`;
+    }).join('');
+    return `<div class="ins-plan"><div class="ins-plan-h">Action plan</div><ol class="ins-plan-list">${items}</ol></div>`;
+  }
+
+  function renderMembers(t) {
+    const m = state.members[t.id];
+    if (!m || m.loading) return '<div class="ins-meta">Loading the daily findings…</div>';
+    if (!m.data) return '<div class="ins-meta">The daily findings could not be loaded. Close and open this again to retry.</div>';
+    const rows = m.data.insights || [];
+    const canSplit = rows.length > 1;
+    const busy = state.topicBusy.has(t.id);
+    return rows.map((r) => {
+      const pr = PRIORITY[String(r.severity || '').toLowerCase()] || { label: r.severity || '', cls: 'badge-neutral' };
+      const st = STATUS[r.status] || { label: r.status || '', cls: 'badge-neutral' };
+      return `<div class="ins-member">
+          <div class="ins-member-head"><b>${esc(shortDay(r.date))}</b>
+            <span class="badge ${pr.cls}">${esc(pr.label)}</span><span class="badge ${st.cls}">${esc(st.label)}</span>
+            ${r.zone ? `<span class="ins-zone">${esc(r.zone)}</span>` : ''}</div>
+          <div class="ins-member-text">${esc(r.title || '')}</div>
+          ${r.do ? `<div class="ins-member-do"><b>Do:</b> ${esc(r.do)}</div>` : ''}
+          ${canSplit ? `<button type="button" class="btn btn-sm btn-ghost ins-member-split" data-topic-act="split" data-topic-id="${esc(t.id)}" data-insight-id="${esc(r.id)}" ${busy ? 'disabled' : ''}>${icon('x')} Not the same issue</button>` : ''}
+        </div>`;
+    }).join('') || '<div class="ins-meta">No findings left in this topic.</div>';
+  }
+
+  function renderBeforeAfter(t) {
+    const ba = t.before_after;
+    if (!ba || !ba.text) return '';
+    const cls = { helped: 'ins-ba-good', worse: 'ins-ba-bad', no_clear_change: 'ins-ba-flat', too_early: 'ins-ba-flat' }[ba.verdict] || 'ins-ba-flat';
+    return `<div class="ins-ba ${cls}"><b>Before and after:</b> ${esc(ba.text)}</div>`;
+  }
+
+  function renderTopic(t) {
+    const pr = PRIORITY[t.priority] || { label: t.priority || dash(), cls: 'badge-neutral' };
+    const tr = TREND[t.trend] || TREND.stable;
+    const st = TOPIC_STATUS[t.status] || TOPIC_STATUS.open;
+    const busy = state.topicBusy.has(t.id);
+    const dis = busy ? 'disabled' : '';
+    const btn = (act, label, ic, cls) => `<button type="button" class="btn btn-sm ${cls || 'btn-secondary'}" data-topic-act="${act}" data-topic-id="${esc(t.id)}" ${dis}>${icon(ic)} ${esc(label)}</button>`;
+    const where = [t.subject && t.subject !== t.title ? t.subject : null, t.zone_name && t.zone_name !== t.subject ? t.zone_name : null]
+      .filter(Boolean).join(' · ');
+    const prods = (t.products || []).length ? `Sells: ${(t.products || []).slice(0, 6).join(', ')}` : '';
+    const snooze = t.status === 'snoozed' && t.snooze_until ? ` until ${shortDay(t.snooze_until)}` : '';
+    const newSince = num(t.new_since_acknowledged) && t.new_since_acknowledged > 0
+      ? ` · ${t.new_since_acknowledged} new since acknowledged` : '';
+    const buttons = [
+      t.status === 'open' ? btn('acknowledge', 'Acknowledge', 'eye', 'btn-primary') : '',
+      t.status !== 'snoozed' && t.status !== 'resolved' ? btn('snooze', 'Snooze 7 days', 'clock') : '',
+      t.status !== 'resolved' ? btn('resolve', 'Resolve', 'circle-check') : '',
+      t.status !== 'open' ? btn('reopen', 'Reopen', 'undo-2') : '',
+      btn('merge-open', 'Merge…', 'minimize-2', 'btn-ghost'),
+      btn('reanalyse', 'Re-analyse', 'refresh-cw', 'btn-ghost'),
+    ].join('');
+    let merge = '';
+    if (state.mergeOpen === t.id) {
+      const others = ((state.topics && state.topics.topics) || []).filter((o) => o.id !== t.id);
+      merge = others.length
+        ? `<div class="ins-merge"><label class="ins-merge-label" for="merge-${esc(t.id)}">Merge into this issue:</label>
+            <select id="merge-${esc(t.id)}" class="ins-merge-select" data-merge-select="${esc(t.id)}">${others.map((o) => `<option value="${esc(o.id)}">${esc(o.title)} (${esc(o.occurrences)} day${o.occurrences === 1 ? '' : 's'})</option>`).join('')}</select>
+            ${btn('merge', 'Merge', 'minimize-2', 'btn-primary')}${btn('merge-cancel', 'Cancel', 'x', 'btn-ghost')}</div>`
+        : `<div class="ins-merge"><span class="ins-meta">There is no other issue to merge with.</span>${btn('merge-cancel', 'Close', 'x', 'btn-ghost')}</div>`;
+    }
+    const source = t.summary_source === 'local_model'
+      ? `<div class="ins-meta">Summary worded by the local AI model${t.model ? ` (${esc(t.model)})` : ''} from the measured facts.</div>`
+      : (t.narration_note ? `<div class="ins-meta">${esc(t.narration_note)}</div>` : '');
+    const extra = [t.pattern, t.time_of_day].filter(Boolean).join(' ');
+    const analysed = t.analysed_at ? `Analysed ${clock(t.analysed_at)}` : 'Not analysed yet';
+    const win = t.data_window && t.data_window.from ? ` · data ${shortDay(t.data_window.from)} to ${shortDay(t.data_window.to)}` : '';
+    const open = state.openMembers.has(t.id);
+    return `
+      <article class="action-card ins-topic severity-${esc(t.severity || 'MEDIUM')} topic-${esc(t.status)}" data-topic="${esc(t.id)}" aria-labelledby="topic-h-${esc(t.id)}">
+        <div class="ins-topic-head">
+          <div class="ins-rec-badges">
+            <span class="badge ${pr.cls}">${esc(pr.label)}</span>
+            <span class="ins-trend ${tr.cls}" title="${esc(t.trend_reason || '')}">${icon(tr.icon)}<span>${esc(t.trend_label || t.trend || '')}</span></span>
+            ${t.status !== 'open' ? `<span class="badge ${st.cls}">${esc(st.label)}${esc(snooze)}</span>` : ''}
+          </div>
+          <span class="ins-topic-seen">${esc(t.seen_text || '')}${t.last_seen ? ` · last ${esc(shortDay(t.last_seen))}` : ''}${esc(newSince)}</span>
+        </div>
+        <h3 class="ins-topic-title" id="topic-h-${esc(t.id)}">${esc(t.title || dash())}</h3>
+        ${where || prods ? `<div class="ins-topic-where">${esc([where, prods].filter(Boolean).join(' · '))}</div>` : ''}
+        ${sparkline(t)}
+        <p class="ins-topic-summary">${esc(t.unified_summary || 'The unified analysis is being prepared; it appears after the next analysis run.')}</p>
+        ${extra && !(t.unified_summary || '').includes(extra) ? `<div class="ins-meta">${esc(extra)}</div>` : ''}
+        ${source}
+        ${renderBeforeAfter(t)}
+        ${renderPlan(t)}
+        <div class="action-footer ins-topic-foot">
+          <span class="action-meta">${esc(analysed)}${esc(win)}</span>
+          <span class="action-btns">${buttons}</span>
+        </div>
+        ${merge}
+        <details class="ins-topic-members" data-topic-members="${esc(t.id)}" ${open ? 'open' : ''}>
+          <summary>Daily findings (${esc(t.occurrences)} day${t.occurrences === 1 ? '' : 's'})</summary>
+          <div class="ins-members-body">${open ? renderMembers(t) : ''}</div>
+        </details>
+        <div class="ins-rec-status" data-topic-status="${esc(t.id)}" role="status" aria-live="polite"></div>
+      </article>`;
+  }
+
+  function renderTopics(force) {
+    const host = ensureTopicDom();
+    if (!host || !state.topics || !topicsMode()) return;
+    const items = visibleTopics();
+    const sig = JSON.stringify([state.filter, state.mergeOpen, [...state.topicBusy], [...state.openMembers],
+      Object.keys(state.members).map((k) => [k, !!(state.members[k] && state.members[k].loading)]),
+      (state.topics.topics || []).map((t) => [t.id, t.status, t.analysed_at, t.occurrences, t.trend, (t.actions || []).map((a) => a.done)])]);
+    if (!force && sig === state.topicSig && host.children.length) return;
+    state.topicSig = sig;
+    document.querySelectorAll('#insights-recs [data-rec-filter]').forEach((b) => {
+      const on = b.getAttribute('data-rec-filter') === state.filter;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    if (!items.length) {
+      const all = state.topics.topics || [];
+      const waiting = state.topics.unassigned_insights || 0;
+      let msg;
+      if (waiting) msg = `Grouping ${waiting} finding${waiting === 1 ? '' : 's'} into issues… this list fills in by itself. Tick "Show every insight" to see them now.`;
+      else if (state.filter === 'open' && all.length) msg = 'Nothing open: every issue is snoozed or resolved. Choose "All" to see them.';
+      else if (state.data && state.data.empty_reason) msg = state.data.empty_reason;
+      else msg = 'No issues found. The analysis found nothing that needs attention.';
+      host.innerHTML = `<div class="fp-empty ins-empty">${esc(msg)}
+        ${all.length ? '' : '<button type="button" class="btn btn-sm btn-primary" data-action="run-analysis">Run analysis now</button>'}</div>`;
+      return;
+    }
+    const counts = state.topics.counts || {};
+    const head = `<div class="ins-meta ins-topics-count">${esc(counts.open || 0)} open · ${esc(counts.acknowledged || 0)} acknowledged · ${esc(counts.snoozed || 0)} snoozed${state.filter === 'all' ? ` · ${esc(counts.resolved || 0)} resolved` : ''}. Each card groups the same finding across days.</div>`;
+    host.innerHTML = head + items.map(renderTopic).join('');
+  }
+
+  async function loadMembers(id) {
+    state.members[id] = { loading: true, data: null };
+    renderTopics(true);
+    const data = await getJ(`${API}/recommendations/topics/${encodeURIComponent(id)}`);
+    state.members[id] = { loading: false, data };
+    renderTopics(true);
+  }
+
+  async function topicAction(btn) {
+    const id = btn.getAttribute('data-topic-id');
+    const act = btn.getAttribute('data-topic-act');
+    if (!id || !act) return;
+    if (act === 'merge-open') { state.mergeOpen = id; renderTopics(true); return; }
+    if (act === 'merge-cancel') { state.mergeOpen = null; renderTopics(true); return; }
+    let body = {};
+    if (act === 'snooze') body = { days: 7 };
+    else if (act === 'action-done') body = { action_id: btn.getAttribute('data-action-id') };
+    else if (act === 'split') body = { insight_id: btn.getAttribute('data-insight-id') };
+    else if (act === 'merge') {
+      const sel = document.querySelector(`[data-merge-select="${CSS.escape(id)}"]`);
+      if (!sel || !sel.value) return;
+      body = { other_topic_id: sel.value };
+    }
+    const t = ((state.topics && state.topics.topics) || []).find((x) => x.id === id);
+    state.topicBusy.add(id);
+    renderTopics(true);
+    let ok = false;
+    let msg = '';
+    try {
+      const res = await fetch(`${API}/recommendations/topics/${encodeURIComponent(id)}/${act}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      ok = res.ok;
+      if (!ok) {
+        const e = await res.json().catch(() => ({}));
+        msg = `Could not update (HTTP ${res.status})${e.detail ? `: ${typeof e.detail === 'string' ? e.detail : JSON.stringify(e.detail)}` : ''}`;
+      }
+    } catch (e) {
+      msg = `Could not update: ${e.message}`;
+    }
+    state.topicBusy.delete(id);
+    if (ok) {
+      toast(`${TOPIC_TOAST[act] || 'Updated'}: ${(t && t.title) || 'issue'}`, 'ok');
+      if (act === 'merge') state.mergeOpen = null;
+      if (act === 'split' || act === 'merge') state.members = {};
+      else delete state.members[id];
+      await Promise.all([loadTopics(true), loadRecs(false)]);
+      state.openMembers.forEach((mid) => { if (!state.members[mid]) loadMembers(mid); });
+      const card = document.querySelector(`[data-topic="${CSS.escape(id)}"]`);
+      const again = card && card.querySelector(`[data-topic-act="${CSS.escape(act)}"]`);
+      if (again && !again.disabled) again.focus();
+    } else {
+      renderTopics(true);
+      const slot = document.querySelector(`[data-topic-status="${CSS.escape(id)}"]`);
+      if (slot) slot.textContent = msg;
+      toast(msg, 'error');
+    }
   }
 
   function visibleItems() {
@@ -359,7 +704,7 @@
       if (res.status === 409) {
         setRunStatus('An analysis is already running. The list updates when it finishes.', 'warn');
         toast('An analysis is already running', 'error');
-        setTimeout(() => { loadLatest(); loadRecs(true); }, 5000);
+        setTimeout(() => { loadLatest(); loadRecs(true); loadTopics(true); }, 5000);
         return;
       }
       if (!res.ok) {
@@ -375,7 +720,7 @@
       toast(msg, 'ok');
       state.latest = { run: body, generated_at: body.generated_at, inputs_summary: body.inputs_summary, schedule: state.latest && state.latest.schedule };
       renderLatest();
-      await Promise.all([loadLatest(), loadRecs(true)]);
+      await Promise.all([loadLatest(), loadRecs(true), loadTopics(true)]);
     } catch (e) {
       setRunStatus(`Analysis failed: ${e.message}`, 'err');
       toast(`Analysis failed: ${e.message}`, 'error');
@@ -499,7 +844,10 @@
 
   // ------------------------------------------------------------ wiring
   function onRecsShown() {
+    ensureTopicDom();
+    applyView();
     loadRecs(true);
+    loadTopics(true);
     loadLatest();
     loadModelStatus(false);
   }
@@ -514,11 +862,28 @@
         if (chip) {
           state.filter = chip.getAttribute('data-rec-filter') === 'all' ? 'all' : 'open';
           renderRecs(true);
+          if (state.topicsOk) loadTopics(true);
           return;
         }
+        const tb = e.target.closest('[data-topic-act][data-topic-id]');
+        if (tb && !tb.disabled) { e.preventDefault(); topicAction(tb); return; }
         const sb = e.target.closest('[data-status][data-rec-id]');
         if (sb && !sb.disabled) setStatus(sb.getAttribute('data-rec-id'), sb.getAttribute('data-status'), sb);
       });
+      // <details> toggle does not bubble: listen in the capture phase.
+      recs.addEventListener('toggle', (e) => {
+        const d = e.target;
+        if (!d || !d.matches || !d.matches('[data-topic-members]')) return;
+        const id = d.getAttribute('data-topic-members');
+        if (d.open) {
+          // A re-render that keeps the panel open fires toggle again: nothing to do then.
+          if (state.openMembers.has(id) && state.members[id]) return;
+          state.openMembers.add(id);
+          const m = state.members[id];
+          if (!m || (!m.loading && !m.data)) loadMembers(id);
+          else renderTopics(true);
+        } else state.openMembers.delete(id);
+      }, true);
       const dis = $('recsShowDismissed');
       if (dis) dis.addEventListener('change', () => { state.showDismissed = dis.checked; if (dis.checked) state.filter = 'all'; loadRecs(true); });
     }
@@ -547,17 +912,19 @@
   function init() {
     bind();
     window.addEventListener('edge:tab', (e) => onTab(e.detail));
-    loadRecs(false);   // badge
+    loadRecs(false);   // flat list (badge only when topics are unavailable)
+    loadTopics(false); // badge: open topics
     if (isVisible('insights-recs')) onRecsShown();
     if (isVisible('tab-digest')) loadDigest();
     setInterval(() => {
       loadRecs(false);
+      loadTopics(false);
       if (isVisible('insights-recs')) { loadLatest(); loadModelStatus(false); }
     }, BADGE_POLL_MS);
   }
 
   window.edgeInsights = {
-    refresh() { loadRecs(true); loadLatest(); if (isVisible('tab-digest')) loadDigest(); },
+    refresh() { loadRecs(true); loadTopics(true); loadLatest(); if (isVisible('tab-digest')) loadDigest(); },
     topRecommendations,
   };
 

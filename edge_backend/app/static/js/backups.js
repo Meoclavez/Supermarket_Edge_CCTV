@@ -80,7 +80,7 @@
     const d = state.data;
     if (state.error) return `<div class="fp-empty">${esc(state.error)}</div>`;
     if (!d) return '<div class="fp-empty">Loading…</div>';
-    if (!d.backups.length) return '<div class="fp-empty">No backups yet. One is taken each time the device starts.</div>';
+    if (!d.backups.length) return '<div class="fp-empty">No backups yet. One is taken each time the device starts; press "Back up now" to take one, then "Download" it to keep a copy off the device.</div>';
     const rows = d.backups.map((b) => {
       const confirming = state.confirmRestore === b.filename;
       const row = `<tr>

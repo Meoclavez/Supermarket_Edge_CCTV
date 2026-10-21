@@ -213,7 +213,8 @@
 
     let empty = '';
     if (!state.cameras.length) {
-      empty = 'No cameras yet. Add cameras in Camera setup first, then place them here.';
+      // Empty state: cameras are added in "Cameras & devices" on this page (js/help.js handles data-help-go).
+      empty = 'No cameras yet. Add them in "Cameras & devices" on this page (a recorder adds all its channels at once), then drag each one onto the map. <button type="button" class="btn btn-xs btn-primary" data-help-go="add-cameras">Add cameras</button>';
     } else if (!list.length && state.query) {
       empty = `No camera matches “${esc(els.search.value.trim())}”.`;
     } else if (!list.length && state.filter === 'unplaced') {

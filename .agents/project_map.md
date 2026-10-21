@@ -505,6 +505,24 @@ Ollama model narrates them. The model never invents a finding or a number, and
 a rule with no supporting signal is suppressed with an explicit reason rather
 than firing on empty data.
 
+**Insight topics (2026-10-21; `services/insight_topics.py`, m0021).**
+Daily findings are grouped into `insight_topics` (FK-less `ai_decision_recommendations.topic_id`):
+key = issue family (rules meaning the same problem, e.g. dwell-no-reach / dead shelf /
+browse-no-touch = `low_pickup`) | subject (blueprint zone id, else sorted singularised name
+words) | direction; fallback merge = subject token Jaccard >= 0.5 (numbered names never match)
+and 0.6*subject + 0.4*TF-IDF text cosine >= 0.55. Grouping + due analyses run inside
+`recommendations_service.run()` (`_group_topics`, max 40 analyses/run, daily refresh) and a
+batched startup backfill (`start_background`, 30 s delay; admin `POST
+/api/v1/analytics/recommendations/topics/backfill`). Analysis: trend (worsening / improving /
+stable / recurring / new), weekday/peak pattern, headline metric from findings' evidence or
+zone_visits / shelf_interactions over 42 days, before/after around `action_done_at`,
+structured action plan (playbooks per family). Ollama only rewords the summary when narrate is
+asked (numbers not in the facts -> discarded). API under `/api/v1/analytics/recommendations/topics`
+(gate `business_insights`; operator writes via `@operator_allowed`). UI: `js/insights.js`
+default grouped view, "Show every insight" = old list; badge = open topics. Tests:
+`tests/test_insight_topics.py`. Store reset (`routes/layout.py`) does not clear the table;
+`prune_orphans` removes empty topics on the next sync.
+
 ---
 
 ## File & API Reference
@@ -586,14 +604,39 @@ than firing on empty data.
 * **[`docs/supermarket_cctv/Supermarket_Edge_AI_CCTV_Hardware_and_Services_Guide.pdf`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/docs/supermarket_cctv/Supermarket_Edge_AI_CCTV_Hardware_and_Services_Guide.pdf):** Print-ready formal PDF document (5 pages, A4) detailing 32-camera deterministic mathematical sizing, single NVDEC decode throughput, 10-Pillar Foolproof Engineering Validation Matrix, itemized BOM, 32-channel store layout, and procurement checklist.
 * **[`docs/supermarket_cctv/Supermarket_Edge_AI_CCTV_Hardware_and_Services_Guide.html`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/docs/supermarket_cctv/Supermarket_Edge_AI_CCTV_Hardware_and_Services_Guide.html):** Paged-media HTML source for regenerating the 32-camera PDF specification document.
 
+## In-app help and onboarding (2026-10-21)
+
+Plan and research: `docs/UX_SUPPORT_PLAN.md`; user-facing description: `docs/USER_MANUAL.md` 1.7.
+
+* **`static/js/help_content.js`:** all help words: `SUPPORT` (iKorex support phone/email/hours/web, **null until the owner supplies them**), `topics` ("?" popover text), `anchors` (where "?" goes on cards other scripts render), `articles` (Help panel guides, `role: 'admin'` hides from operators).
+* **`static/js/help.js`:** `window.EdgeHelp`: "?" buttons from `data-help` / `data-help-after` attributes and `anchors` (MutationObserver re-adds them after re-renders), non-modal popover (Esc, aria-expanded), header Help panel `#navHelp` (search, guides, "Do it" via `go(action)`), `friendlyError(status, body)` / `fetchJSON(url)` for 401/403 feature_disabled/409 camera_limit/423 service_paused|standby/offline. Global click hooks for empty states: `data-help-go="<action>"`, `data-help-open="<article>"`.
+* **`static/js/onboarding.js`:** `window.EdgeOnboarding`: Getting started checklist in `#gettingStartedMount` (Today; manual Part 2 order, live status from layout/store setup/cameras/site-settings/product zones/`/api/zones`/night-watch/web-push/users/remote-access/pos/backups; operators get 2 own steps; steps for features off in the iKorex plan hidden), first-run welcome for admins (localStorage `edge_cctv_welcome_seen:<user id>`; checklist flags `edge_cctv_getting_started:<user id>`).
+* **`static/css/help.css`:** styles for all of the above (z: welcome 1400, panel 1500, popover 1600).
+* Loaded in index.html after fleet.js, before theme.js (theme.js must stay last). Not on studio.html yet.
+
 ## Store map v2, camera gallery, iKorex branding, fleet control (2026-10-16)
 
 Contracts: `docs/STORE_MAP_V2_CONTRACT.md`, `docs/FLEET_CONTROL_CONTRACT.md`. Built and QA'd
 end-to-end on a scratch box (headless Chrome, all checks PASS); commit c206a32. VPS side
 deployed 2026-10-21 (key sha256:3ee9e4f81f48d587); box deployed 2026-10-21 20:43 AEDT at 3ec190d
 (m0020 applied with pre-v0020 backup, MIGraphX inference, first check-in 20:45:25 pinned the key; check-ins
-every ~5 min, telemetry numbers only). Follow-up: config.py APP_VERSION still 2.1.0. The
-2026-10-16/17 outage was the store's internet (DNS failures), the box stayed up.
+every ~5 min, telemetry numbers only). The 2026-10-16/17 outage was the store's internet (DNS
+failures), the box stayed up.
+**2026-10-21 follow-up build (committed, deploy pending: VPS control rebuild + box pull):**
+APP_VERSION 2.7.0; offline standby (contract decision 5); atomic site changes (below); in-app
+help/onboarding; insight topics (m0021). Integration QA on a copy of the real 03:00 backup: all
+checks PASS, full suite 1510 passed, VPS control 43 passed. After deploy: run Fit once on the
+Pearcedale map (site still 79.2x29 from the 2026-10-21 incident, brain #388).
+* **Atomic site changes** (`store_layout_service._site_change`): extend/fit/resize run in their
+  own session behind a per-loop asyncio lock, `BEGIN IMMEDIATE` before the first read, one
+  all-or-nothing txn, whole-op retry x3 then `SiteBusyError` -> 503 Retry-After; fit bounds are
+  computed inside the lock (idempotent); `_prescan_tracks` before the lock. `database.get_db`
+  yields once (the old retry loop re-yielded -> FastAPI `athrow()` 500s). `floorplan.js`
+  `_runSiteChange` disables site buttons while one runs. Tests: `tests/test_store_map_atomic.py`.
+* **Offline standby**: policy `licence.offline_grace_hours` (1..2160 or null = never); every
+  check-in sends a nonce, the VPS returns a signed `ack`; only a verified ack counts as contact
+  (`last_verified_contact_at`, CLOCK_BOOTTIME + persisted floor). Past the limit -> state
+  `standby`, API 423 `service_standby`, standby page; resumes only after a verified ack.
 * **Map = "site"**: `store_layouts.width_m/height_m` is the whole canvas (building = a ROOM).
   `POST /api/v1/layout/extend {left_m,top_m,right_m,bottom_m}` (left/top translate zones,
   structures, cameras, calibration points, homography `T@H`, shelf_interactions floor x/y,
@@ -616,7 +659,8 @@ every ~5 min, telemetry numbers only). Follow-up: config.py APP_VERSION still 2.
   `FLEET_CONTROL_DEV_URL` for 127.0.0.1), `routes/fleet.py`, `static/js/fleet.js` (Settings
   "iKorex service" card, licence banner, paused page, also in studio.html). Pause/resume,
   heatmaps, business_insights, phone_alerts changes restart the app (5 s debounce).
-  Offline never stops anything; licence end date judged on the box clock + grace days.
+  Licence end date judged on the box clock + grace days; offline standby only when the VPS
+  sets `offline_grace_hours`.
 * **Fleet control, VPS side**: `~/Projects-1/Server/cctv-tunnel/control` (cctv-control,
   port 9200, `control.ikorex.com.au`), deploy runbook in that README "Fleet control".
 * Known gaps: older recorded heatmaps offset after extend-left/top; undo of a zone delete gives

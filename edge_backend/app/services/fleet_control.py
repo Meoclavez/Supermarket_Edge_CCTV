@@ -14,9 +14,16 @@ administrator resets the pin. ``FLEET_CONTROL_PUBLIC_KEY`` in .env overrides
 the pin. Policies with a version <= the applied one, policies or commands for
 another store, expired commands and command ids already seen are refused.
 
-Offline rule: losing the VPS never stops anything; the last verified policy
-stays in force (``entitlements``), and only its licence date is evaluated on
-the box's own clock.
+Offline rule (owner decision 2026-10-21): the last verified policy stays in
+force (``entitlements``) and its licence date is evaluated on the box's own
+clock. When the policy sets ``licence.offline_grace_hours``, the box stands by
+(same effects as paused) once it has had no *verified* contact for longer than
+that. Every check-in sends a fresh random ``nonce``; the VPS answers with a
+signed ``ack`` (type, store_id, nonce, server_time, policy_version). Contact is
+verified only when that ack verifies against the pinned key, names this store
+and echoes this nonce, and the policy it names is applied (``verify_ack``).
+Unsigned or invalid acks never count, so a fake VPS (DNS hijack) cannot keep a
+box out of standby or bring it back.
 """
 
 from __future__ import annotations
@@ -25,6 +32,7 @@ import asyncio
 import base64
 import binascii
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -70,6 +78,10 @@ MAX_COMMANDS = 20
 MAX_AUDIT = 50
 RESTART_DEBOUNCE_S = 5.0
 RESTART_COMMAND_DELAY_S = 1.0
+# Ack server_time further than this from the box clock: still accepted (the
+# nonce proves freshness) but recorded as clock_skew and the server time used.
+ACK_MAX_SKEW_S = 600.0
+NONCE_BYTES = 16
 ALLOWED_ACTIONS = ("restart_app", "checkin_now", "run_health_check")
 # Started once at boot from the policy; a change needs an app restart.
 RESTART_FEATURES = ("heatmaps", "business_insights", "phone_alerts")
@@ -79,13 +91,13 @@ _COMMAND_ID_RE = re.compile(r"^c_[A-Za-z0-9_-]{1,64}$")
 ERROR_CODES = frozenset({
     "inference_unavailable", "inference_fallback_cpu", "disk_low", "evidence_over_limit",
     "online_access_error", "backup_failed", "camera_offline", "pipeline_stopped",
-    "control_key_changed", "telemetry_partial",
+    "control_key_changed", "telemetry_partial", "clock_skew",
 })
 
 # Every field the check-in may carry (docs/FLEET_CONTROL_CONTRACT.md). A dict
 # is a nested object, [x] a list of x, None a scalar (str/int/float/bool/null).
 ALLOWED_BODY: Dict[str, Any] = {
-    "version": None, "store_id": None, "sent_at": None,
+    "version": None, "store_id": None, "sent_at": None, "nonce": None,
     "box": {k: None for k in ("software_version", "git_commit", "boot_id", "uptime_s", "app_uptime_s",
                                "hostname_hash", "os", "python")},
     "health": {
@@ -98,7 +110,8 @@ ALLOWED_BODY: Dict[str, Any] = {
     },
     "usage": {"alerts_24h": {"low": None, "medium": None, "high": None},
               "incidents_24h": None, "users_total": None, "phones_registered": None},
-    "policy": {"version_applied": None, "state": None, "licence_status": None},
+    "policy": {"version_applied": None, "state": None, "licence_status": None, "standby": None,
+               "last_verified_contact_age_s": None},
     "control_key_fingerprint": None,
     "command_results": [{"id": None, "status": None, "detail": None, "finished_at": None}],
 }
@@ -206,6 +219,44 @@ def fingerprint(raw: Optional[bytes]) -> Optional[str]:
     return "sha256:" + hashlib.sha256(raw).hexdigest()[:16] if raw else None
 
 
+def new_nonce() -> str:
+    """128 random bits, base64url without padding (22 characters)."""
+    return b64url_encode(os.urandom(NONCE_BYTES))
+
+
+def verify_ack(envelope: Any, raw_key: Optional[bytes], store_id: str, nonce: str,
+               now: Optional[datetime] = None) -> Dict[str, Any]:
+    """The check-in ack's fields if it proves fresh contact with the key holder.
+
+    Raises Rejected: ack_missing, no_control_key, bad_signature / bad_payload /
+    bad_encoding / bad_envelope, not_an_ack, wrong_store, wrong_nonce (also a
+    replayed ack: every check-in has a new nonce), bad_server_time,
+    bad_policy_version. A server_time more than ACK_MAX_SKEW_S away from the box
+    clock is accepted, with ``skew_s`` set.
+    """
+    if envelope is None:
+        raise Rejected("ack_missing")
+    if raw_key is None:
+        raise Rejected("no_control_key")
+    ack = verify_envelope(envelope, raw_key)
+    if ack.get("type") != "ack":
+        raise Rejected("not_an_ack")
+    if ack.get("store_id") != store_id:
+        raise Rejected("wrong_store")
+    got = ack.get("nonce")
+    if not isinstance(got, str) or not nonce or not hmac.compare_digest(got.encode(), nonce.encode()):
+        raise Rejected("wrong_nonce")
+    server_time = parse_iso(ack.get("server_time"))
+    if server_time is None:
+        raise Rejected("bad_server_time")
+    pv = ack.get("policy_version")
+    if not isinstance(pv, int) or isinstance(pv, bool) or pv < 0:
+        raise Rejected("bad_policy_version")
+    skew = ((now or _now()) - server_time).total_seconds()
+    return {"server_time": server_time, "policy_version": pv,
+            "skew_s": skew if abs(skew) > ACK_MAX_SKEW_S else None}
+
+
 def verify_envelope(envelope: Any, raw_key: bytes) -> Dict[str, Any]:
     """The JSON payload of {"payload","sig"} if Ed25519-signed by ``raw_key``."""
     if not isinstance(envelope, dict):
@@ -234,6 +285,10 @@ def default_state() -> Dict[str, Any]:
         "policy": None, "policy_applied_at": None, "last_policy_error": None,
         "seen_command_ids": [], "pending_results": [],
         "last_checkin_at": None, "last_ok_at": None, "last_result": "not run yet", "last_error": None,
+        # Offline standby (entitlements.offline_info): the last check-in whose
+        # signed ack verified, the clocks at that moment, the last ack problem.
+        "last_verified_contact_at": None, "contact_anchor": None, "clock_skew_s": None,
+        "last_ack_error": None,
         "audit": [],
     }
 
@@ -264,6 +319,16 @@ def _audit(state: Dict[str, Any], actor: str, action: str) -> None:
     entry = {"at": iso(), "actor": str(actor)[:128], "action": str(action)[:200]}
     state.setdefault("audit", []).append(entry)
     audit_log.info("fleet control: %s by %s", action, actor)
+
+
+def refresh_contact_floor(state: Dict[str, Any]) -> None:
+    """Persist the time since the last verified contact as a lower bound (clock set back)."""
+    anchor = state.get("contact_anchor")
+    if isinstance(anchor, dict):
+        elapsed = entitlements.contact_elapsed_s(anchor)
+        if elapsed is not None:
+            state["contact_anchor"] = dict(anchor, floor_s=round(elapsed, 1), floor_boot_id=entitlements.boot_id(),
+                                           floor_boottime_s=entitlements.boot_clock())
 
 
 def env_public_key() -> Optional[bytes]:
@@ -584,11 +649,22 @@ class FleetControl:
         tgt = self.target()
         env_key = env_public_key()
         mismatch = state.get("key_mismatch") if isinstance(state.get("key_mismatch"), dict) else None
+        off = eff["offline"]
         return {
             "managed": eff["managed"],
+            "software_version": settings.APP_VERSION,
+            "git_commit": box_info().get("git_commit"),
             "state": eff["state"],
             "paused": eff["paused"],
             "paused_reason": eff["paused_reason"],
+            "standby": eff["standby"],
+            "offline_grace_hours": off["grace_hours"],
+            "last_verified_contact_at": off["last_verified_contact_at"],
+            "last_verified_contact_age_s": off["elapsed_s"],
+            "standby_in_s": off["remaining_s"],
+            "standby_warning": off["warning"],
+            "clock_skew_s": off["clock_skew_s"],
+            "last_ack_error": state.get("last_ack_error"),
             "message": eff["message"],
             "licence_status": eff["licence"]["status"],
             "licence_valid_until": eff["licence"]["valid_until"],
@@ -636,7 +712,7 @@ class FleetControl:
             self._wake_loop.call_soon_threadsafe(ev.set)
 
     # ---- the check-in
-    async def build_body(self, state: Dict[str, Any], store_id: str) -> Dict[str, Any]:
+    async def build_body(self, state: Dict[str, Any], store_id: str, nonce: Optional[str] = None) -> Dict[str, Any]:
         eff = entitlements.effective_state()
         try:
             health = await asyncio.to_thread(_health_sync)
@@ -649,12 +725,15 @@ class FleetControl:
             usage = {}
         if state.get("key_mismatch"):
             health.setdefault("errors", []).append("control_key_changed")
+        if state.get("clock_skew_s") is not None:
+            health.setdefault("errors", []).append("clock_skew")
         env_key = env_public_key()
         body = {
-            "version": 1, "store_id": store_id, "sent_at": iso(),
+            "version": 1, "store_id": store_id, "sent_at": iso(), "nonce": nonce,
             "box": box_info(), "health": health, "usage": usage,
             "policy": {"version_applied": eff["version"], "state": eff["state"],
-                       "licence_status": eff["licence"]["status"]},
+                       "licence_status": eff["licence"]["status"], "standby": eff["standby"],
+                       "last_verified_contact_age_s": eff["offline"]["elapsed_s"]},
             "control_key_fingerprint": fingerprint(env_key) if env_key else state.get("fingerprint"),
             "command_results": list(state.get("pending_results") or [])[-MAX_RESULTS:],
         }
@@ -671,12 +750,14 @@ class FleetControl:
         state = load_state()
         tgt = self.target()
         state["last_checkin_at"] = iso()
+        refresh_contact_floor(state)
         if "problem" in tgt:
             state.update(last_result="not configured", last_error=tgt["problem"])
             await asyncio.to_thread(save_state, state)
             self._next_s = None
             return self.status()
-        body = await self.build_body(state, tgt["store_id"])
+        nonce = new_nonce()
+        body = await self.build_body(state, tgt["store_id"], nonce)
         sent_ids = {r.get("id") for r in body.get("command_results") or []}
         headers = {"Authorization": f"Bearer {tgt['token']}", "X-Store-Id": tgt["store_id"],
                    "Content-Type": "application/json"}
@@ -701,18 +782,20 @@ class FleetControl:
         # Results the VPS now has are done with.
         state["pending_results"] = [r for r in state.get("pending_results") or [] if r.get("id") not in sent_ids]
         state.update(last_ok_at=state["last_checkin_at"], last_result="ok", last_error=None)
-        follow_up = await self._handle_answer(state, answer, tgt["store_id"])
+        follow_up = await self._handle_answer(state, answer, tgt["store_id"], nonce)
         await asyncio.to_thread(save_state, state)
         nxt = answer.get("next_checkin_s")
         self._next_s = float(min(max(nxt, NEXT_CHECKIN_MIN_S), NEXT_CHECKIN_MAX_S)) \
             if isinstance(nxt, (int, float)) and not isinstance(nxt, bool) else None
         if follow_up:
             self.poke()
+        if state.pop("_standby_lifted", False):
+            self.check_restart()  # e.g. "Check connection now": resume without waiting for the loop
         return self.status()
 
     async def _failed(self, state: Dict[str, Any], message: str) -> Dict[str, Any]:
         self._failures += 1
-        state.update(last_result="failed", last_error=message)
+        state.update(last_result="failed", last_error=message, last_ack_error="no_contact")
         logger.warning("Fleet check-in failed: %s", message)
         await asyncio.to_thread(save_state, state)
         return self.status()
@@ -743,8 +826,9 @@ class FleetControl:
             return offered
         return None
 
-    async def _handle_answer(self, state: Dict[str, Any], answer: Dict[str, Any], store_id: str) -> bool:
-        """Apply a verified policy and run verified commands. True = check in again soon."""
+    async def _handle_answer(self, state: Dict[str, Any], answer: Dict[str, Any], store_id: str,
+                             nonce: Optional[str] = None) -> bool:
+        """Apply a verified policy, run verified commands, check the ack. True = check in again soon."""
         key = self._trusted_key(state, decode_public_key(answer.get("control_public_key")))
         follow_up = False
         envelope = answer.get("policy")
@@ -761,7 +845,37 @@ class FleetControl:
         if isinstance(commands, list):
             for envelope in commands[:MAX_COMMANDS]:
                 follow_up |= await self._run_command(state, envelope, key, store_id)
+        self._check_ack(state, answer.get("ack"), key, store_id, nonce)
         return follow_up
+
+    def _check_ack(self, state: Dict[str, Any], envelope: Any, key: Optional[bytes], store_id: str,
+                   nonce: Optional[str]) -> bool:
+        """Record a verified contact (the offline standby clock restarts). True = verified."""
+        try:
+            if key is None and envelope is not None and state.get("key_mismatch"):
+                raise Rejected("control_key_changed")
+            ack = verify_ack(envelope, key, store_id, nonce or "")
+            applied = int((entitlements.stored_policy() or {}).get("version") or 0)
+            if ack["policy_version"] > applied:
+                # iKorex has a newer policy this box did not apply (refused or not
+                # sent): not in step with iKorex, so not a verified contact.
+                raise Rejected("policy_not_applied")
+        except Rejected as exc:
+            if state.get("last_ack_error") != exc.code:
+                logger.warning("Fleet check-in ack not verified: %s", exc.code)
+            state["last_ack_error"] = exc.code
+            return False
+        skew = ack["skew_s"]
+        when = ack["server_time"] if skew is not None else _now()
+        if skew is not None and state.get("clock_skew_s") is None:
+            logger.warning("Box clock is %+d s off the iKorex server clock", int(skew))
+        if entitlements.effective_state()["standby"]:
+            logger.warning("Fleet: verified contact with iKorex again; leaving standby")
+            _audit(state, "iKorex (signed ack)", "standby lifted: verified contact")
+            state["_standby_lifted"] = True  # not persisted (save_state keeps known keys only)
+        state.update(last_verified_contact_at=iso(when), contact_anchor=entitlements.contact_anchor("ack"),
+                     clock_skew_s=int(skew) if skew is not None else None, last_ack_error=None)
+        return True
 
     async def _apply_policy(self, state: Dict[str, Any], payload: Dict[str, Any], store_id: str) -> bool:
         if payload.get("type") != "policy":
@@ -776,6 +890,10 @@ class FleetControl:
         policy = entitlements.normalise_policy(payload, store_id)
         before = entitlements.effective_state()
         state.update(policy=policy, policy_applied_at=iso(), last_policy_error=None)
+        if policy["licence"].get("offline_grace_hours") and not isinstance(state.get("contact_anchor"), dict):
+            # Never a verified contact yet: the grace counts from now (the first
+            # policy with an offline limit).
+            state["contact_anchor"] = entitlements.contact_anchor("policy")
         await asyncio.to_thread(save_state, state)
         after = entitlements.effective_state()
         logger.info("Fleet policy v%d applied: state=%s licence=%s off=%s", policy["version"], after["state"],
@@ -931,6 +1049,19 @@ class FleetControl:
             else:
                 base = self._next_s or INTERVAL_S
                 delay = max(1.0, base + random.uniform(-JITTER_S, JITTER_S))
+            delay = self._cap_for_standby(delay)
+
+    @staticmethod
+    def _cap_for_standby(delay: float) -> float:
+        """Wake up when the offline grace runs out, so standby starts on time."""
+        try:
+            eff = entitlements.effective_state()
+        except Exception:  # noqa: BLE001
+            return delay
+        remaining = eff["offline"]["remaining_s"]
+        if eff["standby"] or remaining is None:
+            return delay
+        return max(1.0, min(delay, remaining + 1.0))
 
     def record_boot(self) -> Dict[str, Any]:
         eff = entitlements.effective_state()

@@ -1,4 +1,4 @@
-# iKorex Fleet Control: contract (v1, 2026-10-16)
+# iKorex Fleet Control: contract (v1, 2026-10-16; offline standby added 2026-10-21)
 
 iKorex owns and rents out the edge boxes. The **master control dashboard** on the VPS lets
 iKorex admins see every box's health and start/stop/restrict features remotely. It never
@@ -6,9 +6,10 @@ sees video, pictures, people, alerts' content, camera names, zone names or any o
 data. The box stays 100 % on-premise for store data.
 
 ## Owner decisions (2026-10-16)
-1. **Offline rule: keep running, grace.** Losing contact with the VPS never stops anything.
-   The box keeps its last valid signed policy. Only an explicit signed *Suspend* or a
-   licence end date stops features. Past `licence.valid_until` the box shows a warning
+1. **Offline rule: keep running, grace.** ~~Losing contact with the VPS never stops anything.~~
+   (Superseded for offline contact by decision 5 below.) The box keeps its last valid signed
+   policy. An explicit signed *Suspend*, a licence end date, or (decision 5) too long without
+   verified contact stops features. Past `licence.valid_until` the box shows a warning
    banner for `licence.grace_days` (default 14), then pauses. Licence dates are evaluated
    on the box's own clock, so they work offline.
 2. **Suspend = pause AI + lock dashboard.** Analysis, alerts, phone alerts and night watch
@@ -19,6 +20,34 @@ data. The box stays 100 % on-premise for store data.
    + TOTP (RFC 6238), rate-limited, full audit log. Cloudflare Access may be added later.
 4. **Telemetry: health + usage counts** (numbers only). Allowed fields are listed below;
    anything not listed must not be sent.
+
+## Owner decision 2026-10-21 (supersedes the offline part of decision 1)
+5. **Offline standby.** "A fallback on the CCTV box to stop working and be on standby mode if
+   the box is disconnected from the VPS for more than the grace period set by the VPS control
+   dashboard. The box should only start working after the VPS is connected again and security
+   is verified again."
+   - Policy field `licence.offline_grace_hours`: whole hours 1..2160, or `null` = never stand
+     by. Default `null`, so a box is unaffected until an admin sets it (Control UI: store page,
+     "Licence & limits" card, "Offline limit (hours)"; CLI
+     `manage policy <store> --offline-grace-hours N|none`). Changing it is a policy edit (new
+     version, audited) like any other.
+   - **Verified contact** = a check-in whose signed `ack` (below) verifies against the box's
+     *pinned* key (or `FLEET_CONTROL_PUBLIC_KEY`), names this store, echoes the nonce the box
+     just sent, and whose `policy_version` is not newer than the policy the box has applied
+     (a newer policy must be applied first). An HTTP 200 alone, an unsigned or invalid ack, an
+     ack signed by another key (fake VPS / DNS hijack), or a replayed ack (old nonce) never
+     counts. The box persists `last_verified_contact_at` in `system_setup['fleet_control']` on
+     every verified ack.
+   - **Standby** = `offline_grace_hours` set and the time since the last verified contact is
+     more than that. Effective state `standby` (separate from `suspended`): same effects as
+     paused (below), API 423 `{"code":"service_standby","message":"Standby: this box can't reach
+     iKorex. It will restart automatically once the connection is back and verified."}`, the
+     dashboard shows the standby variant of the paused page (last verified contact time; admins
+     get "Check connection now" = `POST /api/v1/fleet/checkin-now`). With less than 25 % of the
+     grace left a banner says "This box hasn't reached iKorex for X h; it will stand by in Y h".
+   - **Resume** only after a verified ack (and the VPS's newer policy, if any, applied); then
+     the app restarts through the existing debounced path. In standby the check-in loop keeps
+     trying with the normal backoff (60 s -> 15 min) and the online-access tunnel stays up.
 
 ## Transport
 Box -> VPS only (box dials out; no inbound port; works without frpc/online access):
@@ -43,6 +72,7 @@ Box -> VPS only (box dials out; no inbound port; works without frpc/online acces
   "version": 1,
   "store_id": "pearcedale",
   "sent_at": "2026-10-16T10:00:00Z",
+  "nonce": "22 chars: 128 random bits, base64url, no padding; new for every check-in",
   "box": {"software_version": "2.6.0", "git_commit": "3f7581e", "boot_id": "…",
           "uptime_s": 12345, "app_uptime_s": 600, "hostname_hash": "sha256-12hex",
           "os": "Ubuntu 26.04", "python": "3.14.0"},
@@ -57,14 +87,19 @@ Box -> VPS only (box dials out; no inbound port; works without frpc/online acces
              "last_backup_at": "…", "errors": ["inference_fallback_cpu"]},
   "usage": {"alerts_24h": {"low": 3, "medium": 1, "high": 0}, "incidents_24h": 4,
             "users_total": 3, "phones_registered": 2},
-  "policy": {"version_applied": 7, "state": "active", "licence_status": "ok|warning|expired"},
+  "policy": {"version_applied": 7, "state": "active", "licence_status": "ok|warning|expired",
+             "standby": false, "last_verified_contact_age_s": 310},
   "control_key_fingerprint": "sha256:…|null",
   "command_results": [{"id": "c_…", "status": "done|failed|rejected", "detail": "…",
                        "finished_at": "…"}]
 }
 ```
-`errors` are fixed machine codes only (no free text, no paths, no names). No IP addresses
-of cameras, no camera/zone/user names, no images, no counts of people.
+`errors` are fixed machine codes only (no free text, no paths, no names), e.g. `clock_skew`
+(the last verified ack's server time was more than 10 min off the box clock). No IP addresses
+of cameras, no camera/zone/user names, no images, no counts of people. `nonce` is used for the
+ack only; the VPS never stores it. `policy.standby` is true while the box is in standby;
+`policy.last_verified_contact_age_s` is the time since its last verified contact (null: none
+yet), measured before this check-in's ack.
 
 ### Check-in response body
 ```json
@@ -73,9 +108,16 @@ of cameras, no camera/zone/user names, no images, no counts of people.
   "control_public_key": "base64 raw Ed25519 public key (32 bytes)",
   "policy": {"payload": "<base64url of canonical JSON>", "sig": "<base64url Ed25519>"} | null,
   "commands": [{"payload": "<base64url JSON>", "sig": "<base64url>"}],
+  "ack": {"payload": "<base64url of canonical JSON>", "sig": "<base64url Ed25519>"} | null,
   "next_checkin_s": 300
 }
 ```
+`ack` is present when the request carried a valid `nonce` (null for older boxes). Its payload:
+```json
+{"type": "ack", "store_id": "pearcedale", "nonce": "<the request's nonce>",
+ "server_time": "2026-10-21T10:00:00Z", "policy_version": 7}
+```
+`policy_version` = the VPS's current stored policy version for the store (0 = none).
 `policy` is returned when the VPS's version > `version_applied` (or always; box ignores
 versions <= applied).
 
@@ -90,7 +132,9 @@ versions <= applied).
   Settings (admin only, audited locally). `.env` `FLEET_CONTROL_PUBLIC_KEY` (base64) overrides
   TOFU when set.
 - Box rejects: bad signature, wrong `store_id`, policy `version` <= applied, command
-  `not_after` passed or command id already seen (keep last 200 ids).
+  `not_after` passed or command id already seen (keep last 200 ids). Acks: see "Offline
+  standby" (bad signature, wrong store, wrong nonce, unparsable server_time, policy_version
+  newer than applied: not a verified contact).
 
 ### Policy payload
 ```json
@@ -98,7 +142,8 @@ versions <= applied).
   "type": "policy", "store_id": "pearcedale", "version": 7, "issued_at": "…",
   "state": "active|suspended",
   "message": "optional text shown to store users when suspended (<= 300 chars)",
-  "licence": {"valid_until": "2027-10-31" | null, "grace_days": 14},
+  "licence": {"valid_until": "2027-10-31" | null, "grace_days": 14,
+              "offline_grace_hours": 72 | null},
   "features": {
     "theft_detection": true, "zone_alerts": true, "night_watch": true,
     "phone_alerts": true, "heatmaps": true, "business_insights": true,
@@ -107,7 +152,8 @@ versions <= applied).
   "limits": {"max_cameras": null}
 }
 ```
-Missing feature keys = enabled (forward compatible). Default policy before any contact:
+Missing feature keys = enabled (forward compatible); a missing `offline_grace_hours` = null
+(never stand by). Default policy before any contact:
 everything enabled, state active, no licence date (a box never configured for fleet
 control behaves exactly as today).
 
@@ -123,7 +169,10 @@ exit so systemd (`Restart=always`) starts it again.
 
 ## Box effective state
 `licence_status`: `ok` | `warning` (today > valid_until but within grace) | `expired`.
-Effective paused = `state == "suspended"` or `licence_status == "expired"`.
+`standby`: see "Offline standby" below.
+Effective paused = `state == "suspended"` or `licence_status == "expired"` or `standby`
+(`paused_reason` `suspended` > `licence_expired` > `standby`; 423 code `service_standby` for the
+last, `service_paused` otherwise).
 - Paused: pipeline/analysis, pose analytics, push alerts, night watch, heatmap recorder,
   recommendations not started (or stopped); the API returns 423
   `{"code":"service_paused","message":…}` to store users for everything except auth,
@@ -139,11 +188,38 @@ Effective paused = `state == "suspended"` or `licence_status == "expired"`.
 - Applying a changed policy: update gates live where cheap; otherwise restart the app
   (graceful, debounced 5 s). Persist policy + results in `system_setup` key `fleet_control`.
 
+### Offline standby (box)
+- Ack check (`fleet_control.verify_ack`): signature with the pinned/env key; `type == "ack"`;
+  `store_id` = this store; `nonce` = the one just sent (constant-time compare); `server_time`
+  parses; `policy_version` an int >= 0 and <= the applied policy version. Within +-10 min of
+  the box clock: `last_verified_contact_at` = box time. Further off: still accepted,
+  `clock_skew_s` recorded (health error `clock_skew`), `last_verified_contact_at` = server time.
+  Problems are kept as `last_ack_error` (`ack_missing`, `no_contact`, `control_key_changed`,
+  `wrong_nonce`, `bad_signature`, `policy_not_applied`, ...) and shown in Settings.
+- Clocks (`entitlements.contact_elapsed_s`): each verified contact stores an anchor (box wall
+  time, boot id, CLOCK_BOOTTIME). Same boot: elapsed = boot-clock difference (wall clock changes
+  do not matter). After a reboot: elapsed = wall clock - anchor wall time, but never less than
+  the *floor*. The floor is persisted on every check-in attempt (at least every 15 min while
+  offline) with the boot it was taken on; it grows by the boot-clock time since (all of this
+  boot's uptime after a reboot). So a clock set back cannot extend the grace: time the box runs
+  always counts; only time it is switched off with its clock set back (plus at most the
+  15 min before shutdown) is lost.
+- Start of the grace without any verified contact (older VPS, or first policy): the moment
+  the first policy with an offline limit is applied.
+- A restart in standby stays in standby (state persisted; boot starts paused). Resetting the
+  control key pin (Settings, admin) does not lift standby: only a verified ack with the newly
+  pinned key does. The loop wakes up when the grace runs out, so standby starts on time; the
+  gate answers 423 from that moment even before the restart.
+- `GET /api/v1/fleet/status` adds `standby`, `offline_grace_hours`, `last_verified_contact_at`,
+  `last_verified_contact_age_s`, `standby_in_s`, `standby_warning` (< 25 % left),
+  `clock_skew_s`, `last_ack_error`, `software_version`, `git_commit`.
+
 Box endpoints (session auth): `GET /api/v1/fleet/status` (any signed-in user: state,
 message, licence status/date, features, last check-in time, fingerprint; no token)
 and `POST /api/v1/fleet/reset-key` (admin), `POST /api/v1/fleet/checkin-now` (admin).
 Settings card "iKorex service": plan status, licence date, features included, last contact,
-control key fingerprint.
+verified contact, offline limit, control key fingerprint, software version (`APP_VERSION`,
+2.7.0 for this release, also in `box.software_version` and `/api/v1/health`).
 
 ## VPS: `cctv-control` container (~/Projects-1/Server/cctv-tunnel/control/)
 Python 3.13 alpine like cctv-auth, stdlib `http.server` + `cryptography` (pinned, for
@@ -159,12 +235,17 @@ Ed25519). Port 9200 on networks `cctv-edge` (gateway) and `cctv-internal` (to ca
 - Admin web UI served by the container under `control.ikorex.com.au`: sign-in
   (password + TOTP, 5 failures -> 15 min lock, per-IP limiter), Fleet overview (online from
   cctv-auth `/status` + last check-in age, version, health chips, licence, state), store
-  detail (health now + 24 h sparkline, feature toggles, licence date, suspend/resume with
-  typed confirmation and message, commands with results, audit), Audit page, Admins page.
+  detail (health now + 24 h sparkline, feature toggles, licence date, offline limit,
+  suspend/resume with typed confirmation and message, commands with results, audit), Audit
+  page, Admins page.
   iKorex logo, light/dark, phone width. Session cookie `__Host-ctl` (Secure, HttpOnly,
   SameSite=Strict, 12 h absolute / 30 min idle), CSRF header `X-CSRF` from a per-session token,
   strict CSP (no inline script), `X-Frame-Options DENY`.
 - CLI `manage`: `add-admin <user>` (prompts password, prints TOTP secret + otpauth URI),
   `reset-totp`, `disable-admin`, `list-admins`, `show-key` (public key + fingerprint),
-  `policy <store> [--suspend|--resume] [--feature k=on|off] [--valid-until D]`.
+  `policy <store> [--suspend|--resume] [--feature k=on|off] [--valid-until D]
+  [--offline-grace-hours N|none]`.
+- Fleet overview: a box reporting `policy.standby` shows "Standby (offline)" and counts as
+  paused; with an offline limit set, a chip "Offline limit N h" (warning past 75 % of it) and
+  "verified contact <= X ago" (the box's reported age plus the time since that check-in).
 - No store data stored or displayed beyond the telemetry fields above.

@@ -1,4 +1,4 @@
-/* iKorex service (fleet control): Settings card, licence banner, paused page,
+/* iKorex service (fleet control): Settings card, licence and offline banners, paused / standby page,
    "not included in your plan" notes (js/fleet.js). Tokens from style.css. */
 
 /* Features not in the plan: hidden whatever their own script does with [hidden]. */
@@ -139,6 +139,8 @@ html.fleet-is-paused body { overflow: hidden; }
   border: 1px solid var(--warning-border);
   color: var(--warning);
 }
+/* Standby (no verified contact with iKorex): informational, not an alarm. */
+.fleet-paused-icon.is-standby { background: var(--info-bg); border-color: var(--info-border); color: var(--info); }
 .fleet-paused-title { margin: 0 0 var(--space-2); font-size: var(--fs-xl); font-weight: 600; color: var(--text); }
 .fleet-paused-msg { margin: 0 0 var(--space-3); font-size: var(--fs-lg); color: var(--text); overflow-wrap: anywhere; }
 .fleet-paused-note { margin: 0 0 var(--space-5); font-size: var(--fs-sm); color: var(--text-secondary); line-height: 1.5; }
