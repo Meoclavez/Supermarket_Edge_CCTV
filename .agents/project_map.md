@@ -589,8 +589,9 @@ than firing on empty data.
 ## Store map v2, camera gallery, iKorex branding, fleet control (2026-10-16)
 
 Contracts: `docs/STORE_MAP_V2_CONTRACT.md`, `docs/FLEET_CONTROL_CONTRACT.md`. Built and QA'd
-end-to-end on a scratch box (headless Chrome, all checks PASS); not yet deployed (box offline
-on 2026-10-16 from ~09:00 AEDT, both Tailscale and tunnel).
+end-to-end on a scratch box (headless Chrome, all checks PASS); commit c206a32. VPS side
+deployed 2026-10-21 (key sha256:3ee9e4f81f48d587); box deploy pending (box at 8767156). The
+2026-10-16/17 outage was the store's internet (DNS failures), the box stayed up.
 * **Map = "site"**: `store_layouts.width_m/height_m` is the whole canvas (building = a ROOM).
   `POST /api/v1/layout/extend {left_m,top_m,right_m,bottom_m}` (left/top translate zones,
   structures, cameras, calibration points, homography `T@H`, shelf_interactions floor x/y,
