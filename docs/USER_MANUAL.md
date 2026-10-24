@@ -186,12 +186,14 @@ camera tile → "Camera setup", or from a setup checklist button. When you come 
   elsewhere to close it.
 - **Help panel.** "Help" in the header opens searchable how-to guides (type a word such as
   "calibrate", "phone" or "backup"). Each guide has the steps, tips and a button that takes you to
-  the right screen. The panel ends with how to contact iKorex support.
+  the right screen. The panel ends with how to contact iKorex support and "Report a problem"
+  (see 4.9).
 - **Error messages** from the help screens are written in plain words, for example "Your sign-in has
   ended. Please sign in again." or "Heatmaps is not included in your iKorex plan."
 
-The words of the "?" explanations, the guides and the iKorex support contact are kept in one file,
-`edge_backend/app/static/js/help_content.js` (the support phone and email are filled in there).
+The words of the "?" explanations and the guides are kept in one file,
+`edge_backend/app/static/js/help_content.js`. The iKorex support contact comes from iKorex's signed
+plan when iKorex has set one; otherwise the one filled in that file is shown.
 
 ---
 
@@ -1216,7 +1218,52 @@ the last plan it received.
 
 **Your data stays in the store.** iKorex receives only health and usage numbers (for example disk
 space and how many alerts there were). Store video, pictures, camera and area names and other store
-data never leave the box.
+data never leave the box. Reports you send yourself and the system's error log are described in 4.9.
+
+### 4.9 Report a problem
+
+Anyone signed in (Owner, Administrator or Operator) can tell iKorex that something is wrong:
+
+1. Press **Help** in the header, then **"Report a problem"** (also in Settings → "Help and support",
+   and on the "Service paused" / standby page).
+2. **"What went wrong?"**: what you saw, what you pressed and when (10 to 2,000 characters).
+3. **"Where in the dashboard?"**: Cameras, Store map, Alerts, Insights, Phone alerts, Online access
+   or Other.
+4. **"How urgent?"**: "Normal", or "Urgent: the store can't use the system".
+5. **"Call back (optional)"**: your name and phone number, only if you want iKorex to ring you. They
+   are kept only if you fill them in.
+6. Press **"Send report"**.
+
+The dialog reminds you: *Don't include customer details. No pictures or video are sent.*
+
+**"My reports"** (in the same dialog) lists this system's reports with their progress: "Waiting to
+send", "Received by iKorex", "Being worked on", "Fixed" or "Closed", and a short reply from iKorex
+when there is one. A call-back phone number is shown only to the person who left it and to owners and
+administrators.
+
+**No internet?** The report is saved on the box first and shows "Will send when the box is online";
+it is sent by itself once the box reaches iKorex again. If the box is not connected to iKorex at all
+(no tunnel server or store token in "Online access"), the report stays on the box: call your
+installer as well.
+
+**What is sent with a report** (shown in the dialog under "Also sent with your report" before you
+press Send): the box software version, how long the box has been running, cameras online out of the
+total, disk space used (%), the codes and counts of the last 10 recorded problems, which screen you
+were on and a rough screen size (phone, tablet, laptop, large screen). Passwords or camera addresses
+pasted into the text are removed before it is saved.
+
+**The system's own problem log.** The box also keeps a small log of its own errors (not every log
+line) for iKorex: serious errors, crashes, and a few important warnings: disk nearly full, person
+detection fell back to the processor (no GPU), database busy ("locked"), a database upgrade or backup
+that failed, and a camera that has been offline for more than 10 minutes. The same problem is counted
+once however often it happens (32 cameras failing the same way is one entry "affected: 32"). The log
+holds at most 500 problems and is sent with the regular check-in, or about a minute after a new
+error.
+
+**What is never sent**: video, pictures or screenshots; camera, area, user or store names (replaced
+by an internal code such as `cam_3f9a…` or by `<name>`); camera or recorder addresses, IP and MAC
+addresses, host names, e-mail addresses, passwords and tokens; file locations outside the program;
+the text inside quotes in error messages; counts of people or any other store data.
 
 ---
 

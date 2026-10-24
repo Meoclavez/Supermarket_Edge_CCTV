@@ -97,6 +97,16 @@ async def lifespan(app: FastAPI):
         _handler.setFormatter(logging.Formatter("%(levelname)s:     [%(name)s] %(message)s"))
         edge_root.addHandler(_handler)
         edge_root.setLevel(logging.INFO)
+    # Box issue log (services/issue_log.py): ERROR and above, uncaught exceptions and a
+    # few important warnings, redacted and counted per fingerprint in STORAGE_DIR/support.db
+    # (never the main database) for iKorex. After log_redaction (import time) and after
+    # the handler check above (it would otherwise see this handler on the root logger).
+    try:
+        from .services.issue_log import install_issue_capture
+
+        install_issue_capture()
+    except Exception as exc:  # never block startup on the issue log
+        logging.getLogger("edge.startup").warning(f"Issue log not installed: {exc}")
 
     for problem in _check_deployment_safety():
         logging.getLogger("edge.security").warning(f"INSECURE CONFIGURATION: {problem}")
@@ -258,11 +268,18 @@ async def lifespan(app: FastAPI):
         await fleet_control.start()
     except Exception as exc:
         startup_log.exception(f"Fleet control failed to start: {exc}")
+    # 7b. Report a problem + issue log upload to iKorex (idle while fleet control is not set up).
+    from .services.support_reports import uploader as support_uploader
+    try:
+        await support_uploader.start()
+    except Exception as exc:
+        startup_log.exception(f"Support uploader failed to start: {exc}")
     try:
         yield
     finally:
         shutdown_signal.request_shutdown()
         await fleet_control.stop()
+        await support_uploader.stop()
         # Before the pipeline: its final partial-hour record reads the live engine.
         await heatmap_recorder.stop()
         await pipeline_supervisor.stop()
@@ -378,6 +395,10 @@ app.include_router(live_routes.router)
 from .routes import fleet as fleet_routes  # noqa: E402
 
 app.include_router(fleet_routes.router)
+# Support contact and Report a problem (support_reports.py, issue_log.py).
+from .routes import support as support_routes  # noqa: E402
+
+app.include_router(support_routes.router)
 
 # Mount Static Files
 STATIC_DIR = Path(__file__).resolve().parent / "static"

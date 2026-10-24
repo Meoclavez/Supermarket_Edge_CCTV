@@ -887,6 +887,8 @@ _OPERATOR_ONLY = (
     ("POST", rf"/api/v1/cameras/{_ID}/reconnect"),
     # a phone's own push token (PATCH/DELETE of its own paired device: below)
     ("PUT", r"/api/v1/pairing/devices/me/push"),
+    # Report a problem to iKorex (any signed-in person)
+    ("POST", r"/api/v1/support/reports"),
 )
 
 

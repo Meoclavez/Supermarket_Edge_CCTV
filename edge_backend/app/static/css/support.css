@@ -1,0 +1,128 @@
+/* ==========================================================================
+   Report a problem dialog, My reports, Settings > Help and support (js/support.js).
+   Built on the style.css tokens, so both themes follow automatically.
+   Layer 9100: above the Help panel (1500) and the paused / standby page (9000),
+   below the sign-in gate (10000).
+   ========================================================================== */
+
+.support-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+  background: var(--modal-scrim);
+}
+.support-overlay[hidden] { display: none; }
+.support-open body { overflow: hidden; }
+
+.support-dialog {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 600px;
+  max-height: min(92vh, 900px);
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-overlay);
+  overflow: hidden;
+}
+.support-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+.support-title { display: flex; align-items: center; gap: var(--space-2); margin: 0; font-size: var(--fs-lg); font-weight: var(--fw-semibold); }
+.support-title .icon { color: var(--accent-text); }
+.support-switch { display: flex; flex-wrap: wrap; gap: var(--space-2); padding: var(--space-3) var(--space-4) 0; }
+.support-count { font-variant-numeric: tabular-nums; }
+.support-body { flex: 1 1 auto; overflow-y: auto; padding: var(--space-3) var(--space-4) calc(var(--space-4) + env(safe-area-inset-bottom)); }
+
+/* ---- form ---------------------------------------------------------------- */
+.support-form { display: flex; flex-direction: column; gap: var(--space-3); font-size: var(--fs-sm); }
+.support-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  background: var(--info-bg);
+  border: 1px solid var(--info-border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  line-height: 1.45;
+}
+.support-notice .icon { color: var(--info); flex: 0 0 auto; margin-top: 1px; }
+.support-text { min-height: 112px; }
+.support-hint { display: flex; justify-content: space-between; gap: var(--space-2); margin: 0; font-size: var(--fs-xs); color: var(--text-secondary); line-height: 1.45; }
+#supCount { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+.support-err { font-size: var(--fs-xs); color: var(--danger); line-height: 1.45; }
+.support-err[hidden] { display: none; }
+.support-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); align-items: start; }
+.support-urgency, .support-callback { margin: 0; padding: 0; border: 0; min-width: 0; }
+.support-urgency { display: flex; flex-direction: column; gap: var(--space-1); }
+.support-urgency legend, .support-callback legend { padding: 0; margin-bottom: 6px; }
+.support-radio { display: flex; align-items: flex-start; gap: var(--space-2); line-height: 1.4; cursor: pointer; color: var(--text); }
+.support-radio input { margin: 2px 0 0; flex: 0 0 auto; accent-color: var(--accent); }
+.support-callback { display: flex; flex-direction: column; gap: var(--space-2); }
+.support-callback .support-hint { display: block; }
+
+.support-diag { padding: var(--space-2) var(--space-3); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.support-h3 { display: flex; align-items: center; gap: var(--space-1); margin: 0 0 var(--space-2); font-size: var(--fs-sm); font-weight: var(--fw-semibold); color: var(--text); }
+.support-h3 .icon { color: var(--text-secondary); }
+.support-diag-list { display: grid; grid-template-columns: minmax(110px, max-content) 1fr; gap: 2px var(--space-3); margin: 0 0 var(--space-2); font-size: var(--fs-xs); }
+.support-diag-list dt { color: var(--text-secondary); }
+.support-diag-list dd { margin: 0; color: var(--text); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.support-diag .help-muted { margin: 0; }
+
+.support-status { margin: 0; font-size: var(--fs-sm); color: var(--text-2); line-height: 1.45; }
+.support-status:empty { display: none; }
+.support-status.is-offline { padding: var(--space-2) var(--space-3); background: var(--warning-bg); border: 1px solid var(--warning-border); border-radius: var(--radius-sm); color: var(--text); }
+.support-status.is-error { color: var(--danger); }
+.support-foot { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); padding-top: var(--space-3); border-top: 1px solid var(--border); }
+.support-contact { padding-top: var(--space-1); font-size: var(--fs-sm); }
+.support-contact .help-muted { margin-bottom: var(--space-1); }
+
+/* ---- sent ------------------------------------------------------------------ */
+.support-sent { display: flex; flex-direction: column; gap: var(--space-2); font-size: var(--fs-sm); }
+.support-sent-icon { color: var(--success); }
+.support-sent-title { margin: 0; font-size: var(--fs-lg); font-weight: var(--fw-semibold); }
+.support-sent-title:focus { outline: none; }
+.support-sent-text { margin: 0; color: var(--text-2); line-height: 1.5; }
+
+/* ---- My reports ---------------------------------------------------------- */
+.support-list { list-style: none; margin: 0 0 var(--space-3); padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+.support-item { padding: var(--space-2) var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); }
+.support-item.is-urgent { border-left: 3px solid var(--danger-solid); }
+.support-item-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); margin-bottom: var(--space-1); }
+.support-item-meta { font-size: var(--fs-xs); color: var(--text-secondary); }
+.support-item-text { margin: 0; font-size: var(--fs-sm); color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45;
+  display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; }
+.support-reply { margin-top: var(--space-2); padding: var(--space-2) var(--space-3); background: var(--accent-bg); border: 1px solid var(--accent-border); border-radius: var(--radius-sm); }
+.support-reply-k { display: flex; align-items: center; gap: var(--space-1); font-size: var(--fs-xs); font-weight: var(--fw-semibold); color: var(--accent-text); margin-bottom: 2px; }
+.support-reply p { margin: 0; font-size: var(--fs-sm); white-space: pre-wrap; overflow-wrap: anywhere; }
+.support-empty { padding: var(--space-5) var(--space-2); }
+
+/* ---- Settings card + paused page ----------------------------------------- */
+.support-card-lede { margin: 0 0 var(--space-3); line-height: 1.45; }
+.support-card-actions { margin-bottom: var(--space-3); }
+.support-card-contact { margin-top: var(--space-2); }
+.fleet-paused-support { width: 100%; margin-top: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--border); text-align: left; font-size: var(--fs-sm); }
+.fleet-paused-support .help-h3 { justify-content: flex-start; }
+
+@media (max-width: 560px) {
+  .support-overlay { padding: 0; align-items: stretch; }
+  .support-dialog { max-width: none; max-height: none; height: 100%; border-radius: 0; border: 0; }
+  .support-row { grid-template-columns: minmax(0, 1fr); }
+  .support-foot .btn { flex: 1 1 auto; justify-content: center; }
+}
+@media print {
+  .support-overlay { display: none !important; }
+}

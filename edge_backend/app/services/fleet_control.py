@@ -61,6 +61,8 @@ audit_log = logging.getLogger("edge.audit")
 
 STATE_KEY = entitlements.STATE_KEY
 CHECKIN_PATH = "/control/v1/checkin"
+# Report a problem + box issue log (docs/SUPPORT_ISSUES_CONTRACT.md, services/support_reports.py).
+ISSUES_PATH = "/control/v1/issues"
 START_DELAY_S = 20.0
 INTERVAL_S = 300.0
 JITTER_S = 30.0
@@ -114,6 +116,8 @@ ALLOWED_BODY: Dict[str, Any] = {
                "last_verified_contact_age_s": None},
     "control_key_fingerprint": None,
     "command_results": [{"id": None, "status": None, "detail": None, "finished_at": None}],
+    # The newest report_updates.updated_at this box has applied (SUPPORT_ISSUES_CONTRACT.md).
+    "report_cursor": None,
 }
 MAX_STRING = 120
 
@@ -133,6 +137,11 @@ _LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
 
 
 def dev_checkin_url() -> Optional[str]:
+    return dev_control_url(CHECKIN_PATH)
+
+
+def dev_control_url(path: str) -> Optional[str]:
+    """FLEET_CONTROL_DEV_URL + ``path`` (loopback only), or None."""
     raw = (os.environ.get(DEV_URL_ENV) or "").strip()
     if not raw:
         return None
@@ -148,7 +157,7 @@ def dev_checkin_url() -> Optional[str]:
         logger.warning("%s ignored: only http(s)://127.0.0.1|localhost|[::1][:port] is allowed", DEV_URL_ENV)
         return None
     netloc = f"[{host}]" if ":" in host else host
-    return f"{parts.scheme}://{netloc}{f':{port}' if port else ''}{CHECKIN_PATH}"
+    return f"{parts.scheme}://{netloc}{f':{port}' if port else ''}{path}"
 
 
 def _now() -> datetime:
@@ -253,8 +262,12 @@ def verify_ack(envelope: Any, raw_key: Optional[bytes], store_id: str, nonce: st
     if not isinstance(pv, int) or isinstance(pv, bool) or pv < 0:
         raise Rejected("bad_policy_version")
     skew = ((now or _now()) - server_time).total_seconds()
+    # sha256 (hex) of the canonical JSON of this answer's report_updates
+    # (SUPPORT_ISSUES_CONTRACT.md): only signed, matching updates are applied.
+    ru_hash = ack.get("report_updates_sha256")
     return {"server_time": server_time, "policy_version": pv,
-            "skew_s": skew if abs(skew) > ACK_MAX_SKEW_S else None}
+            "skew_s": skew if abs(skew) > ACK_MAX_SKEW_S else None,
+            "report_updates_sha256": ru_hash if isinstance(ru_hash, str) else None}
 
 
 def verify_envelope(envelope: Any, raw_key: bytes) -> Dict[str, Any]:
@@ -600,6 +613,15 @@ def _health_sync() -> Dict[str, Any]:
     return h
 
 
+def _report_cursor() -> Optional[str]:
+    try:
+        from app.services import support_reports
+
+        return support_reports.report_cursor()
+    except Exception:  # noqa: BLE001
+        return None
+
+
 # --------------------------------------------------------------------------- client
 
 class FleetControl:
@@ -639,7 +661,8 @@ class FleetControl:
             return {"problem": "Store ID or store token missing (Settings > Online access)."}
         port = "" if server["port"] == 443 else f":{server['port']}"
         url = dev_checkin_url() or f"https://{server['host']}{port}{CHECKIN_PATH}"
-        return {"url": url, "store_id": store_id,
+        issues_url = dev_control_url(ISSUES_PATH) if dev_checkin_url() else f"https://{server['host']}{port}{ISSUES_PATH}"
+        return {"url": url, "issues_url": issues_url, "store_id": store_id,
                 "token": token, "ca_file": ras.find_ca_bundle()}
 
     # ---- status for the dashboard (no token, no key material beyond the fingerprint)
@@ -685,6 +708,8 @@ class FleetControl:
             "control_key_source": "env" if env_key else ("pinned" if state.get("control_public_key") else None),
             "key_changed": bool(mismatch),
             "offered_key_fingerprint": mismatch.get("fingerprint") if mismatch else None,
+            # The support contact from the signed policy (None: the dashboard uses its built-in one).
+            "support": eff.get("support"),
         }
 
     # ---- loop plumbing (same pattern as offline_watchdog)
@@ -736,6 +761,7 @@ class FleetControl:
                        "last_verified_contact_age_s": eff["offline"]["elapsed_s"]},
             "control_key_fingerprint": fingerprint(env_key) if env_key else state.get("fingerprint"),
             "command_results": list(state.get("pending_results") or [])[-MAX_RESULTS:],
+            "report_cursor": await asyncio.to_thread(_report_cursor),
         }
         body = filter_allowed(body, ALLOWED_BODY)
         while len(canonical_json(body)) > MAX_BODY_BYTES and body.get("command_results"):
@@ -782,8 +808,18 @@ class FleetControl:
         # Results the VPS now has are done with.
         state["pending_results"] = [r for r in state.get("pending_results") or [] if r.get("id") not in sent_ids]
         state.update(last_ok_at=state["last_checkin_at"], last_result="ok", last_error=None)
+        state.pop("_verified_ack", None)
         follow_up = await self._handle_answer(state, answer, tgt["store_id"], nonce)
+        verified_ack = state.pop("_verified_ack", None)
         await asyncio.to_thread(save_state, state)
+        try:
+            # Report statuses / replies from iKorex (only when this check-in's signed ack
+            # verified and covers them), then send queued reports and changed issues.
+            from app.services import support_reports
+
+            await asyncio.to_thread(support_reports.on_checkin_answer, answer, verified_ack)
+        except Exception:  # noqa: BLE001 - support upload must never break the check-in
+            logger.info("support report updates not applied", exc_info=True)
         nxt = answer.get("next_checkin_s")
         self._next_s = float(min(max(nxt, NEXT_CHECKIN_MIN_S), NEXT_CHECKIN_MAX_S)) \
             if isinstance(nxt, (int, float)) and not isinstance(nxt, bool) else None
@@ -875,6 +911,7 @@ class FleetControl:
             state["_standby_lifted"] = True  # not persisted (save_state keeps known keys only)
         state.update(last_verified_contact_at=iso(when), contact_anchor=entitlements.contact_anchor("ack"),
                      clock_skew_s=int(skew) if skew is not None else None, last_ack_error=None)
+        state["_verified_ack"] = ack  # not persisted: this check-in's verified ack (report_updates check)
         return True
 
     async def _apply_policy(self, state: Dict[str, Any], payload: Dict[str, Any], store_id: str) -> bool:

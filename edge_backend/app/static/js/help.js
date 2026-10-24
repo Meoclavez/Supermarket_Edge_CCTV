@@ -9,7 +9,8 @@
  *    The popover is a non-modal dialog: click / Enter / Space toggles it, Esc
  *    closes it and returns focus to the "?" button.
  *  - Help panel (header "Help" button, #navHelp): searchable how-to articles,
- *    "Do it" buttons that open the right screen, and iKorex support contact.
+ *    "Do it" buttons that open the right screen, the iKorex support contact (from
+ *    the signed policy via js/support.js, else help_content.js) and "Report a problem".
  *    Modal side panel: focus stays inside, Esc closes, focus goes back.
  *  - EdgeHelp.friendlyError(status, body) / EdgeHelp.fetchJSON(url): turn API
  *    refusals (401, 403 feature_disabled, 409 camera_limit, 423 service_paused
@@ -139,6 +140,7 @@
         break;
       case 'studio': window.location.href = '/dashboard/studio'; break;
       case 'checklist': if (window.EdgeOnboarding) window.EdgeOnboarding.showChecklist(); break;
+      case 'report': if (window.EdgeSupport) window.EdgeSupport.openReport(); break;
       case 'welcome': if (window.EdgeOnboarding) window.EdgeOnboarding.showWelcome(); break;
       default: break;
     }
@@ -342,19 +344,29 @@
 
   const visibleArticles = () => C.articles.filter((a) => a.role !== 'admin' || isAdmin());
 
+  // The contact comes from the signed iKorex policy when there is one (js/support.js),
+  // else from help_content.js SUPPORT.
   function supportHtml() {
-    const s = C.SUPPORT || {};
-    const rows = [];
-    if (s.phone) rows.push(`<li><span class="help-support-k">Phone</span><a href="tel:${esc(String(s.phone).replace(/[^0-9+]/g, ''))}">${esc(s.phone)}</a></li>`);
-    if (s.email) rows.push(`<li><span class="help-support-k">Email</span><a href="mailto:${esc(s.email)}">${esc(s.email)}</a></li>`);
-    if (s.hours) rows.push(`<li><span class="help-support-k">Hours</span><span>${esc(s.hours)}</span></li>`);
-    if (s.website) rows.push(`<li><span class="help-support-k">Web</span><a href="${esc(s.website)}" target="_blank" rel="noopener">${esc(s.website)}</a></li>`);
-    const body = rows.length
-      ? `<ul class="help-support-list">${rows.join('')}</ul>`
-      : '<p class="help-muted">Ask your installer for the iKorex support phone number and email.</p>';
+    let contact = '';
+    try { contact = window.EdgeSupport ? window.EdgeSupport.contactHtml({ titleId: 'helpSupportTitle' }) : ''; } catch (_) { contact = ''; }
+    if (!contact) {
+      const s = C.SUPPORT || {};
+      const rows = [];
+      if (s.phone) rows.push(`<li><span class="help-support-k">Phone</span><a href="tel:${esc(String(s.phone).replace(/[^0-9+]/g, ''))}">${esc(s.phone)}</a></li>`);
+      if (s.email) rows.push(`<li><span class="help-support-k">Email</span><a href="mailto:${esc(s.email)}">${esc(s.email)}</a></li>`);
+      if (s.hours) rows.push(`<li><span class="help-support-k">Hours</span><span>${esc(s.hours)}</span></li>`);
+      if (s.website) rows.push(`<li><span class="help-support-k">Web</span><a href="${esc(s.website)}" target="_blank" rel="noopener">${esc(s.website)}</a></li>`);
+      const body = rows.length
+        ? `<ul class="help-support-list">${rows.join('')}</ul>`
+        : '<p class="help-muted">Ask your installer for the iKorex support phone number and email.</p>';
+      contact = `<h3 class="help-h3" id="helpSupportTitle">${ico('users', 'sm')}Contact ${esc(s.name || 'iKorex support')}</h3>${body}`;
+    }
     return `<section class="help-support" aria-labelledby="helpSupportTitle">
-      <h3 class="help-h3" id="helpSupportTitle">${ico('users', 'sm')}Contact ${esc(s.name || 'iKorex support')}</h3>
-      ${body}
+      ${contact}
+      <div class="help-quick help-support-actions">
+        <button type="button" class="btn btn-sm btn-primary" data-support-report>${ico('circle-alert', 'sm')}Report a problem</button>
+        <button type="button" class="btn btn-sm" data-support-reports>My reports</button>
+      </div>
       <p class="help-muted">When you call, say which screen you are on and what you pressed. Never send camera pictures or passwords by email.</p>
     </section>`;
   }

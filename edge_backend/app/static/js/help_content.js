@@ -4,7 +4,8 @@
  * Plain language, Australian English, button and field names exactly as they
  * appear on screen. Edit the words here; no other file needs to change.
  *
- *   SUPPORT   iKorex support contact shown in the Help panel (owner to fill in).
+ *   SUPPORT   iKorex support contact shown in the Help panel when the signed iKorex
+ *             policy has none (the policy's "support" wins: js/support.js).
  *   topics    short "?" explanations: { title, text: [paragraphs], list?: [items], article? }
  *   anchors   where "?" buttons go on cards that scripts build at run time
  *             (static cards use data-help / data-help-after in index.html).
@@ -13,22 +14,22 @@
  * Text is inserted as text (escaped), never as HTML.
  * Actions ("go") are names that js/help.js knows: today, cameras, map,
  * map-edit, map-zone, add-cameras, insights, insights-footfall, loss,
- * studio, settings:<card id>, checklist, welcome.
+ * studio, settings:<card id>, checklist, welcome, report.
  */
 (function () {
   'use strict';
 
   // ---------------------------------------------------------------------------
-  // SUPPORT CONTACT: TO BE SUPPLIED BY THE OWNER.
+  // SUPPORT CONTACT (owner, 2026-10-24). The signed policy's `support` overrides it.
   // Fill in iKorex's real support details here. A value left null is not shown;
   // with all of them null the panel says to ask the installer.
   // ---------------------------------------------------------------------------
   const SUPPORT = {
     name: 'iKorex support',
-    phone: null,     // e.g. '1300 000 000'  (OWNER TO SUPPLY)
-    email: null,     // e.g. 'support@example.com.au'  (OWNER TO SUPPLY)
-    hours: null,     // e.g. 'Monday to Friday, 9 am to 5 pm (Melbourne time)'  (OWNER TO SUPPLY)
-    website: null,   // e.g. 'https://example.com.au/support'  (OWNER TO SUPPLY)
+    phone: '+61 451 541 758',
+    email: 'sales@ikorex.com.au',
+    hours: null,     // not supplied yet
+    website: 'https://ikorex.com.au',
   };
 
   // Names of the features the iKorex plan can turn off (services/entitlements.py FEATURE_LABELS).
@@ -570,6 +571,19 @@
         '"Service paused" means iKorex has paused the service; your settings and evidence are kept.'],
       tips: ['Losing the internet never pauses anything. Store video and pictures never leave this device.'],
       go: 'settings:settings-fleet', goLabel: 'Open iKorex service',
+    },
+    {
+      id: 'report-problem', title: 'Report a problem to iKorex',
+      keywords: 'report problem issue fault broken support ticket contact ikorex help call back',
+      summary: 'Tell iKorex what is wrong, and see their answer under My reports.',
+      steps: ['Press Help, then "Report a problem" (also in Settings > Help and support).',
+        'Say what went wrong, where in the dashboard, and how urgent it is.',
+        'Add your name and phone only if you want a call back.',
+        'Press "Send report". iKorex\'s answer and progress show under "My reports".'],
+      tips: ["Don't include customer details. No pictures or video are sent.",
+        'A few numbers go with the report so iKorex can help faster: software version, how long the box has run, cameras online, disk space, recent error codes. They are shown before you send.',
+        'No internet? The report is kept on this box and sent when it is back online.'],
+      go: 'report', goLabel: 'Report a problem',
     },
     {
       id: 'troubleshooting', title: 'Something is not working',

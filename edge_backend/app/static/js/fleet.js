@@ -4,7 +4,8 @@
 //   * the full-screen "Service paused" page (also opened by any API 423 service_paused),
 //     and its "Standby" variant (423 service_standby: no verified contact with iKorex
 //     for longer than the plan's offline limit) with the last contact time and
-//     "Check connection now" (administrators: a check-in now)
+//     "Check connection now" (administrators: a check-in now); both show the support
+//     contact from the signed policy (js/support.js) and "Report a problem"
 //   * the licence warning banner (licence ended, within the grace days) and the
 //     offline banner (less than 25 % of the offline limit left before standby)
 //   * hiding the cards/tabs of features not in the plan, with a short
@@ -138,7 +139,20 @@
           <button type="button" class="btn btn-secondary" id="fleetPausedSignOut">${icon('log-out')}Sign out</button>
         </div>
         <div class="fleet-paused-status" id="fleetPausedStatus" role="status" aria-live="polite"></div>
+        <section class="fleet-paused-support" aria-labelledby="fleetPausedSupportTitle">
+          <div id="fleetPausedSupport">${supportBlock()}</div>
+          <button type="button" class="btn btn-secondary btn-sm" data-support-report>${icon('circle-alert', 'sm')}Report a problem</button>
+        </section>
       </div>`;
+  }
+
+  // Support contact (signed policy, else help_content.js) from js/support.js.
+  function supportBlock() {
+    try {
+      if (window.EdgeSupport) return window.EdgeSupport.contactHtml({ titleId: 'fleetPausedSupportTitle' });
+    } catch (_) { /* support.js not ready */ }
+    return '<h3 class="help-h3" id="fleetPausedSupportTitle">Contact iKorex support</h3>'
+      + '<p class="help-muted">Contact your iKorex installer for the support phone number and email.</p>';
   }
 
   function showPaused(st) {
@@ -523,6 +537,10 @@
     else if (status) applyFeatures(status);   // panels render lazily: re-apply hiding
   });
   window.addEventListener('edge:account', () => { if (status) renderCard(); });
+  window.addEventListener('edge:support', () => {
+    const el = $('fleetPausedSupport');
+    if (el) el.innerHTML = supportBlock();
+  });
   document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });
 
   if (window.edgeAuth && typeof window.edgeAuth.onReady === 'function') window.edgeAuth.onReady(boot);

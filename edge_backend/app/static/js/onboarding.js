@@ -519,7 +519,7 @@
     },
     {
       title: 'Help is always one click away',
-      body: ['Press Help at the top right to search short how-to guides and to find iKorex support.',
+      body: ['Press Help at the top right to search short how-to guides, find iKorex support or report a problem.',
         'A small question mark next to a title explains that card in plain words. Press it again, or Esc, to close it.'],
     },
     {

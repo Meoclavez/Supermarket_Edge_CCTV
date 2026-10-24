@@ -32,6 +32,7 @@
   <link rel="stylesheet" href="/static/css/live_view.css?v=2.6.0" />
   <link rel="stylesheet" href="/static/css/fleet.css?v=2.6.0" />
   <link rel="stylesheet" href="/static/css/help.css?v=2.6.0" />
+  <link rel="stylesheet" href="/static/css/support.css?v=2.6.0" />
   <!-- auth.js stays a classic (blocking) script: it must wrap fetch before any
        module runs. Everything else is deferred and runs in document order after
        parsing; theme.js is listed last so it still runs after the modules.
@@ -853,6 +854,7 @@
       <div class="settings-jump" aria-label="Settings sections">
         <button type="button" class="btn btn-sm" onclick="openDeviceManager()">Cameras &amp; recorders</button>
         <a class="btn btn-sm" href="#settings-fleet" onclick="return jumpTo('settings-fleet')">iKorex service</a>
+        <a class="btn btn-sm" href="#settings-support" onclick="return jumpTo('settings-support')">Help and support</a>
         <a class="btn btn-sm" href="#settings-account" onclick="return jumpTo('settings-account')">Your account</a>
         <a class="btn btn-sm" href="#settings-accounts" onclick="return jumpTo('settings-accounts')" data-admin-only>Accounts</a>
         <a class="btn btn-sm" href="#settings-recorder-streams" onclick="return jumpTo('settings-recorder-streams')">Recorder sub-streams</a>
@@ -873,6 +875,8 @@
       <div class="glass-card" id="settings-device"></div>
       <!-- iKorex service: plan, licence, features included, last contact, control key (fleet.js). -->
       <div class="glass-card" id="settings-fleet"></div>
+      <!-- Help and support: Report a problem, My reports, support contact (support.js). -->
+      <div class="glass-card" id="settings-support"></div>
       <!-- Phone alerts: this phone, who gets alerts (first priority / backup, escalation,
            alert level, store-offline watchdog), connected phones (phone_alerts.js). -->
       <div class="glass-card" id="settings-phone-alerts"></div>
@@ -1200,6 +1204,8 @@
   <!-- In-app help: words (help_content.js), "?" popovers + Help panel (help.js), Getting started + welcome (onboarding.js). -->
   <script src="/static/js/help_content.js?v=2.6.0" defer></script>
   <script src="/static/js/help.js?v=2.6.0" defer></script>
+  <!-- Support contact (signed policy) + Report a problem / My reports (support.js). -->
+  <script src="/static/js/support.js?v=2.6.0" defer></script>
   <script src="/static/js/onboarding.js?v=2.6.0" defer></script>
   <script src="/static/js/theme.js?v=2.6.0" defer></script>
 </body>

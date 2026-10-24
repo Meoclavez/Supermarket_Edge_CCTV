@@ -9,7 +9,10 @@ The signed policy that ``fleet_control`` verified and stored in
   has had no *verified* contact with iKorex (a signed check-in ack, see
   ``fleet_control.verify_ack``) for longer than that (owner decision 2026-10-21);
 * **features** -- each paid feature on or off (a missing key means on);
-* **limits** -- ``max_cameras``.
+* **limits** -- ``max_cameras``;
+* **support** -- the iKorex support contact shown to store users (Help panel,
+  paused/standby page, Report a problem). Only from the signed policy, never
+  from unsigned check-in fields (a spoofed phone number would be phishing).
 
 Before any policy arrived (a box never set up for fleet control) everything is
 on and nothing is paused: the box behaves exactly as before.
@@ -83,6 +86,17 @@ STANDBY_MESSAGE = ("Standby: this box can't reach iKorex. It will restart automa
                    "is back and verified.")
 NOT_IN_PLAN = "Not included in your plan."
 
+# policy.support (docs/SUPPORT_ISSUES_CONTRACT.md): plain text <= 120 chars each,
+# website https only, e-mail checked. Unknown keys are ignored; a value that does
+# not pass is dropped on its own (never the whole policy: a bad phone number must
+# not stop a Suspend from applying).
+SUPPORT_FIELDS = ("name", "phone", "email", "hours", "website", "note")
+SUPPORT_MAX_CHARS = 120
+_SUPPORT_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+                               r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$")
+_SUPPORT_PHONE_RE = re.compile(r"^\+?[0-9(][0-9 ()./-]{4,30}$")
+_SUPPORT_WEBSITE_RE = re.compile(r"^https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?(?:[/?#][^\s<>\"']*)?$")
+
 _lock = threading.Lock()
 _cache: Dict[str, Any] = {"policy": None, "contact": {}, "loaded_at": None}
 # The fields of the stored state the offline standby rule needs (fleet_control writes them).
@@ -114,7 +128,29 @@ def default_policy() -> Dict[str, Any]:
     return {"type": "policy", "store_id": None, "version": 0, "issued_at": None, "state": "active",
             "message": "", "licence": {"valid_until": None, "grace_days": DEFAULT_GRACE_DAYS,
                                        "offline_grace_hours": None},
-            "features": {k: True for k in FEATURES}, "limits": {"max_cameras": None}}
+            "features": {k: True for k in FEATURES}, "limits": {"max_cameras": None}, "support": None}
+
+
+def normalise_support(value: Any) -> Optional[Dict[str, str]]:
+    """policy.support reduced to valid plain-text fields; None = unknown (box falls back)."""
+    if not isinstance(value, dict):
+        return None
+    out: Dict[str, str] = {}
+    for key in SUPPORT_FIELDS:
+        raw = value.get(key)
+        if not isinstance(raw, str):
+            continue
+        text = " ".join("".join(ch for ch in raw if ch.isprintable()).split())
+        if not text or len(text) > SUPPORT_MAX_CHARS:
+            continue
+        if key == "email" and not _SUPPORT_EMAIL_RE.match(text):
+            continue
+        if key == "phone" and (not _SUPPORT_PHONE_RE.match(text) or sum(c.isdigit() for c in text) < 6):
+            continue
+        if key == "website" and not _SUPPORT_WEBSITE_RE.match(text):
+            continue
+        out[key] = text
+    return out or None
 
 
 def _parse_day(value: Any) -> Optional[date]:
@@ -185,6 +221,7 @@ def normalise_policy(payload: Any, store_id: Optional[str] = None) -> Dict[str, 
         "licence": {"valid_until": valid_until.isoformat() if valid_until else None, "grace_days": grace,
                     "offline_grace_hours": offline_grace},
         "features": features, "limits": {"max_cameras": max_cameras},
+        "support": normalise_support(payload.get("support")),
     }
 
 
@@ -429,6 +466,7 @@ def effective_state(today: Optional[date] = None) -> Dict[str, Any]:
         "licence": lic,
         "features": dict(policy.get("features") or {}),
         "limits": dict(policy.get("limits") or {"max_cameras": None}),
+        "support": dict(policy["support"]) if isinstance(policy.get("support"), dict) else None,
     }
 
 
@@ -541,10 +579,12 @@ _FEATURE_ROUTES = tuple((feature, re.compile(rx)) for feature, rx in (
 _REMOTE_VIDEO_ROUTES = re.compile(r"^/api/v1/webrtc/(sessions|offer)(/|$)")
 _ADOPT_ROUTES = re.compile(r"^/api/v1/layout/devices/adopt/?$")
 
-# Open while paused: sign-in, first-run setup, this status, health, the device
-# identity phones check, and everything that is not the API (pages, static files).
+# Open while paused: sign-in, first-run setup, this status, the support contact
+# and Report a problem (a paused store must still be able to ask for help), health,
+# the device identity phones check, and everything that is not the API (pages,
+# static files).
 _PAUSE_EXEMPT = re.compile(
-    r"^/api/v1/(auth|setup|fleet|health|device/identity)(/|$)")
+    r"^/api/v1/(auth|setup|fleet|support|health|device/identity)(/|$)")
 
 
 def feature_for_path(path: str) -> Optional[str]:
