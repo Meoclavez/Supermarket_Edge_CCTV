@@ -268,7 +268,7 @@
       // Next action (data-za-filter is handled by onClick; data-help-open by js/help.js).
       const next = state.filter === 'acked'
         ? '<button type="button" class="btn btn-xs" data-za-filter="open">Show alerts needing attention</button>'
-        : '<button type="button" class="link-btn" data-help-open="area-line-alerts">How to set them up</button>';
+        : '<button type="button" class="btn btn-xs" data-help-go="feature-setup:area-line-alerts">Set up in Features</button> <button type="button" class="link-btn" data-help-open="area-line-alerts">How to set them up</button>';
       host.innerHTML = `<div class="fp-empty">${esc(msg)} ${next}</div>`;
       return;
     }

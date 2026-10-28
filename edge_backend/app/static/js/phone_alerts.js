@@ -375,7 +375,8 @@
     if (!devices.length) {
       return `<h3 class="pa-h">Connected phones</h3><div class="pr-hint">No phone has alerts turned on yet. On each phone, open the store's
         public address (https), install the app, open it and tap "Enable alerts".
-        <button type="button" class="link-btn" data-help-open="phone-alerts">Show me how</button></div>`;
+        <button type="button" class="link-btn" data-help-open="phone-alerts">Show me how</button>
+        <button type="button" class="link-btn" data-help-go="feature:phone-alerts">See it on the Features tab</button></div>`;
     }
     const rows = devices.map((d) => {
       const last = d.last_push_status

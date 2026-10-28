@@ -9,13 +9,27 @@
 /* Header "Help" button: same shape as the Settings gear. */
 .header-help[aria-expanded="true"] { background: var(--accent-bg); border-color: var(--accent-border); color: var(--accent-text); }
 /* Laptop widths: icon-only header buttons (they keep aria-label/title) and a
-   shorter subtitle, so all five tabs stay visible at 1366px with the Help
+   shorter subtitle, so all six tabs stay visible at 1366px with the Help
    button added (the tab bar scrolls without a scrollbar, so a clipped tab is
    easy to miss). Phones (<=760px) have their own layout in style.css. */
 @media (min-width: 761px) and (max-width: 1599px) {
   .header-actions .header-gear-label, .header-actions .pa-install-label { display: none; }
   .brand-subtitle { max-width: 200px; }
+  /* The iKorex logo already names the product; the store name keeps the room. */
+  .brand-product { display: none; }
 }
+/* With the Features tab (six tabs): from 1280px the tabs keep their full width
+   (tighter padding, no gaps) and the store name shortens instead, so no tab is
+   clipped at 1366px. Narrower laptop windows keep the swipeable tab bar. */
+@media (min-width: 1280px) and (max-width: 1599px) {
+  .top-nav-header { gap: var(--space-4); }
+  .tab-nav-bar { flex: 1 0 auto; gap: 0; }
+  .tab-btn { padding: 0 10px; }
+}
+
+/* Screens opened by EdgeHelp.go() (Help "Take me there", checklist, Features
+   "Full settings") scroll their card to the top: keep it clear of the sticky header. */
+html { scroll-padding-top: calc(var(--header-height) + var(--space-3)); }
 
 /* ---- "?" button ---------------------------------------------------------- */
 .help-tip {
@@ -196,11 +210,14 @@
 .gs-detail:empty { display: none; }
 .gs-partial .gs-detail { color: var(--warning); }
 .gs-go { align-self: center; }
+/* "Do it" and, under it, the link to the matching Features card's easy setup. */
+.gs-actions { display: flex; flex-direction: column; align-items: flex-end; gap: var(--space-1); align-self: center; }
+.gs-card-link { font-size: var(--fs-xs); }
 .gs-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); margin-top: var(--space-3); font-size: var(--fs-xs); color: var(--text-secondary); }
 .gs-note { flex: 1 1 200px; }
 @media (max-width: 560px) {
   .gs-step { grid-template-columns: 20px minmax(0, 1fr); }
-  .gs-go { grid-column: 2; justify-self: start; }
+  .gs-actions { grid-column: 2; justify-self: start; flex-direction: row; flex-wrap: wrap; align-items: center; gap: var(--space-3); }
 }
 
 /* ---- First-run welcome --------------------------------------------------------- */

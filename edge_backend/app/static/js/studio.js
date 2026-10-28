@@ -209,12 +209,18 @@ function setDrawStatus(msg, isError) {
 function fromChecklist() { return getUrlParameter('from') === 'checklist'; }
 function checklistCameraId() { return activeCameraId || getUrlParameter('camera_id') || getUrlParameter('camera') || ''; }
 function checklistUrl() { return `/dashboard?checklist=${encodeURIComponent(checklistCameraId())}#cameras`; }
+// Opened from a card on the dashboard's Features tab (?from=features): the same button leads back there.
+function fromFeatures() { return getUrlParameter('from') === 'features'; }
 function syncChecklistLink() {
   const a = el('backToChecklist');
   if (!a) return;
-  const on = fromChecklist();
+  const features = fromFeatures();
+  const on = fromChecklist() || features;
   a.style.display = on ? '' : 'none';
-  if (on) a.href = checklistUrl();
+  if (!on) return;
+  a.href = features ? '/dashboard#features' : checklistUrl();
+  const label = [...a.childNodes].reverse().find((n) => n.nodeType === 3 && n.textContent.trim());
+  if (label) label.textContent = features ? 'Back to Features' : 'Back to setup checklist';
 }
 // Success line for any saved tool; adds the way back when opened from the checklist.
 function announceSaved(msg) {

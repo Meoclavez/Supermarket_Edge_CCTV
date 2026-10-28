@@ -81,7 +81,7 @@ def test_unreachable_server_still_releases_requests_after_the_check_fails():
 
 POLLING_MODULES = ("analytics.js", "today.js", "loss.js", "insights.js", "floorplan.js", "devices.js", "entrances.js", "product_reach.js",
                    "pairing.js", "remote_access.js", "studio.js",
-                   "camera_roles.js", "heatmap_history.js")
+                   "camera_roles.js", "heatmap_history.js", "features.js")
 
 
 @pytest.mark.parametrize("name", POLLING_MODULES)

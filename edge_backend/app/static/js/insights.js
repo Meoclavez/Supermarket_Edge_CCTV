@@ -433,7 +433,7 @@
       else if (state.data && state.data.empty_reason) msg = state.data.empty_reason;
       else msg = 'No issues found. The analysis found nothing that needs attention.';
       host.innerHTML = `<div class="fp-empty ins-empty">${esc(msg)}
-        ${all.length ? '' : '<button type="button" class="btn btn-sm btn-primary" data-action="run-analysis">Run analysis now</button>'}</div>`;
+        ${all.length ? '' : '<button type="button" class="btn btn-sm btn-primary" data-action="run-analysis">Run analysis now</button> <button type="button" class="link-btn" data-help-go="feature:insights">What it needs (Features)</button>'}</div>`;
       return;
     }
     const counts = state.topics.counts || {};

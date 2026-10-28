@@ -10,7 +10,7 @@
  * via window.edgeFleet) are not shown. A status that cannot be read says so;
  * nothing is assumed done. Hide it with the cross; reopen it from Help.
  *
- * Welcome: on an administrator's first sign-in in this browser, four short
+ * Welcome: on an administrator's first sign-in in this browser, five short
  * screens about the main areas, ending at the checklist. Skippable (Esc),
  * reopened from Help > "Welcome tour".
  *
@@ -95,7 +95,8 @@
     return out;
   }
 
-  // A step: { id, title, why, optional, feature, check(d) -> { state, detail, go, goLabel } }
+  // A step: { id, card, title, why, optional, feature, check(d) -> { state, detail, go, goLabel } }
+  // card: the matching card on the Features tab (its "Easy setup" link, js/features.js).
   // state: 'done' | 'partial' | 'todo' | 'unknown'.
   const unknown = (r) => ({ state: 'unknown', detail: `Could not be checked: ${(r && r.message) || 'no answer.'}` });
   const ok = (r) => r && r.ok && r.data;
@@ -113,7 +114,7 @@
 
   const ADMIN_STEPS = [
     {
-      id: 'store', title: 'Name the store and set its time zone',
+      id: 'store', card: 'store-settings', title: 'Name the store and set its time zone',
       why: 'The name is on every page and the daily report; the time zone decides what "today", schedules and alert times mean.',
       check(d) {
         if (!ok(d.site)) return unknown(d.site);
@@ -126,7 +127,7 @@
       go: 'settings:settings-store',
     },
     {
-      id: 'plan', title: 'Draw the store plan',
+      id: 'plan', card: 'store-map', title: 'Draw the store plan',
       why: 'The map is where live shoppers, heatmaps and store areas are shown.',
       check(d) {
         if (!ok(d.layout)) return unknown(d.layout);
@@ -137,7 +138,7 @@
       go: 'map-edit', goLabel: 'Open the Store map',
     },
     {
-      id: 'cameras', title: 'Add your cameras',
+      id: 'cameras', card: 'cameras', title: 'Add your cameras',
       why: 'Every figure and alert comes from the cameras. A recorder (NVR) adds all its channels at once.',
       check(d) {
         if (!ok(d.pipe)) return unknown(d.pipe);
@@ -151,7 +152,7 @@
       go: 'add-cameras', goLabel: 'Add cameras',
     },
     {
-      id: 'purpose', title: 'Choose what each camera looks at',
+      id: 'purpose', card: 'camera-purpose', title: 'Choose what each camera looks at',
       why: 'The purpose (entrance, checkout, aisle, stockroom...) switches on the right checks for that camera.',
       check(d) {
         if (!ok(d.setup)) return unknown(d.setup);
@@ -165,7 +166,7 @@
       },
     },
     {
-      id: 'place', title: 'Put each camera on the map',
+      id: 'place', card: 'placement-calibration', title: 'Put each camera on the map',
       why: 'So everyone can see where a camera is mounted and what it covers.',
       check(d) {
         if (!ok(d.layout)) return unknown(d.layout);
@@ -178,7 +179,7 @@
       go: 'map', goLabel: 'Open the Store map',
     },
     {
-      id: 'calibrate', title: 'Calibrate cameras, or link them to an area',
+      id: 'calibrate', card: 'placement-calibration', title: 'Calibrate cameras, or link them to an area',
       why: 'Calibration puts shoppers on the map and heatmap; linking an uncalibrated camera to an area still counts its visits.',
       check(d) {
         if (!ok(d.layout)) return unknown(d.layout);
@@ -194,7 +195,7 @@
       },
     },
     {
-      id: 'zones', title: 'Draw store areas (aisles, entrance, checkout)',
+      id: 'zones', card: 'store-areas', title: 'Draw store areas (aisles, entrance, checkout)',
       why: 'Visits, time spent and the recommendations are measured per area.',
       check(d) {
         if (!ok(d.layout)) return unknown(d.layout);
@@ -204,7 +205,7 @@
       go: 'map-zone', goLabel: 'Draw a zone',
     },
     {
-      id: 'shelves', title: 'Draw product shelves on the camera pictures',
+      id: 'shelves', card: 'shelf-reaches', title: 'Draw product shelves on the camera pictures',
       why: 'Shelf reaches and the theft checks need to know where the products are.',
       check(d) {
         if (!ok(d.products)) return unknown(d.products);
@@ -218,7 +219,7 @@
       go: 'studio', goLabel: 'Open Camera setup',
     },
     {
-      id: 'zone-alerts', title: 'Set up area and line alerts', optional: true, feature: 'zone_alerts',
+      id: 'zone-alerts', card: 'area-line-alerts', title: 'Set up area and line alerts', optional: true, feature: 'zone_alerts',
       why: 'Alerts when someone is in the stockroom after hours or crosses a back-door line.',
       check(d) {
         if (!ok(d.zones)) return unknown(d.zones);
@@ -231,7 +232,7 @@
       go: 'studio', goLabel: 'Open Camera setup',
     },
     {
-      id: 'night', title: 'Turn on night watch for after-hours cameras', optional: true, feature: 'night_watch',
+      id: 'night', card: 'night-watch', title: 'Turn on night watch for after-hours cameras', optional: true, feature: 'night_watch',
       why: 'While the store is closed, a person seen on a watched camera is a high alert.',
       check(d) {
         if (!ok(d.night)) return unknown(d.night);
@@ -243,7 +244,7 @@
       go: 'cameras', goLabel: 'Open Cameras',
     },
     {
-      id: 'phones', title: 'Get alerts on staff phones', feature: 'phone_alerts',
+      id: 'phones', card: 'phone-alerts', title: 'Get alerts on staff phones', feature: 'phone_alerts',
       why: 'Staff are told within seconds, even away from this screen.',
       check(d) {
         if (!ok(d.subs)) return unknown(d.subs);
@@ -256,7 +257,7 @@
       go: 'settings:settings-phone-alerts', goLabel: 'Open Phone alerts',
     },
     {
-      id: 'accounts', title: 'Create accounts for your staff', optional: true,
+      id: 'accounts', card: 'accounts', title: 'Create accounts for your staff', optional: true,
       why: 'Everyone signs in as themselves. Operators can review alerts but cannot change setup.',
       check(d) {
         if (!ok(d.users)) return unknown(d.users);
@@ -267,7 +268,7 @@
       go: 'settings:settings-accounts', goLabel: 'Open Accounts',
     },
     {
-      id: 'online', title: 'Turn on online access', optional: true, feature: 'online_access',
+      id: 'online', card: 'online-access', title: 'Turn on online access', optional: true, feature: 'online_access',
       why: 'Open the dashboard away from the store. Phone alerts need it.',
       check(d) {
         if (!ok(d.remote)) return unknown(d.remote);
@@ -279,7 +280,7 @@
       go: 'settings:settings-remote', goLabel: 'Open Online access',
     },
     {
-      id: 'tills', title: 'Connect the tills', optional: true, feature: 'pos_integration',
+      id: 'tills', card: 'sales-data', title: 'Connect the tills', optional: true, feature: 'pos_integration',
       why: 'Sales today, the buying rate and lost sales need till data.',
       check(d) {
         if (!ok(d.pos)) return unknown(d.pos);
@@ -288,7 +289,7 @@
       go: 'settings:settings-pos', goLabel: 'Open Sales data',
     },
     {
-      id: 'backup', title: 'Back up and download a copy',
+      id: 'backup', card: 'backups', title: 'Back up and download a copy',
       why: 'Backups stay on this device unless you download one. Keep a copy somewhere safe.',
       check(d) {
         if (!ok(d.backups)) return unknown(d.backups);
@@ -304,7 +305,7 @@
 
   const OPERATOR_STEPS = [
     {
-      id: 'my-phone', title: 'Turn on alerts on your phone', feature: 'phone_alerts',
+      id: 'my-phone', card: 'phone-alerts', title: 'Turn on alerts on your phone', feature: 'phone_alerts',
       why: 'You are told about an alert within seconds, even away from this screen.',
       check(d) {
         if (!ok(d.push)) return unknown(d.push);
@@ -315,7 +316,7 @@
       go: 'settings:settings-phone-alerts', goLabel: 'Open Phone alerts',
     },
     {
-      id: 'learn-review', title: 'Learn how to review an alert', feature: 'theft_detection',
+      id: 'learn-review', card: 'theft-alerts', title: 'Learn how to review an alert', feature: 'theft_detection',
       why: 'An alert is something to check, never proof of theft. Recording what happened keeps alerts accurate.',
       check() {
         const read = help() && help().hasRead('review-alert');
@@ -416,7 +417,10 @@
             <div class="gs-why">${esc(s.why)}</div>
             <div class="gs-detail">${esc(s.detail || '')}</div>
           </div>
-          ${s.go ? `<button type="button" class="${btnCls} gs-go" data-gs-go="${esc(s.id)}">${esc(label)}</button>` : ''}
+          <div class="gs-actions">
+            ${s.go ? `<button type="button" class="${btnCls} gs-go" data-gs-go="${esc(s.id)}">${esc(label)}</button>` : ''}
+            ${s.card ? `<button type="button" class="link-btn gs-card-link" data-help-go="feature-setup:${esc(s.card)}" title="Open this feature's easy setup on the Features tab">Easy setup</button>` : ''}
+          </div>
         </li>`;
     }).join('');
 
@@ -515,7 +519,13 @@
         'Store map: the plan of the store, cameras and live shoppers.',
         'Insights: recommendations, footfall and heatmap history.',
         'Loss prevention: alerts to review, area and line alerts, night watch.',
+        'Features: everything the system can do, with easy setup.',
         'Settings (the gear): phones, accounts, store settings, backups.'],
+    },
+    {
+      title: 'Every feature on one page',
+      body: ['The Features tab lists each feature in plain words and shows whether it is On, Off or Needs setup.',
+        '"Easy setup" changes the few settings most stores need, with a short guide. "Full settings" takes you straight to every control. Use "Needs setup" to see what is left.'],
     },
     {
       title: 'Help is always one click away',

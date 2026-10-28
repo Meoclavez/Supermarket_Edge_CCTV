@@ -52,3 +52,4 @@ supermarket owners, managers and staff who are not technical.
 | 7 | Help on the Camera setup page (studio.html) | Deferred |
 | 8 | Inline field validation messages across Settings forms | Deferred (per-module refactor) |
 | 9 | Undo for destructive Settings actions (remove account, revoke key) | Deferred; they already confirm first |
+| 10 | Features tab: every feature in plain words with live status, Easy setup (guide + main settings through the existing APIs) and Full settings (exact control); guides in Help, checklist and tour link to it | Built (`js/features.js`, `GET /api/v1/features/status`, 2026-10-28) |

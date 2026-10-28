@@ -118,12 +118,72 @@
     }, 150);
   }
 
-  /** Open the screen an article or checklist step points to. Unknown names do nothing. */
+  /** Switch to a view, then scroll an element of it into view and highlight it briefly. */
+  function openOnView(route, id) {
+    call('switchTab', route);
+    later(() => {
+      const node = $(id);
+      if (!node) return;
+      node.scrollIntoView({ behavior: 'instant', block: 'start' });
+      flash(node);
+    }, 200);
+  }
+
+  /** Scroll a part of the open camera settings dialog into view (night watch, AI features). */
+  function openCameraPart(camId, partId) {
+    Promise.resolve(call('openCameraConfigModal', camId)).then(() => later(() => {
+      const node = $(partId);
+      if (!node) return;
+      node.scrollIntoView({ behavior: 'instant', block: 'start' });
+      flash(node);
+    }, 300));
+  }
+
+  /**
+   * Open the screen an article, checklist step or Features card points to.
+   * Unknown names do nothing. Besides the plain names:
+   *   settings:<card id>              Settings, that card scrolled into view and highlighted
+   *   view:<route>#<element id>       any view (e.g. loss, insights/footfall), then that element
+   *   camera:<id> / night:<id>        the camera settings dialog (night: at "Night watch")
+   *   camera-part:<id>#<element id>   the camera settings dialog at that part
+   *   calibrate:<id>                  Store map with the calibration tool open for that camera
+   *   studio-url:<path>               the Camera setup page (same-site path only)
+   *   feature:<id>                    the Features tab at that feature's card
+   *   feature-setup:<id>              the same, with its Easy setup open
+   *   help:<article id>               that guide in the Help panel
+   */
   function go(action) {
     const a = String(action || '');
     if (a.startsWith('settings:')) { openSettingsCard(a.slice(9)); return; }
+    if (a.startsWith('view:')) {
+      const [route, id] = a.slice(5).split('#');
+      if (id) openOnView(route, id); else call('switchTab', route);
+      return;
+    }
+    if (a.startsWith('camera-part:')) { const [cam, id] = a.slice(12).split('#'); openCameraPart(cam, id); return; }
+    if (a.startsWith('camera:')) { call('openCameraConfigModal', a.slice(7)); return; }
+    if (a.startsWith('night:')) { openCameraPart(a.slice(6), 'nightWatchMount'); return; }
+    if (a.startsWith('calibrate:')) {
+      const id = a.slice(10);
+      call('switchTab', 'map');
+      later(() => { if (window.calibrationTool) window.calibrationTool.open(id); }, 200);
+      return;
+    }
+    if (a.startsWith('studio-url:')) {
+      const url = a.slice(11);
+      if (/^\/dashboard\/studio(\?|$)/.test(url)) window.location.href = url;
+      return;
+    }
+    if (a.startsWith('feature:') || a.startsWith('feature-setup:')) {
+      const setup = a.startsWith('feature-setup:');
+      const id = a.slice(setup ? 14 : 8);
+      if (window.EdgeFeatures) window.EdgeFeatures.show(id, { setup });
+      else call('switchTab', 'features');
+      return;
+    }
+    if (a.startsWith('help:')) { openCentre(a.slice(5)); return; }
     switch (a) {
-      case 'today': case 'cameras': case 'map': case 'insights': case 'loss':
+      case 'today': case 'cameras': case 'map': case 'insights': case 'loss': case 'features':
         call('switchTab', a); break;
       case 'insights-footfall': call('switchTab', 'insights/footfall'); break;
       case 'add-cameras': call('openDeviceManager'); break;
@@ -447,6 +507,7 @@
       <div class="help-quick">
         <button type="button" class="btn btn-sm" data-hc-go="checklist">${ico('circle-check', 'sm')}Getting started checklist</button>
         <button type="button" class="btn btn-sm" data-hc-go="welcome">${ico('play', 'sm')}Welcome tour</button>
+        <button type="button" class="btn btn-sm" data-hc-go="features">${ico('layout-dashboard', 'sm')}All features</button>
       </div>`;
     const list = found.length
       ? `<ul class="help-list">${found.map(({ a }) => `

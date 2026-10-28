@@ -2449,7 +2449,7 @@ input[type="file"]::file-selector-button:hover { background: var(--surface-2); }
   .header-gear-label { display: none; }
   .header-actions { gap: 8px; }
   .header-actions .btn { padding: 0 8px; }
-  .tab-nav-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 900; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr));
+  .tab-nav-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 900; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr);
     gap: 0; padding: 0 4px env(safe-area-inset-bottom); overflow: visible;
     background: var(--surface); border-top: 1px solid var(--border); box-shadow: var(--shadow-overlay); }
   .tab-btn { flex-direction: column; justify-content: center; gap: 2px; padding: 4px 2px; min-height: 56px; font-size: 12px; min-width: 0; }

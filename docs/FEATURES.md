@@ -1,6 +1,6 @@
 # Edge AI CCTV: Dashboard Feature Reference
 
-Last updated: 2026-10-04 · Describes the working tree after 5c21d13 (accounts and roles, site settings, backups, till key, area & line alerts, masked remote video) plus ignore areas, "Not a person" and static-figure memory
+Last updated: 2026-10-28 (Features tab) · earlier: 2026-10-04 · Describes the working tree after 5c21d13 (accounts and roles, site settings, backups, till key, area & line alerts, masked remote video) plus ignore areas, "Not a person" and static-figure memory
 
 The Edge AI CCTV dashboard runs on the in-store edge device. It shows live cameras, counts shoppers,
 maps them onto a store plan, and flags suspicious behaviour for staff to review. It also produces
@@ -40,9 +40,20 @@ that is daily use (see "Roles" under Access and security).
 | "Forgot password?" | Explains how to reset access on the device when nobody can sign in. An administrator can also reset a password in Settings → "Accounts". | Link on the sign-in form |
 | "Your account" | Shows your username, name and role; "Change password" (other browsers of the account are signed out, this one stays signed in). | Settings → "Your account" |
 | "Accounts" | Lists accounts with role and last sign-in; "Add account", "Change role", "Reset password", "Remove" (inline confirmations). The last owner cannot be removed or demoted. | Settings → "Accounts" (admin; only an owner changes owner accounts) |
-| Main tabs | "Today", "Cameras", "Store map", "Insights", "Loss prevention", plus "Settings" (gear). | Header; phones get a bottom tab bar |
+| Main tabs | "Today", "Cameras", "Store map", "Insights", "Loss prevention", "Features", plus "Settings" (gear). | Header; phones get a bottom tab bar (six buttons) |
 | Alert banner | Shows the newest suspicious-behaviour incident or unacknowledged area / line alert on every page; the Loss prevention badge counts both. | Banner → "Review now" / "Dismiss" |
 | Colour theme | Light, dark, or follow the device. | Header switch, or Settings → "Appearance" |
+
+## Features tab
+
+| Feature | What it's for | Where / how to configure |
+|---|---|---|
+| Feature cards | One card per feature (28), grouped Security and alerts, Store insights, Cameras and store map, Access and phones, System: what it does, why it helps, and a status chip "On", "Off", "Needs setup", "Not in your plan" or (operators) "Admin only", from `GET /api/v1/features/status` (one read, every 60 s only while the tab is shown; on returning to the tab only when older than 15 s). | Features |
+| Search and filters | Finds a card by words in its title, description or guide; "Needs setup" and "On" narrow the list. The tab button shows how many need setup (owners and administrators). | Features toolbar |
+| "Easy setup" | A side panel (full-width sheet on phones) with a 2-5 step guide and the main settings of that feature, saved through the same endpoints as the full screens (site settings, camera features, night watch, phone alert roster, zones, accounts, backups, till key, online access). Operators see the values greyed with the reason. The full list per card is in the User Manual 1.8. | Features → card → "Easy setup" (admin for setup) |
+| "Full settings" | Opens the full control: the Settings card, Loss prevention / Insights section, camera settings dialog part, calibration tool, map editor or Camera setup tool (with "Back to Features"). | Features → card → "Full settings" |
+| Plan and roles | A feature left out of the iKorex plan: both buttons greyed, explained, "Contact iKorex". Operators: "Admin only" on setup cards; Full settings greyed where the screen is for administrators. | Automatic |
+| Guides | Each card's guide is a Help article (`fs-<card>` in `static/js/help_content.js`), found by the Help search; the Getting started checklist links each step to its card ("Easy setup"); the welcome tour has a Features screen. | Help; Today → Getting started |
 
 ## Today
 

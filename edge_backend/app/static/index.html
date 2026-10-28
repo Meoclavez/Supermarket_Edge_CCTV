@@ -33,6 +33,7 @@
   <link rel="stylesheet" href="/static/css/fleet.css?v=2.6.0" />
   <link rel="stylesheet" href="/static/css/help.css?v=2.6.0" />
   <link rel="stylesheet" href="/static/css/support.css?v=2.6.0" />
+  <link rel="stylesheet" href="/static/css/features.css?v=2.6.0" />
   <!-- auth.js stays a classic (blocking) script: it must wrap fetch before any
        module runs. Everything else is deferred and runs in document order after
        parsing; theme.js is listed last so it still runs after the modules.
@@ -94,6 +95,10 @@
         <button type="button" class="tab-btn" data-tab="loss" onclick="switchTab('loss')">
           <span class="tab-icon" aria-hidden="true"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-shield-alert"></use></svg></span><span class="tab-label" data-short="Alerts">Loss prevention</span>
           <span class="tab-count tab-count-alert" id="tabTheftCountBadge" title="Incidents waiting for review" hidden>0</span>
+        </button>
+        <button type="button" class="tab-btn" data-tab="features" onclick="switchTab('features')" title="Features: what each one does, easy setup and full settings">
+          <span class="tab-icon" aria-hidden="true"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-layout-dashboard"></use></svg></span><span class="tab-label">Features</span>
+          <span class="tab-count tab-count-ai" id="tabFeaturesSetupBadge" title="Features that need setting up" hidden>0</span>
         </button>
       </nav>
 
@@ -844,6 +849,33 @@
     </section>
 
     <!-- ==========================================
+         FEATURES (js/features.js): every feature in plain words, its live status
+         (GET /api/v1/features/status), "Easy setup" (the 1-4 main settings, saved
+         through the same APIs as the full controls) and "Full settings" (opens the
+         full control through EdgeHelp.go). Help words: js/help_content.js.
+         ========================================== -->
+    <section id="tab-features" class="tab-view" aria-labelledby="featuresTitle">
+      <div class="glass-card feat-head">
+        <div class="card-title">
+          <span><h2 class="feat-title" id="featuresTitle" data-help="features-tab">Features</h2></span>
+          <button type="button" class="btn btn-sm btn-ghost" data-help-open="features-tab">How to use this page</button>
+        </div>
+        <p class="feat-lede">Everything this system can do for your store, in plain words. Each card shows whether the feature is working.
+          <b>Easy setup</b> changes the few settings most stores need; <b>Full settings</b> takes you to every control.</p>
+        <div class="feat-toolbar" role="search">
+          <span class="search-field feat-search-field"><svg class="icon icon-md search-field-icon" aria-hidden="true"><use href="/static/icons/sprite.svg#i-search"></use></svg><input type="search" id="featureSearch" name="featureSearch" class="search-input" placeholder="Search features, for example phone" aria-label="Search features" autocomplete="off" spellcheck="false"></span>
+          <div class="feat-filters" role="group" aria-label="Show">
+            <button type="button" class="filter-chip active" data-feat-filter="all" aria-pressed="true">All</button>
+            <button type="button" class="filter-chip" data-feat-filter="setup" aria-pressed="false">Needs setup <span class="feat-filter-count" id="featNeedsCount"></span></button>
+            <button type="button" class="filter-chip" data-feat-filter="on" aria-pressed="false">On</button>
+          </div>
+        </div>
+        <p class="feat-summary" id="featSummary" role="status" aria-live="polite">Loading…</p>
+      </div>
+      <div id="featureGroups" class="feat-groups"><div class="fp-empty">Loading…</div></div>
+    </section>
+
+    <!-- ==========================================
          SETTINGS (header gear). Each panel is owned by one script:
          device + remote access -> remote_access.js,
          online access live video (direct WebRTC) -> remote_video.js,
@@ -1207,6 +1239,7 @@
   <!-- Support contact (signed policy) + Report a problem / My reports (support.js). -->
   <script src="/static/js/support.js?v=2.6.0" defer></script>
   <script src="/static/js/onboarding.js?v=2.6.0" defer></script>
+  <script src="/static/js/features.js?v=2.6.0" defer></script>
   <script src="/static/js/theme.js?v=2.6.0" defer></script>
 </body>
 </html>

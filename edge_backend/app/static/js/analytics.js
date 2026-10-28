@@ -45,6 +45,7 @@ const VIEW_SECTIONS = {
   map: 'tab-floorplan',
   insights: 'tab-insights',
   loss: 'tab-theft',
+  features: 'tab-features',
   settings: 'tab-settings',
 };
 // Insights sub-views -> their element.
@@ -62,7 +63,7 @@ const LEGACY_ROUTES = {
 };
 // Every route the self test walks, old ones included.
 const VALID_TABS = ['today', 'cameras', 'map', 'insights', 'insights/recs', 'insights/footfall', 'insights/report',
-  'loss', 'settings', ...Object.keys(LEGACY_ROUTES)];
+  'loss', 'features', 'settings', ...Object.keys(LEGACY_ROUTES)];
 
 let activeCameraFilter = 'ALL';
 let currentDecimationFPS = 5;

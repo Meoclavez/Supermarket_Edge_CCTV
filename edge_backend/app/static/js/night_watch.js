@@ -295,7 +295,7 @@
     const now = s.now ? `<div class="nw-clock">Store time now: ${whenHtml(s.now, true)} <span class="nw-meta">(${esc(zoneLabel(z))})</span></div>` : '';
     if (!s.cameras || !s.cameras.length) {
       return `${now}<div class="fp-empty">Night watch is off on every camera. Turn it on in a camera's Settings (Cameras, then Settings on that camera):
-        tick "Watch this camera at night" and set the times. <button type="button" class="btn btn-xs" data-help-go="cameras">Open Cameras</button>
+        tick "Watch this camera at night" and set the times, or use Easy setup on the Features tab. <button type="button" class="btn btn-xs" data-help-go="feature-setup:night-watch">Set up in Features</button>
         <button type="button" class="link-btn" data-help-open="night-watch">How it works</button></div>`;
     }
     const armed = s.cameras.filter((c) => (s.armed_now || []).includes(c.camera_id));

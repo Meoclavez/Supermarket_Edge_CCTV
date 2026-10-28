@@ -399,6 +399,10 @@ app.include_router(fleet_routes.router)
 from .routes import support as support_routes  # noqa: E402
 
 app.include_router(support_routes.router)
+# Features tab: every feature's state in one read (routes/features.py).
+from .routes import features as features_routes  # noqa: E402
+
+app.include_router(features_routes.router)
 
 # Mount Static Files
 STATIC_DIR = Path(__file__).resolve().parent / "static"

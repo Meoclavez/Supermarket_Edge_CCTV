@@ -142,6 +142,8 @@ def test_every_referenced_icon_exists_in_the_sprite():
         found = set(re.findall(r"#i-([a-z0-9-]+)", text))
         found |= set(re.findall(r"EdgeIcon\.(?:svg|el)\(\s*['\"]([a-z0-9-]+)['\"]", text))
         found |= set(re.findall(r"\b(?:ico|uiIcon|icon|iconSvg)\(\s*['\"]([a-z0-9-]+)['\"]", text))
+        # Data-driven cards (js/features.js FEATURES / GROUPS, button helpers): icon: 'name'.
+        found |= set(re.findall(r"\bicon:\s*'([a-z0-9-]+)'", text)) if path.suffix == ".js" else set()
         for name in found:
             refs.setdefault(name, set()).add(str(path.relative_to(STATIC)))
     missing = {n: sorted(files) for n, files in refs.items() if n not in names}

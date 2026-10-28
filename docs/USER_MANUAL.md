@@ -158,9 +158,11 @@ off"), then "Help" (see 1.7), the "⚙️ Settings" gear, the Light / Dark / Sys
 | "🗺️ Store map" | Drawing the store, adding, placing and calibrating cameras, live people, heatmaps |
 | "📈 Insights" | Recommendations, footfall, heatmap history, the daily report |
 | "🚨 Loss prevention" | The review queue, area & line alerts, evidence, patterns, night watch |
+| "Features" | Every feature in plain words with its status, "Easy setup" and "Full settings" (see 1.8) |
 | "⚙️ Settings" (header gear) | Accounts, store settings, evidence storage, alert settings, online access, phones, sales data, backups, system health |
 
-On phones and narrow windows the tabs become a bottom bar ("Map", "Alerts"). The Store map is
+On phones and narrow windows the tabs become a bottom bar ("Map", "Alerts", "Features"; six buttons
+share the width). The Store map is
 view-only on a phone until you press "Edit map".
 
 **Camera setup** is a second page used to draw lines and areas on a camera's picture. Open it from a
@@ -170,7 +172,7 @@ camera tile → "Camera setup", or from a setup checklist button. When you come 
 ### 1.7 Getting help in the dashboard
 
 - **Welcome tour.** The first time an Owner or Administrator signs in on a browser, a short welcome
-  (four screens) explains what the system does, where things are and where help is. "Skip" or Esc
+  (five screens, one of them about the Features tab) explains what the system does, where things are and where help is. "Skip" or Esc
   closes it; "Show me the checklist" ends at the Getting started checklist. Reopen it with Help →
   "Welcome tour".
 - **Getting started** (top of Today). The store's setup steps in the order of Part 2, each with one
@@ -191,9 +193,71 @@ camera tile → "Camera setup", or from a setup checklist button. When you come 
 - **Error messages** from the help screens are written in plain words, for example "Your sign-in has
   ended. Please sign in again." or "Heatmaps is not included in your iKorex plan."
 
+- **Getting started → Features.** Each checklist step also has an "Easy setup" link that opens the
+  matching card on the Features tab with its settings panel.
+
 The words of the "?" explanations and the guides are kept in one file,
 `edge_backend/app/static/js/help_content.js`. The iKorex support contact comes from iKorex's signed
 plan when iKorex has set one; otherwise the one filled in that file is shown.
+
+### 1.8 The Features tab
+
+"Features" (top bar; bottom bar on a phone) lists everything the system does, grouped as **Security
+and alerts**, **Store insights**, **Cameras and store map**, **Access and phones** and **System**.
+Each card says what the feature does and why it helps, and shows its status, read from the device
+about once a minute while the tab is open:
+
+| Status | Meaning |
+|---|---|
+| On | Working. The line under it says how, for example "1 camera watching, Front door 21:00-07:00". |
+| Off | Switched off, or an optional feature not used yet. |
+| Needs setup | A step is missing; the card says which one. The tab button shows how many (owners and administrators). |
+| Not in your plan | iKorex has left it out of your plan. Both buttons are greyed; "Contact iKorex" shows the support contact. |
+| Admin only | Shown to Operators on cards only an owner or administrator sets up; the card still says whether it is on. |
+
+Use the search box ("phone", "night", "backup") or the "Needs setup" / "On" buttons to narrow the list.
+
+**Easy setup** opens a panel with a short "How to set it up" guide and the few settings most stores
+need, already filled in with the current values. "Save" saves them through the same settings the full
+screens use, so the change shows there at once; a refusal is explained in plain words. Esc or "Close"
+closes the panel. Operators can open it to read the guide and the current values, but the fields are
+greyed ("Only an owner or administrator can change this"); they can still use "Report a problem", send a
+test alert to their own phone, record a heatmap hour or run the analysis.
+
+| Card | Easy setup | Full settings opens |
+|---|---|---|
+| Theft alerts | Cameras that look for theft; "Alerts from confidence"; exit-without-checkout check | Settings → "Alerts and detection" |
+| Alert levels | Watch / Alert / Critical from risk score; Alert to phones; escalate | Settings → "Theft alert levels" |
+| Area and line alerts | Restricted areas on/off; lines that alert; repeat times | Camera setup (Restricted area tool) |
+| Night watch | Camera, on/off, start and end, nights, IR / low light | That camera's settings at "Night watch" |
+| Phone alerts | Who is told (First priority / Backup / Not told); backup after (minutes); theft alerts from (%); "Send a test alert to my phone" | Settings → "Phone alerts" |
+| Visitors and entrances | Cameras that count people; lines that count store visitors | Camera setup (Tripwire tool) |
+| Checkout queues | "A queue is too long after" (seconds) | Camera setup (Checkout / queue area tool) |
+| Shelf reaches | Cameras that count shelf reaches | Camera setup (Product shelf tool) |
+| Customer heatmaps | "Record this hour so far now" | Insights → Heatmap history |
+| Business insights | "Run the analysis now" | Insights |
+| Sales from the tills | "Create till key" (shown once, with "Copy the key") | Settings → "Sales data" |
+| Cameras and recorder | Cameras analysed (on/off); "Add cameras" | Store map → "Cameras & devices" |
+| Camera purposes | A purpose for each camera | Camera settings of the first camera without one |
+| Store plan | "Start drawing" | Store map editor |
+| Camera placement and calibration | Link uncalibrated cameras to the area they look at ("Counts into zone") | Calibration on the Store map |
+| Store areas | List of areas; "Draw an area" | Store map, Zone tool |
+| Privacy masks and ignore areas | "Ignore figures that never move" per camera | Camera setup (Privacy mask tool) |
+| Recorder picture quality | Guide only | Settings → "Recorder sub-streams" |
+| Online access | Turn on/off (once the installer filled in the details); "Verify now" | Settings → "Online access" |
+| Live video away from the store | Most live videos at once; what plays in the store | Settings → "Live video" |
+| Staff accounts | Add an account (username, name, role, first password) | Settings → "Accounts" |
+| Phone app (backup) | Guide only | Settings → "Phone app (backup)" |
+| Store name and time zone | Store name; time zone | Settings → "Store" |
+| Evidence storage | Size limit; days kept (lowering asks you to press Save again); night-watch clip | Settings → "Evidence storage" |
+| Backups | "Back up now" | Settings → "Backups and reset" |
+| Analysis speed | Share of the device for detection; most pictures per second per camera | Settings → "Analysis speed" |
+| Help and support | "Report a problem", "My reports", guides | Settings → "Help and support" |
+| iKorex plan | Plan summary; "Check in now" (administrators) | Settings → "iKorex service" |
+
+**Full settings** goes straight to the full control: the right tab, scrolled to the card and briefly
+outlined, or the Camera setup page with the right tool (its "Back to Features" button returns here).
+Each card's guide is also in the Help panel (search the feature's name, or "easy setup").
 
 ---
 
