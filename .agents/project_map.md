@@ -604,7 +604,7 @@ default grouped view, "Show every insight" = old list; badge = open topics. Test
 * **[`docs/supermarket_cctv/Supermarket_Edge_AI_CCTV_Hardware_and_Services_Guide.pdf`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/docs/supermarket_cctv/Supermarket_Edge_AI_CCTV_Hardware_and_Services_Guide.pdf):** Print-ready formal PDF document (5 pages, A4) detailing 32-camera deterministic mathematical sizing, single NVDEC decode throughput, 10-Pillar Foolproof Engineering Validation Matrix, itemized BOM, 32-channel store layout, and procurement checklist.
 * **[`docs/supermarket_cctv/Supermarket_Edge_AI_CCTV_Hardware_and_Services_Guide.html`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/docs/supermarket_cctv/Supermarket_Edge_AI_CCTV_Hardware_and_Services_Guide.html):** Paged-media HTML source for regenerating the 32-camera PDF specification document.
 
-## Features tab (2026-10-28, not committed / not deployed)
+## Features tab (2026-10-28; commit b2b71ec + Loss plan-gate fix 3256786, deployed to Pearcedale 2026-10-28)
 
 User docs: `docs/USER_MANUAL.md` 1.8 (card -> Easy setup controls -> Full settings target table), `docs/FEATURES.md` "Features tab".
 
