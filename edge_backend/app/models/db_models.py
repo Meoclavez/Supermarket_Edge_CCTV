@@ -78,6 +78,13 @@ class CameraModel(Base):
     # True once the operator put the camera on the store map (m0020); cameras
     # added at a default spot (adopt, recorder import) start False.
     map_placed: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True, default=False)
+    # How far the camera usefully sees on the floor, metres (m0022); None =
+    # the lens-angle default (services/coverage_geometry.default_range_m).
+    range_m: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # Coverage used on the map and in analytics (m0022): None/"auto" =
+    # calibrated footprint when calibrated, else the manual cone;
+    # "calibrated" | "manual" = the operator's choice.
+    coverage_mode: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
 
     # Relationships
     events: Mapped[list["SecurityEventModel"]] = relationship(
@@ -731,3 +738,73 @@ class PushAlertModel(Base):
     closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, index=True, nullable=True)
     sent_to: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     report: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+
+# --------------------------------------------------------------------------- restricted areas (m0023)
+
+class RestrictedAreaModel(Base):
+    """One high-security restricted area (services/restricted_areas.py, m0023).
+
+    Where: a store-map zone (``floor_zone_id``, floor metres, every calibrated
+    camera that sees it) and/or per-camera image regions (``camera_regions``:
+    ``[{camera_id, intrusion_zone_id}]`` drawn with Camera setup's restricted
+    area tool, or ``[{camera_id, points}]``). ``arming`` is
+    ``{mode: always|schedule, schedule: [{days, from, to}], schedule_mode}``;
+    ``triggers`` maps a trigger id to its settings; ``security`` holds the
+    detection sensitivity. A manual arm/disarm (``manual_state`` until
+    ``manual_until``) overrides the schedule. ``legacy_intrusion_id`` marks an
+    area upgraded from an older restricted area of the zone store.
+    """
+    __tablename__ = "restricted_areas"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    floor_zone_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    camera_regions: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    arming: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    triggers: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    points_of_interest: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    security: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    manual_state: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    manual_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    manual_reason: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    manual_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    legacy_intrusion_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    updated_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+
+
+class RestrictedAreaAnnouncementModel(Base):
+    """"I'm going in": a person announced entry to a restricted area until ``until`` (m0023)."""
+    __tablename__ = "restricted_area_announcements"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    area_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    user_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    user_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    note: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    people: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    source: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    until: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    ended_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+
+
+class RestrictedAreaAuditModel(Base):
+    """Audit trail of restricted areas (m0023): settings, arm/disarm, announcements,
+    alerts and their outcomes. Append-only; never edited by the API."""
+    __tablename__ = "restricted_area_audit"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    ts: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    area_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    area_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    action: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    actor_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    actor_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    actor_role: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    event_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    detail: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)

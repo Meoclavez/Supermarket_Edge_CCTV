@@ -145,13 +145,21 @@ versions <= applied).
   "licence": {"valid_until": "2027-10-31" | null, "grace_days": 14,
               "offline_grace_hours": 72 | null},
   "features": {
-    "theft_detection": true, "zone_alerts": true, "night_watch": true,
+    "theft_detection": true, "zone_alerts": true, "restricted_areas": true, "night_watch": true,
     "phone_alerts": true, "heatmaps": true, "business_insights": true,
     "online_access": true, "remote_live_video": true, "pos_integration": true
   },
   "limits": {"max_cameras": null}
 }
 ```
+`restricted_areas` (added 2026-10-28, box 2.6.x): high-security restricted areas (announce
+entry, arming schedules, movement / speed / posture / people-count / tamper triggers, audit
+trail). Off = `/api/v1/restricted-areas/*` answers 403 `feature_disabled`, the live engine
+does nothing and camera-drawn restricted areas fall back to the plain `zone_alerts`
+evaluation (if that feature is on). The box sends nothing new to the VPS for it: no area
+names, no events, no announcements; only the existing numeric `usage.alerts_24h` counters
+include its alerts. A VPS that predates the key simply omits it, which means on.
+
 Missing feature keys = enabled (forward compatible); a missing `offline_grace_hours` = null
 (never stand by). Default policy before any contact:
 everything enabled, state active, no licence date (a box never configured for fleet

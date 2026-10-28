@@ -403,6 +403,27 @@ async def _acknowledger(request: Request, db: AsyncSession) -> Optional[dict]:
 
 @router.post("/{event_id}/acknowledge", dependencies=[Depends(_signed_in_person)])
 async def acknowledge_event(event_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    row = await _get_retail_event(event_id, db)
+    if (row.metadata_json or {}).get("ra_requires_outcome") and not (row.metadata_json or {}).get("ra_outcome"):
+        # High-security restricted-area alerts are acknowledged with what
+        # happened (POST /api/v1/restricted-areas/events/{id}/outcome), so the
+        # audit trail always has an outcome.
+        body = {}
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 - no body
+            body = {}
+        if not isinstance(body, dict) or not body.get("outcome"):
+            raise HTTPException(status_code=422, detail=(
+                "Restricted area alerts need an outcome: choose false alarm, authorised or real incident."))
+        from app.routes.restricted_areas import record_outcome
+
+        await record_outcome(event_id, request, body, db)
+        await db.refresh(row)
+    return await _acknowledge_plain(event_id, request, db)
+
+
+async def _acknowledge_plain(event_id: str, request: Request, db: AsyncSession):
     """Mark an alert as seen by staff (any signed-in person, operators included).
 
     The first acknowledgement is kept: a second one changes nothing, so the

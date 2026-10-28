@@ -43,6 +43,14 @@ HIGH_DWELL_LOW_ENGAGE_SEC = 45.0    # people linger this long...
 LOW_ENGAGEMENT_PCT = 10.0           # ...but this few reach for product
 QUEUE_WAIT_WARN_SECONDS = 270.0     # 4.5 minutes at a checkout
 MIN_VISITS_FOR_CONFIDENCE = 5       # below this, the sample proves nothing
+# Low-traffic ("bypassed aisle") rule, space-aware: zones are compared on
+# visits per m^2 of their real map area once at least this many comparable
+# zones (AISLE / DEPARTMENT) have an area, so a small aisle is not called dead
+# for being small. A zone the calibrated cameras see less than this share of
+# is not judged at all: its low count may only mean the cameras miss it.
+LOW_TRAFFIC_MIN_PEERS_WITH_AREA = 2
+LOW_TRAFFIC_MIN_COVERAGE = 0.5
+LOW_TRAFFIC_CATEGORIES = ("AISLE", "DEPARTMENT")
 
 # Only zones where a shopper is expected to handle product can be judged on
 # engagement. Dwelling at an entrance or a checkout without reaching for
@@ -111,11 +119,17 @@ def attach_products(findings: list[Finding], products_by_zone: dict[str, list[st
             f.products = list(products_by_zone[f.zone] or [])
 
 
-def _detect(zones: list[ZoneMetrics], funnel: dict) -> list[Finding]:
+def _detect(zones: list[ZoneMetrics], funnel: dict, coverage: Optional[dict] = None,
+            suppressed: Optional[list] = None) -> list[Finding]:
     """Run every rule over the observed metrics.
 
     Only zones with enough visits to be meaningful are assessed; a zone with
     two recorded visits cannot support a claim about shopper behaviour.
+
+    ``coverage``: zone id -> share of the zone the calibrated cameras see
+    (0..1, from the store map's line-of-sight coverage), or None for a zone
+    whose coverage is unknown. ``suppressed`` collects plain reasons for
+    rule checks that were skipped.
     """
     findings: list[Finding] = []
     assessable = [z for z in zones if z.visits >= MIN_VISITS_FOR_CONFIDENCE]
@@ -129,6 +143,10 @@ def _detect(zones: list[ZoneMetrics], funnel: dict) -> list[Finding]:
     engagement_tracked = any(z.interactions > 0 for z in zones)
 
     avg_visits = sum(z.visits for z in assessable) / len(assessable)
+    # Space-normalised traffic: visits per m^2 over comparable zones with an area.
+    peers = [z for z in assessable if z.category in LOW_TRAFFIC_CATEGORIES and z.area_m2 and z.area_m2 > 0]
+    per_m2 = len(peers) >= LOW_TRAFFIC_MIN_PEERS_WITH_AREA
+    avg_density = (sum(z.visits / z.area_m2 for z in peers) / len(peers)) if per_m2 else None
 
     for z in assessable:
         # Shoppers stop but do not engage: a merchandising or pricing problem.
@@ -162,8 +180,38 @@ def _detect(zones: list[ZoneMetrics], funnel: dict) -> list[Finding]:
                 },
             ))
 
-        # Chronically bypassed aisle.
-        if z.category in ("AISLE", "DEPARTMENT") and z.visits < avg_visits * DEAD_ZONE_TRAFFIC_RATIO:
+        # Chronically bypassed aisle (per m^2 when the zones have real areas).
+        cov = (coverage or {}).get(z.zone_id) if z.category in LOW_TRAFFIC_CATEGORIES else None
+        if cov is not None and cov < LOW_TRAFFIC_MIN_COVERAGE:
+            if suppressed is not None:
+                suppressed.append(
+                    f"low_traffic: {z.name} is only {cov * 100:.0f}% in view of the calibrated cameras, "
+                    "so its visit count is not compared")
+        elif z.category in LOW_TRAFFIC_CATEGORIES and per_m2 and z.area_m2:
+            density = z.visits / z.area_m2
+            if density < avg_density * DEAD_ZONE_TRAFFIC_RATIO:
+                findings.append(Finding(
+                    category="STORE_LAYOUT",
+                    severity="MEDIUM",
+                    zone=z.name,
+                    finding=(
+                        f"{z.name} saw {z.visits} visits, {density:.2f} per m² of its {z.area_m2:.0f} m², "
+                        f"against a store average of {avg_density:.2f} visits per m²."
+                    ),
+                    root_cause=(
+                        "Traffic well below the store average for its size suggests the aisle sits off "
+                        "the dominant circulation path or its category signage is not visible."
+                    ),
+                    action_item=(
+                        f"Reposition a destination category into {z.name} or add an aisle-end "
+                        "signpost to draw the main traffic flow through it."
+                    ),
+                    evidence={"visits": z.visits, "store_avg_visits": round(avg_visits, 1),
+                              "area_m2": z.area_m2, "visits_per_m2": round(density, 3),
+                              "store_avg_visits_per_m2": round(avg_density, 3), "basis": "per_m2",
+                              **({"camera_coverage_pct": round(cov * 100, 1)} if cov is not None else {})},
+                ))
+        elif z.category in LOW_TRAFFIC_CATEGORIES and z.visits < avg_visits * DEAD_ZONE_TRAFFIC_RATIO:
             findings.append(Finding(
                 category="STORE_LAYOUT",
                 severity="MEDIUM",
@@ -179,7 +227,7 @@ def _detect(zones: list[ZoneMetrics], funnel: dict) -> list[Finding]:
                     f"Reposition a destination category into {z.name} or add an aisle-end "
                     "signpost to draw the main traffic flow through it."
                 ),
-                evidence={"visits": z.visits, "store_avg_visits": round(avg_visits, 1)},
+                evidence={"visits": z.visits, "store_avg_visits": round(avg_visits, 1), "basis": "visits"},
             ))
 
         # Checkout congestion.
@@ -892,7 +940,8 @@ class BusinessAnalysisService:
         overview = await retail_metrics_service.overview(db, layout_id, settings.STORE_NAME)
 
         assessable = sum(1 for z in zones if z.visits >= MIN_VISITS_FOR_CONFIDENCE)
-        findings = _detect(zones, funnel)
+        coverage_suppressed: list[str] = []
+        findings = _detect(zones, funnel, await self._zone_coverage(db), coverage_suppressed)
 
         # Product-level shelf reach rules (from shelf_interactions rows).
         product_summary = None
@@ -930,7 +979,7 @@ class BusinessAnalysisService:
             "suppressed_rules": (
                 [] if engagement_tracked
                 else ["merchandising_engagement: no shelf-interaction source is reporting"]
-            ) + product_suppressed,
+            ) + coverage_suppressed + product_suppressed,
             "product_reach": (
                 {
                     "reaches": product_summary["totals"]["reaches"],
@@ -958,6 +1007,30 @@ class BusinessAnalysisService:
             result["narrative"] = self.narrate(findings, overview,
                                                heatmap_summary=heatmap["summary"] if heatmap else None)
         return result
+
+    @staticmethod
+    async def _zone_coverage(db: AsyncSession) -> Optional[dict]:
+        """Zone id -> share the calibrated cameras see (None = unknown) for the
+        low-traffic rule; None overall when coverage cannot be computed."""
+        try:
+            from app.services.store_layout_service import store_layout_service
+
+            report = await store_layout_service.coverage_report(db)
+        except Exception as e:  # never let geometry break the analysis
+            logger.warning(f"Camera coverage unavailable for the insights: {e}")
+            return None
+        cams = report.get("cameras") or []
+        # A calibrated camera without a usable footprint: what it sees is unknown.
+        unknown = any(c.get("calibrated") and c.get("enabled") and not c.get("footprint_available") for c in cams)
+        if unknown or not any(c.get("calibrated") and c.get("enabled") for c in cams):
+            return None
+        linked = {c.get("watch_zone_id") for c in cams
+                  if c.get("enabled") and not c.get("calibrated") and c.get("watch_zone_id")}
+        out: dict = {}
+        for z in report.get("zones") or []:
+            # An uncalibrated camera linked to the zone counts all of it.
+            out[z["zone_id"]] = None if z["zone_id"] in linked else z.get("calibrated_covered_fraction")
+        return out
 
     async def _persist(self, db: AsyncSession, findings: list[Finding]) -> None:
         """Store today's findings, replacing any earlier run for the same day.

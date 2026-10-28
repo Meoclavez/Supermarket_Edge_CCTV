@@ -220,6 +220,8 @@ class InferenceScheduler:
         self._cams: dict[str, _Camera] = {}
         # Per-camera preferences (configure()): (analysis_priority, max_analysis_fps).
         self._prefs: dict[str, tuple[Optional[str], Optional[float]]] = {}
+        # Cameras that see an armed restricted area (set_secured).
+        self._secured: set[str] = set()
         self._inflight = 0
         self._skipped_busy = 0
         self._last_tick: Optional[float] = None
@@ -267,7 +269,26 @@ class InferenceScheduler:
         return max(0.0, float(settings.ANALYTICS_MAX_DETECT_FPS))
 
     def _weight(self, camera_id: str) -> float:
-        return priority_weight(self._prefs.get(camera_id, (None, None))[0])
+        w = priority_weight(self._prefs.get(camera_id, (None, None))[0])
+        if camera_id in self._secured:
+            # Sees an armed restricted area (restricted_area_engine): a larger share.
+            w = max(w, float(settings.RESTRICTED_PRIORITY_WEIGHT))
+        return w
+
+    def set_secured(self, camera_id: str, secured: bool) -> None:
+        """This camera sees an armed restricted area: higher weight, faster idle rate."""
+        with self._lock:
+            if (camera_id in self._secured) == bool(secured):
+                return
+            if secured:
+                self._secured.add(camera_id)
+            else:
+                self._secured.discard(camera_id)
+            c = self._cams.get(camera_id)
+            if c is not None:
+                if secured:
+                    c.next_due = min(c.next_due, self._clock())
+                self._recompute_locked(self._clock())
 
     def _ceiling(self, cam: _Camera, camera_id: Optional[str] = None) -> float:
         """Most analysed frames/s this camera can use.
@@ -566,8 +587,9 @@ class InferenceScheduler:
         # No people, no motion: the idle rate, taken from the budget first.
         quiet = {k: c for k, c in analysing.items() if k not in boosted and self._quiet(c, now)}
         idle_fps = max(0.0, float(settings.ANALYTICS_IDLE_DETECT_FPS))
+        secured_fps = max(idle_fps, float(settings.RESTRICTED_MIN_ANALYSIS_FPS))
         for k, c in quiet.items():
-            c.rate = min(idle_fps, self._ceiling(c, k))
+            c.rate = min(secured_fps if k in self._secured else idle_fps, self._ceiling(c, k))
         others = {k: c for k, c in analysing.items() if k not in boosted and k not in quiet}
         if not settings.ANALYTICS_SCHEDULER or not self._cost_ms:
             # Legacy rule, or nothing to measure against (no detector): the ceiling.
@@ -709,6 +731,7 @@ class InferenceScheduler:
                 "ceiling_fps": round(self._ceiling(c, camera_id), 2),
                 "floor_fps": float(settings.ANALYTICS_MIN_DETECT_FPS),
                 "priority": priority or "normal",
+                "restricted_area": camera_id in self._secured,
                 "weight": self._weight(camera_id),
                 "max_fps_setting": own_max,
                 # Quiet = no people and no pixel motion lately: analysed at the idle rate.

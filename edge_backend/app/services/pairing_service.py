@@ -156,8 +156,14 @@ def in_quiet_hours(quiet: Optional[dict], now: Optional[datetime] = None) -> boo
 
 
 def prefs_filter_reason(prefs: Optional[dict], event_type: str, severity: str,
-                        camera_id: Optional[str], now: Optional[datetime] = None) -> Optional[str]:
-    """Why this device should NOT get the alert, or None when it should."""
+                        camera_id: Optional[str], now: Optional[datetime] = None,
+                        ignore_quiet_hours: bool = False) -> Optional[str]:
+    """Why this device should NOT get the alert, or None when it should.
+
+    ``ignore_quiet_hours``: high-security restricted-area alerts reach the
+    phone during its quiet hours too (owner decision 2026-10-28); the phone's
+    own event-type, severity and camera choices still apply.
+    """
     p = prefs or default_prefs()
     if p.get("event_types") is not None and event_type not in p["event_types"]:
         return f"event type {event_type} not selected"
@@ -165,7 +171,7 @@ def prefs_filter_reason(prefs: Optional[dict], event_type: str, severity: str,
         return f"severity {severity} below {p.get('min_severity')}"
     if p.get("camera_ids") is not None and camera_id and camera_id not in p["camera_ids"]:
         return f"camera {camera_id} not selected"
-    if in_quiet_hours(p.get("quiet_hours"), now):
+    if not ignore_quiet_hours and in_quiet_hours(p.get("quiet_hours"), now):
         qh = p["quiet_hours"]
         return f"quiet hours {qh['start']}-{qh['end']}"
     return None

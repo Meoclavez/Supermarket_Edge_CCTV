@@ -161,6 +161,17 @@ def _ratio(a: str, b: str, scale: float = 100.0):
     return f
 
 
+def _first(*fns):
+    """The first of several metric readers that finds its numbers."""
+    def f(ev: dict) -> Optional[float]:
+        for fn in fns:
+            v = fn(ev)
+            if v is not None:
+                return v
+        return None
+    return f
+
+
 def _key(k: str, scale: float = 1.0):
     def f(ev: dict) -> Optional[float]:
         v = ev.get(k)
@@ -173,7 +184,8 @@ METRICS = {
     "browse_no_touch": (_key("reaches_per_shopper_minute"), "reaches per shopper-minute", "", False),
     "reach_no_sale": (_key("units_per_reaching_shopper"), "units sold per shopper who reached", "", False),
     "shelf_level": (_ratio("reaches_per_zone", "eye_level_reaches_per_zone"), "of eye-level reaches", "%", False),
-    "low_traffic": (_ratio("visits", "store_avg_visits"), "of the store-average visits", "%", False),
+    "low_traffic": (_first(_ratio("visits_per_m2", "store_avg_visits_per_m2"), _ratio("visits", "store_avg_visits")),
+                    "of the store-average visits", "%", False),
     "dead_space": (_ratio("zone_visitors_per_cell_per_day", "median_zone_visitors_per_cell_per_day"),
                    "of a typical area's traffic", "%", False),
     "queue_wait": (_key("avg_wait_seconds", 1 / 60.0), "minutes average wait", " min", True),

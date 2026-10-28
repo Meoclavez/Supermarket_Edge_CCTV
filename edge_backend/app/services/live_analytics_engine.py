@@ -885,6 +885,7 @@ class CameraWorker(threading.Thread):
         try:
             inference_scheduler.configure(cam, camera_setting(cam, "analysis_priority"),
                                           camera_setting(cam, "max_analysis_fps"))
+            inference_scheduler.set_secured(cam, self._secured(cam))
         except Exception as e:  # noqa: BLE001 - the defaults apply
             _log_once(f"rate_settings:{type(e).__name__}", f"analysis rate settings unreadable ({e})")
         if settings.ANALYTICS_MOTION_WAKE:
@@ -1108,6 +1109,8 @@ class CameraWorker(threading.Thread):
                     self.rt.frames_read += 1
                     self.rt.last_frame_at = time.time()
                     self.rt.put_frame(frame)
+                    # Restricted areas: frame heartbeat and tamper checks (1 Hz, armed areas only).
+                    self._restricted_health(frame, self.rt.last_frame_at)
                     frames_in_window += 1
                     self._frame_index += 1
                     # Feed the pre-event ring buffer, when a clip can need it
@@ -1367,14 +1370,48 @@ class CameraWorker(threading.Thread):
 
     # ----------------------------------------------------------------- analysis
 
+    def _restricted_health(self, frame, now: float) -> None:
+        try:
+            from app.services.restricted_area_engine import restricted_area_engine
+
+            restricted_area_engine.frame_health(self.rt.camera_id, frame, now)
+        except Exception as e:  # noqa: BLE001 - never take the capture loop down
+            _log_once(f"restricted_health:{type(e).__name__}", f"restricted-area camera check failed ({e})")
+
+    @staticmethod
+    def _secured(camera_id: str) -> bool:
+        """The camera sees an armed restricted area (restricted_area_engine)."""
+        try:
+            from app.services.restricted_area_engine import restricted_area_engine
+
+            return restricted_area_engine.camera_secured(camera_id)
+        except Exception:  # noqa: BLE001
+            return False
+
+    @staticmethod
+    def _restricted_covers(camera_id: str) -> bool:
+        try:
+            from app.services.restricted_area_engine import restricted_area_engine
+
+            return restricted_area_engine.covers(camera_id)
+        except Exception:  # noqa: BLE001
+            return False
+
     def _night_watch_step(self, frame, now: float) -> str:
         """NORMAL, HOLD or CONFIRM for this frame (services/night_watch.py).
 
         On arming, the camera's tracks are finished as when every analysis
         feature is off: nobody is counted while the pose model is paused.
-        A night-watch failure falls back to the normal pipeline.
+        A night-watch failure falls back to the normal pipeline. A camera that
+        sees an armed restricted area is never held: the full pose pipeline
+        (restricted_area_engine) replaces night watch's motion check there.
         """
         cam = self.rt.camera_id
+        if self._secured(cam):
+            if self._night_armed:
+                inference_scheduler.hold(cam, False)
+                self._night_armed = False
+            return nw.NORMAL
         try:
             mode = nw.night_watch.step(cam, self.rt.name, frame, now)
         except Exception as e:  # noqa: BLE001 - never take the capture loop down
@@ -1425,8 +1462,10 @@ class CameraWorker(threading.Thread):
         cam = self.rt.camera_id
         flags = {f: camera_flag(cam, f) for f in ANALYSIS_FLAGS}
         self.rt.analysis_flags = flags
-        inference_scheduler.set_idle(cam, not any(flags.values()))
-        if not any(flags.values()):
+        # An armed restricted area keeps the camera analysed whatever its flags.
+        secured = self._secured(cam)
+        inference_scheduler.set_idle(cam, not (any(flags.values()) or secured))
+        if not any(flags.values()) and not secured:
             # Every analysis feature is off for this camera: spend no GPU time,
             # show no boxes, and finish any tracks (closing open visits).
             for t in self.tracker.flush_all():
@@ -1466,6 +1505,16 @@ class CameraWorker(threading.Thread):
         else:
             self.rt.ignored_detections_last = 0
         detections = kept
+        if secured:
+            # Inside an armed restricted area a slightly less certain person
+            # still starts a track (per-area "extra sensitivity"); AI_IGNORE
+            # areas were already removed above, so privacy still wins.
+            try:
+                from app.services.restricted_area_engine import restricted_area_engine
+
+                restricted_area_engine.boost_detections(cam, detections, w, h, now)
+            except Exception as e:  # noqa: BLE001
+                _log_once(f"restricted_boost:{type(e).__name__}", f"restricted-area sensitivity failed ({e})")
         # People by the per-box rule (a dark box needs less confidence), as
         # the detector itself keeps them when no explicit threshold is given.
         persons = [d for d in detections if d.confidence >= person_threshold(d)]
@@ -1558,6 +1607,8 @@ class CameraWorker(threading.Thread):
         humans = [t for t in live if t.is_human]
         self._observe_pose(evidence, now, humans)
         self._evaluate_zone_rules(evidence, now, humans, counting)
+        if secured or self._restricted_covers(cam):
+            self._evaluate_restricted(evidence, now, live)
 
         for finished in self.tracker.drain_finished():
             self.engine.close_track(finished, reason="track_lost", persist=counting)
@@ -1582,6 +1633,23 @@ class CameraWorker(threading.Thread):
                 f"zone_rules:{type(e).__name__}",
                 f"tripwire/restricted-area evaluation failed ({type(e).__name__}: {e}); continuing without it",
             )
+
+    def _evaluate_restricted(self, frame, now: float, tracks: list[Track]) -> None:
+        """High-security restricted areas (services/restricted_area_engine.py).
+
+        Gets every live track (static ones too: inside an armed area a still
+        "person" is only ignored when it was learnt as a still figure while the
+        area was not guarded). ``frame`` is the privacy-masked evidence frame.
+        """
+        try:
+            from app.services.restricted_area_engine import restricted_area_engine
+
+            h, w = frame.shape[:2]
+            restricted_area_engine.evaluate(self.rt.camera_id, tracks, w, h, now, frame=frame,
+                                            camera_name=self.rt.name)
+        except Exception as e:  # noqa: BLE001
+            _log_once(f"restricted_rules:{type(e).__name__}",
+                      f"restricted-area evaluation failed ({type(e).__name__}: {e}); continuing without it")
 
     def _observe_pose(self, frame: np.ndarray, now: float, tracks: list[Track]) -> None:
         """Hand confirmed tracks to pose_analytics; apply the interactions it reports.

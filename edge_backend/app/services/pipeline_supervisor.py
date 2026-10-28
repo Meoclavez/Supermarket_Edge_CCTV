@@ -199,6 +199,13 @@ class PipelineSupervisor:
                 floor_projector.set_homography(cam.id, cam.homography_matrix,
                                                calibration_frame_size(cam.calibration_points))
                 live_engine.set_camera_zone(cam.id, getattr(cam, "watch_zone_id", None))
+                try:
+                    from app.services.pose_analytics import pose_analytics
+
+                    pose_analytics.set_camera_geometry(cam.id, cam.floor_x, cam.floor_y, cam.floor_z,
+                                                       placed=bool(getattr(cam, "map_placed", False)))
+                except Exception as e:  # noqa: BLE001 - shelf attribution is optional
+                    logger.debug(f"camera geometry for shelf attribution unavailable: {e}")
                 if not cam.is_ai_enabled:
                     off[cam.id] = cam
                 elif cam.rtsp_url:

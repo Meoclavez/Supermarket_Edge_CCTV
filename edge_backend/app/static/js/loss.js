@@ -84,6 +84,20 @@
     const label = inc.alert_tier_label || TIER_LABEL[t];
     return `<span class="tier-badge tier-${t}${cls}" title="Alert level: ${esc(label)}">${ico(TIER_ICON[t], { size: 'sm' })}${esc(label)}</span>`;
   }
+  // Restricted-area alerts (js/restricted.js) come through zone_alerts.js with
+  // metadata.alert_tier and metadata.channels from the same level routing.
+  const zoneMeta = (z) => (z && z.metadata && typeof z.metadata === 'object' ? z.metadata : {});
+  const zoneTier = (z) => (zoneMeta(z).ra_area_id && TIERS.includes(zoneMeta(z).alert_tier) ? zoneMeta(z).alert_tier : null);
+  const ZONE_DEFAULT_CH = { review: {}, watch: { banner: true }, alert: { banner: true, sound: true }, critical: { banner: true, sound: true } };
+  const zoneCh = (z) => {
+    const ch = zoneMeta(z).channels;
+    if (ch && typeof ch === 'object') return ch;
+    const t = zoneTier(z);
+    return t ? ZONE_DEFAULT_CH[t] : null;
+  };
+  /** Banner / sound for an area or line alert: by its level when it has one, else always (as before). */
+  const zoneBannerOk = (z) => { const ch = zoneCh(z); return ch ? ch.banner === true : true; };
+  const zoneSoundOk = (z) => { const ch = zoneCh(z); return ch ? ch.sound === true : true; };
   const riskText = (inc) => (num(inc && inc.risk_score) ? `risk ${Math.round(inc.risk_score * 100)}%` : null);
 
   const state = {
@@ -301,8 +315,13 @@
     const active = state.incidents.filter((i) => i.status === 'ACTIVE' && bannerAllowed(i))
       .sort((a, b) => (bannerRank(b) - bannerRank(a)) || (timeOf(b) - timeOf(a)))[0] || null;
     const za = zoneAlerts();
-    const zone = za ? za.pending()[0] : null;
-    if (zone && (!active || (tierOf(active) !== 'critical' && timeOf(zone) > timeOf(active)))) return { kind: 'zone', id: zone.id, item: zone };
+    const zone = za ? (za.pending().find(zoneBannerOk) || null) : null;
+    // A Critical restricted-area alert is never pushed aside by a lower theft level
+    // (two Criticals: the newer leads).
+    const zCrit = zone && zoneTier(zone) === 'critical';
+    const aCrit = active && tierOf(active) === 'critical';
+    if (zone && (!active || (zCrit && (!aCrit || timeOf(zone) > timeOf(active)))
+      || (!aCrit && !zCrit && timeOf(zone) > timeOf(active)))) return { kind: 'zone', id: zone.id, item: zone };
     return active ? { kind: 'theft', id: active.id, item: active } : null;
   }
 
@@ -313,8 +332,8 @@
    * unacknowledged area/line alert (as before). A new Critical sounds three times.
    */
   function ringForNew() {
-    if (!state.loaded) return;
-    const fresh = state.incidents.filter((i) => i.status === 'ACTIVE' && !state.heard.has(i.id));
+    // Area / line alerts ring even when theft alerts are not loaded (not in the plan).
+    const fresh = state.loaded ? state.incidents.filter((i) => i.status === 'ACTIVE' && !state.heard.has(i.id)) : [];
     fresh.forEach((i) => state.heard.add(i.id));
     const ring = fresh.filter(soundAllowed);
     const za = zoneAlerts();
@@ -322,14 +341,15 @@
     let zoneRing = false;
     if (zone && !state.heard.has(`zone:${zone.id}`)) {
       state.heard.add(`zone:${zone.id}`);
-      zoneRing = true;
+      zoneRing = zoneSoundOk(zone);
     }
+    const zoneUrgent = zoneRing && zoneTier(zone) === 'critical';
     if (state.heard.size > 2000) {
       // Forget ids no longer in the queue so the set stays small.
       const keep = new Set(state.incidents.map((i) => i.id));
       state.heard.forEach((id) => { if (!keep.has(id) && !String(id).startsWith('zone:')) state.heard.delete(id); });
     }
-    if (ring.length || zoneRing) playSound(ring.some((i) => tierOf(i) === 'critical'));
+    if (ring.length || zoneRing) playSound(ring.some((i) => tierOf(i) === 'critical') || zoneUrgent);
   }
 
   const BANNER_TIER_CLASSES = ['theft-banner-critical', 'theft-banner-alert', 'theft-banner-watch'];
@@ -343,7 +363,7 @@
     if (state.dismissedBannerId === pick.id) { banner.style.display = 'none'; return; }
     // Banner look by level: Critical solid danger, Alert danger outline, Watch info; no level and
     // area/line alerts keep the old look.
-    const tier = pick.kind === 'theft' ? tierOf(pick.item) : null;
+    const tier = pick.kind === 'theft' ? tierOf(pick.item) : zoneTier(pick.item);
     const look = tier && tier !== 'review' ? `theft-banner-${tier}` : '';
     BANNER_TIER_CLASSES.forEach((c) => banner.classList.toggle(c, c === look));
     banner.dataset.tier = tier || '';
@@ -355,7 +375,13 @@
     }
     const set = (id, t) => { const n = $(id); if (n) n.textContent = t; };
     const it = pick.item;
-    if (pick.kind === 'zone') {
+    if (pick.kind === 'zone' && tier) {
+      const m = zoneMeta(it);
+      set('theftBannerHeadline', `${TIER_LABEL[tier]} · Please check: ${m.ra_trigger_label || 'Restricted area alert'} in ${it.zone_name || m.area_name || 'a restricted area'} on ${it.camera_name || m.camera_name || it.camera_id || 'a camera'}`);
+      set('theftBannerConfidence', m.test ? 'Restricted area alert, test' : 'Restricted area alert');
+      set('theftBannerTime', when(it.timestamp));
+      set('theftBannerDetails', 'A restricted area alert: check the camera and record what happened.');
+    } else if (pick.kind === 'zone') {
       const restricted = it.event_type === 'RESTRICTED_AREA';
       set('theftBannerHeadline', zoneAlerts().bannerHeadline(it));
       set('theftBannerConfidence', restricted ? 'Restricted area alert' : 'Line alert');
@@ -402,7 +428,10 @@
     if (!id) return;
     setTimeout(() => {
       const za = zoneAlerts();
-      if (kind === 'zone' && za) za.focus(id);
+      const ra = window.edgeRestricted;
+      const zi = kind === 'zone' && za ? za.pending().find((z) => z.id === id) : null;
+      if (zi && zoneTier(zi) && ra && typeof ra.focusEvent === 'function') ra.focusEvent(id);
+      else if (kind === 'zone' && za) za.focus(id);
       else focusIncident(id);
     }, 60);
   }
@@ -1428,7 +1457,7 @@
   window.edgeLoss = {
     refresh, focusIncident, closeEvidence, openEvidence, incidentTier,
     // Pure helpers for tests (tests/fixtures/theft_tier_harness.js).
-    _test: { tierOf, bannerAllowed, soundAllowed, bannerItem, ringForNew, renderBanner, renderTierKpis, cardHtml, tierMix, filtered, tierUrl, state },
+    _test: { tierOf, bannerAllowed, soundAllowed, bannerItem, ringForNew, renderBanner, zoneTier, zoneBannerOk, zoneSoundOk, renderTierKpis, cardHtml, tierMix, filtered, tierUrl, state },
   };
 
   if (window.edgeAuth && typeof window.edgeAuth.onReady === 'function') {

@@ -261,3 +261,33 @@ button.fp-badge { line-height: inherit; text-align: left; }
 .fp-site-exact { margin: 8px 0; font-size: 13px; }
 .fp-site-exact summary { cursor: pointer; color: var(--text-2); font-weight: 500; min-height: 28px; display: flex; align-items: center; }
 .fp-site-exact[open] summary { margin-bottom: 8px; }
+
+/* ---- camera coverage (inspector boxes, coverage choice, print) ----- */
+.fp-field-end { display: flex; align-items: flex-end; }
+.fp-cov-mode { border: 1px solid var(--border); border-radius: var(--radius-sm, 6px); padding: 6px 10px 8px; margin: 8px 0; }
+.fp-cov-mode legend { font-size: 12px; color: var(--text-dim); padding: 0 4px; }
+.fp-radio { display: block; font-size: 13px; color: var(--text-2); cursor: pointer; margin-top: 4px; }
+.fp-radio input { accent-color: var(--accent-solid); margin-right: 4px; }
+.fp-radio .fp-hintline { margin: 0 0 4px 22px; }
+.fp-cov-box:empty { display: none; }
+.fp-cov-box { border-top: 1px solid var(--border); margin-top: 10px; padding-top: 8px; }
+.fp-cov-title { font-size: 13px; font-weight: 700; color: var(--text); margin: 6px 0 2px; }
+.fp-cov-sub { font-size: 12px; font-weight: 600; color: var(--text-dim); margin: 8px 0 2px; }
+.fp-cov-big { font-size: 26px; font-weight: 800; color: var(--text); font-variant-numeric: tabular-nums; line-height: 1.2; }
+.fp-cov-big small { font-size: 13px; font-weight: 500; color: var(--text-dim); margin-left: 4px; }
+.fp-cov-list { list-style: none; margin: 2px 0; padding: 0; font-size: 13px; }
+.fp-cov-list li { display: flex; justify-content: space-between; gap: 8px; padding: 3px 0; border-bottom: 1px dashed var(--border); flex-wrap: wrap; }
+.fp-cov-list li:last-child { border-bottom: 0; }
+.fp-cov-list li span { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.fp-cov-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+.fp-cov-actions .btn { white-space: normal; text-align: left; }
+.fp-cov-toggles { display: flex; flex-wrap: wrap; gap: 12px; margin: 6px 0; }
+.fp-linklike { background: none; border: 0; padding: 0; color: var(--accent-text, var(--accent)); font: inherit; cursor: pointer; text-align: left; text-decoration: underline; text-underline-offset: 2px; }
+.fp-linklike:hover, .fp-linklike:focus-visible { color: var(--text); }
+#fpPrintSheet { display: none; }
+@media print {
+  body.fp-printing > *:not(#fpPrintSheet) { display: none !important; }
+  body.fp-printing #fpPrintSheet { display: block; }
+  body.fp-printing #fpPrintSheet img { display: block; max-width: none; }
+  @page { size: landscape; margin: 10mm; }
+}

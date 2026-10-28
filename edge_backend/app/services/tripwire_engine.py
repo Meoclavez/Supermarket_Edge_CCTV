@@ -476,6 +476,15 @@ class TripwireEngine:
                  and all(isinstance(w.get(k), (int, float)) for k in ("x1", "y1", "x2", "y2"))]
         areas = [a for a in data.get("intrusion_zones", []) if a.get("enabled", True)
                  and len(a.get("points") or []) >= 3]
+        if areas:
+            # Areas upgraded to (or used by) high-security restricted areas are
+            # evaluated by restricted_area_engine while that plan feature is on.
+            try:
+                from app.services.restricted_area_engine import restricted_area_engine
+
+                areas = [a for a in areas if not restricted_area_engine.handles_intrusion(a.get("id"))]
+            except Exception:  # noqa: BLE001 - the old evaluation stands
+                pass
         return wires, areas
 
     @staticmethod

@@ -123,6 +123,15 @@ class ClipRecorderService:
         if cached is not None and now - cached[0] < self.WANT_CACHE_SEC:
             return cached[1]
         want = self.theft_clip_enabled(camera_id)
+        if not want:
+            # A camera that sees an armed restricted area keeps the pre-event
+            # ring, so its evidence clip starts before the alert.
+            try:
+                from app.services.restricted_area_engine import restricted_area_engine
+
+                want = restricted_area_engine.wants_clip_ring(camera_id)
+            except Exception:  # noqa: BLE001
+                want = False
         if not want and settings.NIGHT_WATCH_CLIP:
             try:
                 from app.services.night_watch import night_watch

@@ -27,7 +27,13 @@
  *   load(), beginPick(cb), cancelPick(), setCalOverlay(overlay|null)
  *
  * Stable API for other modules (window.FloorplanAPI, defined below), and the
- * events 'fp:layout-changed', 'fp:camera-hover', 'fp:camera-selected' on window.
+ * events 'fp:layout-changed', 'fp:camera-hover', 'fp:camera-selected',
+ * 'fp:coverage-changed' and 'fp:restricted-settings' on window.
+ *
+ * Camera coverage: each camera's cone (field of view + reach, range_m) or,
+ * when calibrated, the floor footprint of its picture, is cut by walls, room
+ * edges, shelves and obstacles (ray casting; doors and outdoor areas do not
+ * block). Same algorithm as services/coverage_geometry.py.
  */
 (function () {
   'use strict';
@@ -146,6 +152,7 @@
     { range: '30d', label: 'Last 30 days', title: 'Recorded hours of the last 30 days, today included' },
   ];
   const HEATMAP_RANGE_KEY = 'edge_cctv_heatmap_range';
+  const COVERAGE_LAYERS_KEY = 'edge_cctv_map_coverage';
   const HEATMAP_HISTORY_REFRESH_MS = 3 * 60 * 1000;
   // After a 403 (heatmaps not in the plan) the live heatmap is asked for again only after this long.
   const HEATMAP_REFUSED_RETRY_MS = 5 * 60 * 1000;
@@ -221,8 +228,16 @@
 
       this.showLayers = {
         structures: true, zones: true, cameras: true, heatmap: true,
-        persons: true, labels: true, grid: true,
+        persons: true, labels: true, grid: true, coverage: false, gaps: false,
       };
+      try {
+        const cov = JSON.parse(window.localStorage.getItem(COVERAGE_LAYERS_KEY) || 'null');
+        if (cov && typeof cov === 'object') { this.showLayers.coverage = !!cov.coverage; this.showLayers.gaps = !!cov.gaps; }
+      } catch (_) { /* storage unavailable: layers off */ }
+      this._covCache = new Map();   // camera_id -> {key, view}: what each camera covers
+      this._covStats = null;        // store-wide coverage numbers (coverageStats)
+      this._gapCanvas = null;
+      this._space = null;           // GET /api/v1/analytics/space (sales per m², walking distance)
 
       this._thumbTimer = null;
       this._statusTimer = null;
@@ -256,8 +271,13 @@
       return this.toWorld(clientX - r.left, clientY - r.top);
     }
 
+    /** Size of what is being drawn: the canvas, or the picture while exporting. */
+    viewW() { return this._exportView ? this._exportView.W : this.canvas.clientWidth; }
+    viewH() { return this._exportView ? this._exportView.H : this.canvas.clientHeight; }
+
     /** Height of the summary overlay at the bottom of the map (0 when hidden). */
     hudReserve() {
+      if (this._exportView) return 0;
       const hud = document.querySelector('#fpWrapper .fp-hud-bottom');
       if (!hud) return 0;
       const h = hud.getBoundingClientRect().height;
@@ -309,6 +329,7 @@
         this.fitToView();
         this.emitState();
         this.renderSetup();
+        if (!this.sel) this.emitInspector();   // store coverage summary
         if (!this._readyFired) { this._readyFired = true; resolveReady(); }
         this.refreshMetrics();
         this.refreshLive();
@@ -387,6 +408,7 @@
           this.zoneMetrics = {};
           (fp.zones || []).forEach((z) => { this.zoneMetrics[z.id] = z.metrics; });
           this.activeNow = (fp.active_shoppers_now === undefined) ? null : fp.active_shoppers_now;
+          this._refreshCoverageBoxes();   // per m² figures of the open zone
         }
         if (hmRes && hmRes.status === 403) {
           // feature_disabled: not in the plan. Ask again only after a while.
@@ -481,6 +503,11 @@
       window.addEventListener('keydown', (e) => this.onKey(e));
       window.addEventListener('keyup', (e) => { if (e.key === 'Shift') this.shiftDown = false; });
       document.addEventListener('visibilitychange', () => { if (this.isVisible()) this.refreshLive(); });
+      // Coverage layers remember their state per browser (constructor).
+      ['coverage', 'gaps'].forEach((k) => {
+        const cb = document.getElementById(k === 'coverage' ? 'layerCoverage' : 'layerGaps');
+        if (cb) cb.checked = !!this.showLayers[k];
+      });
       const listToggle = document.getElementById('fpCamListToggle');
       if (listToggle) {
         listToggle.addEventListener('click', () => {
@@ -623,7 +650,7 @@
         const s = this.findShape(d.type, d.id);
         if (s) { s.polygon = clonePts(d.orig); if (d.before) this.setRotation(d.type, s, snapRotation(d.before)); }
       }
-      if ((d.kind === 'camera' || d.kind === 'camera-rotate') && d.before) {
+      if ((d.kind === 'camera' || d.kind === 'camera-rotate' || d.kind === 'camera-range') && d.before) {
         const cam = this.cameras.find((c) => c.camera_id === d.id);
         if (cam) Object.assign(cam, cameraFields(d.before));
       }
@@ -657,7 +684,8 @@
       // Selected camera: the rotate handle has priority over everything.
       const handle = this.cameraHandleAt(p.x, p.y);
       if (handle) {
-        this.dragging = { kind: 'camera-rotate', id: handle.camera_id, before: cameraSnap(handle), moved: false };
+        this.dragging = { kind: handle.kind === 'range' ? 'camera-range' : 'camera-rotate', id: handle.cam.camera_id,
+          before: cameraSnap(handle.cam), moved: false };
         return;
       }
       // Selected shape: the turn handle, then the resize handles of its box;
@@ -745,6 +773,18 @@
             cam.azimuth_deg = deg;
             d.moved = true;
           }
+        } else if (d.kind === 'camera-range') {
+          const cam = this.cameras.find((c) => c.camera_id === d.id);
+          if (cam) {
+            const s = this.cameraScreenPos(cam);
+            const a = ((cam.azimuth_deg || 0) - 90) * Math.PI / 180;
+            // Distance along the camera's bearing, so the reach changes and the angle stays.
+            let m = ((p.x - s.x) * Math.cos(a) + (p.y - s.y) * Math.sin(a)) / this.scale;
+            m = this.shiftDown ? Math.round(m) : Math.round(m * 10) / 10;
+            cam.range_m = Math.max(COV.MIN_RANGE_M, Math.min(COV.MAX_RANGE_M, m));
+            this._dragLabel = `Reach ${fmt(cam.range_m)} m`;
+            d.moved = true;
+          }
         } else if (d.kind === 'vertex') {
           const shape = this.findSel();
           if (shape) {
@@ -773,7 +813,7 @@
       let hoverCam = null;
       if (this.mode === MODE.DRAW || this.mode === MODE.PICK || this.mode === MODE.MEASURE) cursor = 'crosshair';
       else if (this.mode === MODE.PLACE_CAMERA) cursor = 'copy';
-      else if (this.cameraHandleAt(p.x, p.y)) cursor = 'alias';
+      else if (this.cameraHandleAt(p.x, p.y)) cursor = this.cameraHandleAt(p.x, p.y).kind === 'range' ? 'ew-resize' : 'alias';
       else {
         const fh = this.frameHandleAt(p.x, p.y);
         if (fh && (fh.kind === 'rotate' || !this.freeShape)) cursor = fh.kind === 'rotate' ? 'alias' : fh.cursor;
@@ -807,9 +847,10 @@
       this.dragging = null;
       this._dragLabel = null;
       if (d.kind === 'rect') { await this.finishRect(d); return; }
-      if (d.kind === 'camera' || d.kind === 'camera-rotate') {
+      if (d.kind === 'camera' || d.kind === 'camera-rotate' || d.kind === 'camera-range') {
         const cam = this.cameras.find((c) => c.camera_id === d.id);
-        if (cam && d.moved) await this.commitCamera(cam, d.before, d.kind === 'camera' ? 'Move camera' : 'Turn camera');
+        const what = { camera: 'Move camera', 'camera-rotate': 'Turn camera', 'camera-range': 'Change camera reach' }[d.kind];
+        if (cam && d.moved) await this.commitCamera(cam, d.before, `${what} "${cam.name}"`);
         this.emitInspector();
       } else if (['shape', 'vertex', 'resize', 'rotate'].includes(d.kind) && d.moved) {
         const shape = this.findShape(d.type, d.id);
@@ -906,7 +947,12 @@
       };
     }
 
-    cameraReachPx() { return Math.max(30, Math.min(160, 6 * this.scale)); }
+    /** Screen length of a camera's reach (its range, never shorter than 30 px so the handle stays usable). */
+    cameraReachPx(cam) {
+      const v = cam ? this.coverageOf(cam) : null;
+      const m = v ? (v.mode === 'calibrated' ? (v.far || v.range) : v.range) : COV.DEFAULT_RANGE_M;
+      return Math.max(30, m * this.scale);
+    }
 
     cameraAt(px, py) {
       for (let i = this.cameras.length - 1; i >= 0; i--) {
@@ -960,19 +1006,37 @@
       return fan;
     }
 
+    /** Turn handle: on the bearing line, well inside the reach. */
     cameraHandlePos(cam) {
       const s = this.cameraScreenPos(cam);
       const a = ((cam.azimuth_deg || 0) - 90) * Math.PI / 180;
-      const r = this.cameraReachPx();
+      const reach = this.cameraReachPx(cam);
+      const r = this.cameraRangeHandleShown(cam) ? Math.max(24, Math.min(90, reach * 0.5)) : Math.max(30, Math.min(160, reach));
       return { x: s.x + Math.cos(a) * r, y: s.y + Math.sin(a) * r };
     }
 
+    /** Reach handle: the tip of the cone (manual coverage only; a calibrated footprint has its own far limit). */
+    cameraRangeHandlePos(cam) {
+      const s = this.cameraScreenPos(cam);
+      const a = ((cam.azimuth_deg || 0) - 90) * Math.PI / 180;
+      const r = Math.max(30, cameraRangeM(cam) * this.scale);
+      return { x: s.x + Math.cos(a) * r, y: s.y + Math.sin(a) * r };
+    }
+
+    cameraRangeHandleShown(cam) { return this.coverageOf(cam).mode === 'manual'; }
+
+    /** {cam, kind: 'rotate'|'range'} under the pointer for the selected camera, or null. */
     cameraHandleAt(px, py) {
       if (!this.sel || this.sel.type !== 'camera' || !this.showLayers.cameras) return null;
       const cam = this.cameras.find((c) => c.camera_id === this.sel.id);
       if (!cam) return null;
+      const tol = this._coarse ? 16 : 10;
+      if (this.cameraRangeHandleShown(cam)) {
+        const r = this.cameraRangeHandlePos(cam);
+        if (Math.hypot(r.x - px, r.y - py) <= tol) return { cam, kind: 'range' };
+      }
       const h = this.cameraHandlePos(cam);
-      return Math.hypot(h.x - px, h.y - py) <= (this._coarse ? 16 : 10) ? cam : null;
+      return Math.hypot(h.x - px, h.y - py) <= tol ? { cam, kind: 'rotate' } : null;
     }
 
     findSel() {
@@ -1501,11 +1565,9 @@
     async saveCameraPlacement(cam, opts) {
       const o = opts || {};
       try {
-        await this.post(`${API}/cameras/${encodeURIComponent(cam.camera_id)}/placement`, {
-          floor_x: cam.floor_x, floor_y: cam.floor_y, floor_z: cam.floor_z,
-          azimuth_deg: cam.azimuth_deg, fov_deg: cam.fov_deg,
-        }, 'PATCH');
+        const r = await this.post(`${API}/cameras/${encodeURIComponent(cam.camera_id)}/placement`, placementBody(cam), 'PATCH');
         cam.map_placed = true;
+        this._applyPlacementAnswer(cam, r);
         if (o.before) this.pushCmd(this.cmdCamera(o.before, cameraSnap(cam), o.label || `Move camera "${cam.name}"`));
         this.setStatus(`"${cam.name}" at ${(+cam.floor_x).toFixed(1)}, ${(+cam.floor_y).toFixed(1)} m, bearing ${Math.round(cam.azimuth_deg || 0)}°.`, 'ok');
         if (window.deviceManager && window.deviceManager.renderCameras) window.deviceManager.renderCameras();
@@ -1516,6 +1578,15 @@
         this.setStatus(`Could not save placement: ${e.message}`, 'error');
         return false;
       }
+    }
+
+    /** Server answer of a placement save: the stored reach and the footprint's new near/far limits. */
+    _applyPlacementAnswer(cam, r) {
+      if (!r || typeof r !== 'object') return;
+      if ('range_m' in r) cam.range_m = r.range_m;
+      if ('range_default_m' in r) cam.range_default_m = r.range_default_m;
+      if ('coverage_mode' in r) cam.coverage_mode = r.coverage_mode;
+      if ('calibrated_footprint' in r) cam.calibrated_footprint = r.calibrated_footprint;
     }
 
     async placeCameraAt(xm, ym) {
@@ -1903,9 +1974,8 @@
         const cam = this.cameras.find((c) => c.camera_id === snap.camera_id);
         if (!cam) throw new Error('the camera was removed');
         Object.assign(cam, cameraFields(snap));
-        await this.post(`${API}/cameras/${encodeURIComponent(cam.camera_id)}/placement`, {
-          floor_x: cam.floor_x, floor_y: cam.floor_y, floor_z: cam.floor_z, azimuth_deg: cam.azimuth_deg, fov_deg: cam.fov_deg,
-        }, 'PATCH');
+        const r = await this.post(`${API}/cameras/${encodeURIComponent(cam.camera_id)}/placement`, placementBody(cam), 'PATCH');
+        this._applyPlacementAnswer(cam, r);
         if (this.sel && this.sel.type === 'camera' && this.sel.id === cam.camera_id) this.emitInspector();
         this.emitLayoutChanged();
       };
@@ -2035,6 +2105,11 @@
         fov_deg: Number.isFinite(+c.fov_deg) ? +c.fov_deg : 85,
         calibrated: !!c.has_homography,
         enabled: c.is_ai_enabled !== false && c.status !== 'DISABLED',
+        // Added with camera coverage (backward compatible: new keys only).
+        range_m: cameraRangeM(c),
+        range_is_default: !(Number.isFinite(+c.range_m) && c.range_m !== null && +c.range_m > 0),
+        coverage_mode: this.coverageOf(c).mode,
+        covered_m2: Math.round(this.coverageOf(c).area * 10) / 10,
       }));
     }
 
@@ -2106,12 +2181,16 @@
       const shape = this.findSel();
       if (!shape) {
         if (title) title.textContent = 'Inspector';
-        panel.innerHTML = '<div class="fp-empty">Select a zone, structure or camera on the plan to edit it and see what was measured there.</div>';
+        panel.innerHTML = '<div class="fp-empty">Select a zone, structure or camera on the plan to edit it and see what was measured there.</div>'
+          + (this.layout ? '<div class="fp-cov-box" id="fpCovBox" data-cov="store"></div>' : '');
+        if (this.layout) { this.coverageStats(true); this._refreshCoverageBoxes(); this.refreshSpace(); }
         return;
       }
       if (this.sel.type === 'zone') this.renderZoneInspector(panel, title, shape);
       else if (this.sel.type === 'structure') this.renderStructureInspector(panel, title, shape);
       else this.renderCameraInspector(panel, title, shape);
+      this.coverageStats(true);
+      this._refreshCoverageBoxes();
     }
 
     renderZoneInspector(panel, title, zone) {
@@ -2144,6 +2223,8 @@
           <div class="metric-pill"><span class="metric-pill-label">Avg dwell</span><span class="metric-pill-val">${m && m.avg_dwell_seconds ? m.avg_dwell_seconds + 's' : dash}</span></div>
           <div class="metric-pill"><span class="metric-pill-label">In zone now</span><span class="metric-pill-val">${val(m && m.occupancy_now)}</span></div>
         </div>
+        <div class="fp-cov-box" id="fpCovBox" data-cov="zone" data-id="${escapeHtml(zone.id)}"></div>
+        ${isRestrictedZone(zone) ? `<div class="fp-actions"><button type="button" class="btn btn-sm btn-warning" id="fpRestricted">${ico('shield-alert', { size: 'sm' })}Restricted area settings</button></div>` : ''}
         <div class="fp-actions">
           <button class="btn btn-secondary btn-sm" id="fpDup" title="Duplicate (Ctrl+D)">${ico('copy', { size: 'sm' })}Duplicate</button>
           <button class="btn btn-sm btn-danger" id="fpDelete">Delete zone</button>
@@ -2161,6 +2242,9 @@
         if (await this.saveShape('zone', zone, null, { before, label })) flashSaved('zSaved');
       };
       ['zName', 'zCat', 'zColor', 'zProducts'].forEach((id) => panel.querySelector(`#${id}`).addEventListener('change', commit));
+      const rb = panel.querySelector('#fpRestricted');
+      // The restricted-area module builds its own settings panel on this event.
+      if (rb) rb.addEventListener('click', () => emit('fp:restricted-settings', { zone_id: zone.id }));
       this.bindGeometryFields(panel, 'zone', zone);
       panel.querySelector('#fpDup').addEventListener('click', () => this.duplicateSelected());
       panel.querySelector('#fpDelete').addEventListener('click', () => this.deleteShape('zone', zone.id));
@@ -2197,6 +2281,8 @@
           <div class="fp-field"><label for="stHeight">Height (m, optional)</label>
             <input id="stHeight" name="structureHeight" type="number" step="0.1" min="0" max="30" value="${props.height_m != null ? props.height_m : ''}" placeholder="not set"></div>
         </div>
+        ${['ROOM', 'WALL', 'SHELF', 'COUNTER', 'OBSTACLE'].includes(st.kind) ? `<label class="fp-toggle" for="stBlocks" title="Whether cameras can see past it. Counters and fixtures lower than 1.2 m do not block unless ticked.">
+          <input type="checkbox" id="stBlocks" name="structureBlocksView"${structureBlocksView(st) ? ' checked' : ''}> Blocks camera view</label>` : ''}
         ${this.geometryFieldsHtml('structure', st)}
         <div class="fp-kv">
           <span>${isLine ? 'Length' : 'Area'}</span><b>${isLine ? fmt(st.length_m) + ' m' : fmt(st.area_m2) + ' m²'}</b>
@@ -2204,6 +2290,7 @@
         </div>
         ${this.editHints(isLine)}
         <div class="fp-saved" id="stSaved"></div>
+        ${st.kind === 'SHELF' || st.kind === 'COUNTER' ? `<div class="fp-cov-box" id="fpCovBox" data-cov="structure" data-id="${escapeHtml(st.id)}"></div>` : ''}
         <div class="fp-actions">
           <button class="btn btn-secondary btn-sm" id="fpDup" title="Duplicate (Ctrl+D)">${ico('copy', { size: 'sm' })}Duplicate</button>
           <button class="btn btn-sm btn-danger" id="fpDelete">Delete ${(KIND_LABEL[st.kind] || 'item').toLowerCase()}</button>
@@ -2221,13 +2308,19 @@
         if (h === '') delete st.properties.height_m; else st.properties.height_m = parseFloat(h);
         const area = panel.querySelector('#stArea');
         if (area) st.properties.area_type = area.value.trim();
+        const blocks = panel.querySelector('#stBlocks');
+        // Only stored when it differs from what the kind and height give by default.
+        if (blocks) {
+          delete st.properties.blocks_view;
+          if (blocks.checked !== structureBlocksView(st)) st.properties.blocks_view = blocks.checked;
+        }
         // A kind picked without a colour of its own keeps the look of that kind.
         if (st.kind !== before.kind && before.color === KIND_COLORS[before.kind]) st.color = KIND_COLORS[st.kind];
         const label = st.name !== before.name ? `Rename ${this.shapeLabel('structure', before)}` : `Edit ${this.shapeLabel('structure', st)}`;
         if (await this.saveShape('structure', st, null, { before, label })) flashSaved('stSaved');
         this.emitInspector();
       };
-      ['stName', 'stKind', 'stColor', 'stThick', 'stHeight', 'stArea'].forEach((id) => {
+      ['stName', 'stKind', 'stColor', 'stThick', 'stHeight', 'stArea', 'stBlocks'].forEach((id) => {
         const el = panel.querySelector(`#${id}`);
         if (el) el.addEventListener('change', commit);
       });
@@ -2339,6 +2432,7 @@
           <div class="fp-field"><label for="cZ">Height (m)</label>
             <input id="cZ" name="cameraHeight" type="number" step="0.1" min="0" max="20" value="${(+cam.floor_z || 3).toFixed(1)}"></div>
         </div>
+        ${this.cameraReachHtml(cam)}
         <div class="fp-saved" id="cSaved"></div>
         ${cam.has_homography
           ? `<div class="fp-cal-state is-cal">Calibrated${cp && cp.image_points ? ` from ${cp.image_points.length} point pairs` : ''}${cp && cp.saved_at ? ` · ${escapeHtml(String(cp.saved_at).slice(0, 16).replace('T', ' '))}` : ''}. People it sees are placed on the plan.</div>`
@@ -2351,6 +2445,7 @@
           <span class="fp-hintline">${cam.has_homography
             ? 'Calibrated cameras place each person in the zone they stand in.'
             : 'Every person this camera sees is counted as a visit to this zone (the aisle or area it looks at). Calibrate later for exact positions.'}</span></div>
+        <div class="fp-cov-box" id="fpCovBox" data-cov="camera" data-id="${escapeHtml(cam.camera_id)}"></div>
         <div class="fp-actions">
           <button class="btn btn-sm btn-primary" id="fpCalibrate">${cam.has_homography ? 'Recalibrate' : 'Calibrate'}</button>
           <button class="btn btn-secondary btn-sm" id="fpCamPlace">Place by click</button>
@@ -2369,17 +2464,9 @@
         if (await this.commitCamera(cam, before, `Edit camera "${cam.name}"`)) flashSaved('cSaved');
       };
       ['cX', 'cY', 'cAz', 'cFov', 'cZ'].forEach((id) => panel.querySelector(`#${id}`).addEventListener('change', commit));
+      this.bindCameraReach(panel, cam);
       panel.querySelector('#cZone').addEventListener('change', async (ev) => {
-        try {
-          const r = await this.post(`${API}/cameras/${encodeURIComponent(cam.camera_id)}/zone`, { zone_id: ev.target.value || null }, 'PUT');
-          cam.watch_zone_id = r.watch_zone_id;
-          this.setStatus(r.watch_zone_id ? `"${cam.name}" now counts into ${r.zone_name}.` : `"${cam.name}" no longer counts into a zone.`, 'ok');
-          this.emitInspector();   // the calibration note depends on the link
-          flashSaved('cSaved');
-        } catch (e) {
-          ev.target.value = cam.watch_zone_id || '';
-          this.setStatus(`Could not link the camera: ${e.message}`, 'error');
-        }
+        if (!(await this.linkCameraZone(cam, ev.target.value || null))) ev.target.value = cam.watch_zone_id || '';
       });
       panel.querySelector('#fpCalibrate').addEventListener('click', () => {
         if (window.calibrationTool) window.calibrationTool.open(cam.camera_id);
@@ -2405,6 +2492,293 @@
         if (this.isVisible() && this._thumbRemote === false) img.src = thumbSnapshotUrl(cam.camera_id);
         if (live) live.textContent = this.liveCountFor(cam.camera_id);
       }, 2000);
+    }
+
+    /** PUT /layout/cameras/{id}/zone (the existing link API): count an uncalibrated camera into a zone. */
+    async linkCameraZone(cam, zoneId) {
+      try {
+        const r = await this.post(`${API}/cameras/${encodeURIComponent(cam.camera_id)}/zone`, { zone_id: zoneId || null }, 'PUT');
+        cam.watch_zone_id = r.watch_zone_id;
+        this.setStatus(r.watch_zone_id ? `"${cam.name}" now counts into ${r.zone_name}.` : `"${cam.name}" no longer counts into a zone.`, 'ok');
+        this.emitInspector();   // the calibration note depends on the link
+        flashSaved('cSaved');
+        return true;
+      } catch (e) {
+        this.setStatus(`Could not link the camera: ${e.message}`, 'error');
+        return false;
+      }
+    }
+
+    /** Reach field and the calibrated / manual coverage choice of the camera inspector. */
+    cameraReachHtml(cam) {
+      const dflt = Number.isFinite(+cam.range_default_m) && cam.range_default_m ? +cam.range_default_m : defaultRangeM(cam.fov_deg);
+      const set = Number.isFinite(+cam.range_m) && cam.range_m !== null && +cam.range_m > 0;
+      const fp = cam.calibrated_footprint;
+      const v = this.coverageOf(cam);
+      const limits = v.footprint && v.near !== null && v.far !== null && v.mode === 'calibrated'
+        ? `from ${fmt1(v.near)} m to ${fmt1(v.far)} m away on the map`
+        : (fp && fp.far_m !== null && fp.far_m !== undefined ? `from ${fmt1(fp.near_m)} m to ${fmt1(fp.far_m)} m away` : 'its real near and far limits');
+      return `
+        <div class="fp-field-row">
+          <div class="fp-field"><label for="cRange">Reach (m)</label>
+            <input id="cRange" name="cameraRange" type="number" step="0.5" min="${COV.MIN_RANGE_M}" max="${COV.MAX_RANGE_M}" value="${set ? fmt(+cam.range_m) : ''}" placeholder="${fmt1(dflt)} (default)"${v.mode === 'calibrated' ? ' disabled' : ''}></div>
+          <div class="fp-field fp-field-end"><button type="button" class="btn btn-secondary btn-xs" id="cRangeDefault"${set && v.mode !== 'calibrated' ? '' : ' disabled'} title="Use the reach that matches the lens angle">Default (${fmt1(dflt)} m)</button></div>
+        </div>
+        <span class="fp-hintline">${v.mode === 'calibrated'
+          ? 'Reach comes from the calibration (see below).'
+          : `How far this camera usefully sees people. Empty = ${fmt1(dflt)} m, worked out from the lens angle (10 m for a normal 85° lens; narrower lenses see further). Or drag the square handle at the tip of the cone.`}</span>
+        ${fp ? `<fieldset class="fp-cov-mode"><legend>Coverage on the map</legend>
+          <label class="fp-radio"><input type="radio" name="cCovMode" value="calibrated"${v.mode === 'calibrated' ? ' checked' : ''}> <b>Use calibrated coverage</b>
+            <span class="fp-hintline">The floor the camera picture really shows, worked out from its calibration: ${limits}.</span></label>
+          <label class="fp-radio"><input type="radio" name="cCovMode" value="manual"${v.mode === 'manual' ? ' checked' : ''}> <b>Manual cone</b>
+            <span class="fp-hintline">The angle, field of view and reach typed above. A guess: use it only if the calibration is rough.</span></label>
+        </fieldset>`
+          : (cam.has_homography
+            ? '<div class="fp-hintline">The calibration has no picture size saved, so its real coverage cannot be shown. Recalibrate to see it.</div>'
+            : '<div class="fp-hintline">The cone is an estimate from the angle and reach. Calibrate this camera to see the floor its picture really covers.</div>')}`;
+    }
+
+    bindCameraReach(panel, cam) {
+      const field = panel.querySelector('#cRange');
+      const save = async (value) => {
+        const before = cameraSnap(cam);
+        cam.range_m = value;
+        if (await this.commitCamera(cam, before, `Change reach of camera "${cam.name}"`)) flashSaved('cSaved');
+        this.emitInspector();
+      };
+      if (field) {
+        field.addEventListener('change', () => {
+          const raw = field.value.trim();
+          if (raw === '') { save(null); return; }
+          const v = parseFloat(raw);
+          if (!Number.isFinite(v) || v < COV.MIN_RANGE_M || v > COV.MAX_RANGE_M) {
+            this.setStatus(`Reach must be between ${COV.MIN_RANGE_M} and ${COV.MAX_RANGE_M} metres.`, 'error');
+            field.value = Number.isFinite(+cam.range_m) && cam.range_m !== null ? fmt(+cam.range_m) : '';
+            return;
+          }
+          save(Math.round(v * 100) / 100);
+        });
+      }
+      const dflt = panel.querySelector('#cRangeDefault');
+      if (dflt) dflt.addEventListener('click', () => save(null));
+      panel.querySelectorAll('input[name="cCovMode"]').forEach((r) => r.addEventListener('change', async () => {
+        const before = cameraSnap(cam);
+        cam.coverage_mode = r.value;
+        if (await this.commitCamera(cam, before, r.value === 'manual' ? `Use the manual cone for "${cam.name}"` : `Use calibrated coverage for "${cam.name}"`)) flashSaved('cSaved');
+        this.emitInspector();
+      }));
+    }
+
+    // ------------------------------------------- coverage in the inspector
+
+    camName(id) { const c = this.cameras.find((x) => x.camera_id === id); return c ? (c.name || c.camera_id) : id; }
+    zoneName(id) { const z = this.zones.find((x) => x.id === id); return z ? z.name : id; }
+
+    /** Fill the coverage box of the open inspector (#fpCovBox) from the current numbers. */
+    _refreshCoverageBoxes() {
+      const box = document.getElementById('fpCovBox');
+      if (!box || !this._covStats) return;
+      const kind = box.dataset.cov, id = box.dataset.id;
+      let html = '';
+      try {
+        if (kind === 'camera') html = this.cameraCoverageHtml(id);
+        else if (kind === 'zone') html = this.zoneCoverageHtml(id);
+        else if (kind === 'structure') html = this.structureCoverageHtml(id);
+        else if (kind === 'store') html = this.storeCoverageHtml();
+      } catch (e) { html = `<div class="fp-hintline">Coverage could not be worked out: ${escapeHtml(e.message)}</div>`; }
+      if (html === box._html) return;
+      box._html = html;
+      box.innerHTML = html;
+      box.querySelectorAll('[data-link-zone]').forEach((b) => b.addEventListener('click', () => {
+        const cam = this.cameras.find((c) => c.camera_id === id);
+        if (cam) this.linkCameraZone(cam, b.dataset.linkZone);
+      }));
+      box.querySelectorAll('[data-go-cam]').forEach((b) => b.addEventListener('click', () => this.focusCamera(b.dataset.goCam)));
+      box.querySelectorAll('[data-go-zone]').forEach((b) => b.addEventListener('click', () => this.select({ type: 'zone', id: b.dataset.goZone })));
+      box.querySelectorAll('[data-go-shelf]').forEach((b) => b.addEventListener('click', () => this.select({ type: 'structure', id: b.dataset.goShelf })));
+      box.querySelectorAll('[data-go-gap]').forEach((b) => b.addEventListener('click', () => this.focusGap(+b.dataset.goGap)));
+      box.querySelectorAll('[data-layer]').forEach((b) => b.addEventListener('change', () => {
+        this.toggleLayer(b.dataset.layer, b.checked);
+        const cb = document.getElementById(b.dataset.layer === 'coverage' ? 'layerCoverage' : 'layerGaps');
+        if (cb) cb.checked = b.checked;
+      }));
+      const exp = box.querySelector('#fpExportPng');
+      if (exp) exp.addEventListener('click', () => this.exportMap('png', box.querySelector('#fpExportScale').value));
+      const prn = box.querySelector('#fpExportPrint');
+      if (prn) prn.addEventListener('click', () => this.exportMap('print', box.querySelector('#fpExportScale').value));
+    }
+
+    cameraCoverageHtml(id) {
+      const st = this._covStats, c = st.cams.get(id);
+      const cam = this.cameras.find((x) => x.camera_id === id);
+      if (!c || !cam) return '';
+      const v = c.view;
+      const how = v.mode === 'calibrated' ? 'calibrated coverage' : 'manual cone';
+      const limits = v.near !== null && v.far !== null ? ` · ${fmt1(v.near)} m to ${fmt1(v.far)} m away` : '';
+      const notes = [];
+      if (!v.occlusion) notes.push('Not placed on the map yet, so walls and shelves are not taken into account.');
+      if (!v.enabled) notes.push('Switched off: not counted in the store coverage.');
+      else if (cam.map_placed === false) notes.push('Not placed yet: not counted in the store coverage.');
+      const zones = c.zones.filter((z) => z.category !== 'EXCLUDED');
+      const zoneRows = zones.slice(0, 8).map((z) => `<li><button type="button" class="fp-linklike" data-go-zone="${escapeHtml(z.zone_id)}">${escapeHtml(z.name)}</button>
+        <span>${pct(z.covered_fraction)} of it · ${fmt1(z.seen_m2)} m²</span></li>`).join('');
+      // One-click "Count this camera into <zone>": only uncalibrated cameras use the link.
+      let suggest = '';
+      if (!cam.has_homography) {
+        const cands = zones.filter((z) => z.zone_id !== cam.watch_zone_id && (z.covered_fraction >= 0.25 || z === zones[0])).slice(0, 3);
+        const linked = cam.watch_zone_id ? this.zones.find((z) => z.id === cam.watch_zone_id) : null;
+        const linkedSeen = linked ? zones.find((z) => z.zone_id === linked.id) : null;
+        suggest = `<div class="fp-cov-sub">Count its people into a zone</div>`
+          + (linked ? `<div class="fp-hintline">Counts into <b>${escapeHtml(linked.name)}</b>${linkedSeen ? ` (it sees ${pct(linkedSeen.covered_fraction)} of it)` : ' — but it does not look at that zone on the map: check the link or the camera position.'}.</div>` : '')
+          + (cands.length ? `<div class="fp-cov-actions">${cands.map((z) => `<button type="button" class="btn btn-secondary btn-xs" data-link-zone="${escapeHtml(z.zone_id)}" title="It sees ${pct(z.covered_fraction)} of this zone">Count this camera into ${escapeHtml(z.name)}</button>`).join('')}</div>`
+            : (linked ? '' : '<div class="fp-hintline">It sees no zone yet: draw a zone where it looks, or move or turn it.</div>'));
+      } else {
+        suggest = '<div class="fp-hintline">Calibrated: each person is counted in the zone they stand in, so no zone link is needed.</div>';
+      }
+      const shelfRows = c.shelves.slice(0, 8).map((sh) => `<li><button type="button" class="fp-linklike" data-go-shelf="${escapeHtml(sh.structure_id)}">${escapeHtml(sh.name || (KIND_LABEL[sh.kind] || 'Shelf'))}</button>
+        <span>${fmt1(sh.seen_front_m)} m of ${fmt1(sh.front_m)} m shelf front</span></li>`).join('');
+      const overlaps = c.overlaps.slice(0, 4).map((o) => `<button type="button" class="fp-linklike" data-go-cam="${escapeHtml(o.camera_id)}">${escapeHtml(this.camName(o.camera_id))}</button> (${fmt1(o.m2)} m²)`).join(', ');
+      return `<div class="fp-cov-title">What it sees</div>
+        <div class="fp-kv">
+          <span>Covers</span><b>${fmt1(v.area)} m²${limits}</b>
+          <span>Shown as</span><b>${how}${v.mode === 'manual' && v.rangeIsDefault ? ' (default reach)' : ''}</b>
+        </div>
+        ${notes.map((n) => `<div class="fp-hintline">${n}</div>`).join('')}
+        <div class="fp-cov-sub">Zones in view</div>
+        ${zoneRows ? `<ul class="fp-cov-list">${zoneRows}</ul>` : '<div class="fp-hintline">No zone in view.</div>'}
+        ${suggest}
+        <div class="fp-cov-sub">Shelves and counters in view</div>
+        ${shelfRows ? `<ul class="fp-cov-list">${shelfRows}</ul>` : '<div class="fp-hintline">No shelf front in view.</div>'}
+        ${overlaps ? `<div class="fp-hintline">Overlaps with ${overlaps}.</div>` : ''}`;
+    }
+
+    zoneCoverageHtml(id) {
+      const st = this._covStats, zc = st.zones.get(id);
+      const zone = this.zones.find((z) => z.id === id);
+      if (!zone) return '';
+      const m = (this.zoneMetrics || {})[id] || null;
+      const rows = zc && zc.cameras.length
+        ? zc.cameras.map((c) => `<li><button type="button" class="fp-linklike" data-go-cam="${escapeHtml(c.camera_id)}">${escapeHtml(this.camName(c.camera_id))}</button>
+            <span>${pct(c.covered_fraction)} of the zone${c.calibrated ? '' : ' · uncalibrated'}</span></li>`).join('') : '';
+      const blind = zc && zc.covered_fraction !== null && zc.covered_fraction < 0.999
+        ? ` · ${fmt1((1 - zc.covered_fraction) * (+zone.area_m2 || polygonArea(zone.polygon)))} m² not in view` : '';
+      const per = (v, unit) => (v === null || v === undefined ? '<span class="fp-dash">&mdash;</span>' : `${v}${unit}`);
+      const shelf = zone.category === 'SHELF';
+      const len = shelf ? orientedBox(zone.polygon).long : null;
+      return `<div class="fp-cov-title">Cameras and space</div>
+        <div class="fp-kv">
+          <span>Size</span><b>${fmt1(+zone.area_m2 || polygonArea(zone.polygon))} m²${len ? ` · ${fmt1(len)} m long` : ''}</b>
+          <span>In view</span><b>${zc && zc.covered_fraction !== null ? pct(zc.covered_fraction) : '—'}${blind}</b>
+        </div>
+        ${rows ? `<ul class="fp-cov-list">${rows}</ul>` : '<div class="fp-hintline">No camera sees this zone on the map, so nothing can be measured here.</div>'}
+        <div class="metric-pill-grid">
+          <div class="metric-pill"><span class="metric-pill-label">Visits per m²</span><span class="metric-pill-val">${per(m && m.visits_per_m2, '')}</span></div>
+          <div class="metric-pill"><span class="metric-pill-label">Time spent per m²</span><span class="metric-pill-val">${per(m && m.dwell_seconds_per_m2, ' s')}</span></div>
+          ${shelf ? `<div class="metric-pill"><span class="metric-pill-label">Reaches per m of shelf</span><span class="metric-pill-val">${per(m && m.reaches_per_shelf_m, '')}</span></div>` : ''}
+          <div class="metric-pill"><span class="metric-pill-label">People per m² now</span><span class="metric-pill-val">${per(m && m.people_per_m2_now, '')}</span></div>
+        </div>
+        <div class="fp-hintline">Per m² figures compare big and small zones fairly. A dash means nothing was measured here today.</div>`;
+    }
+
+    structureCoverageHtml(id) {
+      const st = this._covStats;
+      const s = this.structures.find((x) => x.id === id);
+      if (!s) return '';
+      const sh = st.shelves.get(id);
+      if (!sh) return '';
+      const rows = sh.cameras.map((c) => `<li><button type="button" class="fp-linklike" data-go-cam="${escapeHtml(c.camera_id)}">${escapeHtml(this.camName(c.camera_id))}</button>
+        <span>${fmt1(c.seen_front_m)} m of the front</span></li>`).join('');
+      return `<div class="fp-cov-title">Size and cameras</div>
+        <div class="fp-kv">
+          <span>Length</span><b>${fmt1(sh.length_m)} m long · ${fmt1(sh.depth_m)} m deep</b>
+          <span>Shelf front</span><b>${fmt1(sh.front_m)} m (both long sides)</b>
+          <span>In view</span><b>${fmt1(sh.seen_front_m)} m${sh.front_m ? ` (${pct(sh.seen_front_m / sh.front_m)})` : ''}</b>
+        </div>
+        ${rows ? `<ul class="fp-cov-list">${rows}</ul>` : '<div class="fp-hintline">No camera sees this shelf front: reaches here cannot be measured.</div>'}`;
+    }
+
+    storeCoverageHtml() {
+      const st = this._covStats;
+      const s = st.store;
+      const floorWord = { rooms: 'rooms on the map, minus shelves and counters', zones: 'drawn zones, minus shelves and counters (no room drawn yet)',
+        'rooms+zones': 'rooms and zones on the map, minus shelves and counters', site: 'whole map (no room or zone drawn yet)' }[s.floor_source];
+      const where = (g) => (!g.zone_names || !g.zone_names.length ? '' : g.zone_names.length === 1
+        ? ` in ${escapeHtml(g.zone_names[0])}` : ` across ${g.zone_names.map(escapeHtml).join(', ')}`);
+      const gaps = s.gaps.slice(0, 6).map((g, i) => `<li><button type="button" class="fp-linklike" data-go-gap="${i}">${fmt1(g.area_m2)} m²${where(g)}</button>
+        <span>near ${fmt1(g.x)}, ${fmt1(g.y)} m</span></li>`).join('');
+      const cams = [...st.cams.entries()].filter(([, c]) => c.view.counted).sort((a, b) => b[1].floor_seen_m2 - a[1].floor_seen_m2)
+        .slice(0, 12).map(([id, c]) => `<li><button type="button" class="fp-linklike" data-go-cam="${escapeHtml(id)}">${escapeHtml(this.camName(id))}</button>
+          <span>${fmt1(c.floor_seen_m2)} m² · ${c.view.mode === 'calibrated' ? 'calibrated' : 'cone'}</span></li>`).join('');
+      const sp = this._space;
+      const spd = (v, unit) => (v === null || v === undefined ? '<span class="fp-dash">&mdash;</span>' : `${v}${unit}`);
+      return `<div class="fp-cov-title">Store coverage</div>
+        <div class="fp-cov-big">${s.coverage_pct === null ? '—' : `${s.coverage_pct}%`}<small> of the floor is in view of a camera</small></div>
+        <div class="fp-kv">
+          <span>Floor</span><b>${fmt1(s.floor_m2)} m²</b>
+          <span>In view</span><b>${fmt1(s.covered_m2)} m²</b>
+          <span>Blind spots</span><b>${fmt1(s.uncovered_m2)} m²</b>
+          <span>Seen twice or more</span><b>${fmt1(s.overlap_m2)} m²</b>
+        </div>
+        <div class="fp-hintline">Floor = the ${floorWord}. Walls, room edges, shelves and obstacles block a camera's view; doors and outdoor areas do not.</div>
+        <div class="fp-cov-toggles">
+          <label class="fp-toggle"><input type="checkbox" data-layer="coverage"${this.showLayers.coverage ? ' checked' : ''}> Show coverage</label>
+          <label class="fp-toggle"><input type="checkbox" data-layer="gaps"${this.showLayers.gaps ? ' checked' : ''}> Show blind spots</label>
+        </div>
+        <div class="fp-cov-sub">Biggest blind spots</div>
+        ${gaps ? `<ul class="fp-cov-list">${gaps}</ul>` : '<div class="fp-hintline">No blind spot of 1 m² or more.</div>'}
+        <div class="fp-cov-sub">Floor each camera sees</div>
+        ${cams ? `<ul class="fp-cov-list">${cams}</ul>` : '<div class="fp-hintline">No camera is placed and switched on.</div>'}
+        <div class="fp-cov-title">Today per square metre</div>
+        <div class="metric-pill-grid">
+          <div class="metric-pill"><span class="metric-pill-label">Sales per m²</span><span class="metric-pill-val">${spd(sp && sp.sales_per_m2 !== null && sp.sales_per_m2 !== undefined ? `$${sp.sales_per_m2}` : null, '')}</span></div>
+          <div class="metric-pill"><span class="metric-pill-label">Shoppers per 100 m²</span><span class="metric-pill-val">${spd(sp && sp.footfall_per_100m2, '')}</span></div>
+          <div class="metric-pill"><span class="metric-pill-label">Avg walk in view</span><span class="metric-pill-val">${spd(sp && sp.walking && sp.walking.avg_path_m, ' m')}</span></div>
+          <div class="metric-pill"><span class="metric-pill-label">Sales floor</span><span class="metric-pill-val">${spd(sp && sp.sales_floor_m2, ' m²')}</span></div>
+        </div>
+        <div class="fp-hintline">Sales per m² needs the till (POS) connected. "Avg walk" is the distance a shopper walks while one calibrated camera follows them.</div>
+        <div class="fp-cov-title">Print or save the map</div>
+        <div class="fp-field-row">
+          <div class="fp-field"><label for="fpExportScale">Scale</label>
+            <select id="fpExportScale" name="fpExportScale">
+              <option value="fit">Fit an A4 page</option><option value="fitA3">Fit an A3 page</option>
+              <option value="50">1:50</option><option value="100" selected>1:100</option><option value="200">1:200</option><option value="500">1:500</option>
+            </select></div>
+          <div class="fp-field fp-field-end"><button type="button" class="btn btn-secondary btn-xs" id="fpExportPng">${ico('download', { size: 'sm' })}Save picture</button></div>
+        </div>
+        <div class="fp-cov-actions"><button type="button" class="btn btn-secondary btn-xs" id="fpExportPrint">${ico('printer', { size: 'sm' })}Print to scale</button></div>
+        <div class="fp-hintline">True to scale: 1:100 means 1 cm on paper is 1 m in the store. The picture has a scale bar, so it stays measurable when printed at any size.</div>`;
+    }
+
+    /** Zoom to a blind spot from the store coverage list. */
+    focusGap(i) {
+      const g = this._covStats && this._covStats.store.gaps[i];
+      if (!g) return;
+      const W = this.canvas.clientWidth, H = this.canvas.clientHeight - this.hudReserve();
+      const bw = Math.max(4, g.bbox.max_x - g.bbox.min_x + 4), bh = Math.max(4, g.bbox.max_y - g.bbox.min_y + 4);
+      this.scale = Math.max(2, Math.min(400, Math.min(W / bw, H / bh)));
+      this.offsetX = W / 2 - g.x * this.scale;
+      this.offsetY = H / 2 - g.y * this.scale;
+      this._userZoomed = true;
+      if (!this.showLayers.gaps) {
+        this.toggleLayer('gaps', true);
+        const cb = document.getElementById('layerGaps');
+        if (cb) cb.checked = true;
+      }
+      this.setStatus(`Blind spot of ${fmt1(g.area_m2)} m²${g.zone_names && g.zone_names.length ? ` (${g.zone_names.join(', ')})` : ''}: no placed camera sees it.`);
+    }
+
+    /** GET /api/v1/analytics/space for the store summary (at most once a minute). */
+    async refreshSpace(force) {
+      if (!force && this._spaceAt && Date.now() - this._spaceAt < 60000) return;
+      this._spaceAt = Date.now();
+      try {
+        const res = await fetch('/api/v1/analytics/space');
+        if (!res.ok) return;
+        this._space = await res.json();
+        const box = document.getElementById('fpCovBox');
+        if (box) box._html = null;
+        this._refreshCoverageBoxes();
+      } catch (_) { /* summary keeps its dashes */ }
     }
 
     _stopThumb() {
@@ -2748,9 +3122,11 @@
         const cal = this.coverage ? this.coverage.cameras_calibrated : this.cameras.filter((c) => c.has_homography).length;
         const tot = this.cameras.length;
         const now = this.activeNow === null || this.activeNow === undefined ? '—' : this.activeNow;
+        const cs = this._covStats && this._covStats.store;
+        const covText = cs && cs.coverage_pct !== null && cs.cameras_counted ? ` · cameras see ${cs.coverage_pct}% of the floor` : '';
         el.textContent =
           `${escapeHtml(this.layout.name || '')} · ${this.layout.width_m}×${this.layout.height_m} m · ${this.structures.length} structures · ` +
-          `${this.zones.length} zones · ${tot} cameras (${cal} calibrated) · ${now} in store now`;
+          `${this.zones.length} zones · ${tot} cameras (${cal} calibrated)${covText} · ${now} in store now`;
       }
       const modeEl = document.getElementById('fpMode');
       if (modeEl) {
@@ -2771,7 +3147,13 @@
       if (kind === 'ok') this._statusTimer = setTimeout(() => { el.textContent = ''; }, 4000);
     }
 
-    toggleLayer(name, on) { this.showLayers[name] = !!on; }
+    toggleLayer(name, on) {
+      this.showLayers[name] = !!on;
+      if (name === 'coverage' || name === 'gaps') {
+        try { window.localStorage.setItem(COVERAGE_LAYERS_KEY, JSON.stringify({ coverage: this.showLayers.coverage, gaps: this.showLayers.gaps })); } catch (_) { /* not kept */ }
+        if (on) this.coverageStats(true);
+      }
+    }
 
     /**
      * Inline presence / dwell / interaction switch placed right after the
@@ -2925,7 +3307,7 @@
         note.textContent = `${rangeInfo.label} · ${what}${where ? ' ' + where : ''}`;
         note.title = recorded
           ? `Peak ${peak} ${hm.unit || ''} per spot over ${hm.recorded_hours} recorded hour(s) (${hm.snapshots_used} hourly heatmaps); hours not recorded are left out`
-          : `Peak ${peak} ${hm.unit || ''} from ${hm.samples} measurements today`;
+          : `Peak ${peak} ${hm.unit || ''}${hm.peak_per_m2 ? ` per spot (${hm.peak_per_m2} per m²)` : ''} from ${hm.samples} measurements today`;
       } else if (recorded) {
         // Aggregate with nothing to draw: nothing recorded, or recorded but nobody seen.
         note.textContent = hm && hm.snapshots_used
@@ -2971,6 +3353,349 @@
 
     setCalOverlay(overlay) { this.calOverlay = overlay || null; }
 
+    // ------------------------------------------------------- camera coverage
+
+    /** Blocking segments of the current structures, rebuilt only when a structure changed. */
+    _blockers() {
+      let key = '';
+      (this.structures || []).forEach((s) => {
+        const p = s.properties || {};
+        key += `${s.id}:${s.kind}:${p.blocks_view}:${p.height_m}:${s.thickness_m}:`;
+        (s.polygon || []).forEach((q) => { key += `${q.x},${q.y};`; });
+        key += '|';
+      });
+      if (key !== this._blockKey) { this._blockKey = key; this._blockersCache = blockingSegments(this.structures); this._blockVer = (this._blockVer || 0) + 1; }
+      return this._blockersCache;
+    }
+
+    _covKey(cam) {
+      const fp = cam.calibrated_footprint;
+      const fk = fp && fp.polygon ? `${fp.polygon.length}:${fp.polygon[0].x},${fp.polygon[0].y}:${fp.near_m}:${fp.far_m}` : '-';
+      const site = this.layout ? `${this.layout.width_m}x${this.layout.height_m}` : '-';
+      return `${this._blockVer}|${site}|${cam.floor_x},${cam.floor_y},${cam.azimuth_deg},${cam.fov_deg},${cam.range_m},${cam.coverage_mode},${cam.map_placed},${cam.status},${cam.is_ai_enabled},${cam.has_homography},${fk}`;
+    }
+
+    /** What a camera covers now (memoised per camera until it or a blocking structure changes). */
+    coverageOf(cam) {
+      this._blockers();
+      const key = this._covKey(cam);
+      let c = this._covCache.get(cam.camera_id);
+      if (!c || c.key !== key) {
+        c = { key, view: cameraCoverage(cam, this._blockersCache, this.layout ? { w: +this.layout.width_m, h: +this.layout.height_m } : null) };
+        this._covCache.set(cam.camera_id, c);
+      }
+      return c.view;
+    }
+
+    /**
+     * Store-wide coverage numbers (the same as GET /api/v1/layout/coverage):
+     * walkable floor, covered %, overlap, gaps, per camera the zones and shelf
+     * fronts it sees, per zone / shelf the cameras that see it. Recomputed
+     * when a camera, structure or zone changed, not while something is dragged.
+     */
+    coverageStats(force) {
+      if (!this.layout) return null;
+      let zk = `${this.layout.width_m}x${this.layout.height_m}|`;
+      this.zones.forEach((z) => { zk += `${z.id}:${z.category}:`; (z.polygon || []).forEach((q) => { zk += `${q.x},${q.y};`; }); zk += '|'; });
+      const key = zk + this.cameras.map((c) => `${c.camera_id}=${this._covKey(c)}`).join('&');
+      if (this._covStats && this._covStats.key === key) return this._covStats;
+      if (!force && this._covStats && (this.dragging || Date.now() - (this._covStatsAt || 0) < 150)) return this._covStats;
+      this._covStatsAt = Date.now();
+      const st = this._computeCoverage();
+      st.key = key;
+      this._covStats = st;
+      this._gapCanvas = null;
+      emit('fp:coverage-changed', { store: st.store });
+      this._refreshCoverageBoxes();
+      this.emitState();
+      return st;
+    }
+
+    _computeCoverage() {
+      const W = +this.layout.width_m || 1, H = +this.layout.height_m || 1;
+      const g = covGrid(W, H);
+      const cm2 = g.cell * g.cell;
+      // Walkable floor: indoor rooms and countable zones (union), else the site; minus fixtures.
+      const rooms = this.structures.filter((s) => s.kind === 'ROOM' && (s.polygon || []).length >= 3);
+      const zp = this.zones.filter((z) => !['STOCKROOM', 'EXCLUDED'].includes(z.category) && (z.polygon || []).length >= 3);
+      const floor = new Uint8Array(g.n);
+      const orInto = (dst, m) => { for (let i = 0; i < g.n; i++) if (m[i]) dst[i] = 1; };
+      rooms.forEach((r) => orInto(floor, gridMask(g, r.polygon)));
+      zp.forEach((z) => orInto(floor, gridMask(g, z.polygon)));
+      let floorSource = rooms.length && zp.length ? 'rooms+zones' : rooms.length ? 'rooms' : zp.length ? 'zones' : 'site';
+      if (floorSource === 'site') floor.fill(1);
+      this.structures.forEach((s) => {
+        if (['SHELF', 'COUNTER', 'OBSTACLE'].includes(s.kind) && (s.polygon || []).length >= 3) {
+          const m = gridMask(g, s.polygon);
+          for (let i = 0; i < g.n; i++) if (m[i]) floor[i] = 0;
+        }
+      });
+      const views = this.cameras.map((c) => ({ cam: c, v: this.coverageOf(c) }));
+      const masks = new Map(views.map(({ cam, v }) => [cam.camera_id, gridMask(g, v.polygon)]));
+      const counted = views.filter(({ v }) => v.counted);
+      const count = new Uint16Array(g.n);
+      counted.forEach(({ cam }) => { const m = masks.get(cam.camera_id); for (let i = 0; i < g.n; i++) count[i] += m[i]; });
+      const zoneMasks = this.zones.filter((z) => (z.polygon || []).length >= 3).map((z) => ({ z, m: gridMask(g, z.polygon) }));
+      zoneMasks.forEach((zm) => { zm.cells = maskCount(zm.m); });
+      const shelves = this.structures.filter((s) => (s.kind === 'SHELF' || s.kind === 'COUNTER') && (s.polygon || []).length >= 3)
+        .map((s) => { const f = shelfFaceSamples(s.polygon); return { s, f, seen: new Uint8Array(f.pts.length), cameras: [] }; });
+
+      const cams = new Map();
+      views.forEach(({ cam, v }) => {
+        const m = masks.get(cam.camera_id);
+        const zones = [];
+        zoneMasks.forEach(({ z, m: zm, cells }) => {
+          if (!cells) return;
+          const k = maskAndCount(zm, m);
+          if (k) zones.push({ zone_id: z.id, name: z.name, category: z.category, covered_fraction: k / cells, seen_m2: k * cm2 });
+        });
+        zones.sort((a, b) => b.seen_m2 - a.seen_m2);
+        const shelfList = [];
+        shelves.forEach((sh) => {
+          let k = 0;
+          const flags = sh.f.pts.map((p) => (pointInPolygon(p.x, p.y, v.polygon) ? 1 : 0));
+          flags.forEach((f) => { k += f; });
+          if (!k) return;
+          const seenM = k * sh.f.per;
+          shelfList.push({ structure_id: sh.s.id, name: sh.s.name, kind: sh.s.kind, seen_front_m: seenM, front_m: sh.f.front, length_m: sh.f.length });
+          if (v.counted) { flags.forEach((f, i) => { if (f) sh.seen[i] = 1; }); sh.cameras.push({ camera_id: cam.camera_id, seen_front_m: seenM }); }
+        });
+        shelfList.sort((a, b) => b.seen_front_m - a.seen_front_m);
+        const overlaps = [];
+        if (v.counted) {
+          counted.forEach(({ cam: o }) => {
+            if (o.camera_id === cam.camera_id) return;
+            const k = maskAndCount(m, masks.get(o.camera_id));
+            if (k) overlaps.push({ camera_id: o.camera_id, m2: k * cm2 });
+          });
+          overlaps.sort((a, b) => b.m2 - a.m2);
+        }
+        cams.set(cam.camera_id, { view: v, zones, shelves: shelfList, overlaps, floor_seen_m2: maskAndCount(m, floor) * cm2 });
+      });
+
+      let floorCells = 0, covered = 0, overlap = 0;
+      const uncovered = new Uint8Array(g.n);
+      for (let i = 0; i < g.n; i++) {
+        if (!floor[i]) continue;
+        floorCells++;
+        if (count[i]) covered++; else uncovered[i] = 1;
+        if (count[i] >= 2) overlap++;
+      }
+      const inZone = new Uint8Array(g.n);
+      zoneMasks.forEach(({ z, m }) => { if (z.category !== 'EXCLUDED') for (let i = 0; i < g.n; i++) if (m[i]) inZone[i] = 1; });
+      const gaps = [];
+      maskComponents(g, uncovered).forEach((comp) => {
+        const area = comp.length * cm2;
+        if (area < COV.GAP_MIN_M2) return;
+        let sx = 0, sy = 0, i0 = Infinity, i1 = -Infinity, j0 = Infinity, j1 = -Infinity;
+        comp.forEach((c) => { const i = c % g.nx, j = (c - i) / g.nx; sx += i; sy += j; i0 = Math.min(i0, i); i1 = Math.max(i1, i); j0 = Math.min(j0, j); j1 = Math.max(j1, j); });
+        const hits = [];
+        zoneMasks.forEach(({ z, m }) => { let k = 0; comp.forEach((c) => { k += m[c]; }); if (k) hits.push({ k, z }); });
+        hits.sort((a, b) => b.k - a.k);
+        const best = hits.length ? hits[0].z : null;
+        gaps.push({ area_m2: area, x: (sx / comp.length + 0.5) * g.cell, y: (sy / comp.length + 0.5) * g.cell,
+          bbox: { min_x: i0 * g.cell, min_y: j0 * g.cell, max_x: (i1 + 1) * g.cell, max_y: (j1 + 1) * g.cell },
+          zone_id: best ? best.id : null, zone_name: best ? best.name : null, zone_names: hits.slice(0, 3).map((h) => h.z.name) });
+      });
+      gaps.sort((a, b) => b.area_m2 - a.area_m2);
+
+      const zones = new Map();
+      zoneMasks.forEach(({ z, m, cells }) => {
+        const list = [];
+        counted.forEach(({ cam }) => {
+          const k = maskAndCount(m, masks.get(cam.camera_id));
+          if (k && cells) list.push({ camera_id: cam.camera_id, covered_fraction: k / cells, calibrated: !!cam.has_homography });
+        });
+        list.sort((a, b) => b.covered_fraction - a.covered_fraction);
+        let cov = 0;
+        for (let i = 0; i < g.n; i++) if (m[i] && count[i]) cov++;
+        zones.set(z.id, { covered_fraction: cells ? cov / cells : null, cameras: list });
+      });
+      const shelfMap = new Map();
+      shelves.forEach((sh) => {
+        let k = 0; sh.seen.forEach((f) => { k += f; });
+        shelfMap.set(sh.s.id, { length_m: sh.f.length, depth_m: sh.f.depth, front_m: sh.f.front, seen_front_m: k * sh.f.per,
+          cameras: sh.cameras.sort((a, b) => b.seen_front_m - a.seen_front_m) });
+      });
+      return {
+        grid: g, uncovered, inZone, cams, zones, shelves: shelfMap,
+        store: {
+          floor_source: floorSource, floor_m2: floorCells * cm2, covered_m2: covered * cm2,
+          uncovered_m2: (floorCells - covered) * cm2, coverage_pct: floorCells ? Math.round(1000 * covered / floorCells) / 10 : null,
+          overlap_m2: overlap * cm2, cameras_counted: counted.length, gaps: gaps.slice(0, 20),
+        },
+      };
+    }
+
+    /** [{camera_id, covered_fraction}] of the cameras (switched on and placed) that see a zone. */
+    camerasSeeingZone(zoneId) {
+      const st = this.coverageStats(true);
+      const z = st && st.zones.get(zoneId);
+      return z ? z.cameras.map((c) => ({ camera_id: c.camera_id, covered_fraction: Math.round(c.covered_fraction * 1000) / 1000 })) : [];
+    }
+
+    /** Uncovered floor as a one-pixel-per-cell picture, drawn scaled under the zones. */
+    _gapImage(st) {
+      if (this._gapCanvas) return this._gapCanvas;
+      const g = st.grid;
+      const c = document.createElement('canvas');
+      c.width = g.nx; c.height = g.ny;
+      const x = c.getContext('2d');
+      const img = x.createImageData(g.nx, g.ny);
+      const rgb = (T.danger || '#ef4444').replace('#', '');
+      const n = parseInt(rgb.length === 3 ? rgb.split('').map((q) => q + q).join('') : rgb, 16) || 0xef4444;
+      for (let i = 0; i < g.n; i++) {
+        if (!st.uncovered[i]) continue;
+        const o = i * 4;
+        img.data[o] = (n >> 16) & 255; img.data[o + 1] = (n >> 8) & 255; img.data[o + 2] = n & 255;
+        // Blind spots inside zones (aisles, entrances, checkouts) stand out more.
+        img.data[o + 3] = st.inZone[i] ? 120 : 60;
+      }
+      x.putImageData(img, 0, 0);
+      this._gapCanvas = c;
+      return c;
+    }
+
+    drawGaps() {
+      const st = this.coverageStats();
+      if (!st) return;
+      const ctx = this.ctx;
+      const tl = this.toScreen(0, 0);
+      const g = st.grid;
+      ctx.save();
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(this._gapImage(st), tl.x, tl.y, g.nx * g.cell * this.scale, g.ny * g.cell * this.scale);
+      ctx.restore();
+    }
+
+    // ------------------------------------------------------- export / print
+
+    /**
+     * The map as a picture, true to scale. ``scale`` '50' | '100' | '200' |
+     * '500' is a paper ratio (1:N, drawn at 150 dpi, so 1 cm on paper = N cm
+     * in the store), 'fit' / 'fitA3' fits a landscape A4 / A3 page. Always on
+     * a light "paper" theme with a title, a scale bar and the coverage note.
+     * Returns {canvas, mmPerM, ratio}.
+     */
+    renderExport(scale) {
+      const W = +this.layout.width_m, H = +this.layout.height_m;
+      const DPI = 150, PX_PER_MM = DPI / 25.4;
+      const page = scale === 'fitA3' ? { w: 400, h: 277 } : { w: 277, h: 190 };    // printable landscape mm
+      let ratio, mmPerM;
+      if (scale === 'fit' || scale === 'fitA3') {
+        mmPerM = Math.min(page.w / W, (page.h - 30) / H);
+        ratio = Math.round(1000 / mmPerM);
+      } else {
+        ratio = Math.max(10, parseInt(scale, 10) || 100);
+        mmPerM = 1000 / ratio;
+      }
+      let px = mmPerM * PX_PER_MM;
+      // A browser canvas has a size limit: keep the picture under 8000 px wide or high.
+      const maxSide = 8000;
+      if (W * px > maxSide - 200 || H * px > maxSide - 300) px = Math.min((maxSide - 200) / W, (maxSide - 300) / H);
+      const margin = 40, header = 64, footer = 76;
+      const c = document.createElement('canvas');
+      c.width = Math.ceil(W * px + margin * 2);
+      c.height = Math.ceil(H * px + header + footer);
+      const saved = { ctx: this.ctx, scale: this.scale, offsetX: this.offsetX, offsetY: this.offsetY, sel: this.sel, hover: this.hover, T };
+      const root = document.documentElement;
+      const themeAttr = root.getAttribute('data-theme');
+      try {
+        // Paper: the light plan colours, whatever theme is on screen.
+        root.setAttribute('data-theme', 'light');
+        T = readPlanTheme();
+      } finally {
+        if (themeAttr === null) root.removeAttribute('data-theme'); else root.setAttribute('data-theme', themeAttr);
+      }
+      try {
+        this.ctx = c.getContext('2d');
+        this.scale = px; this.offsetX = margin; this.offsetY = header;
+        this.sel = null; this.hover = null;
+        this._exportView = { W: c.width, H: c.height };
+        const ctx = this.ctx;
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, c.width, c.height);
+        this._labelQueue = []; this._markers = []; this._fixedText = [];
+        this.drawFloor();
+        if (this.showLayers.heatmap) this.drawHeatmap();
+        if (this.showLayers.gaps) this.drawGaps();
+        if (this.showLayers.structures) this.drawStructures();
+        if (this.showLayers.zones) this.drawZones();
+        if (this.showLayers.cameras) this.drawCameras();
+        this.flushLabels();
+        // Title and scale.
+        const st = this._covStats && this._covStats.store;
+        ctx.fillStyle = '#0f172a';
+        ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+        ctx.font = '700 22px system-ui, sans-serif';
+        ctx.fillText(`${this.layout.name || 'Store map'} · ${fmt1(W)} × ${fmt1(H)} m`, margin, 34);
+        ctx.font = '500 13px system-ui, sans-serif';
+        ctx.fillStyle = '#334155';
+        const when = new Date().toLocaleString([], { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+        ctx.fillText(`Scale 1:${ratio} when printed at ${fmt1(mmPerM * W / 10)} cm wide · ${when}`
+          + (st && st.coverage_pct !== null && st.cameras_counted ? ` · cameras see ${st.coverage_pct}% of the floor` : ''), margin, 54);
+        // Scale bar: a round distance close to a fifth of the map width.
+        const steps = [0.5, 1, 2, 5, 10, 20, 50, 100];
+        const metres = steps.reduce((best, m) => (m * px <= c.width / 4 ? m : best), steps[0]);
+        const bx = margin, by = header + H * px + 26, bw = metres * px;
+        ctx.fillStyle = '#0f172a';
+        ctx.fillRect(bx, by, bw / 2, 8);
+        ctx.strokeStyle = '#0f172a'; ctx.lineWidth = 1.5;
+        ctx.strokeRect(bx, by, bw, 8);
+        ctx.font = '600 13px system-ui, sans-serif';
+        ctx.fillText('0', bx - 3, by + 26);
+        ctx.fillText(`${fmt(metres / 2)}`, bx + bw / 2 - 6, by + 26);
+        ctx.fillText(`${fmt(metres)} m`, bx + bw - 6, by + 26);
+        ctx.textAlign = 'right';
+        ctx.fillStyle = '#64748b';
+        ctx.font = '500 11px system-ui, sans-serif';
+        ctx.fillText('Edge AI CCTV store map · metres from the top-left corner', c.width - margin, by + 26);
+        return { canvas: c, mmPerM, ratio, widthMm: (c.width / PX_PER_MM), heightMm: (c.height / PX_PER_MM) };
+      } finally {
+        this._exportView = null;
+        this._labelQueue = null;
+        this._gapCanvas = null;     // drawn in the paper colours: rebuild for the screen
+        Object.assign(this, { ctx: saved.ctx, scale: saved.scale, offsetX: saved.offsetX, offsetY: saved.offsetY, sel: saved.sel, hover: saved.hover });
+        T = saved.T;
+      }
+    }
+
+    /** Save the map as a PNG, or print it true to scale. */
+    async exportMap(kind, scale) {
+      if (!this.layout) return false;
+      this.coverageStats(true);
+      const out = this.renderExport(String(scale || '100'));
+      const blob = await new Promise((resolve) => out.canvas.toBlob(resolve, 'image/png'));
+      if (!blob) { this.setStatus('The map picture could not be made in this browser.', 'error'); return false; }
+      const url = URL.createObjectURL(blob);
+      const name = `${(this.layout.name || 'store-map').replace(/[^\w-]+/g, '-').replace(/^-|-$/g, '').toLowerCase() || 'store-map'}-1-${out.ratio}.png`;
+      if (kind === 'print') {
+        let sheet = document.getElementById('fpPrintSheet');
+        if (!sheet) { sheet = document.createElement('div'); sheet.id = 'fpPrintSheet'; document.body.appendChild(sheet); }
+        // Sized in millimetres so the paper keeps the scale (print at 100%, no "fit to page").
+        sheet.innerHTML = `<img alt="Store map at 1:${out.ratio}" src="${url}" style="width:${out.widthMm.toFixed(1)}mm;height:${out.heightMm.toFixed(1)}mm">`;
+        document.body.classList.add('fp-printing');
+        const done = () => {
+          document.body.classList.remove('fp-printing');
+          window.removeEventListener('afterprint', done);
+          setTimeout(() => { URL.revokeObjectURL(url); if (sheet.isConnected) sheet.innerHTML = ''; }, 1000);
+        };
+        window.addEventListener('afterprint', done);
+        this.setStatus(`Printing at 1:${out.ratio}: choose "Actual size" (100%) in the print window so the scale stays true.`, 'ok');
+        const img = sheet.querySelector('img');
+        await new Promise((r) => { if (img.complete) r(); else { img.onload = r; img.onerror = r; } });
+        if (!window.__fpNoPrint) window.print();
+        return true;
+      }
+      const a = document.createElement('a');
+      a.href = url; a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      this.setStatus(`Saved ${name} (1:${out.ratio} at 150 dpi, ${out.canvas.width}×${out.canvas.height} px).`, 'ok');
+      this._lastExport = { name, width: out.canvas.width, height: out.canvas.height, ratio: out.ratio, bytes: blob.size };
+      return true;
+    }
+
     // ---------------------------------------------------------------- render
 
     render() {
@@ -2989,8 +3714,10 @@
       this._labelQueue = [];
       this._markers = [];
       this._fixedText = [];
+      this.coverageStats();
       this.drawFloor();
       if (this.showLayers.heatmap) this.drawHeatmap();
+      if (this.showLayers.gaps) this.drawGaps();
       if (this.showLayers.structures) this.drawStructures();
       if (this.showLayers.zones) this.drawZones();
       this.drawSelectionHandles();
@@ -3024,7 +3751,7 @@
       this._labelQueue = null;
       if (!queue.length) return;
       const ctx = this.ctx;
-      const W = this.canvas.clientWidth, H = this.canvas.clientHeight;
+      const W = this.viewW(), H = this.viewH();
       const placed = [];
       const obstacles = (this._markers || []).map((m) => ({ x: m.x - m.r - 1, y: m.y - m.r - 1, w: 2 * m.r + 2, h: 2 * m.r + 2 }))
         .concat(this._fixedText || []);
@@ -3082,7 +3809,7 @@
       ctx.fillStyle = color;
       ctx.font = '600 14px system-ui, sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText(text, this.canvas.clientWidth / 2, this.canvas.clientHeight / 2 + dy);
+      ctx.fillText(text, this.viewW() / 2, this.viewH() / 2 + dy);
       ctx.restore();
     }
 
@@ -3255,7 +3982,9 @@
           } else {
             // Shelves and counters: along the fixture's long side, shrunk to
             // fit, or left out (the name is in the inspector) when it cannot.
-            this.drawFittedLabel(poly, [{ text: st.name, weight: 600 }], 10);
+            const box = (st.kind === 'SHELF' || st.kind === 'COUNTER') && poly.length >= 3 ? orientedBox(poly) : null;
+            this.drawFittedLabel(poly, [{ text: st.name, weight: 600 }].concat(box && box.long > 0
+              ? [{ text: `${fmt1(box.long)} m`, weight: 500, mono: true, color: T.text2 }] : []), 10);
           }
         }
         ctx.restore();
@@ -3321,18 +4050,47 @@
         const selected = this.isSelected('zone', z.id), hovered = this.isHovered('zone', z.id);
         ctx.save();
         this.tracePolygon(poly, true);
-        const zc = ink(z.color);
+        const restricted = isRestrictedZone(z);
+        const zc = restricted ? (T.danger || '#ef4444') : ink(z.color);
         ctx.fillStyle = hexToRgba(zc, selected ? 0.30 : hovered ? 0.22 : 0.13);
         ctx.fill();
+        if (restricted) {
+          // Restricted area: red cross-hatch and a dashed red edge, so it reads as "no entry".
+          ctx.save();
+          this.tracePolygon(poly, true);
+          ctx.clip();
+          const sp = poly.map((p) => this.toScreen(p.x, p.y));
+          const x0 = Math.min(...sp.map((p) => p.x)), x1 = Math.max(...sp.map((p) => p.x));
+          const y0 = Math.min(...sp.map((p) => p.y)), y1 = Math.max(...sp.map((p) => p.y));
+          const span = (x1 - x0) + (y1 - y0);
+          ctx.beginPath();
+          for (let d = 0; d <= span; d += 8) {
+            ctx.moveTo(x0 + d, y0); ctx.lineTo(x0, y0 + d);
+            ctx.moveTo(x1 - d, y0); ctx.lineTo(x1, y0 + d);
+          }
+          ctx.strokeStyle = hexToRgba(zc, 0.55);
+          ctx.lineWidth = 1.2;
+          ctx.stroke();
+          ctx.restore();
+          this.tracePolygon(poly, true);
+          ctx.setLineDash([6, 4]);
+        }
         ctx.strokeStyle = selected ? T.marker : zc;
-        ctx.lineWidth = selected ? 2.5 : 1.4;
+        ctx.lineWidth = selected ? 2.5 : restricted ? 2 : 1.4;
         ctx.stroke();
+        ctx.setLineDash([]);
         if (this.showLayers.labels) {
           const c = polygonCentroid(poly);
           const s = this.toScreen(c.x, c.y);
           const m = (this.zoneMetrics || {})[z.id];
-          const lines = [{ text: z.name, weight: 600, color: T.text }];
+          const lines = [{ text: restricted ? `${z.name} · restricted` : z.name, weight: 600, color: T.text }];
           if (m && m.observed) lines.push({ text: `${m.visits} visits · ${m.avg_dwell_seconds || 0}s`, weight: 500, color: zc, mono: true });
+          // Real size (metres on the map): area, plus the run length of a shelf zone.
+          const area = Number.isFinite(+z.area_m2) && +z.area_m2 > 0 ? +z.area_m2 : polygonArea(poly);
+          if (area > 0) {
+            const len = z.category === 'SHELF' ? orientedBox(poly).long : 0;
+            lines.push({ text: `${fmt1(area)} m²${len ? ` · ${fmt1(len)} m long` : ''}`, weight: 500, color: T.text2, mono: true });
+          }
           if (!this.drawFittedLabel(poly, lines, 11, true)) {
             // Too small to hold the text: keep the old centred label so a zone is never anonymous.
             ctx.fillStyle = T.text;
@@ -3414,7 +4172,7 @@
       ctx.save();
       ctx.font = '700 12px system-ui, sans-serif';
       const w = Math.ceil(ctx.measureText(text).width) + 12, h = 20;
-      const W = this.canvas.clientWidth, H = this.canvas.clientHeight;
+      const W = this.viewW(), H = this.viewH();
       const bx = Math.max(2, Math.min(x, W - w - 2)), by = Math.max(2, Math.min(y - h / 2, H - h - 2));
       ctx.globalAlpha = 0.92;
       ctx.fillStyle = T.bg;
@@ -3547,32 +4305,43 @@
         }
         const online = cam.status === 'ONLINE';
         const color = ink(camColorFor(this.cameras, cam.camera_id));
-        const reach = this.cameraReachPx();
-        const half = ((cam.fov_deg || 85) * Math.PI) / 180 / 2;
-        const bearing = ((cam.azimuth_deg || 0) - 90) * Math.PI / 180;
+        const view = this.coverageOf(cam);
 
         ctx.save();
-        if (detailed) {
-          ctx.beginPath();
-          ctx.moveTo(s.x, s.y);
-          ctx.arc(s.x, s.y, reach, bearing - half, bearing + half);
-          ctx.closePath();
-          ctx.fillStyle = hexToRgba(color, selected ? 0.22 : hovered ? 0.18 : 0.10);
+        if (detailed && view.polygon.length >= 3) {
+          // What the camera really covers: its cone (or calibrated footprint)
+          // cut by walls and shelves. A fanned-out marker is not where the
+          // camera hangs, so its coverage is drawn from the real spot.
+          const strong = this.showLayers.coverage;
+          this.tracePolygon(view.polygon, true);
+          ctx.fillStyle = hexToRgba(color, selected ? 0.24 : hovered ? 0.2 : strong ? 0.16 : 0.10);
           ctx.fill();
           ctx.lineWidth = selected ? 1.6 : 1;
           if (!cam.has_homography) { ctx.setLineDash([4, 4]); ctx.strokeStyle = hexToRgba(T.warn, 0.85); }
-          else ctx.strokeStyle = hexToRgba(color, 0.6);
+          else if (view.mode === 'calibrated') ctx.strokeStyle = hexToRgba(color, 0.85);
+          else { ctx.setLineDash([2, 3]); ctx.strokeStyle = hexToRgba(color, 0.6); }
           ctx.stroke();
           ctx.setLineDash([]);
         }
 
         if (selected) {
           const h = this.cameraHandlePos(cam);
-          ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(h.x, h.y);
+          const showRange = this.cameraRangeHandleShown(cam);
+          const tip = showRange ? this.cameraRangeHandlePos(cam) : h;
+          ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(tip.x, tip.y);
           ctx.strokeStyle = hexToRgba(color, 0.7); ctx.lineWidth = 1; ctx.stroke();
+          // Turn handle (round).
           ctx.beginPath(); ctx.arc(h.x, h.y, 6, 0, Math.PI * 2);
           ctx.fillStyle = T.marker; ctx.fill();
           ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
+          if (showRange) {
+            // Reach handle (square) on the tip of the cone, with the distance.
+            const hr = this._coarse ? 7 : 5.5;
+            ctx.fillStyle = T.marker; ctx.strokeStyle = color; ctx.lineWidth = 2;
+            ctx.fillRect(tip.x - hr, tip.y - hr, hr * 2, hr * 2);
+            ctx.strokeRect(tip.x - hr, tip.y - hr, hr * 2, hr * 2);
+            if (!this.dragging) this.queueLabel(`${fmt(cameraRangeM(cam))} m`, tip.x, tip.y, hr + 1, { prio: 1, required: false, color: T.text2, prefer: 'down' });
+          }
         }
 
         ctx.beginPath();
@@ -3781,6 +4550,9 @@
   }
 
   function fmt(v) { return v === null || v === undefined ? '—' : (Math.round(v * 100) / 100).toString(); }
+  /** One decimal (whole numbers from 100 up): sizes on the map. */
+  function fmt1(v) { if (v === null || v === undefined || !Number.isFinite(+v)) return '—'; v = +v; return (Math.abs(v) >= 100 ? Math.round(v) : Math.round(v * 10) / 10).toString(); }
+  function pct(f) { return f === null || f === undefined || !Number.isFinite(+f) ? '—' : `${Math.round(+f * 100)}%`; }
   function cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 
   function flashSaved(id) {
@@ -3828,11 +4600,20 @@
 
   function cameraSnap(cam) {
     return { camera_id: cam.camera_id, floor_x: +cam.floor_x, floor_y: +cam.floor_y, floor_z: cam.floor_z,
-      azimuth_deg: cam.azimuth_deg, fov_deg: cam.fov_deg };
+      azimuth_deg: cam.azimuth_deg, fov_deg: cam.fov_deg,
+      range_m: cam.range_m === undefined ? null : cam.range_m, coverage_mode: cam.coverage_mode || 'auto' };
   }
 
   function cameraFields(snap) {
-    return { floor_x: snap.floor_x, floor_y: snap.floor_y, floor_z: snap.floor_z, azimuth_deg: snap.azimuth_deg, fov_deg: snap.fov_deg };
+    return { floor_x: snap.floor_x, floor_y: snap.floor_y, floor_z: snap.floor_z, azimuth_deg: snap.azimuth_deg, fov_deg: snap.fov_deg,
+      range_m: snap.range_m === undefined ? null : snap.range_m, coverage_mode: snap.coverage_mode || 'auto' };
+  }
+
+  /** PATCH .../placement body of a camera (range_m null = back to the lens default). */
+  function placementBody(cam) {
+    return { floor_x: cam.floor_x, floor_y: cam.floor_y, floor_z: cam.floor_z, azimuth_deg: cam.azimuth_deg, fov_deg: cam.fov_deg,
+      range_m: Number.isFinite(+cam.range_m) && cam.range_m !== null && +cam.range_m > 0 ? +cam.range_m : null,
+      coverage_mode: cam.coverage_mode || 'auto' };
   }
 
   /** Move a shape or camera snapshot by (dx, dy) metres, in place. */
@@ -3877,14 +4658,391 @@
     try { window.dispatchEvent(new CustomEvent(name, { detail })); } catch (_) { /* no CustomEvent */ }
   }
 
+  // ------------------------------------------------- camera coverage geometry
+  //
+  // The same algorithm as services/coverage_geometry.py (the server's numbers,
+  // GET /api/v1/layout/coverage), run here so the map answers instantly while
+  // a camera is dragged. Metres, x right, y down; bearing 0 = up, clockwise.
+
+  const COV = {
+    DEFAULT_RANGE_M: 10, DEFAULT_FOV: 85, MIN_RANGE_M: 0.5, MAX_RANGE_M: 100,
+    MIN_HIT_M: 0.15, LOW_FIXTURE_M: 1.2, DOOR_SNAP_M: 0.3, DOOR_MAX_ANGLE_DEG: 15,
+    MAX_RAYS: 2400, SHELF_SAMPLE_M: 0.25, SHELF_FACE_OFFSET_M: 0.03, GAP_MIN_M2: 1,
+    GRID_MAX_CELLS: 200000, GRID_MIN_CELL_M: 0.25,
+  };
+  const BLOCKING_DEFAULT = { WALL: true, ROOM: true, SHELF: true, OBSTACLE: true, COUNTER: false };
+
+  /** Reach used when none is set: 10 m for an 85° lens, 10·tan(42.5°)/tan(fov/2), 3..30 m; ≥179° = 6 m. */
+  function defaultRangeM(fovDeg) {
+    let fov = +fovDeg;
+    if (!Number.isFinite(fov) || fov <= 0) fov = COV.DEFAULT_FOV;
+    if (fov >= 179) return 6;
+    const r = COV.DEFAULT_RANGE_M * Math.tan((COV.DEFAULT_FOV / 2) * Math.PI / 180) / Math.tan((fov / 2) * Math.PI / 180);
+    return Math.round(Math.min(30, Math.max(3, r)) * 10) / 10;
+  }
+
+  function cameraRangeM(cam) {
+    const r = +cam.range_m;
+    return Number.isFinite(r) && r > 0 && cam.range_m !== null ? r : defaultRangeM(cam.fov_deg);
+  }
+
+  function structureBlocksView(st) {
+    const kind = String(st.kind || '').toUpperCase();
+    if (kind === 'DOOR' || kind === 'OUTDOOR') return false;
+    const p = st.properties || {};
+    if (typeof p.blocks_view === 'boolean') return p.blocks_view;
+    if (!BLOCKING_DEFAULT[kind]) return false;
+    if (kind !== 'WALL' && kind !== 'ROOM') {
+      const h = +p.height_m;
+      if (p.height_m !== null && p.height_m !== undefined && p.height_m !== '' && Number.isFinite(h) && h > 0 && h < COV.LOW_FIXTURE_M) return false;
+    }
+    return true;
+  }
+
+  function polyEdges(pts, closed) {
+    const out = [];
+    const n = pts.length;
+    for (let i = 0; i < (closed ? n : n - 1); i++) {
+      const a = pts[i], b = pts[(i + 1) % n];
+      if (Math.hypot(b.x - a.x, b.y - a.y) > 1e-9) out.push([a.x, a.y, b.x, b.y]);
+    }
+    return out;
+  }
+
+  /** Remove door openings lying along a wall / room edge segment. */
+  function cutDoors(seg, doors) {
+    const [x1, y1, x2, y2] = seg;
+    const dx = x2 - x1, dy = y2 - y1, L = Math.hypot(dx, dy);
+    if (L < 1e-9) return [];
+    const ux = dx / L, uy = dy / L;
+    const cuts = [];
+    doors.forEach(({ s: [a, b, c, d], thick }) => {
+      const tol = Math.max(COV.DOOR_SNAP_M, thick);
+      const ddx = c - a, ddy = d - b, dl = Math.hypot(ddx, ddy);
+      if (dl < 1e-9) return;
+      if (Math.abs((ddx * ux + ddy * uy) / dl) < Math.cos(COV.DOOR_MAX_ANGLE_DEG * Math.PI / 180)) return;
+      const d1 = Math.abs((a - x1) * uy - (b - y1) * ux), d2 = Math.abs((c - x1) * uy - (d - y1) * ux);
+      if (d1 > tol || d2 > tol) return;
+      const t1 = ((a - x1) * ux + (b - y1) * uy) / L, t2 = ((c - x1) * ux + (d - y1) * uy) / L;
+      const lo = Math.min(t1, t2), hi = Math.max(t1, t2);
+      if (hi <= 0 || lo >= 1) return;
+      cuts.push([Math.max(0, lo), Math.min(1, hi)]);
+    });
+    if (!cuts.length) return [seg];
+    cuts.sort((p, q) => p[0] - q[0]);
+    const out = [];
+    let t = 0;
+    cuts.forEach(([lo, hi]) => {
+      if (lo > t + 1e-9) out.push([x1 + dx * t, y1 + dy * t, x1 + dx * lo, y1 + dy * lo]);
+      t = Math.max(t, hi);
+    });
+    if (t < 1 - 1e-9) out.push([x1 + dx * t, y1 + dy * t, x2, y2]);
+    return out;
+  }
+
+  /** Structures that hide what is behind them: [{id, kind, segs:[[ax,ay,bx,by]], poly}]. */
+  function blockingSegments(structures) {
+    const doors = [];
+    (structures || []).forEach((s) => {
+      if (String(s.kind).toUpperCase() !== 'DOOR') return;
+      polyEdges(s.polygon || [], false).forEach((seg) => doors.push({ s: seg, thick: +s.thickness_m || 0 }));
+    });
+    const out = [];
+    (structures || []).forEach((s) => {
+      const kind = String(s.kind || '').toUpperCase();
+      if (!structureBlocksView(s)) return;
+      const pts = s.polygon || [];
+      const closed = kind !== 'WALL';
+      if (pts.length < (closed ? 3 : 2)) return;
+      let segs = polyEdges(pts, closed);
+      if ((kind === 'WALL' || kind === 'ROOM') && doors.length) segs = [].concat(...segs.map((g) => cutDoors(g, doors)));
+      if (segs.length) out.push({ id: s.id, kind, segs, poly: closed ? pts : null });
+    });
+    return out;
+  }
+
+  function segmentsFor(origin, blockers) {
+    const rows = [];
+    blockers.forEach((b) => {
+      // A camera mounted above a shelf is not hidden by that shelf.
+      if (b.kind !== 'WALL' && b.kind !== 'ROOM' && b.poly && pointInPolygon(origin.x, origin.y, b.poly)) return;
+      b.segs.forEach((g) => rows.push(g));
+    });
+    return rows;
+  }
+
+  function castRay(ox, oy, ang, maxR, segs) {
+    const dx = Math.cos(ang), dy = Math.sin(ang);
+    let best = maxR;
+    for (let i = 0; i < segs.length; i++) {
+      const g = segs[i];
+      const ex = g[2] - g[0], ey = g[3] - g[1];
+      const den = dx * ey - dy * ex;
+      if (Math.abs(den) <= 1e-12) continue;
+      const wx = g[0] - ox, wy = g[1] - oy;
+      const t = (wx * ey - wy * ex) / den;
+      if (t < COV.MIN_HIT_M || t >= best) continue;
+      const u = (wx * dy - wy * dx) / den;
+      if (u >= -1e-9 && u <= 1 + 1e-9) best = t;
+    }
+    return best;
+  }
+
+  /** Floor seen from origin between two screen angles (radians, a1 >= a0), up to maxR, blockers in the way. */
+  function visibilityPolygon(origin, a0, a1, maxR, blockers) {
+    let span = a1 - a0;
+    const full = span >= 2 * Math.PI - 1e-9;
+    if (full) { a0 = -Math.PI; a1 = Math.PI; span = 2 * Math.PI; }
+    const segs = segmentsFor(origin, blockers);
+    const n = Math.max(32, Math.ceil(span * 180 / Math.PI));
+    const angles = [];
+    for (let i = 0; i <= n; i++) angles.push(a0 + span * i / n);
+    const TWO = 2 * Math.PI;
+    for (let i = 0; i < segs.length && angles.length < COV.MAX_RAYS; i++) {
+      for (let k = 0; k < 4; k += 2) {
+        const ex = segs[i][k], ey = segs[i][k + 1];
+        if (Math.hypot(ex - origin.x, ey - origin.y) > maxR + 1e-6) continue;
+        const a = Math.atan2(ey - origin.y, ex - origin.x);
+        const kk = a0 + ((((a - a0) % TWO) + TWO) % TWO);
+        if (kk - 1e-4 >= a0 && kk - 1e-4 <= a1) angles.push(kk - 1e-4);
+        if (kk + 1e-4 >= a0 && kk + 1e-4 <= a1) angles.push(kk + 1e-4);
+      }
+    }
+    angles.sort((p, q) => p - q);
+    const ring = [];
+    let last = null;
+    angles.forEach((a) => {
+      if (last !== null && a - last < 1e-9) return;
+      last = a;
+      const r = castRay(origin.x, origin.y, a, maxR, segs);
+      ring.push({ x: origin.x + r * Math.cos(a), y: origin.y + r * Math.sin(a) });
+    });
+    if (full) { ring.pop(); return ring; }
+    return [{ x: origin.x, y: origin.y }].concat(ring);
+  }
+
+  function signedArea(poly) {
+    let s = 0;
+    for (let i = 0, n = poly.length; i < n; i++) { const a = poly[i], b = poly[(i + 1) % n]; s += a.x * b.y - b.x * a.y; }
+    return s / 2;
+  }
+
+  /** Sutherland-Hodgman: subject (any simple polygon) clipped to a convex polygon. */
+  function clipConvex(subject, clip) {
+    let out = subject.slice();
+    if (clip.length < 3 || out.length < 3) return [];
+    const ccw = signedArea(clip) > 0;
+    for (let i = 0; i < clip.length && out.length; i++) {
+      const A = clip[i], B = clip[(i + 1) % clip.length];
+      const inside = (p) => { const c = (B.x - A.x) * (p.y - A.y) - (B.y - A.y) * (p.x - A.x); return ccw ? c >= -1e-12 : c <= 1e-12; };
+      const cross = (p, q) => {
+        const dx = q.x - p.x, dy = q.y - p.y, ex = B.x - A.x, ey = B.y - A.y;
+        const den = dx * ey - dy * ex;
+        if (Math.abs(den) < 1e-15) return q;
+        const t = ((A.x - p.x) * ey - (A.y - p.y) * ex) / den;
+        return { x: p.x + t * dx, y: p.y + t * dy };
+      };
+      const inp = out;
+      out = [];
+      let prev = inp[inp.length - 1];
+      inp.forEach((cur) => {
+        if (inside(cur)) { if (!inside(prev)) out.push(cross(prev, cur)); out.push(cur); }
+        else if (inside(prev)) out.push(cross(prev, cur));
+        prev = cur;
+      });
+    }
+    return out;
+  }
+
+  /** (long side m, short side m, angle of the long side) of the min-area edge-aligned box. */
+  function orientedBox(poly) {
+    let best = null;
+    const n = poly.length;
+    for (let i = 0; i < n; i++) {
+      const a = poly[i], b = poly[(i + 1) % n];
+      const ang = Math.atan2(b.y - a.y, b.x - a.x), c = Math.cos(ang), s = Math.sin(ang);
+      let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
+      poly.forEach((p) => { const u = p.x * c + p.y * s, v = -p.x * s + p.y * c; u0 = Math.min(u0, u); u1 = Math.max(u1, u); v0 = Math.min(v0, v); v1 = Math.max(v1, v); });
+      const w = u1 - u0, h = v1 - v0;
+      if (!best || w * h < best.a - 1e-9) best = { a: w * h, w, h, ang };
+    }
+    if (!best) return { long: 0, short: 0, ang: 0 };
+    return best.h > best.w ? { long: best.h, short: best.w, ang: best.ang + Math.PI / 2 } : { long: best.w, short: best.h, ang: best.ang };
+  }
+
+  /** Points just outside a shelf's long sides (its fronts): {pts, per, length, front}. */
+  function shelfFaceSamples(poly) {
+    const box = orientedBox(poly);
+    const ccw = signedArea(poly) > 0;
+    const pts = [];
+    let total = 0;
+    for (let i = 0, n = poly.length; i < n; i++) {
+      const a = poly[i], b = poly[(i + 1) % n];
+      const el = Math.hypot(b.x - a.x, b.y - a.y);
+      if (el < 1e-6) continue;
+      const ea = Math.atan2(b.y - a.y, b.x - a.x);
+      if (Math.abs(Math.cos(ea - box.ang)) < Math.cos(30 * Math.PI / 180)) continue;
+      total += el;
+      const k = Math.max(1, Math.round(el / COV.SHELF_SAMPLE_M));
+      const ux = (b.x - a.x) / el, uy = (b.y - a.y) / el;
+      const nx = ccw ? uy : -uy, ny = ccw ? -ux : ux;
+      for (let s = 0; s < k; s++) {
+        const t = (s + 0.5) / k;
+        pts.push({ x: a.x + ux * el * t + nx * COV.SHELF_FACE_OFFSET_M, y: a.y + uy * el * t + ny * COV.SHELF_FACE_OFFSET_M });
+      }
+    }
+    return { pts, per: pts.length ? total / pts.length : 0, length: box.long, depth: box.short, front: total };
+  }
+
+  function nearFar(o, poly) {
+    let far = 0;
+    poly.forEach((p) => { far = Math.max(far, Math.hypot(p.x - o.x, p.y - o.y)); });
+    let near = 0;
+    if (!pointInPolygon(o.x, o.y, poly)) {
+      near = Infinity;
+      for (let i = 0; i < poly.length; i++) {
+        const a = poly[i], b = poly[(i + 1) % poly.length];
+        near = Math.min(near, segDist(o.x, o.y, a.x, a.y, b.x, b.y).d);
+      }
+    }
+    return { near, far };
+  }
+
+  /**
+   * What one camera covers after line of sight: {mode, polygon, area, range, near, far, ...}.
+   * mode 'calibrated' uses the server's footprint (calibrated_footprint) clipped by the view
+   * from the camera's spot; 'manual' the cone of fov_deg and range_m around the bearing.
+   */
+  function cameraCoverage(cam, blockers, site) {
+    const range = cameraRangeM(cam);
+    const isDefault = !(Number.isFinite(+cam.range_m) && cam.range_m !== null && +cam.range_m > 0);
+    const origin = { x: +cam.floor_x || 0, y: +cam.floor_y || 0 };
+    const placed = cam.map_placed !== false;
+    const enabled = cam.is_ai_enabled !== false && cam.status !== 'DISABLED';
+    const fp = cam.calibrated_footprint && Array.isArray(cam.calibrated_footprint.polygon) && cam.calibrated_footprint.polygon.length >= 3
+      ? cam.calibrated_footprint : null;
+    const pref = String(cam.coverage_mode || 'auto').toLowerCase();
+    const useCal = !!fp && pref !== 'manual';
+    const v = { camera_id: cam.camera_id, mode: useCal ? 'calibrated' : 'manual', polygon: [], range, rangeIsDefault: isDefault,
+      near: null, far: null, footprint: !!fp, occlusion: true, counted: placed && enabled, enabled, calibrated: !!cam.has_homography };
+    if (useCal) {
+      const poly = fp.polygon.map((p) => ({ x: +p.x, y: +p.y }));
+      if (!placed) { v.polygon = poly; v.occlusion = false; }
+      else {
+        let lo, hi;
+        if (pointInPolygon(origin.x, origin.y, poly)) { lo = -Math.PI; hi = Math.PI; }
+        else {
+          const ref = Math.atan2(poly[0].y - origin.y, poly[0].x - origin.x);
+          const rel = poly.map((p) => { const a = Math.atan2(p.y - origin.y, p.x - origin.x) - ref; return ((a + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI; });
+          lo = ref + Math.min(...rel) - 1e-3; hi = ref + Math.max(...rel) + 1e-3;
+        }
+        const far = Math.max(...poly.map((p) => Math.hypot(p.x - origin.x, p.y - origin.y))) + 0.5;
+        v.polygon = clipConvex(visibilityPolygon(origin, lo, hi, far, blockers), poly);
+      }
+      v.near = Number.isFinite(+fp.near_m) && fp.near_m !== null ? +fp.near_m : null;
+      v.far = Number.isFinite(+fp.far_m) && fp.far_m !== null ? +fp.far_m : null;
+      if (v.near === null && placed) { const nf = nearFar(origin, poly); v.near = nf.near; v.far = nf.far; }
+      v.range = v.far || range;
+    } else {
+      const c = ((+cam.azimuth_deg || 0) - 90) * Math.PI / 180;
+      const half = (Math.min(360, Math.max(1, +cam.fov_deg || COV.DEFAULT_FOV)) * Math.PI / 180) / 2;
+      v.polygon = visibilityPolygon(origin, c - half, c + half, range, blockers);
+      v.near = 0; v.far = range;
+    }
+    // Nothing beyond the edge of the map (the site) counts.
+    if (site && v.polygon.length >= 3) {
+      const box = [{ x: 0, y: 0 }, { x: site.w, y: 0 }, { x: site.w, y: site.h }, { x: 0, y: site.h }];
+      v.polygon = clipConvex(v.polygon, box);
+      if (useCal && placed) {
+        // Near / far limits of the footprint part that lies on the map.
+        const onMap = clipConvex(fp.polygon.map((p) => ({ x: +p.x, y: +p.y })), box);
+        if (onMap.length >= 3) { const nf = nearFar(origin, onMap); v.near = Math.round(nf.near * 100) / 100; v.far = Math.round(nf.far * 100) / 100; v.range = v.far; }
+      }
+    }
+    v.area = polygonArea(v.polygon);
+    return v;
+  }
+
+  /** Raster of the site: cell centres, cell size like the server (≤ 200k cells, ≥ 0.25 m). */
+  function covGrid(W, H) {
+    const cell = Math.round(Math.max(COV.GRID_MIN_CELL_M, Math.sqrt(Math.max(W * H, 1e-9) / COV.GRID_MAX_CELLS)) * 1000) / 1000;
+    const nx = Math.max(1, Math.ceil(W / cell)), ny = Math.max(1, Math.ceil(H / cell));
+    return { W, H, cell, nx, ny, n: nx * ny };
+  }
+
+  /** Uint8Array mask of the cells whose centre lies inside poly (even-odd), scanline fill. */
+  function gridMask(g, poly) {
+    const m = new Uint8Array(g.n);
+    const n = poly.length;
+    if (n < 3) return m;
+    let y0 = Infinity, y1 = -Infinity;
+    poly.forEach((p) => { y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y); });
+    const j0 = Math.max(0, Math.floor(y0 / g.cell) - 1), j1 = Math.min(g.ny, Math.ceil(y1 / g.cell) + 1);
+    const xs = [];
+    for (let j = j0; j < j1; j++) {
+      const yc = (j + 0.5) * g.cell;
+      xs.length = 0;
+      for (let i = 0, k = n - 1; i < n; k = i++) {
+        const a = poly[i], b = poly[k];
+        if ((a.y > yc) !== (b.y > yc)) xs.push(a.x + (yc - a.y) * (b.x - a.x) / ((b.y - a.y) || 1e-12));
+      }
+      if (xs.length < 2) continue;
+      xs.sort((p, q) => p - q);
+      for (let q = 0; q + 1 < xs.length; q += 2) {
+        // cells whose centre x is in (xs[q], xs[q+1])
+        const i0 = Math.max(0, Math.ceil(xs[q] / g.cell - 0.5)), i1 = Math.min(g.nx - 1, Math.floor(xs[q + 1] / g.cell - 0.5));
+        for (let i = i0; i <= i1; i++) {
+          const xc = (i + 0.5) * g.cell;
+          if (xc > xs[q] && xc < xs[q + 1]) m[j * g.nx + i] = 1;
+        }
+      }
+    }
+    return m;
+  }
+
+  function maskCount(m) { let c = 0; for (let i = 0; i < m.length; i++) c += m[i]; return c; }
+  function maskAndCount(a, b) { let c = 0; for (let i = 0; i < a.length; i++) if (a[i] && b[i]) c++; return c; }
+
+  /** 4-connected components of set cells: [[index...]]. */
+  function maskComponents(g, mask) {
+    const seen = new Uint8Array(g.n);
+    const comps = [];
+    const stack = [];
+    for (let s = 0; s < g.n; s++) {
+      if (!mask[s] || seen[s]) continue;
+      const comp = [];
+      seen[s] = 1; stack.push(s);
+      while (stack.length) {
+        const c = stack.pop();
+        comp.push(c);
+        const i = c % g.nx, j = (c - i) / g.nx;
+        if (i > 0 && mask[c - 1] && !seen[c - 1]) { seen[c - 1] = 1; stack.push(c - 1); }
+        if (i < g.nx - 1 && mask[c + 1] && !seen[c + 1]) { seen[c + 1] = 1; stack.push(c + 1); }
+        if (j > 0 && mask[c - g.nx] && !seen[c - g.nx]) { seen[c - g.nx] = 1; stack.push(c - g.nx); }
+        if (j < g.ny - 1 && mask[c + g.nx] && !seen[c + g.nx]) { seen[c + g.nx] = 1; stack.push(c + g.nx); }
+      }
+      comps.push(comp);
+    }
+    return comps;
+  }
+
+  /** Restricted area zones (another module owns their settings): drawn hatched in red. */
+  function isRestrictedZone(z) {
+    if (!z) return false;
+    const c = String(z.category || '').toUpperCase(), k = String(z.kind || '').toUpperCase();
+    return c === 'RESTRICTED' || k === 'RESTRICTED' || z.restricted === true || !!(z.properties && z.properties.restricted === true);
+  }
+
   // --------------------------------------------- window.FloorplanAPI (stable)
   //
   // For other modules (camera gallery). Exists from script load; methods that
   // need the map wait for it (ready resolves after the first layout load).
   //   ready, getCameras(), clientToWorld(clientX, clientY), canvasElement(),
   //   placeCamera(cameraId, x_m, y_m), focusCamera(cameraId), setDropPreview(x_m, y_m | null)
+  //   camerasSeeingZone(zoneId), getCoverage(), exportMap(kind, scale)
   // Events on window: 'fp:layout-changed' {cameras}, 'fp:camera-hover'
-  // {camera_id, clientX, clientY} | {camera_id: null}, 'fp:camera-selected' {camera_id}.
+  // {camera_id, clientX, clientY} | {camera_id: null}, 'fp:camera-selected' {camera_id},
+  // 'fp:coverage-changed' {store}, 'fp:restricted-settings' {zone_id}.
   let resolveReady = () => {};
   const readyPromise = new Promise((resolve) => { resolveReady = resolve; });
   const editorNow = () => window.blueprintEditor || null;
@@ -3902,6 +5060,13 @@
     },
     focusCamera(cameraId) { const ed = editorNow(); if (ed) ed.focusCamera(cameraId); },
     setDropPreview(xm, ym) { const ed = editorNow(); if (ed) ed.setDropPreview(xm, ym); },
+    // Camera coverage (2026-10-28), for other modules such as restricted areas:
+    // [{camera_id, covered_fraction}] of the switched-on, placed cameras that see the zone.
+    camerasSeeingZone(zoneId) { const ed = editorNow(); return ed && ed.layout ? ed.camerasSeeingZone(zoneId) : []; },
+    // Store numbers {coverage_pct, floor_m2, covered_m2, uncovered_m2, overlap_m2, gaps, ...} or null.
+    getCoverage() { const ed = editorNow(); const st = ed && ed.layout ? ed.coverageStats(true) : null; return st ? JSON.parse(JSON.stringify(st.store)) : null; },
+    // Save ('png') or print ('print') the map to scale: scale '50' | '100' | '200' | '500' | 'fit' | 'fitA3'.
+    exportMap(kind, scale) { const ed = editorNow(); return ed ? ed.exportMap(kind || 'png', scale || '100') : Promise.resolve(false); },
   };
 
   function initFloorplan() {

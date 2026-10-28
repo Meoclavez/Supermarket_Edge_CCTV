@@ -576,7 +576,8 @@ class AlertDispatcher:
         result: Dict[str, Any] = {"provider": "fcm_v1", "devices": 0, "targets": 0, "sent": 0, "failed": 0,
                                   "not_configured": 0, "unregistered": 0, "filtered": 0, "no_token": 0,
                                   "skipped": None, "results": []}
-        if camera is not None and camera.muted_until and camera.muted_until > datetime.utcnow():
+        if camera is not None and camera.muted_until and camera.muted_until > datetime.utcnow() \
+                and not data.get("ra_area_id"):
             result["skipped"] = f"camera alerts muted until {camera.muted_until.isoformat()}Z"
             return result
         key = (data.get("camera_id"), data.get("event_type"))
@@ -599,7 +600,8 @@ class AlertDispatcher:
 
         to_send: List[_Target] = []
         for t in targets:
-            reason = prefs_filter_reason(t.prefs, data["event_type"], data["severity"], data.get("camera_id"))
+            reason = prefs_filter_reason(t.prefs, data["event_type"], data["severity"], data.get("camera_id"),
+                                         ignore_quiet_hours=bool(data.get("ra_bypass_quiet")))
             if reason:
                 result["filtered"] += 1
                 result["results"].append({"paired_device_id": t.id, "name": t.name, "status": "filtered",

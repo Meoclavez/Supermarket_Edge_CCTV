@@ -2,7 +2,7 @@
 
 Setting up, mapping and using the store dashboard
 
-Last updated: 2026-10-04 · Describes the working tree after 5c21d13 (accounts and roles, site settings, backups, till key, area & line alerts, masked remote video) plus ignore areas, "Not a person" and static-figure memory
+Last updated: 2026-10-28 (restricted areas, 2.8a and 3.5a) · Describes the working tree after 5c21d13 (accounts and roles, site settings, backups, till key, area & line alerts, masked remote video) plus ignore areas, "Not a person" and static-figure memory
 
 This manual takes a store from a freshly installed edge device to daily use. Part 1 covers the device
 and the first sign-in. Part 2 is the store setup, in the order you should do it. Part 3 explains the
@@ -548,8 +548,12 @@ Store map. For each camera:
 
 1. Press "Place" in "Cameras & devices", then click the plan where the camera is mounted
    ("Place by click"). You can also drag the camera marker.
-2. Drag the tip of the wedge to point it, or enter "Bearing (°)" and "FOV (°)" (field of view) in
+2. Drag the round handle to point it, or enter "Bearing (°)" and "FOV (°)" (field of view) in
    the inspector, with "X (metres)", "Y (metres)" and "Height (m)" (mounting height).
+3. Set how far it sees: drag the **square handle at the tip of the cone**, or type "Reach (m)" in the
+   inspector. Left empty, the reach comes from the lens angle: 10 m for a normal 85° lens, further for
+   a narrower lens (60°: about 16 m), less for a wider one. "Default (… m)" goes back to that value.
+   Hold Shift while dragging for whole metres. Undo (Ctrl+Z) works as for any other change.
 
 You can also use the camera gallery, described next.
 
@@ -590,6 +594,58 @@ time and occupancy, and the Insights rules, work before the camera is calibrated
 people on the map or the floor heatmap. Pick "— none —" to remove the link. Once the camera is
 calibrated, the link is no longer used: each person is counted in the area they stand in. If two
 linked cameras see the same aisle, a shopper seen by both is counted by each.
+
+### 2.6a What each camera sees: coverage, blind spots and shelves
+
+The cone on the map is not a fixed drawing any more. It is cut wherever the camera cannot see:
+**walls, room outlines, shelves and obstacles block the view; doors, outdoor areas and low counters
+do not.** A shelf or counter has a "Blocks camera view" tick box in its inspector: untick it for a low
+display a ceiling camera sees over, tick it for a tall counter. A fixture with "Height (m)" below
+1.2 m does not block unless ticked.
+
+- **Calibrated cameras** (2.7) show the floor their picture really shows, worked out from the
+  calibration, with its real near and far limits ("from 2.1 m to 14.5 m away on the map"). The
+  inspector lets you choose **"Use calibrated coverage"** (recommended: this is what the camera
+  measures) or **"Manual cone"** (the angle and reach you typed; use it only if the calibration is
+  rough).
+- **"Show:" "Coverage"** draws what each camera covers more strongly; where two cameras overlap it is
+  darker. **"Blind spots"** paints the floor no placed camera sees in red, stronger inside store
+  areas (aisles, entrances, checkouts).
+- **Select a camera** to see "What it sees": the floor area it covers (m²), the store areas in view
+  (and how much of each), the shelves and counters in view (metres of shelf front) and which cameras
+  it overlaps. An uncalibrated camera offers one-click **"Count this camera into <area>"** buttons for
+  the areas it sees most (the same link as "Counts into zone" below).
+- **Select a shelf** to see its length and depth, its shelf front (both long sides) and how many
+  metres of it each camera sees. A shelf front no camera sees cannot have its reaches measured.
+- **Select a store area** to see its size (m²), how much of it is in view and by which cameras,
+  and its figures per square metre (2.6b).
+- **Click an empty part of the map** for "Store coverage": the share of the floor in view, the floor
+  in view and in blind spots (m²), floor seen twice or more, the biggest blind spots (click one to
+  zoom to it) and the floor each camera sees. The floor is the rooms and store areas on the map,
+  minus shelves, counters and obstacles. The same summary appears on the map's summary line
+  ("cameras see 74% of the floor").
+
+Only cameras that are switched on and placed on the map count towards the store coverage.
+
+### 2.6b Using the real sizes (metres)
+
+The map is drawn in real metres, so the dashboard uses the sizes:
+
+- Store areas show their size on the map ("24 m²") and shelf areas their length; shelves and counters
+  show their length.
+- Area figures per square metre: **visits per m²**, **time spent per m²** (seconds of shopping per
+  m²), **people per m² now**, and for shelf areas **reaches per metre of shelf**. They compare big and
+  small areas fairly. A dash means nothing was measured there today.
+- Store figures (in "Store coverage"): **sales per m²** of sales floor (needs the tills connected,
+  2.10), **shoppers per 100 m²** and **average walk in view** (how far a shopper walks while one
+  calibrated camera follows them).
+- Insights compare low-traffic areas **per m²** (a small aisle is not called "dead" for being small),
+  and do not judge an area the calibrated cameras see less than half of (its low count may only mean
+  the cameras miss it; the reason is listed under the skipped rules).
+- **Print or save the map to scale**: in "Store coverage", choose a scale (1:50, 1:100, 1:200, 1:500,
+  or "Fit an A4 / A3 page") and press "Save picture" (PNG with title, date, coverage and a scale
+  bar) or "Print to scale". When printing, choose "Actual size" (100%) so 1 cm on paper is the stated
+  distance in the store.
 
 ### 2.7 Calibrate each camera to the floor
 
@@ -665,6 +721,12 @@ doors, or the shop floor after closing.
 Restricted-area alerts appear in Loss prevention → "Area & line alerts" (3.5), in the alert banner
 and on paired phones. How soon the same person in the same area can alert again is set in Settings →
 "Alerts and detection" (4.2).
+
+Since 2026-10-28 every area drawn here also becomes a **high-security restricted area** (2.8a): it
+keeps its name, schedule, minimum dwell (as "Inside for at least") and severity (High = Alert,
+Warning = Watch, Info = Review), and from then on its alerts, arming, announcements and outcomes are
+handled in Loss prevention → "Restricted areas". The points you draw here still define where the
+area is on that camera.
 
 #### 🧾 Checkout / queue area (3+ points)
 
@@ -767,6 +829,57 @@ Other ways:
 - On the store network the analysed picture marks static figures "static", figures still being checked "pending" or
   "pending static", and ignore areas "ignored". Ignore areas are also outlined on the drawing layer
   as "🚫 <name> · no AI" ("(off)" when switched off).
+
+### 2.8a Restricted areas: high security
+
+For places where every movement matters: the cash office, the safe room, the stockroom after
+closing. While an area is **armed**, anyone inside who has not announced it is an urgent alert within
+a second, on every open dashboard and every alert phone. The system never recognises faces or
+identifies anyone: it follows a person-shaped track and the body pose, nothing else.
+
+**Where.** Open Loss prevention → "Restricted areas" → "Settings" (owners and administrators), or on
+the Store map select a zone and press "Restricted area settings". Choose one or both:
+
+- a **zone on the store map** (category "RESTRICTED" marks it). It works on every *calibrated* camera
+  that sees it, measured in metres, and on an uncalibrated camera linked to that zone ("Which area this
+  camera watches"), whose whole view then counts as inside;
+- **areas drawn on a camera picture** (Camera setup → "⛔ Restricted area", 2.8) for uncalibrated
+  cameras. Tick them under "Camera areas"; "Draw on a camera" opens Camera setup.
+
+Privacy comes first: an area that lies inside a privacy mask is refused with a message ("Privacy masks
+always win"); move the area or change the mask. People in "Ignore area (no AI)" areas are never seen,
+and every evidence picture is masked.
+
+**When.** "Always armed" or "On a schedule": add rows of days and "From" / "To" in store time (a "To"
+before the "From" runs past midnight; daylight saving is handled), armed during or outside those times.
+
+**What raises an alert.** Each trigger can be switched on or off, has its own thresholds, an alert
+level (Critical, Alert, Watch, Review, the same levels as theft alerts) and a "Repeat at most every"
+time. Defaults:
+
+| Trigger | Default | Level |
+|---|---|---|
+| "Entry without notice" | inside at least 0.5 s (a flicker never counts) | Critical |
+| "Stayed longer than announced" | 2 min after the announced time (15 s after "I'm out") | Alert |
+| "Inside too long" | more than 60 s | Watch |
+| "Moving fast (running)" | faster than 2.5 m/s (uncalibrated: 1.5 body heights/s, less accurate) | Alert |
+| "Pacing back and forth" | 3 direction changes within 30 s | Alert |
+| "Zig-zag or erratic movement" | 4 sharp alternating turns within 12 s | Alert |
+| "Crouching or low posture" | 2 s (hips and knees must be visible) | Alert |
+| "Reaching up high" | a hand above the head for 1 s | Alert |
+| "Near a marked point" | within 1 m of a point of interest (the safe, the cash drawer) for 1 s | Alert |
+| "Lingering at the edge" | waiting within 1 m outside the area for 8 s | Watch |
+| "Too many people inside" | more than 1 (the number announced is allowed) | Alert |
+| "Entry not through the door" | off; choose the door lines drawn in Camera setup | Alert |
+| "Camera tampered with" | no picture 20 s, covered 10 s, turned away 15 s (a lighting change is not tampering) | Critical |
+
+Most triggers stay quiet while someone has announced entry; tick "Also while someone announced entry"
+to keep one on. "Extra sensitivity inside the area" (default 5 points) lets a slightly less certain
+person still count inside an armed area. Press "Send test alert" to check the banner, the sound and
+the phones. A poster or mannequin inside the area is only ignored when the system learnt it while the
+area was not guarded (disarmed or announced); "Forget learnt still figures" clears that.
+
+The Features tab card "Restricted areas" → "Easy setup" sets the schedule and the main triggers.
 
 ### 2.9 Night watch
 
@@ -959,7 +1072,10 @@ camera there takes about 1.5 s for H.264 cameras and about 4 s for H.265 ones. I
 
 ### 3.3 Store map
 
-- **"Show:"** turns layers on or off: walls and shelves, areas, cameras, people, labels, grid.
+- **"Show:"** turns layers on or off: walls and shelves, areas, cameras, people, labels, grid,
+  "Coverage" and "Blind spots" (2.6a).
+- **Store coverage:** click an empty part of the map for the share of the floor the cameras see, the
+  biggest blind spots, figures per m² and "Print or save the map" (2.6a, 2.6b).
 - **People:** live positions from calibrated cameras.
 - **Heatmap:** "Walked", "Stopped" or "Touched shelves", for "Today", "Yesterday", "Last 7 days" or
   "Last 30 days".
@@ -1078,6 +1194,28 @@ for a person", "Person detected", …) and "Recent night events" with image and 
 Evidence is deleted oldest-first when the storage limit or the maximum age is reached; the incident
 then shows "Evidence expired". To keep evidence for police or insurance, open it with "Open in new
 tab" and save it elsewhere straight away. There is no bulk export.
+
+### 3.5a Restricted areas: going in, arming and alerts
+
+**Going in.** Before you enter an armed area, press "I'm going in" (in the strip at the top of every
+page, or on the area in Loss prevention → "Restricted areas"). Choose the area, for how long (5 to
+120 minutes, default 15), how many people and an optional note, then confirm. Everyone signed in now
+sees "Cash office — announced by <you> until 14:20" with the minutes left. Press "I'm out" when you
+leave. If you stay longer than announced, an alert "Stayed longer than announced" goes out after a
+short grace time, so announce again (it replaces your announcement) if you need longer. Operators may
+announce; only the person who announced (or an administrator) can end it.
+
+**Arming by hand.** "Arm now" (anyone, with a reason) arms the area until the schedule's next change
+or for the minutes you choose. "Disarm" and "Back to schedule" are for owners and administrators,
+always with a reason and at most 12 hours. Each action is in the "Audit trail" with who did it.
+
+**When an alert comes in,** a red banner and an alarm (three beeps for Critical) appear on every open
+dashboard within a second, and every alert phone gets it, also during its quiet hours. Open the camera
+with "Watch live", then record what happened on the alert: "False alarm", "Authorised (staff or
+contractor)" or "Real incident", with a note. An alert is not finished until an outcome is recorded;
+acknowledging from the phone stops the reminders but the outcome is still asked for on the dashboard.
+Each alert has an evidence still and, when the camera delivered pictures, a short clip. The list can
+be filtered by area, by trigger and by "Needs outcome".
 
 ---
 
@@ -1351,6 +1489,10 @@ the text inside quotes in error messages; counts of people or any other store da
 | Tile says "Hidden: privacy masks" | The camera has privacy masks and the device could not build the masked live view (for example the camera has sent no picture yet, or the video tools failed) | Check the camera works on the store network; press "Try again" on the tile. The raw picture is never shown instead |
 | All remote tiles drop for a few seconds | Someone added, changed or deleted a privacy mask | None; the tiles reconnect by themselves (2.8) |
 | No restricted-area or line alerts in "Area & line alerts" | The line is not set to "Alert staff on crossing", the area's schedule is not active, or the repeat time has not passed | Check the line or area in Camera setup (2.8) and the repeat times in Settings → "Alerts and detection" |
+| "This restricted area is inside a privacy mask" | Privacy masks always win over restricted areas | Move the area, or change the mask in Camera setup (2.8a) |
+| A restricted area shows "no camera watches it yet" | The store-map zone is not seen by a calibrated camera and no camera is linked to it | Calibrate a camera (2.7), link one to the zone, or draw the area on a camera (2.8a) |
+| "Camera tampered with" alerts at night in a dark room | A camera without infrared sees a completely black picture when the lights go off | Use an IR camera, keep a light on, or switch "Camera tampered with" off for that area |
+| Staff set off "Entry without notice" | They did not press "I'm going in" first | Announce before entering; record the alert as "Authorised" (3.5a) |
 | Till sales stopped arriving | The till key was replaced or revoked | Put the current key into the till system, or "Create till key" (2.10) |
 | Times, "Today" or the nightly backup are an hour or more off | Wrong store time zone | Settings → "Store" → "Time zone" (2.1) |
 | "First-run setup is only available on the store network" | Setup tried through online access | Create the account on the store network or the VPN |

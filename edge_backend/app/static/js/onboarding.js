@@ -81,6 +81,7 @@
         products: '/api/v1/analytics/products/zones',
         zones: !featureOff('zone_alerts') ? '/api/zones' : null,
         night: !featureOff('night_watch') ? '/api/v1/night-watch' : null,
+        restricted: !featureOff('restricted_areas') ? '/api/v1/restricted-areas/status' : null,
         subs: !featureOff('phone_alerts') ? '/api/v1/web-push/subscriptions' : null,
         users: '/api/v1/users',
         remote: !featureOff('online_access') ? '/api/v1/remote-access' : null,
@@ -230,6 +231,19 @@
         return { state: 'todo', detail: 'None yet.', go: studioFor(firstCamera(d), 'restricted'), goLabel: 'Open Camera setup' };
       },
       go: 'studio', goLabel: 'Open Camera setup',
+    },
+    {
+      id: 'restricted', card: 'restricted-areas', title: 'Set up a restricted area (cash office, safe room)', optional: true, feature: 'restricted_areas',
+      why: 'Every movement is tracked while it is armed; entry without notice is an urgent alert to every store phone.',
+      check(d) {
+        if (!ok(d.restricted)) return unknown(d.restricted);
+        const areas = (d.restricted.data.areas || []).filter((a) => a.enabled);
+        if (!areas.length) return { state: 'todo', detail: 'None yet.', go: 'restricted', goLabel: 'Open Restricted areas' };
+        const unwatched = areas.filter((a) => !(a.watching_cameras || []).length);
+        if (unwatched.length) return { state: 'partial', detail: `${unwatched[0].name}: no camera watches it yet.`, go: `restricted:${unwatched[0].id}`, goLabel: 'Open its settings' };
+        return { state: 'done', detail: `${plural(areas.length, 'restricted area')} set up.` };
+      },
+      go: 'restricted', goLabel: 'Open Restricted areas',
     },
     {
       id: 'night', card: 'night-watch', title: 'Turn on night watch for after-hours cameras', optional: true, feature: 'night_watch',

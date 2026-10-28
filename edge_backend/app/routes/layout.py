@@ -39,6 +39,7 @@ from app.models.db_models import (
 )
 from app.services.auth_service import auth_service
 from app.services.camera_discovery import camera_discovery_service
+from app.services import coverage_geometry
 from app.services import camera_source
 from app.services.camera_drivers import build_stream_urls, redact_url
 from app.services.frame_geometry import calibration_frame_size
@@ -117,6 +118,11 @@ class CameraPlacement(BaseModel):
     floor_z: Optional[float] = Field(None, ge=0, le=20)
     azimuth_deg: Optional[float] = None
     fov_deg: Optional[float] = Field(None, gt=0, le=360)
+    # Reach on the floor in metres (m0022). Sent as null: back to the
+    # lens-angle default; left out: unchanged.
+    range_m: Optional[float] = Field(None, ge=coverage_geometry.MIN_RANGE_M, le=coverage_geometry.MAX_RANGE_M)
+    # "auto" | "calibrated" | "manual"; left out: unchanged.
+    coverage_mode: Optional[str] = Field(None, pattern="^(auto|calibrated|manual)$")
 
 
 class StructureCreate(BaseModel):
@@ -466,8 +472,21 @@ async def place_camera(
         cam.azimuth_deg = req.azimuth_deg % 360.0
     if req.fov_deg is not None:
         cam.fov_deg = req.fov_deg
+    if "range_m" in req.model_fields_set:
+        try:
+            cam.range_m = coverage_geometry.validate_range_m(req.range_m)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+    if req.coverage_mode is not None:
+        cam.coverage_mode = coverage_geometry.validate_coverage_mode(req.coverage_mode)
     await db.commit()
     await db.refresh(cam)
+    try:  # shelf attribution along the line of sight uses the new spot at once
+        from app.services.pose_analytics import pose_analytics
+
+        pose_analytics.set_camera_geometry(cam.id, cam.floor_x, cam.floor_y, cam.floor_z, placed=True)
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"camera geometry not published: {e}")
     return {
         "camera_id": cam.id,
         "floor_x": cam.floor_x,
@@ -475,8 +494,31 @@ async def place_camera(
         "floor_z": cam.floor_z,
         "azimuth_deg": cam.azimuth_deg,
         "fov_deg": cam.fov_deg,
+        "range_m": cam.range_m,
+        "range_default_m": coverage_geometry.default_range_m(cam.fov_deg),
+        "coverage_mode": cam.coverage_mode or "auto",
+        # Moving a calibrated camera changes its near/far limits.
+        "calibrated_footprint": store_layout_service._footprint(cam),
         "map_placed": True,
     }
+
+
+@router.get("/coverage")
+async def get_coverage(
+    db: AsyncSession = Depends(get_db),
+    _: bool = Depends(auth_service.verify_api_access),
+):
+    """What each camera really sees on the map, and how much of the store is covered.
+
+    Per camera: the covered floor polygon after line of sight (walls, room
+    outlines, shelves and obstacles block; doors and outdoor areas do not),
+    whether it is the calibrated footprint or the manual cone, its area, near
+    and far limits, the zones it sees (share of each) and the shelf fronts it
+    sees (metres). Store: walkable floor, covered %, overlap, uncovered gaps;
+    per zone and per shelf which cameras see it. Geometry only: nothing here
+    is an observation. See services/coverage_geometry.py.
+    """
+    return await store_layout_service.coverage_report(db)
 
 
 @router.put("/cameras/{camera_id}/zone")

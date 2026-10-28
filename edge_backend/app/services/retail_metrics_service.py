@@ -227,6 +227,58 @@ def bin_heatmap_paths(
     return grid, samples
 
 
+def _zone_dimensions(polygon: list, category: Optional[str]) -> tuple[Optional[float], Optional[float]]:
+    """(area m^2, shelf run length m for SHELF zones) of a zone polygon."""
+    from app.services import coverage_geometry as cg
+
+    pts = cg._pts(polygon)
+    area = cg.polygon_area(pts)
+    if area <= 0:
+        return None, None
+    length = None
+    if str(category or "").upper() == "SHELF":
+        length = round(cg.oriented_box(pts)[0], 2) or None
+    return round(area, 2), length
+
+
+# A step between two consecutive floor points of one track implying a speed
+# above PATH_MAX_SPEED_MPS (or, without timestamps, longer than
+# PATH_MAX_STEP_M) is a tracking jump (an id switch or a projection glitch),
+# not walking: that step is not counted.
+PATH_MAX_STEP_M = 4.0
+PATH_MAX_SPEED_MPS = 3.0
+
+
+def path_length_m(points: list) -> Optional[float]:
+    """Metres walked along one track's recorded floor points ({x, y, t}).
+
+    Image-only samples ({u, v}) are skipped; implausible jumps are not counted.
+    None when the track has fewer than two floor points.
+    """
+    prev = None
+    total = 0.0
+    n = 0
+    for p in points or []:
+        if not isinstance(p, dict) or "x" not in p or "y" not in p:
+            continue
+        try:
+            x, y = float(p["x"]), float(p["y"])
+            t = float(p["t"]) if p.get("t") is not None else None
+        except (TypeError, ValueError):
+            continue
+        n += 1
+        if prev is not None:
+            px, py, pt = prev
+            step = ((x - px) ** 2 + (y - py) ** 2) ** 0.5
+            dt = (t - pt) if (t is not None and pt is not None) else None
+            # With timestamps the speed decides; without, a single step may not exceed PATH_MAX_STEP_M.
+            ok = (step / dt <= PATH_MAX_SPEED_MPS) if (dt is not None and dt > 0) else step <= PATH_MAX_STEP_M
+            if ok:
+                total += step
+        prev = (x, y, t)
+    return round(total, 2) if n >= 2 else None
+
+
 @dataclass
 class ZoneMetrics:
     """What was actually observed in one zone over a window."""
@@ -242,6 +294,13 @@ class ZoneMetrics:
     occupancy_now: int = 0
     # Product categories the operator says the zone sells (store_zones.products).
     products: list = field(default_factory=list)
+    # Real size of the zone on the map (m^2) and, for SHELF zones, the length
+    # of the shelf run (long side, m). None when the polygon has no area.
+    area_m2: Optional[float] = None
+    shelf_length_m: Optional[float] = None
+    # Shelf reaches recorded against this zone (shelf_interactions.shelf_zone_id),
+    # None when none were recorded in the window.
+    reaches: Optional[int] = None
 
     @property
     def engagement_rate(self) -> Optional[float]:
@@ -264,7 +323,43 @@ class ZoneMetrics:
             "occupancy_now": self.occupancy_now,
             "products": list(self.products),
             "observed": self.visits > 0,
+            # Space-normalised figures (real map metres). Null when not observed
+            # or when the zone has no area: never 0 for "nothing seen".
+            "area_m2": self.area_m2,
+            "visits_per_m2": self.visits_per_m2,
+            "dwell_seconds_per_m2": self.dwell_seconds_per_m2,
+            "people_per_m2_now": self.people_per_m2_now,
+            "shelf_length_m": self.shelf_length_m,
+            "reaches": self.reaches,
+            "reaches_per_shelf_m": self.reaches_per_shelf_m,
         }
+
+    def _per_area(self, value: Optional[float], digits: int = 3) -> Optional[float]:
+        if value is None or not self.area_m2 or self.area_m2 <= 0:
+            return None
+        return round(value / self.area_m2, digits)
+
+    @property
+    def visits_per_m2(self) -> Optional[float]:
+        """Visits per square metre of zone: traffic density, fair between big and small zones."""
+        return self._per_area(self.visits) if self.visits > 0 else None
+
+    @property
+    def dwell_seconds_per_m2(self) -> Optional[float]:
+        """Shopper-seconds spent per square metre (total dwell / area)."""
+        return self._per_area(self.total_dwell_seconds, 1) if self.visits > 0 and self.total_dwell_seconds > 0 else None
+
+    @property
+    def people_per_m2_now(self) -> Optional[float]:
+        """People in the zone now per square metre; only once the zone has been observed."""
+        return self._per_area(self.occupancy_now) if self.visits > 0 else None
+
+    @property
+    def reaches_per_shelf_m(self) -> Optional[float]:
+        """Shelf reaches per metre of shelf run (SHELF zones with recorded reaches)."""
+        if not self.reaches or not self.shelf_length_m or self.shelf_length_m <= 0:
+            return None
+        return round(self.reaches / self.shelf_length_m, 2)
 
 
 class RetailMetricsService:
@@ -458,10 +553,22 @@ class RetailMetricsService:
         ).all()
         occupancy = {r[0]: int(r[1]) for r in occ_rows}
 
+        reach_rows = (
+            await db.execute(
+                select(ShelfInteractionModel.shelf_zone_id, func.count(ShelfInteractionModel.id))
+                .where(and_(ShelfInteractionModel.timestamp >= start, ShelfInteractionModel.timestamp < end,
+                            _not_duplicate(ShelfInteractionModel.camera_id)))
+                .group_by(ShelfInteractionModel.shelf_zone_id)
+            )
+        ).all()
+        reaches = {r[0]: int(r[1]) for r in reach_rows if r[1]}
+
         out: list[ZoneMetrics] = []
         for z in zones:
             m = ZoneMetrics(zone_id=z.id, name=z.name, category=z.category,
                             products=list(getattr(z, "products", None) or []))
+            m.area_m2, m.shelf_length_m = _zone_dimensions(z.polygon or [], z.category)
+            m.reaches = reaches.get(z.id)
             if (row := agg.get(z.id)) is not None:
                 _, visits, uniques, avg_dwell, total_dwell, interactions = row
                 m.visits = int(visits or 0)
@@ -656,6 +763,7 @@ class RetailMetricsService:
             }
 
         peak = max(max(row) for row in grid) or 1.0
+        cell_m2 = (float(width_m) / grid_w) * (float(height_m) / grid_h) if grid_w and grid_h else None
         return {
             "kind": kind,
             "unit": unit,
@@ -665,6 +773,10 @@ class RetailMetricsService:
             "samples": samples,
             "peak_count": int(round(peak)),
             "peak_value": round(peak, 2),
+            # Real size of one heatmap cell and the peak per square metre, so
+            # maps of different grid sizes compare fairly.
+            "cell_area_m2": round(cell_m2, 4) if cell_m2 else None,
+            "peak_per_m2": round(peak / cell_m2, 3) if cell_m2 else None,
             "observed": True,
             **extra,
         }
@@ -925,6 +1037,84 @@ class RetailMetricsService:
             "days_observed": days,
             "hourly_forecast": out,
             "basis": "Per-hour mean of distinct visitors over observed days at this store.",
+        }
+
+    # ------------------------------------------------------- space (per m2)
+
+    async def walking_distance(self, db: AsyncSession, start: datetime, end: datetime) -> dict:
+        """Metres walked per tracked path (customer_tracks floor points).
+
+        A path is one camera's sighting of a person, so a shopper crossing
+        several cameras' views has several. Only calibrated cameras record
+        floor points; staff-only and duplicate cameras are left out. All
+        figures are None when no path with two floor points was recorded.
+        """
+        excluded = sorted(set(await staff_only_camera_ids(db)) | set(duplicate_camera_ids()))
+        rows = (
+            await db.execute(
+                select(CustomerTrackModel.trajectory_points).where(
+                    and_(CustomerTrackModel.start_time >= start, CustomerTrackModel.start_time < end,
+                         _track_is_real(), CustomerTrackModel.camera_id.notin_(excluded))
+                )
+            )
+        ).scalars().all()
+        lengths = sorted(v for v in (path_length_m(r) for r in rows) if v is not None)
+        if not lengths:
+            return {"paths_measured": 0, "avg_path_m": None, "median_path_m": None,
+                    "p90_path_m": None, "total_walked_m": None}
+        n = len(lengths)
+        return {
+            "paths_measured": n,
+            "avg_path_m": round(sum(lengths) / n, 1),
+            "median_path_m": round(lengths[n // 2] if n % 2 else (lengths[n // 2 - 1] + lengths[n // 2]) / 2, 1),
+            "p90_path_m": round(lengths[min(n - 1, int(0.9 * n))], 1),
+            "total_walked_m": round(sum(lengths), 1),
+        }
+
+    async def space_metrics(self, db: AsyncSession, layout_id: str, start: datetime, end: datetime) -> dict:
+        """Store figures normalised by real floor area (the map is in metres).
+
+        * ``sales_floor_m2``: indoor rooms and countable zones (union) minus
+          stockroom / excluded zones; ``sales_floor_source`` says which were
+          drawn (rooms | zones | rooms+zones); None with neither.
+        * ``sales_per_m2``: POS revenue in the window / sales floor (None
+          without POS rows).
+        * ``footfall_per_100m2``: footfall / sales floor x 100.
+        * ``walking``: :meth:`walking_distance`.
+        * ``zones``: per-zone visits / dwell / reaches per m^2 (zone_metrics).
+        """
+        from app.models.db_models import StoreLayoutModel, StoreStructureModel
+        from app.services import coverage_geometry as cg
+
+        layout = await db.get(StoreLayoutModel, layout_id)
+        structures = (await db.execute(select(StoreStructureModel).where(
+            StoreStructureModel.layout_id == layout_id))).scalars().all()
+        zones_db = (await db.execute(select(StoreZoneModel).where(
+            StoreZoneModel.layout_id == layout_id))).scalars().all()
+        area, source = cg.sales_floor_area(
+            float(layout.width_m) if layout else 1.0, float(layout.height_m) if layout else 1.0,
+            [{"kind": s.kind, "polygon": s.polygon} for s in structures],
+            [{"category": z.category, "polygon": z.polygon} for z in zones_db],
+        )
+        revenue, txns = await self.pos_totals(db, start, end)
+        footfall = await self.footfall(db, start, end)
+        zones = await self.zone_metrics(db, layout_id, start, end)
+        return {
+            "window": {"start": start.isoformat(), "end": end.isoformat()},
+            "sales_floor_m2": area,
+            "sales_floor_source": source,
+            "revenue": revenue,
+            "sales_per_m2": round(revenue / area, 2) if revenue is not None and area else None,
+            "transactions": txns,
+            "footfall": footfall,
+            "footfall_per_100m2": round(footfall / area * 100.0, 1) if footfall and area else None,
+            "walking": await self.walking_distance(db, start, end),
+            "zones": [
+                {k: d[k] for k in ("zone_id", "name", "category", "area_m2", "visits", "visits_per_m2",
+                                   "dwell_seconds_per_m2", "people_per_m2_now", "shelf_length_m",
+                                   "reaches", "reaches_per_shelf_m", "observed")}
+                for d in (z.to_dict() for z in zones)
+            ],
         }
 
     # -------------------------------------------------------------- overview

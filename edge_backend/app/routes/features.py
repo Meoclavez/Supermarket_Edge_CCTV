@@ -53,7 +53,7 @@ router = APIRouter(
 # Feature card id -> the iKorex plan key that can leave it out (None: always in the plan).
 PLAN_KEYS: Dict[str, Optional[str]] = {
     "theft-alerts": "theft_detection", "alert-levels": "theft_detection",
-    "area-line-alerts": "zone_alerts", "night-watch": "night_watch", "phone-alerts": "phone_alerts",
+    "area-line-alerts": "zone_alerts", "restricted-areas": "restricted_areas", "night-watch": "night_watch", "phone-alerts": "phone_alerts",
     "footfall": None, "queues": None, "shelf-reaches": None, "heatmaps": "heatmaps",
     "insights": "business_insights", "sales-data": "pos_integration",
     "cameras": None, "camera-purpose": None, "store-map": None, "placement-calibration": None,
@@ -144,6 +144,15 @@ async def _collect(db: AsyncSession, plan: Dict[str, bool]) -> Dict[str, Any]:
     d["privacy_masks"] = len(masks) - d["ignore_areas"]
     d["shelves"] = len(shelf_interaction_service.get_zones(None))
 
+    if plan.get("restricted_areas", True):
+        from app.services.restricted_areas import restricted_areas
+
+        now = restricted_areas.clock()
+        snap = restricted_areas.snapshot
+        d["ra"] = {"total": len(snap.areas), "on": [a for a in snap.areas if a.enabled],
+                   "armed": [a for a in snap.areas if a.armed_state(now)[0]],
+                   "unwatched": [a for a in snap.areas if a.enabled and not a.cameras()]}
+
     accounts = (await db.execute(select(AdminUserModel))).scalars().all()
     d["accounts"] = [a for a in accounts if a.is_active is None or a.is_active]
 
@@ -229,6 +238,18 @@ def _area_lines(d) -> Dict[str, str]:
     if not areas and not lines:
         return _st("off", "No restricted area or alert line drawn yet.")
     return _st("on", f"{_plural(len(areas), 'restricted area')} and {_plural(len(lines), 'alert line')} on.")
+
+
+def _restricted(d) -> Dict[str, str]:
+    r = d.get("ra") or {}
+    if not r.get("total"):
+        return _st("off", "No restricted area set up yet.")
+    if r.get("unwatched"):
+        return _st("setup", f"{r['unwatched'][0].name}: no camera watches it yet.")
+    if not r.get("on"):
+        return _st("off", f"{_plural(r['total'], 'restricted area')}, all switched off.")
+    armed = r.get("armed") or []
+    return _st("on", f"{_plural(len(r['on']), 'restricted area')} on, {len(armed)} armed now.")
 
 
 def _night(d) -> Dict[str, str]:
@@ -466,7 +487,8 @@ def _plan(d) -> Dict[str, str]:
 
 
 STATES: Dict[str, Callable[[Dict[str, Any]], Dict[str, str]]] = {
-    "theft-alerts": _theft, "alert-levels": _levels, "area-line-alerts": _area_lines, "night-watch": _night,
+    "theft-alerts": _theft, "alert-levels": _levels, "area-line-alerts": _area_lines,
+    "restricted-areas": _restricted, "night-watch": _night,
     "phone-alerts": _phones, "footfall": _footfall, "queues": _queues, "shelf-reaches": _shelves,
     "heatmaps": _heatmaps, "insights": _insights, "sales-data": _sales, "cameras": _cameras,
     "camera-purpose": _purpose, "store-map": _map, "placement-calibration": _placement, "store-areas": _areas,

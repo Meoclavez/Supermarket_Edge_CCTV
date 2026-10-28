@@ -140,3 +140,94 @@ auth.js if it renders the login card (logo markup only).
   the new tests). Do NOT start uvicorn or a browser; the integrator runs one combined
   headless-Chrome check afterwards (16 GB RAM machine).
 - Do not commit; the integrator commits.
+
+## Camera coverage, reach and real sizes (2026-10-28)
+
+Owner request: the camera cone had a fixed length; make the reach per camera, connect cameras to
+the shelves and zones they really see, and make good use of the real dimensions (metres).
+Floorplan.js stays owned by the map stream; other modules use only the API and events below.
+
+### Data (m0022, additive)
+- `cameras.range_m` FLOAT NULL: reach in metres (0.5..100). NULL = lens default
+  `coverage_geometry.default_range_m(fov)` = `10 * tan(42.5°) / tan(fov/2)`, clamped 3..30 m
+  (85° -> 10 m; >= 179° -> 6 m).
+- `cameras.coverage_mode` VARCHAR(16) NULL: NULL/"auto" (calibrated footprint when there is one,
+  else the manual cone) | "calibrated" | "manual".
+
+### API
+- `PATCH /api/v1/layout/cameras/{id}/placement` also takes `range_m` (left out = unchanged, `null` =
+  back to the default, outside 0.5..100 -> 422) and `coverage_mode` (auto|calibrated|manual); the answer
+  adds `range_m`, `range_default_m`, `coverage_mode`, `calibrated_footprint`.
+- `GET /api/v1/layout` cameras add `range_m`, `range_default_m`, `coverage_mode`,
+  `calibrated_footprint` = `{polygon:[{x,y}], near_m, far_m, area_m2}` | null.
+- `GET /api/v1/layout/coverage` (new): `cameras[]` {camera_id, mode, counted, enabled, calibrated,
+  footprint_available, occlusion_applied, range_m, range_is_default, near_m, far_m, polygon, area_m2,
+  floor_seen_m2, zones[{zone_id,name,category,covered_fraction,seen_m2}],
+  shelves[{structure_id,name,kind,seen_front_m,front_m,length_m}], overlaps[{camera_id,m2}], watch_zone_id};
+  `zones[]` {zone_id, area_m2, covered_fraction, calibrated_covered_fraction, cameras[{camera_id,
+  covered_fraction, calibrated}]}; `shelves[]` {structure_id, length_m, front_m, seen_front_m,
+  cameras[...]}; `store` {floor_source rooms|zones|rooms+zones|site, floor_m2, covered_m2, uncovered_m2,
+  coverage_pct, overlap_m2, cameras_counted, gaps[{area_m2,x,y,bbox,zone_id,zone_name,zone_names}]}.
+- `GET /api/v1/analytics/space?from&to` (new): `sales_floor_m2`, `sales_floor_source`, `revenue`,
+  `sales_per_m2`, `transactions`, `footfall`, `footfall_per_100m2`, `walking` {paths_measured,
+  avg_path_m, median_path_m, p90_path_m, total_walked_m}, `zones[]` per-m² figures. Null when not observed.
+- Zone metrics (`/analytics/floorplan` zones[].metrics, `/analytics/space`) add `area_m2`,
+  `visits_per_m2`, `dwell_seconds_per_m2`, `people_per_m2_now`, `shelf_length_m` (SHELF zones),
+  `reaches` (shelf_interactions with that shelf_zone_id), `reaches_per_shelf_m`; null when not observed.
+- `GET /api/v1/analytics/heatmaps` (observed) adds `cell_area_m2`, `peak_per_m2`.
+
+### Coverage algorithm (services/coverage_geometry.py; same in floorplan.js)
+1. Blockers: WALL centre lines; ROOM / SHELF / OBSTACLE outlines; DOOR segments cut the wall / room
+   edge they lie on (both ends within max(0.3 m, door thickness), < 15° apart); OUTDOOR and DOOR never
+   block; COUNTER does not block by default; a fixture with `properties.height_m` < 1.2 m does not
+   block; `properties.blocks_view` (bool) overrides. Hits closer than 0.15 m to the camera are ignored
+   (wall-mounted cameras); a fixture the camera sits inside is ignored.
+2. Manual: rays every degree of the FOV plus ±1e-4 rad around every blocker end point in range; each
+   ray stops at the first blocker or the reach; polygon = camera + ray ends. Bearing 0 = up, clockwise.
+3. Calibrated: image rectangle (calibration frame size) clipped to projective depth
+   `w >= w(farthest calibration point) / 3` (drops the horizon and the unreliable band near it),
+   projected by the homography (convex), limited to 60 m; then intersected (Sutherland-Hodgman) with
+   the visibility polygon over the footprint's angular span from the camera's map spot. Not placed ->
+   footprint without occlusion. Near/far = nearest/farthest point of the footprint part on the map.
+4. Everything is clipped to the site rectangle. Store numbers rasterise the site (cell = max(0.25 m,
+   sqrt(W*H/200000))): floor = ROOM ∪ countable zones (else the site) minus SHELF/COUNTER/OBSTACLE;
+   coverage % = floor cells seen by >= 1 counted camera (switched on and placed); overlap = >= 2;
+   gaps = 4-connected uncovered floor components >= 1 m². Shelf fronts = polygon edges within 30° of
+   the oriented box's long side, sampled every 0.25 m, 3 cm outside; a sample is seen when inside the
+   camera's polygon.
+5. Shelf attribution (pose_analytics floor fallback): when the projected wrist lands in no SHELF zone
+   and the camera is placed, the hand lies on the sight-line segment `C + (P - C)(H - h)/H` for
+   h = 0.4..2.0 m; the first SHELF zone it crosses from the camera is used
+   (`INTERACTION_FLOOR_SIGHT_LINE`, default on).
+
+### Frontend (floorplan.js)
+- Camera inspector: "Reach (m)" + "Default (… m)", square reach handle on the cone tip (round handle
+  turns; Shift = whole metres; undoable), "Use calibrated coverage" / "Manual cone", "What it sees"
+  (zones, shelf fronts, overlaps, "Count this camera into <zone>" via `PUT .../cameras/{id}/zone`).
+- Shelf / counter inspector: length, depth, front, metres seen per camera, "Blocks camera view".
+- Zone inspector: size, share in view per camera, per-m² figures; restricted zones (category
+  `RESTRICTED`, or `kind`/`restricted`/`properties.restricted`) are drawn with a red cross-hatch and get
+  a "Restricted area settings" button.
+- Empty inspector: "Store coverage" (%, blind spots with zoom, floor per camera, per-m² store figures,
+  "Print or save the map": PNG at 1:50..1:500 or fit A4/A3 at 150 dpi on light paper colours with title
+  and scale bar, or print with the sheet sized in mm).
+- Layers "Coverage" and "Blind spots" (localStorage `edge_cctv_map_coverage`).
+
+### Public API additions (backward compatible)
+```js
+FloorplanAPI.camerasSeeingZone(zoneId) // -> [{camera_id, covered_fraction}] (switched-on, placed cameras)
+FloorplanAPI.getCoverage()             // -> store numbers (as GET /layout/coverage store) | null
+FloorplanAPI.exportMap(kind, scale)    // kind 'png'|'print', scale '50'|'100'|'200'|'500'|'fit'|'fitA3'
+FloorplanAPI.getCameras()              // entries add range_m, range_is_default, coverage_mode, covered_m2
+// Events on window:
+//   'fp:coverage-changed'     detail: {store}
+//   'fp:restricted-settings'  detail: {zone_id}   (the restricted-areas module builds its own panel)
+```
+
+### Insights
+`business_analysis_service._detect` low-traffic rule (STORE_LAYOUT): with >= 2 AISLE/DEPARTMENT zones
+that have an area, compares visits per m² against their average (evidence `visits_per_m2`,
+`store_avg_visits_per_m2`, `area_m2`, `basis: per_m2`); without areas the old count rule
+(`basis: visits`). A zone the calibrated cameras see < 50% of (and no linked uncalibrated camera) is
+not judged; the reason is listed in `suppressed_rules`. Insight topics' headline uses the per-m² ratio
+when present.

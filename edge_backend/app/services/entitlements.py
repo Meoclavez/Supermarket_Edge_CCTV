@@ -56,6 +56,7 @@ STANDBY_WARN_SHARE = 0.25
 FEATURES = (
     "theft_detection",    # theft / loss alerts (pose analytics incidents)
     "zone_alerts",        # restricted-area and line-crossing alerts
+    "restricted_areas",   # high-security restricted areas (announce entry, triggers, tamper)
     "night_watch",        # after-hours motion / person watch
     "phone_alerts",       # Web Push + paired phone app push, store-offline watchdog
     "heatmaps",           # recorded heatmap history
@@ -68,6 +69,7 @@ FEATURES = (
 FEATURE_LABELS = {
     "theft_detection": "Theft alerts",
     "zone_alerts": "Area and line alerts",
+    "restricted_areas": "Restricted areas",
     "night_watch": "Night watch",
     "phone_alerts": "Phone alerts",
     "heatmaps": "Heatmaps",
@@ -509,6 +511,8 @@ def max_cameras() -> Optional[int]:
 def alert_feature(event_type: Optional[str], data: Optional[dict] = None) -> Optional[str]:
     """The plan feature an alert belongs to (None: operational, e.g. camera offline)."""
     et = str(event_type or "").upper()
+    if et == "RESTRICTED_AREA" and data and data.get("ra_area_id"):
+        return "restricted_areas"
     if et in ("RESTRICTED_AREA", "TRIPWIRE_ALERT"):
         return "zone_alerts"
     if et in ("NIGHT_INTRUSION", "NIGHT_MOTION"):
@@ -565,6 +569,8 @@ _FEATURE_ROUTES = tuple((feature, re.compile(rx)) for feature, rx in (
     # Restricted areas and the zone alert snapshots. Tripwire drawing stays
     # available: tripwires also count footfall (entrances); only their alerts are gated.
     ("zone_alerts", r"^/api/zones/(intrusion|alerts)(/|$)"),
+    # High-security restricted areas (announce entry, triggers, tamper, audit).
+    ("restricted_areas", r"^/api/v1/restricted-areas(/|$)"),
     ("night_watch", r"^/api/v1/(night-watch|cameras/[^/]+/night-watch)(/|$)"),
     ("phone_alerts", r"^/api/v1/(web-push|push)(/|$)"),
     ("heatmaps", r"^/api/v1/analytics/heatmaps(/|$)"),
@@ -576,6 +582,9 @@ _FEATURE_ROUTES = tuple((feature, re.compile(rx)) for feature, rx in (
     ("online_access", r"^/api/v1/remote-access/verify(/|$)"),
     ("pos_integration", r"^/api/v1/(analytics/pos|store/pos-registers|cameras/[^/]+/pos-register)(/|$)"),
 ))
+# Camera-drawn restricted areas are also the camera regions of high-security
+# restricted areas: drawing them stays open when either feature is in the plan.
+_SHARED_DRAWING = re.compile(r"^/api/zones/intrusion(/|$)")
 _REMOTE_VIDEO_ROUTES = re.compile(r"^/api/v1/webrtc/(sessions|offer)(/|$)")
 _ADOPT_ROUTES = re.compile(r"^/api/v1/layout/devices/adopt/?$")
 
@@ -643,6 +652,8 @@ class FleetGateMiddleware:
             code = "service_standby" if st["paused_reason"] == "standby" else "service_paused"
             return 423, {"code": code, "message": st["message"], "detail": st["message"]}
         feature = feature_for_path(path)
+        if feature == "zone_alerts" and _SHARED_DRAWING.match(path) and feature_enabled("restricted_areas"):
+            feature = None   # restricted areas draw their camera regions with the same tool
         if feature and not feature_enabled(feature):
             return 403, feature_disabled_body(feature)
         method = scope.get("method", "GET")

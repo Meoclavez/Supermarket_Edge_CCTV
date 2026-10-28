@@ -42,6 +42,15 @@ shelf zone drawn over the shelf footprint this still separates "hand over the
 shelf" from "hand in the aisle" for typical ceiling cameras, but boundaries
 are soft. Set ``INTERACTION_FLOOR_SHELF_FALLBACK=false`` to disable it.
 
+When the projected point lands in no SHELF zone and the camera is placed on
+the store map (position + mounting height, published by the pipeline
+supervisor through ``set_camera_geometry``), the overshoot is undone along the
+line of sight: a hand at height h sits above ``C + (P - C) * (H - h) / H``, so
+for hand heights 0.4-2.0 m the hand lies on a segment of the sight line, and
+the first SHELF zone that segment crosses (seen from the camera) is the shelf
+face the camera sees the hand at (``coverage_geometry.shelf_on_sight_line``).
+``INTERACTION_FLOOR_SIGHT_LINE=false`` turns this step off.
+
 Threading
 ---------
 ``observe`` runs on the camera worker thread and must stay cheap: it only does
@@ -287,6 +296,8 @@ class PoseAnalytics:
         self._cameras: Dict[str, CameraState] = {}
         self._cameras_lock = threading.Lock()
         self._floor_zones_override: Optional[List[Dict[str, Any]]] = None
+        # camera id -> (x_m, y_m, height_m) of cameras placed on the store map.
+        self._camera_geom: Dict[str, Tuple[float, float, float]] = {}
         # Outgoing work: ("interaction", dict) | ("incident", dict)
         self._pending: List[Tuple[str, Dict[str, Any]]] = []
         self._pending_lock = threading.Lock()
@@ -329,6 +340,18 @@ class PoseAnalytics:
         self._writer_stop.set()
         self._wake.set()
         self.flush_now()
+
+    def set_camera_geometry(self, camera_id: str, x_m: Optional[float], y_m: Optional[float],
+                            height_m: Optional[float], placed: bool = True) -> None:
+        """Where a camera hangs on the store map (None / not placed: forget it)."""
+        try:
+            ok = placed and None not in (x_m, y_m, height_m) and float(height_m) > 0
+        except (TypeError, ValueError):
+            ok = False
+        if ok:
+            self._camera_geom[camera_id] = (float(x_m), float(y_m), float(height_m))
+        else:
+            self._camera_geom.pop(camera_id, None)
 
     def set_floor_zones(self, zones: Optional[List[Dict[str, Any]]]) -> None:
         """Override the floor zones (tests); ``None`` reads the live engine's."""
@@ -883,16 +906,30 @@ class PoseAnalytics:
             p = None
         if p is None:
             return None
+        shelves = []
         for z in self._floor_zones():
             if str(z.get("category", "")).upper() != "SHELF":
                 continue
             pts = [(float(q["x"]), float(q["y"])) for q in (z.get("polygon") or []) if isinstance(q, dict)]
             if _point_in_poly(p[0], p[1], pts):
-                xs, ys = [q[0] for q in pts], [q[1] for q in pts]
-                return (ProductZoneGeom(id=z["id"], name=z.get("name") or z["id"], space="floor",
-                                        polygon=pts, bbox=(min(xs), min(ys), max(xs), max(ys)),
-                                        category="SHELF"), label, x, y)
+                return self._floor_shelf_geom(z, pts), label, x, y
+            shelves.append((z["id"], pts, z))
+        geom = self._camera_geom.get(cam.camera_id)
+        if shelves and geom is not None and settings.INTERACTION_FLOOR_SIGHT_LINE:
+            from app.services.coverage_geometry import shelf_on_sight_line
+
+            hit = shelf_on_sight_line((geom[0], geom[1]), geom[2], (float(p[0]), float(p[1])),
+                                      [(i, pts) for i, (_zid, pts, _z) in enumerate(shelves)])
+            if hit is not None:
+                _zid, pts, z = shelves[hit]
+                return self._floor_shelf_geom(z, pts), label, x, y
         return None
+
+    @staticmethod
+    def _floor_shelf_geom(z: Dict[str, Any], pts: List[Tuple[float, float]]) -> ProductZoneGeom:
+        xs, ys = [q[0] for q in pts], [q[1] for q in pts]
+        return ProductZoneGeom(id=z["id"], name=z.get("name") or z["id"], space="floor",
+                               polygon=pts, bbox=(min(xs), min(ys), max(xs), max(ys)), category="SHELF")
 
     def _zone_by_id(self, cam: CameraState, zone_id: Optional[str]) -> Optional[ProductZoneGeom]:
         for z in cam.zones:

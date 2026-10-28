@@ -20,6 +20,7 @@
   <link rel="stylesheet" href="/static/css/camera_gallery.css?v=2.6.0" />
   <link rel="stylesheet" href="/static/css/loss.css?v=2.6.0" />
   <link rel="stylesheet" href="/static/css/zone_alerts.css?v=2.6.0" />
+  <link rel="stylesheet" href="/static/css/restricted.css?v=2.6.0" />
   <link rel="stylesheet" href="/static/css/insights.css?v=2.6.0" />
   <link rel="stylesheet" href="/static/css/camera_roles.css?v=2.6.0" />
   <link rel="stylesheet" href="/static/css/heatmap_history.css?v=2.6.0" />
@@ -137,6 +138,9 @@
       </div>
     </div>
     <!-- BANNER:END -->
+    <!-- Restricted areas (js/restricted.js): who announced entry where and until when, on every page;
+         "I'm going in" and "I'm out". Hidden until an area exists. -->
+    <div id="raStrip" class="ra-strip" role="region" aria-label="Restricted areas: announced entries" aria-live="polite" hidden></div>
 
     <!-- ==========================================
          TODAY (js/today.js): the home screen after sign-in.
@@ -329,6 +333,8 @@
             <label class="fp-toggle fp-layer-opt" for="layerPersons"><input type="checkbox" id="layerPersons" name="layerPersons" checked onchange="blueprintEditor.toggleLayer('persons', this.checked)"> People</label>
             <label class="fp-toggle fp-layer-opt" for="layerLabels"><input type="checkbox" id="layerLabels" name="layerLabels" checked onchange="blueprintEditor.toggleLayer('labels', this.checked)"> Labels</label>
             <label class="fp-toggle fp-layer-opt" for="layerGrid"><input type="checkbox" id="layerGrid" name="layerGrid" checked onchange="blueprintEditor.toggleLayer('grid', this.checked)"> Grid</label>
+            <label class="fp-toggle fp-layer-opt" for="layerCoverage" data-help-after="coverage" title="What each camera really sees: its cone or calibrated footprint, cut by walls and shelves. Darker where cameras overlap."><input type="checkbox" id="layerCoverage" name="layerCoverage" onchange="blueprintEditor.toggleLayer('coverage', this.checked)"> Coverage</label>
+            <label class="fp-toggle fp-layer-opt" for="layerGaps" title="Floor no placed camera sees, in red (stronger inside zones)"><input type="checkbox" id="layerGaps" name="layerGaps" onchange="blueprintEditor.toggleLayer('gaps', this.checked)"> Blind spots</label>
             <span class="fp-sep fp-layer-opt"></span>
             <label class="fp-toggle" for="layerHeatmap"><input type="checkbox" id="layerHeatmap" name="layerHeatmap" checked onchange="blueprintEditor.toggleLayer('heatmap', this.checked)"> Heatmap</label>
             <span class="fp-heatbar" id="fpHeatBar"></span>
@@ -741,6 +747,20 @@
         <div id="theftIncidentsList" class="loss-list"><div class="fp-empty">Loading…</div></div>
       </div>
 
+      <!-- Restricted areas (js/restricted.js): armed / announced state, live occupancy, "I'm going in",
+           arming, settings, restricted-area alerts with their outcome, the audit trail. -->
+      <div class="glass-card" id="restrictedAreasCard">
+        <div class="card-title">
+          <span data-help="restricted-areas">Restricted areas</span>
+        </div>
+        <p class="loss-intro">
+          Cash office, safe room, stockroom: while an area is <b>armed</b>, every movement there is tracked and flagged at
+          once. Tap <b>I'm going in</b> before entering and <b>I'm out</b> when you leave. Every alert is closed with what
+          really happened. No faces are recognised and nobody is identified.
+        </p>
+        <div id="raCardBody"><div class="fp-empty">Loading…</div></div>
+      </div>
+
       <!-- Area & line alerts (js/zone_alerts.js): restricted-area and line-crossing alerts from the alert log. -->
       <div class="glass-card" id="zoneAlertsCard">
         <div class="card-title">
@@ -896,6 +916,7 @@
         <a class="btn btn-sm" href="#settings-evidence" onclick="return jumpTo('settings-evidence')">Evidence storage</a>
         <a class="btn btn-sm" href="#settings-alerts" onclick="return jumpTo('settings-alerts')">Alerts and detection</a>
         <a class="btn btn-sm" href="#settings-theft-alerts" onclick="return jumpTo('settings-theft-alerts')">Theft alert levels</a>
+        <a class="btn btn-sm" href="#settings-restricted-areas" data-ra-jump="settings-restricted-areas">Restricted areas</a>
         <a class="btn btn-sm" href="#settings-analysis" onclick="return jumpTo('settings-analysis')">Analysis speed</a>
         <a class="btn btn-sm" href="#settings-remote" onclick="return jumpTo('settings-remote')">Online access</a>
         <a class="btn btn-sm" href="#settings-remote-video" onclick="return jumpTo('settings-remote-video')">Live video</a>
@@ -922,6 +943,8 @@
       <!-- Theft alert levels: thresholds, who is told at each level, weights, combined signs, and the
            policy explainer from GET /api/v1/theft/alert-policy (site_settings.js, group theft_alerts). -->
       <div class="glass-card" id="settings-theft-alerts"></div>
+      <!-- Restricted areas: one line and the buttons to the panel and each area's settings (restricted.js). -->
+      <div class="glass-card" id="settings-restricted-areas"></div>
       <!-- Analysis speed: GPU share, decode cap, per-camera ceiling, idle rate, motion wake, and the
            capacity the box can sustain (site_settings.js, GET /api/v1/system/analysis-capacity). -->
       <div class="glass-card" id="settings-analysis"></div>
@@ -1218,6 +1241,7 @@
   <script src="/static/js/loss.js?v=2.6.0" defer></script>
   <script src="/static/js/live_behaviour.js?v=2.6.0" defer></script>
   <script src="/static/js/zone_alerts.js?v=2.6.0" defer></script>
+  <script src="/static/js/restricted.js?v=2.6.0" defer></script>
   <script src="/static/js/insights.js?v=2.6.0" defer></script>
   <script src="/static/js/heatmap_history.js?v=2.6.0" defer></script>
   <script src="/static/js/product_reach.js?v=2.6.0" defer></script>

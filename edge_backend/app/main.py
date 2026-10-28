@@ -188,6 +188,15 @@ async def lifespan(app: FastAPI):
     if not paused:
         await pose_analytics.start()
 
+    # 4a. High-security restricted areas: settings snapshot for the camera
+    # workers, upgrade of older restricted areas, camera-offline watchdog.
+    from .services.restricted_areas import restricted_areas as restricted_area_service
+    try:
+        if not paused:
+            await restricted_area_service.start()
+    except Exception as exc:  # never block the store system
+        startup_log.exception(f"Restricted areas failed to start: {exc}")
+
     # 4b. Recorded heatmap history: hourly snapshots, daily roll-ups, backfill.
     from .services.heatmap_history import heatmap_recorder
     try:
@@ -282,6 +291,7 @@ async def lifespan(app: FastAPI):
         await support_uploader.stop()
         # Before the pipeline: its final partial-hour record reads the live engine.
         await heatmap_recorder.stop()
+        await restricted_area_service.stop()
         await pipeline_supervisor.stop()
         await asyncio.to_thread(pose_analytics.stop)
         await remote_access_service.stop()
@@ -403,6 +413,11 @@ app.include_router(support_routes.router)
 from .routes import features as features_routes  # noqa: E402
 
 app.include_router(features_routes.router)
+# High-security restricted areas: announce entry, triggers, tamper, audit (restricted_areas.py).
+from .routes import restricted_areas as restricted_areas_routes  # noqa: E402
+
+app.include_router(restricted_areas_routes.status_router)
+app.include_router(restricted_areas_routes.router)
 
 # Mount Static Files
 STATIC_DIR = Path(__file__).resolve().parent / "static"

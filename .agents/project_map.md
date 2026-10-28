@@ -11,8 +11,11 @@ analysis) and (3) customer heatmaps. Home-security features -- fall detection,
 kinematic/emergency alerts, the emergency siren screen, residential intrusion
 alarms and door monitoring -- were removed on purpose and **must not be
 reintroduced**. Retail tripwires (entrance in/out counting) and scheduled
-restricted areas (stockroom, cash office, after-hours floor) are in scope and
-are evaluated live by `tripwire_engine.py`. Legacy keys such as
+restricted areas (stockroom, cash office, after-hours floor) are in scope:
+tripwires are evaluated live by `tripwire_engine.py`, restricted areas (high
+security, since 2026-10-28) by `restricted_area_engine.py` (the older
+tripwire_engine evaluation only runs for camera-drawn areas while the
+`restricted_areas` plan feature is off). Legacy keys such as
 `fall_detection` / `door_monitoring` in stored camera rows are ignored
 (`CameraFeatureConfig` is `extra="ignore"`), and migration m0004 dropped
 `security_events.kinematics`.
@@ -603,6 +606,110 @@ default grouped view, "Show every insight" = old list; badge = open topics. Test
 * **[`docs/supermarket_cctv/hardware_sizing_and_procurement_guide_30_cameras.md`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/docs/supermarket_cctv/hardware_sizing_and_procurement_guide_30_cameras.md):** Complete hardware sizing, workload throughput mathematics, multi-model TensorRT VRAM sizing, itemized Bill of Materials (BOM), and procurement options for 32-camera supermarket installations.
 * **[`docs/supermarket_cctv/Supermarket_Edge_AI_CCTV_Hardware_and_Services_Guide.pdf`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/docs/supermarket_cctv/Supermarket_Edge_AI_CCTV_Hardware_and_Services_Guide.pdf):** Print-ready formal PDF document (5 pages, A4) detailing 32-camera deterministic mathematical sizing, single NVDEC decode throughput, 10-Pillar Foolproof Engineering Validation Matrix, itemized BOM, 32-channel store layout, and procurement checklist.
 * **[`docs/supermarket_cctv/Supermarket_Edge_AI_CCTV_Hardware_and_Services_Guide.html`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/docs/supermarket_cctv/Supermarket_Edge_AI_CCTV_Hardware_and_Services_Guide.html):** Paged-media HTML source for regenerating the 32-camera PDF specification document.
+
+## Restricted areas, high security (2026-10-28, BOX stream, not committed / not deployed)
+
+Owner request: restricted areas where movements are tracked and flagged instantly; entry without notice,
+movement pattern and speed triggers configurable. Owner decisions 2026-10-28: authorised entry =
+announce ("I'm going in", 5-120 min) + schedule (always or weekly); alerts to store phones (highest
+priority, quiet hours and cooldowns bypassed) + dashboard (banner + alarm); evidence clip; no face
+recognition / identity; the VPS gets nothing new (plan key `restricted_areas` only).
+User docs: `docs/USER_MANUAL.md` 2.8a + 3.5a, `docs/FEATURES.md` "Restricted areas (high security)",
+`docs/FLEET_CONTROL_CONTRACT.md` (`restricted_areas` key).
+
+* **Data (m0023, `restricted_areas`, `restricted_area_announcements`, `restricted_area_audit`;
+  models at the end of `db_models.py`).** Area = name, enabled, `floor_zone_id` (store-map zone, category
+  `RESTRICTED` added to `store_layout_service.ZONE_CATEGORIES`, any zone works) and/or `camera_regions`
+  `[{camera_id, intrusion_zone_id}]` (Studio "Restricted area" polygons, read live) or `[{camera_id, points}]`,
+  `arming` {mode always|schedule, schedule rows, schedule_mode armed_during|armed_outside, timezone?},
+  `triggers` (merged over `restricted_areas.TRIGGERS` defaults), `points_of_interest`, `security`
+  {confidence_delta}, manual override (`manual_state` armed|disarmed until `manual_until`, reason, by),
+  `legacy_intrusion_id`. Alerts are `security_events` rows (`event_type RESTRICTED_AREA`, metadata
+  `ra_area_id`, `ra_trigger`, `alert_tier`, `ra_requires_outcome`, outcome `ra_outcome` false_alarm|
+  authorised|incident + note/by/at). Evidence: `<alert_id>.jpg/.mp4` in the zone_alerts evidence dir
+  (evidence storage limit ages them out and nulls the links by event id).
+* **`services/restricted_areas.py`:** trigger catalogue (labels/explanations/examples/defaults/ranges),
+  validation (`validate_area`: privacy-mask overlap >= `RESTRICTED_MASK_REFUSE_FRACTION` 0.5 refused with
+  a plain message, partial overlap = warning; floor zones checked per calibrated camera), arming
+  (`schedule_armed`, `next_schedule_change`: zoneinfo, DST-correct), `CompiledArea` / `Snapshot` (what the
+  workers read: regions per camera, floor polygon + calibrated cameras with covered fraction from
+  `floor_coverage` (cached), linked uncalibrated cameras by `watch_zone_id`, door lines, announcements
+  incl. recently ended), audit writer, `adopt_legacy()` (every zone-store intrusion zone not linked becomes
+  an area once: schedule, min dwell -> min presence, severity -> tier HIGH=alert/WARNING=watch/INFO=review,
+  cooldown; only "Entry without notice" on), background loop (lifespan `main.py` 4a): adopt every 30 s,
+  refresh every `RESTRICTED_REFRESH_SEC` (5) and after every API write, engine `tick()` every 1 s.
+* **`services/restricted_area_engine.py`:** called from `CameraWorker._analyse` with ALL live tracks
+  (hits >= 2) whenever an area covers the camera (`covers()`); calibrated = floor metres, uncalibrated =
+  pixels / box height ("body heights", labelled less accurate). Triggers: unannounced_entry (min presence
+  0.5 s, >= 2 obs, exit grace 1 s; Critical), announced_overstay (after `until` + grace 2 min, or 15 s after
+  "I'm out"; people inside before the end are covered until then, newcomers are not), dwell (60 s, Watch),
+  speed (2.5 m/s or 1.5 bh/s over 0.6 s: min(net, median step) so a track jump is not running), pacing
+  (`count_reversals`, 3 in 30 s), erratic (`zigzag_turns`, 4 in 12 s), crouch (hip-knee drop < 0.40 torso,
+  2 s), reach_up (wrist above head, elbow above shoulder, 1 s), poi_approach (1 m / 0.6 bh, 1 s),
+  boundary_linger (outside within 1 m / 0.5 bh for 8 s, Watch), people_count (max over cameras of the
+  per-camera count, held 1 s; announced people allowed), wrong_door (door lines on the same camera,
+  checked once per entry), tamper (`frame_health` 1 Hz on decoded frames of armed cameras: covered = thumb
+  std < 6 for 10 s with a textured reference; moved = ZNCC < 0.35 for 15 s, one alert per move, gain
+  changes ignored; offline = no frame 20 s, from `tick()`; Critical). Each fires once per (area, track) and
+  then per-area cooldown. Still figures: static/pending-static tracks inside a guarded area count unless
+  they match a figure learnt while the area was NOT guarded (`STORAGE_DIR/restricted_areas/still_figures.json`,
+  IoU >= STATIC_MEMORY_IOU + poses_match; "Forget learnt still figures"). `boost_detections`: inside armed
+  areas a detection within `confidence_delta` (0.05) below the new-track threshold is raised to it (after
+  AI_IGNORE). Alert path: queued on the worker thread -> writer thread woken at once -> masked still ->
+  `alert_dispatcher.dispatch(..., bypass_cooldown=True)` (tier routing of theft alerts) -> audit "alert" with
+  `latency_ms` (stats `latency_ms`, `latency_max_ms`) -> clip thread (`record_incident_clip`, <= 2 at once)
+  -> `security_events.clip_url`. `qa_feed()` behind `EDGE_RESTRICTED_QA_HOOK=1` only.
+* **Pipeline hooks:** `live_analytics_engine` (frame heartbeat/tamper per decoded frame, night watch never
+  holds a secured camera, analysis keeps running when every flag is off but the camera is secured, boost,
+  evaluate), `inference_scheduler.set_secured` (weight `RESTRICTED_PRIORITY_WEIGHT` 3, quiet rate
+  `RESTRICTED_MIN_ANALYSIS_FPS` 3; `camera_status().restricted_area`), `clip_recorder.keeps_ring`
+  (pre-event ring for secured cameras), `tripwire_engine._rules_for` skips intrusion zones handled here
+  (plan on), `alert_dispatcher` (FCM quiet hours bypassed via `ra_bypass_quiet`, camera mute ignored for
+  `ra_area_id`), `push_alerts` (roster key `restricted_alerts` default on; tiered like theft; Critical
+  `ra_all_phones` = first priority + backup at once, no separate escalation, repeats), `pairing_service.
+  prefs_filter_reason(ignore_quiet_hours)`, `entitlements` (`restricted_areas` feature + label,
+  `alert_feature` by `ra_area_id`, `/api/v1/restricted-areas` gated, `/api/zones/intrusion` open when either
+  zone_alerts or restricted_areas is on), `routes/events.py` acknowledge needs `{outcome}` for
+  `ra_requires_outcome` events, `routes/features.py` card `restricted-areas`.
+* **API `routes/restricted_areas.py` (`/api/v1/restricted-areas`):** GET `/status` (cheap poll), `/catalogue`,
+  ``, `/{id}`, `/events?area_id&trigger&needs_outcome`, `/events/{id}/snapshot|clip`, `/audit`,
+  `/cameras-for-zone/{zone_id}`; POST `` / PUT `/{id}` / DELETE (admin), `/{id}/arm` (operator, reason),
+  `/{id}/disarm` + `/{id}/resume` (admin, reason, <= 12 h), `/{id}/announce` (operator, 5-120 min, people,
+  note), `/announcements/{id}/end` (own or admin), `/events/{id}/outcome` (operator), `/{id}/test-alert` +
+  `/{id}/forget-still-figures` (admin); QA only: `/qa/feed`, `/qa/health`.
+* **Dashboard:** `static/js/restricted.js` (`window.edgeRestricted.{open, openSettings(id|{zone_id}), refresh,
+  focusEvent, announce, status}`; Loss tab card `#restrictedAreasCard` before `#zoneAlertsCard`, strip `#raStrip`
+  after BANNER:END on every page ("announced by X until 14:20", countdown, "I'm out"), dialog `#raDialog` for
+  announce / arm / disarm / resume / test / settings, events with outcome form, audit `details#raAudit`,
+  Settings card `#settings-restricted-areas`; polls `/status` 3 s visible / 15 s hidden (not rate limited:
+  `status_router`), opens `/api/v1/events/ws` and hands `ra_area_id` messages to `edgeZoneAlerts.ingest` so
+  loss.js raises banner + sound at once; listens for floorplan's `fp:restricted-settings` {zone_id}, uses
+  `FloorplanAPI.camerasSeeingZone` when present, else `/cameras-for-zone`), `static/css/restricted.css`;
+  `zone_alerts.js` (`ingest`, `askOutcome`, kind chips, outcome form), `loss.js` (tier look, Critical never
+  pushed aside by a lower theft level, 3 beeps, area alerts ring without theft data), `features.js` card
+  `restricted-areas` (Easy setup: area, always/schedule, main triggers + levels), `help.js` go `restricted` /
+  `restricted:<id>`, `help_content.js` articles `restricted-*` + `fs-restricted-areas`, `onboarding.js`
+  optional step, `phone_alerts.js` roster checkbox `restricted_alerts`.
+* Browser-verified 2026-10-29 on a scratch box (owner + 2 operators, fake Web Push endpoint, QA hook):
+  banner 31-64 ms after the detection request, 3 beeps, push at the fake endpoint 102-187 ms, server
+  detection->dispatch 206-337 ms; announce / I'm out / arm / disarm / resume / outcome / settings / Easy setup /
+  fp:restricted-settings / operator read-only; 1366 + 360 px, light + dark, no CSP or console errors. Known:
+  several dashboards behind ONE address share `general_rate_limiter` (100/min); one idle Loss tab sent
+  144 API requests/min (2/min restricted-area ones besides the exempt status poll).
+* Tests: `tests/test_restricted_area_engine.py` (synthetic tracks, fake clock), `tests/test_restricted_areas_api.py`.
+
+## Camera coverage, reach and real sizes (2026-10-28, MAP stream, not committed / not deployed)
+
+Contract: `docs/STORE_MAP_V2_CONTRACT.md` "Camera coverage, reach and real sizes". User docs: manual 2.6 step 3, 2.6a, 2.6b, 3.3; FEATURES "Store map and calibration".
+
+* **m0022_camera_coverage**: `cameras.range_m` (NULL = lens default 10*tan(42.5°)/tan(fov/2), 3..30 m) and `cameras.coverage_mode` (NULL/auto | calibrated | manual). Placement PATCH takes both (`range_m: null` resets, 0.5..100 else 422).
+* **`services/coverage_geometry.py`** (pure, numpy): blockers (WALL lines, ROOM/SHELF/OBSTACLE outlines, doors cut walls/room edges, COUNTER and fixtures < 1.2 m high do not block, `properties.blocks_view` overrides), ray-cast visibility polygon, calibrated footprint (homography of the image clipped at w >= w_far/3, 60 m cap), Sutherland-Hodgman clip, site clip, raster stats (floor = ROOM ∪ countable zones minus fixtures; coverage %, overlap, gaps), shelf fronts (long edges sampled 0.25 m), `sales_floor_area`, `shelf_on_sight_line`. `store_layout_service.coverage_report` -> `GET /api/v1/layout/coverage`; `serialize_cameras` adds `range_m`, `range_default_m`, `coverage_mode`, `calibrated_footprint`.
+* **floorplan.js** runs the same algorithm (client/server parity verified to 0.1 m² per camera): reach field + square tip handle, calibrated/manual choice, "What it sees", "Count this camera into <zone>" (existing zone link API), shelf / zone coverage boxes, empty-inspector "Store coverage" (blind spots, per-m² store figures, PNG/print to scale), layers Coverage / Blind spots, restricted zones red hatch + `fp:restricted-settings`, `FloorplanAPI.camerasSeeingZone/getCoverage/exportMap`, `fp:coverage-changed`.
+* **Metrics**: ZoneMetrics `area_m2`, `visits_per_m2`, `dwell_seconds_per_m2`, `people_per_m2_now`, `shelf_length_m`, `reaches`, `reaches_per_shelf_m`; `GET /api/v1/analytics/space` (sales per m², footfall per 100 m², walking distance from customer_tracks floor points, jumps > 3 m/s dropped); heatmaps `cell_area_m2`, `peak_per_m2`. All null when not observed.
+* **Insights**: low-traffic rule per m² (>= 2 AISLE/DEPARTMENT zones with area) and skipped for zones < 50% in view of calibrated cameras (`_zone_coverage`, reason in suppressed_rules).
+* **Shelf attribution**: pose_analytics floor fallback follows the sight line to the first SHELF zone when the projected wrist misses (`INTERACTION_FLOOR_SIGHT_LINE`, camera geometry via `set_camera_geometry` from pipeline_supervisor reconcile and the placement route).
+* Tests: `tests/test_camera_coverage.py`. Browser-checked on a scratch Pearcedale 36x21 box (5 cameras, 1 synthetic calibration).
+* Parallel stream: restricted areas (other agent) listens for `fp:restricted-settings` and uses `camerasSeeingZone`; it owns the RESTRICTED category.
 
 ## Features tab (2026-10-28; commit b2b71ec + Loss plan-gate fix 3256786, deployed to Pearcedale 2026-10-28)
 

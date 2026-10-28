@@ -317,6 +317,86 @@
       },
     },
     {
+      id: 'restricted-areas', group: 'security', icon: 'lock', plan: 'restricted_areas', admin: true, operatorUse: true,
+      title: 'Restricted areas',
+      what: 'Cash office, safe room or stockroom: every movement is tracked while the area is armed. Entry without notice, running, pacing, crouching, too many people or a covered camera is flagged at once.',
+      why: 'An urgent alert with an evidence clip reaches the dashboard and every store phone within a second; staff tap "I\'m going in" so their own visits are not alerts.',
+      full: { go: 'restricted', label: 'Restricted areas', admin: false },
+      setup: {
+        title: 'Arming and the main signs',
+        async load() {
+          const [a, c] = await Promise.all([api('/api/v1/restricted-areas'), api('/api/v1/restricted-areas/catalogue')]);
+          if (!a.ok) return { error: a.message };
+          if (!c.ok) return { error: c.message };
+          const areas = (a.data && a.data.areas) || [];
+          return { areas, cat: c.data || {}, areaId: areas.length ? areas[0].id : null, store: (a.data && a.data.store_time) || null };
+        },
+        render(d) {
+          if (!d.areas.length) {
+            return hint('No restricted area yet. Create one with Full settings, or select a zone on the Store map and press "Restricted area settings".');
+          }
+          const area = d.areas.find((x) => x.id === d.areaId) || d.areas[0];
+          const arm = area.arming || { mode: 'always', schedule: [] };
+          const row = (arm.schedule && arm.schedule[0]) || { days: DAY_KEYS, from: '18:00', to: '07:00' };
+          const days = new Set(row.days || []);
+          const cat = d.cat || {};
+          const tiers = (cat.tiers || []).map((t) => [t.id, t.label]);
+          const byId = {};
+          (cat.triggers || []).forEach((t) => { byId[t.id] = t; });
+          const trig = area.triggers || {};
+          const main = (cat.main_triggers || []).filter((k) => byId[k]);
+          return selectField('ra_area', 'Area', area.id, d.areas.map((x) => [x.id, x.name]), { hint: 'Changing the area loads its own settings.' })
+            + selectField('ra_mode', 'When it is armed', arm.mode === 'schedule' ? 'schedule' : 'always', [['always', 'Always armed'], ['schedule', 'On a schedule (store time)']])
+            + `<div class="feat-field"><span class="feat-label">Armed from (store time)</span>
+                <div class="feat-inline"><label class="sr-only" for="${fid('ra_from')}">From</label><input class="input" type="time" id="${fid('ra_from')}" name="ra_from" value="${esc(row.from || '18:00')}">
+                <span class="feat-hint">to</span><label class="sr-only" for="${fid('ra_to')}">To</label><input class="input" type="time" id="${fid('ra_to')}" name="ra_to" value="${esc(row.to || '07:00')}"></div>
+                ${hint((arm.schedule || []).length > 1 ? 'Only the first time of this area is shown here; Full settings shows all of them.' : 'A time that ends before it starts runs past midnight. Used only "On a schedule".')}</div>`
+            + `<fieldset class="feat-field"><legend class="feat-label">Days</legend><div class="feat-days">${DAYS.map(([k, t]) => `<label class="feat-check" for="${fid(`rad_${k}`)}"><input type="checkbox" id="${fid(`rad_${k}`)}" name="rad:${k}"${days.has(k) ? ' checked' : ''}><span>${t}</span></label>`).join('')}</div></fieldset>`
+            + `<fieldset class="feat-field"><legend class="feat-label">Signs to flag and how loudly</legend><ul class="feat-rows">${main.map((k) => {
+              const cfg = trig[k] || {};
+              return `<li><label class="feat-check" for="${fid(`rat_${k}`)}"><input type="checkbox" id="${fid(`rat_${k}`)}" name="rat:${k}"${cfg.enabled ? ' checked' : ''}><span>${esc(byId[k].label)}</span></label>
+                <select class="select" id="${fid(`ratl_${k}`)}" name="ratl:${k}" aria-label="${esc(byId[k].label)}: alert level">${tiers.map(([v, t]) => `<option value="${esc(v)}"${v === (cfg.tier || byId[k].tier) ? ' selected' : ''}>${esc(t)}</option>`).join('')}</select></li>`;
+            }).join('')}</ul>${hint('Critical: banner, alarm sound and every alert phone at once, repeated until someone records what happened. Thresholds are in Full settings.')}</fieldset>`;
+        },
+        async onChange(e, d) {
+          if (!e.target || e.target.name !== 'ra_area' || !d) return;
+          d.areaId = e.target.value;
+          const fields = $('featDrawerFields');
+          if (fields && drawerFeature && drawerFeature.id === 'restricted-areas') {
+            fields.innerHTML = drawerFeature.setup.render(d, ctx());
+            if (!canEdit(drawerFeature)) fields.querySelectorAll('input, select').forEach((n) => { if (n.name !== 'ra_area') n.disabled = true; });
+            const sel = $(fid('ra_area'));
+            if (sel) sel.focus();
+          }
+        },
+        async save(form, d) {
+          if (!d || !d.areas.length) return { ok: false, message: 'Create a restricted area first (Full settings).' };
+          const area = d.areas.find((x) => x.id === d.areaId) || d.areas[0];
+          const mode = val(form, 'ra_mode') === 'schedule' ? 'schedule' : 'always';
+          const days = DAY_KEYS.filter((k) => checked(form, `rad:${k}`));
+          const arm = Object.assign({ schedule_mode: 'armed_during' }, area.arming || {});
+          const rows = (arm.schedule || []).slice();
+          if (mode === 'schedule') {
+            if (!days.length) return { ok: false, message: 'Tick at least one day.' };
+            rows[0] = { days, from: val(form, 'ra_from') || '18:00', to: val(form, 'ra_to') || '07:00' };
+          }
+          const triggers = {};
+          ((d.cat && d.cat.main_triggers) || []).forEach((k) => {
+            if (!form.elements.namedItem(`rat:${k}`)) return;
+            triggers[k] = { enabled: checked(form, `rat:${k}`), tier: val(form, `ratl:${k}`) };
+          });
+          const body = { arming: { mode, schedule: mode === 'schedule' ? rows : (arm.schedule || []), schedule_mode: arm.schedule_mode || 'armed_during' }, triggers };
+          const r = await api(`/api/v1/restricted-areas/${encodeURIComponent(area.id)}`, { method: 'PUT', json: body });
+          if (!r.ok) return { ok: false, message: r.message };
+          const i = d.areas.findIndex((x) => x.id === area.id);
+          if (i >= 0 && r.data) d.areas[i] = r.data;
+          const warn = r.data && r.data.warnings && r.data.warnings.length ? ` ${r.data.warnings.join(' ')}` : '';
+          return { ok: true, message: `Saved. ${area.name} is ${mode === 'always' ? 'always armed' : 'armed on its schedule'}.${warn}`, keepForm: true };
+        },
+        reloads: ['edgeRestricted.refresh'],
+      },
+    },
+    {
       id: 'night-watch', group: 'security', icon: 'moon', plan: 'night_watch', admin: true,
       title: 'Night watch',
       what: 'While the store is closed, chosen cameras watch for movement; a person seen is a high alert.',
@@ -635,7 +715,7 @@
       id: 'store-map', group: 'cameras', icon: 'map', admin: true,
       title: 'Store plan',
       what: 'A plan of the store in metres: rooms, shelves, checkouts and doors, plus the car park if you like.',
-      why: 'Live shoppers, heatmaps and store areas are all shown on it.',
+      why: 'Live shoppers, heatmaps and store areas are shown on it, with real sizes: m² per area, shelf lengths, figures per m² and a print-to-scale map.',
       full: { go: 'map-edit', label: 'Store map editor', admin: true },
       setup: {
         title: 'Start',
@@ -647,8 +727,8 @@
     {
       id: 'placement-calibration', group: 'cameras', icon: 'scan', admin: true,
       title: 'Camera placement and calibration',
-      what: 'Puts each camera on the plan and matches its picture to the floor, so people appear in the right place.',
-      why: 'Calibrated cameras show live shoppers on the map and feed the heatmaps.',
+      what: 'Puts each camera on the plan with how far it sees, and matches its picture to the floor, so people appear in the right place.',
+      why: 'Shows what each camera really covers (walls and shelves block it), the blind spots and which shelves it sees; calibrated cameras show live shoppers and feed the heatmaps.',
       full: { go: camLink('calibrate:', 'first_to_calibrate', 'map'), label: 'Calibrate on the Store map', admin: true },
       setup: {
         title: 'Uncalibrated cameras: counts into area',

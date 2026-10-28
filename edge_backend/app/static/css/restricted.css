@@ -1,0 +1,118 @@
+/* Restricted areas (js/restricted.js): the Loss prevention card, the
+   announcement strip, the dialogs (announce, arm, settings) and the outcome
+   form shared with js/zone_alerts.js. Design tokens only, so light and dark
+   follow the theme; laid out to work from 360 px wide. */
+
+/* ---------------------------------------------------------------- strip */
+.ra-strip {
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3);
+  margin: 0 var(--space-4) var(--space-3); padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--warning-border); background: var(--warning-bg); color: var(--text);
+  border-radius: var(--radius-sm); font-size: 13px;
+}
+.ra-strip[hidden] { display: none; }
+.ra-strip-label { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; color: var(--warning); }
+.ra-strip-items { display: flex; flex-wrap: wrap; gap: var(--space-2); flex: 1 1 220px; min-width: 0; }
+.ra-strip-item { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; overflow-wrap: anywhere; }
+
+/* ---------------------------------------------------------------- card */
+.ra-card-actions, .ra-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+.ra-card-actions { margin-bottom: var(--space-3); }
+.ra-areas { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); gap: var(--space-3); }
+.ra-area {
+  display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3);
+  border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); min-width: 0;
+}
+.ra-area-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.ra-area-name { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; font-size: 15px; overflow-wrap: anywhere; }
+.ra-area-meta, .ra-event-meta { display: flex; flex-wrap: wrap; gap: 4px var(--space-3); font-size: 13px; color: var(--text-secondary); }
+.ra-area-meta span, .ra-event-meta span { display: inline-flex; align-items: center; gap: 4px; }
+.ra-chip {
+  display: inline-flex; align-items: center; min-height: 22px; padding: 0 8px; border-radius: var(--radius-pill, 999px);
+  font-size: 12px; font-weight: 600; border: 1px solid var(--neutral-border); background: var(--neutral-bg); color: var(--neutral);
+}
+.ra-chip-armed { border-color: var(--danger-border); background: var(--danger-bg); color: var(--danger); }
+.ra-chip-announced { border-color: var(--warning-border); background: var(--warning-bg); color: var(--warning); }
+.ra-chip-disarmed { border-color: var(--success-border); background: var(--success-bg); color: var(--success); }
+.ra-chip-off { opacity: 0.85; }
+.ra-ann, .ra-problem, .ra-outcome-done {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px var(--space-2); font-size: 13px;
+  padding: 6px var(--space-2); border-radius: var(--radius-xs);
+}
+.ra-ann { background: var(--warning-bg); border: 1px solid var(--warning-border); }
+.ra-ann > span { flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; }
+.ra-problem { background: var(--neutral-bg); border: 1px solid var(--neutral-border); color: var(--text-secondary); }
+.ra-outcome-done { background: var(--success-bg); border: 1px solid var(--success-border); }
+.ra-last { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-secondary); }
+.ra-sub { margin: var(--space-4) 0 var(--space-2); font-size: 14px; font-weight: 600; }
+.ra-filter-row { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; margin-bottom: var(--space-2); }
+.ra-select { min-width: 0; max-width: 100%; }
+.ra-events { display: flex; flex-direction: column; gap: var(--space-2); }
+.ra-event-body { margin: 6px 0; font-size: 13px; color: var(--text-2); overflow-wrap: anywhere; }
+.ra-muted { color: var(--text-tertiary); font-size: 12px; }
+.ra-audit { margin-top: var(--space-4); }
+.ra-audit summary { cursor: pointer; font-weight: 600; font-size: 14px; }
+.ra-audit-list { margin: var(--space-2) 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: 13px; overflow-wrap: anywhere; }
+.ra-settings-list { margin: var(--space-2) 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: var(--space-2); }
+.ra-settings-list li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.ra-settings-list li > span { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+/* ---------------------------------------------------------------- outcome form (also zone_alerts.js) */
+.za-chip-gap { display: inline-block; width: var(--space-3); }
+.za-outcome { margin-top: var(--space-2); padding: var(--space-3); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface); }
+.za-outcome fieldset { border: 0; margin: 0 0 var(--space-2); padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.za-outcome legend { font-weight: 600; margin-bottom: 6px; }
+.za-outcome-opt { display: flex; align-items: center; gap: var(--space-2); min-height: 32px; cursor: pointer; }
+.za-outcome-note { display: block; font-size: 13px; margin-bottom: 4px; color: var(--text-secondary); }
+.za-outcome .input { width: 100%; margin-bottom: var(--space-2); }
+
+/* ---------------------------------------------------------------- dialog */
+.ra-scrim { position: fixed; inset: 0; z-index: 1460; background: var(--modal-scrim); }
+.ra-scrim[hidden], .ra-dialog[hidden] { display: none; }
+.ra-dialog {
+  position: fixed; z-index: 1461; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  width: min(720px, calc(100vw - 24px)); max-height: calc(100vh - 32px); display: flex; flex-direction: column;
+  background: var(--surface); color: var(--text); border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-overlay);
+}
+.ra-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--border); }
+.ra-dialog-title { display: inline-flex; align-items: center; gap: var(--space-2); margin: 0; font-size: 16px; overflow-wrap: anywhere; }
+.ra-dialog-title:focus { outline: none; }
+.ra-dialog-body { padding: var(--space-3) var(--space-4); overflow-y: auto; display: flex; flex-direction: column; gap: var(--space-3); min-height: 0; }
+.ra-dialog-msg { margin: 0; padding: 0 var(--space-4); font-size: 13px; min-height: 0; }
+.ra-dialog-msg:empty { display: none; }
+.ra-dialog-msg.is-ok { color: var(--success); padding-top: var(--space-2); }
+.ra-dialog-msg.is-error { color: var(--danger); padding-top: var(--space-2); font-weight: 600; }
+.ra-dialog-foot { display: flex; flex-wrap: wrap; gap: var(--space-2); padding: var(--space-3) var(--space-4); border-top: 1px solid var(--border); }
+.ra-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.ra-field > label, .ra-label, .ra-param > label { font-size: 13px; font-weight: 600; color: var(--text-2); }
+.ra-hint { margin: 0; font-size: 12px; color: var(--text-tertiary); overflow-wrap: anywhere; }
+.ra-inline { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.ra-inline .input[type="number"] { width: 96px; }
+.ra-num { width: 84px; }
+.ra-check { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; cursor: pointer; }
+.ra-locked { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3); border-radius: var(--radius-xs); background: var(--neutral-bg); border: 1px solid var(--neutral-border); font-size: 13px; }
+.ra-subfield { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: var(--space-2) var(--space-3); margin: 0; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.ra-subfield legend { font-size: 13px; font-weight: 600; padding: 0 4px; }
+.ra-cam-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.ra-cam-list li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.ra-radios { display: flex; flex-wrap: wrap; gap: var(--space-3); }
+.ra-schedule { display: flex; flex-direction: column; gap: var(--space-2); }
+.ra-schedule[hidden] { display: none; }
+.ra-sched-row { display: flex; flex-direction: column; gap: 6px; padding: var(--space-2); border: 1px solid var(--border); border-radius: var(--radius-xs); }
+.ra-days { display: flex; flex-wrap: wrap; gap: 4px var(--space-2); }
+.ra-tier-help { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-secondary); }
+.ra-trigger { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: var(--space-2) var(--space-3); margin: 0; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.ra-trigger.is-on { border-color: var(--accent-border); background: var(--surface-2); }
+.ra-trigger legend { padding: 0 4px; }
+.ra-trigger-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 180px), 1fr)); gap: var(--space-2) var(--space-3); }
+.ra-param { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.ra-param .select { width: 100%; }
+.ra-poi { display: flex; flex-direction: column; gap: 6px; padding: var(--space-2); border: 1px solid var(--border); border-radius: var(--radius-xs); }
+
+@media (max-width: 600px) {
+  .ra-strip { margin: 0 var(--space-2) var(--space-2); }
+  .ra-dialog { top: 8px; transform: translateX(-50%); max-height: calc(100vh - 16px); width: calc(100vw - 16px); }
+  .ra-dialog-body, .ra-dialog-head, .ra-dialog-foot { padding-left: var(--space-3); padding-right: var(--space-3); }
+  .ra-filter-row .ra-select { flex: 1 1 140px; }
+}

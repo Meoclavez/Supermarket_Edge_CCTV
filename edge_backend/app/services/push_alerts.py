@@ -73,6 +73,9 @@ DEFAULT_ROSTER: Dict[str, Any] = {
     "min_confidence": 0.75,
     "night_intrusion": True,
     "area_alerts": True,
+    # High-security restricted areas (services/restricted_area_engine.py):
+    # their alert levels decide; Critical goes to every alert phone at once.
+    "restricted_alerts": True,
     "watchdog_enabled": True,
     "watchdog_offline_min": 15,
 }
@@ -170,7 +173,7 @@ def validate_roster(data: Dict[str, Any], accounts: Dict[str, Dict[str, Any]]) -
             if not lo <= value <= hi:
                 raise ValueError(f"{key} must be between {lo:g} and {hi:g}.")
             out[key] = round(value, 2) if key == "min_confidence" else int(round(value))
-    for key in ("night_intrusion", "area_alerts", "watchdog_enabled"):
+    for key in ("night_intrusion", "area_alerts", "restricted_alerts", "watchdog_enabled"):
         if key in data:
             out[key] = bool(data[key])
     return out
@@ -315,6 +318,16 @@ class PushAlertService:
             if float(conf) < float(roster["min_confidence"]):
                 return False, f"confidence {float(conf):.2f} below the phone alert level {roster['min_confidence']:.2f}", False
             return True, "", True
+        if et == "RESTRICTED_AREA" and data.get("ra_area_id") and data.get("alert_tier"):
+            from app.services import theft_alert_policy as tp
+
+            if not roster.get("restricted_alerts", True):
+                return False, "restricted area alerts are off for phones", False
+            tier = tp.normalise_tier(data.get("alert_tier"))
+            ch = data.get("channels") if isinstance(data.get("channels"), dict) else tp.channels(tier)
+            if tier is None or not ch.get("push"):
+                return False, f"{tier or 'this'} level is not sent to phones", False
+            return True, "", not data.get("test")
         if et in NIGHT_TYPES:
             if not roster.get("night_intrusion"):
                 return False, "night intrusion alerts are off for phones", False
@@ -335,7 +348,10 @@ class PushAlertService:
         if not ok:
             report["skipped"] = reason
             return report
-        if camera is not None and camera.muted_until and camera.muted_until > datetime.utcnow():
+        # Restricted-area alerts ignore a camera mute: an armed area is opened by
+        # announcing entry, not by holding the camera's alerts.
+        if camera is not None and camera.muted_until and camera.muted_until > datetime.utcnow() \
+                and not data.get("ra_area_id"):
             report["skipped"] = f"camera alerts muted until {camera.muted_until.isoformat()}Z"
             return report
         key = (data.get("camera_id"), data.get("event_type"))
@@ -350,8 +366,12 @@ class PushAlertService:
         accounts = await load_accounts()
         first, backup, mode = resolve_tiers(roster, accounts)
         report["mode"] = mode
-        subs = await subscriptions_for(first)
+        # A Critical restricted-area alert is the highest priority: every alert
+        # phone (first priority and backup) at once, not backup only on escalation.
+        everyone = bool(data.get("ra_all_phones")) and not data.get("test")
+        subs = await subscriptions_for(first + backup if everyone else first)
         report["phones"] = len(subs)
+        report["all_phones"] = everyone
         self._last_push[key] = now_m
         alert_id = str(data.get("alert_id") or f"evt_{uuid.uuid4().hex[:8]}")
         base = self._payload("alert", title, body, data, alert_id)
@@ -367,8 +387,10 @@ class PushAlertService:
         # no first-priority phone accepted still goes to the backup people now.
         escalates = track and (not data.get("alert_tier")
                                or bool((data.get("channels") or {}).get("escalate")))
+        if everyone:
+            escalates = False
         report["escalates"] = bool(escalates and backup)
-        if track and backup and (escalates or not accepted):
+        if track and backup and not everyone and (escalates or not accepted):
             delay = timedelta(minutes=int(roster["escalate_after_min"]))
             escalate_at = now if not accepted else now + delay
         report["escalate_at"] = escalate_at.isoformat() + "Z" if escalate_at else None

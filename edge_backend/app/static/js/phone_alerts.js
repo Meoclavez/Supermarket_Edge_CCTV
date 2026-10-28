@@ -355,7 +355,8 @@
           <div class="pa-inline"><input id="paEscalate" type="number" class="form-input" min="${(lim.escalate_after_min || {}).min || 1}"
             max="${(lim.escalate_after_min || {}).max || 60}" step="1" value="${esc(d.escalate_after_min)}" ${dis}><span>min without acknowledgement</span></div></div>
         <div class="fp-field"><label class="pa-check"><input type="checkbox" id="paNight" ${d.night_intrusion ? 'checked' : ''} ${dis}> Night watch intrusions</label>
-          <label class="pa-check"><input type="checkbox" id="paArea" ${d.area_alerts ? 'checked' : ''} ${dis}> Area &amp; line alerts</label></div>
+          <label class="pa-check"><input type="checkbox" id="paArea" ${d.area_alerts ? 'checked' : ''} ${dis}> Area &amp; line alerts</label>
+          <label class="pa-check"><input type="checkbox" id="paRestricted" ${d.restricted_alerts !== false ? 'checked' : ''} ${dis}> Restricted area alerts (Critical goes to every alert phone at once, even in quiet hours)</label></div>
         <div class="fp-field"><label class="pa-check"><input type="checkbox" id="paWatchdog" ${d.watchdog_enabled ? 'checked' : ''} ${dis}> Alert if the store's CCTV goes offline</label>
           <div class="pa-inline"><span>after</span><input id="paWatchdogMin" type="number" class="form-input" min="${(lim.watchdog_offline_min || {}).min || 5}"
             max="${(lim.watchdog_offline_min || {}).max || 240}" step="1" value="${esc(d.watchdog_offline_min)}" ${dis}><span>min</span></div>
@@ -430,6 +431,7 @@
     const base = draft || JSON.parse(JSON.stringify({
       first_priority: roster.first_priority, backup: roster.backup, escalate_after_min: roster.escalate_after_min,
       min_confidence: roster.min_confidence, night_intrusion: roster.night_intrusion, area_alerts: roster.area_alerts,
+      restricted_alerts: roster.restricted_alerts !== false,
       watchdog_enabled: roster.watchdog_enabled, watchdog_offline_min: roster.watchdog_offline_min,
     }));
     const first = [];
@@ -451,6 +453,7 @@
       escalate_after_min: Math.round(num('paEscalate', base.escalate_after_min)),
       night_intrusion: !!($('paNight') || {}).checked,
       area_alerts: !!($('paArea') || {}).checked,
+      restricted_alerts: $('paRestricted') ? !!$('paRestricted').checked : base.restricted_alerts !== false,
       watchdog_enabled: !!($('paWatchdog') || {}).checked,
       watchdog_offline_min: Math.round(num('paWatchdogMin', base.watchdog_offline_min)),
     };
@@ -496,7 +499,7 @@
       }
       renderCard();
     });
-    host.querySelectorAll('.pa-tier, #paLevel, #paEscalate, #paNight, #paArea, #paWatchdog, #paWatchdogMin').forEach((n) => {
+    host.querySelectorAll('.pa-tier, #paLevel, #paEscalate, #paNight, #paArea, #paRestricted, #paWatchdog, #paWatchdogMin').forEach((n) => {
       n.addEventListener('change', () => { draft = readDraftFromForm(); rosterMsg = { text: '', error: false }; renderCard(); });
     });
     on('paDiscard', () => { draft = null; rosterMsg = { text: '', error: false }; renderCard(); });

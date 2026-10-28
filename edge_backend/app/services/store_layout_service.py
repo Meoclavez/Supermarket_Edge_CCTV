@@ -37,6 +37,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.services import coverage_geometry
 from app.models.db_models import (
     CameraModel,
     StoreLayoutModel,
@@ -58,6 +59,10 @@ ZONE_CATEGORIES = (
     "SHELF",
     "CHECKOUT",
     "STOCKROOM",
+    # A high-security restricted area (cash office, safe room): its settings,
+    # arming and triggers live in services/restricted_areas.py; any zone can
+    # be used for one, this category only marks it on the map.
+    "RESTRICTED",
     "EXCLUDED",
 )
 
@@ -1194,6 +1199,14 @@ class StoreLayoutService:
                     "watch_zone_id": getattr(cam, "watch_zone_id", None),
                     # Put on the map by the operator (m0020); False = still at a default spot.
                     "map_placed": bool(getattr(cam, "map_placed", False)),
+                    # Reach on the floor (m0022): None = the lens-angle default below.
+                    "range_m": getattr(cam, "range_m", None),
+                    "range_default_m": coverage_geometry.default_range_m(cam.fov_deg),
+                    # "auto" (calibrated footprint when there is one) | "calibrated" | "manual".
+                    "coverage_mode": getattr(cam, "coverage_mode", None) or "auto",
+                    # Floor the calibrated picture really shows ({polygon, near_m, far_m,
+                    # area_m2}, metres), None when uncalibrated or unusable.
+                    "calibrated_footprint": self._footprint(cam),
                     "calibration_points": cam.calibration_points,
                     # Native pixel size of the frames the worker is reading.
                     # Calibration image points are in this space; the client
@@ -1207,6 +1220,39 @@ class StoreLayoutService:
                 }
             )
         return out
+
+    @staticmethod
+    def _footprint(cam: CameraModel) -> Optional[dict]:
+        if not cam.homography_matrix:
+            return None
+        try:
+            return coverage_geometry.camera_footprint({
+                "homography_matrix": cam.homography_matrix,
+                "calibration_points": cam.calibration_points or {},
+                "map_placed": bool(getattr(cam, "map_placed", False)),
+                "floor_x": cam.floor_x, "floor_y": cam.floor_y,
+            })
+        except Exception as e:  # a malformed stored matrix never breaks the layout
+            logger.debug(f"footprint for {cam.id} unavailable: {e}")
+            return None
+
+    async def coverage_report(self, db: AsyncSession) -> dict:
+        """What every camera sees and how much of the store is covered
+        (services/coverage_geometry.analyse over the active layout)."""
+        layout = await self.get_active_layout(db)
+        zones = await self.list_zones(db, layout.id)
+        structures = await self.list_structures(db, layout.id)
+        cameras = await self.serialize_cameras(db, layout)
+        report = coverage_geometry.analyse(
+            {"width_m": layout.width_m, "height_m": layout.height_m},
+            [self.serialize_structure(s) for s in structures],
+            [self.serialize_zone(z) for z in zones],
+            cameras,
+        )
+        report["layout_id"] = layout.id
+        report["width_m"] = layout.width_m
+        report["height_m"] = layout.height_m
+        return report
 
     @staticmethod
     def known_frame_size(cam: CameraModel, rt) -> tuple[Optional[int], Optional[int]]:

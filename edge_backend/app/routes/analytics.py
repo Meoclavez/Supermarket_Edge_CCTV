@@ -176,6 +176,29 @@ async def get_floorplan_data(db: AsyncSession = Depends(get_db)):
     return payload
 
 
+@router.get("/space")
+async def get_space_metrics(
+    from_: Optional[str] = Query(None, alias="from", description="ISO start (default: today 00:00 store time)"),
+    to: Optional[str] = Query(None, description="ISO end, exclusive (default: start + 1 day)"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Figures normalised by real floor area: sales per m^2, footfall per 100 m^2,
+    per-zone visits / dwell / shelf reaches per m^2 and metre of shelf, and the
+    walking distance of tracked paths. Null wherever nothing was observed."""
+    start = _parse_window_bound(from_, "from")
+    end = _parse_window_bound(to, "to")
+    if start is None:
+        start = day_bounds()[0] if end is None else end - timedelta(days=1)
+    if end is None:
+        end = start + timedelta(days=1) if from_ else day_bounds()[1]
+    if end <= start:
+        raise HTTPException(status_code=422, detail="'to' must be after 'from'")
+    if end - start > timedelta(days=93):
+        raise HTTPException(status_code=422, detail="window is limited to 93 days")
+    layout = await _active_layout(db)
+    return await retail_metrics_service.space_metrics(db, layout.id, start, end)
+
+
 @router.get("/heatmaps")
 async def get_heatmaps(
     resolution_w: int = Query(50, ge=8, le=200),

@@ -151,6 +151,8 @@
    *   feature:<id>                    the Features tab at that feature's card
    *   feature-setup:<id>              the same, with its Easy setup open
    *   help:<article id>               that guide in the Help panel
+   *   restricted                      Loss prevention at the "Restricted areas" card
+   *   restricted:<area id>            the settings of that restricted area (js/restricted.js)
    */
   function go(action) {
     const a = String(action || '');
@@ -182,6 +184,12 @@
       return;
     }
     if (a.startsWith('help:')) { openCentre(a.slice(5)); return; }
+    if (a.startsWith('restricted:')) {
+      const id = a.slice(11);
+      call('switchTab', 'loss');
+      later(() => { if (window.edgeRestricted) window.edgeRestricted.openSettings(id || null); }, 200);
+      return;
+    }
     switch (a) {
       case 'today': case 'cameras': case 'map': case 'insights': case 'loss': case 'features':
         call('switchTab', a); break;
@@ -197,6 +205,10 @@
           call('toggleMapEditing', true);
           if (window.blueprintEditor && typeof window.blueprintEditor.setTool === 'function') window.blueprintEditor.setTool('ZONE');
         }, 200);
+        break;
+      case 'restricted':
+        if (window.edgeRestricted) window.edgeRestricted.open();
+        else openOnView('loss', 'restrictedAreasCard');
         break;
       case 'studio': window.location.href = '/dashboard/studio'; break;
       case 'checklist': if (window.EdgeOnboarding) window.EdgeOnboarding.showChecklist(); break;

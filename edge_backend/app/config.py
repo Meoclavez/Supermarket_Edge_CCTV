@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     APP_NAME: str = "Universal Edge AI CCTV System"
     # This release. Reported by the fleet check-in (box.software_version),
     # /api/v1/health, / and the Settings > iKorex service card.
-    APP_VERSION: str = "2.7.0"
+    APP_VERSION: str = "2.8.0"
     VERSION: str = APP_VERSION  # older alias (/api/v1/health); always the same value
     # DEBUG makes logging more verbose and serves the API docs (/docs, /redoc,
     # /openapi.json) on the local address; never through the public hostname.
@@ -591,6 +591,12 @@ class Settings(BaseSettings):
     # Use floor-plan SHELF zones (metres, via the camera homography) for cameras
     # that have no image-space product zones. Approximate: see pose_analytics.
     INTERACTION_FLOOR_SHELF_FALLBACK: bool = os.getenv("INTERACTION_FLOOR_SHELF_FALLBACK", "true").lower() in ("1", "true", "yes")
+    # Floor fallback, second step: when the projected wrist lands in no SHELF
+    # zone, follow the camera's line of sight back towards the camera (hand
+    # heights 0.4-2.0 m, using the camera's map position and height) and take
+    # the first SHELF zone it crosses: the shelf face the camera sees the hand
+    # at. Needs the camera placed on the store map. pose_analytics docstring.
+    INTERACTION_FLOOR_SIGHT_LINE: bool = os.getenv("INTERACTION_FLOOR_SIGHT_LINE", "true").lower() in ("1", "true", "yes")
     # Forget a track's state after this many seconds without an observation.
     INTERACTION_TRACK_TTL_SEC: float = float(os.getenv("INTERACTION_TRACK_TTL_SEC", "10.0"))
     # How often the background writer persists queued interactions/incidents.
@@ -818,6 +824,26 @@ class Settings(BaseSettings):
     RESTRICTED_AREA_COOLDOWN_SEC: float = float(os.getenv("RESTRICTED_AREA_COOLDOWN_SEC", "300"))
     # A foot point may leave an area this long (boundary jitter) without resetting its dwell.
     RESTRICTED_AREA_EXIT_GRACE_SEC: float = float(os.getenv("RESTRICTED_AREA_EXIT_GRACE_SEC", "1.5"))
+
+    # ---------------- Restricted areas, high security (services/restricted_area_engine.py) ----------------
+    # Cameras that see an armed restricted area share the analysis budget with
+    # this weight (normal camera = 1, analysis_priority "high" = 2) ...
+    RESTRICTED_PRIORITY_WEIGHT: float = float(os.getenv("RESTRICTED_PRIORITY_WEIGHT", "3.0"))
+    # ... and are never analysed slower than this while nobody is in view (the
+    # idle rate of other cameras is ANALYTICS_IDLE_DETECT_FPS), so an entry is
+    # seen within a fraction of a second even before motion wakes the camera.
+    RESTRICTED_MIN_ANALYSIS_FPS: float = float(os.getenv("RESTRICTED_MIN_ANALYSIS_FPS", "3.0"))
+    # Restricted areas re-read their settings, schedules and announcements this often.
+    RESTRICTED_REFRESH_SEC: float = float(os.getenv("RESTRICTED_REFRESH_SEC", "5"))
+    # Watchdog for cameras that see an armed area (offline = no frame for the
+    # area's tamper "offline after" time); also expires announcements.
+    RESTRICTED_TICK_SEC: float = float(os.getenv("RESTRICTED_TICK_SEC", "1.0"))
+    # A share of an area (0..1) covered by privacy masks at or above which the
+    # area is refused: privacy masks always win over restricted areas.
+    RESTRICTED_MASK_REFUSE_FRACTION: float = float(os.getenv("RESTRICTED_MASK_REFUSE_FRACTION", "0.5"))
+    # QA / tests only: POST /api/v1/restricted-areas/qa/feed feeds synthetic
+    # tracks into the engine. Never set on a store box.
+    RESTRICTED_QA_HOOK: bool = os.getenv("EDGE_RESTRICTED_QA_HOOK", "").lower() in ("1", "true", "yes")
     # The store's IANA time zone (e.g. Australia/Melbourne): "today", hourly
     # curves, restricted-area and night-watch schedules and alert times are
     # store-local. Empty = the host's own time zone. Default only: Settings >
