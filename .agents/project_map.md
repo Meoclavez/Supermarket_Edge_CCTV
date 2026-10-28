@@ -783,6 +783,8 @@ static/js/help_content.js is null (owner to supply). Incident: brain #388.
 
 ## Live deployment: Ubuntu edge box (updated 2026-10-01)
 
+**Disk unlock (2026-10-28):** full-disk LUKS2 unlocks by TPM2 (PCR 7) at boot; passphrase + offline recovery key remain. Details, rebuild command and re-enrol after BIOS/Secure Boot updates: brain #424. Box release 95fc122 (Report a problem + issue log) deployed 2026-10-28 13:22 AEDT, reboot-tested 13:52. Pending on site: BIOS 'Restore after AC Power Loss' = Power On, ErP Ready Disabled; UPS.
+
 **Box:** `securitypc-MS-7D90`, Ubuntu 26.04, i5-14400F (no iGPU), RX 9060 XT 16 GB (gfx1200),
 16 GB RAM, Wi-Fi 192.168.20.239, Tailscale 100.78.122.93 (tailnet `tail9fc52a`), TZ
 Australia/Melbourne (store: IGA Pearcedale). SSH from the dev PC: `ssh aus` (user `securitypc`,
