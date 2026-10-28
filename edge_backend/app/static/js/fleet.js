@@ -506,6 +506,8 @@
     renderOfflineBanner(status);
     applyFeatures(status);
     renderCard();
+    // Modules that poll plan-gated APIs (loss.js) wait for this before their first load.
+    window.dispatchEvent(new CustomEvent('edge:fleet', { detail: status }));
   }
 
   async function load() {

@@ -179,6 +179,7 @@
   // ------------------------------------------------------------ data
 
   async function load(force) {
+    if (theftOff()) return;           // not in the iKorex plan: the box would answer 403
     const get = (url) => (typeof getJSON === 'function' ? getJSON(url, null) : fetch(url).then((r) => (r.ok ? r.json() : null)).catch(() => null));
     const tf = state.tierFilter;
     const [data, stats, tierData] = await Promise.all([
@@ -226,7 +227,7 @@
 
   async function loadTier() {
     const tf = state.tierFilter;
-    if (tf === 'all') return;
+    if (tf === 'all' || theftOff()) return;
     const data = typeof getJSON === 'function'
       ? await getJSON(tierUrl(tf), null)
       : await fetch(tierUrl(tf)).then((r) => (r.ok ? r.json() : null)).catch(() => null);
@@ -237,7 +238,7 @@
   }
 
   async function loadPatterns() {
-    if (state.patternsBusy) return;
+    if (state.patternsBusy || theftOff()) return;
     state.patternsBusy = true;
     const days = state.patternDays;
     try {
@@ -1403,8 +1404,18 @@
 
     const canPollNow = typeof canPoll === 'function' ? canPoll() : true;
     if (!canPollNow) return;       // signed out: the gate reloads the page after sign-in
-    load(true);
-    schedule();
+    // First load once the iKorex plan is known (fleet.js 'edge:fleet'), so a plan without
+    // theft alerts never sends a request; fall back after 5 s if the plan status can't load.
+    // A plan change that turns theft alerts back on loads at once.
+    let started = false;
+    const start = () => { if (started) return; started = true; load(true); schedule(); };
+    const fleetKnown = !!(window.edgeFleet && typeof window.edgeFleet.status === 'function' && window.edgeFleet.status());
+    window.addEventListener('edge:fleet', () => {
+      if (!started) start();
+      else if (!theftOff() && !state.loaded) load(true);
+    });
+    if (fleetKnown || !window.edgeFleet) start();
+    else setTimeout(start, 5000);
   }
 
   /** The alert level of a loaded incident ({tier, label, risk}) or null; used by live_behaviour.js. */
