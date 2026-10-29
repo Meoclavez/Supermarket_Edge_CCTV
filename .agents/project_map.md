@@ -1095,6 +1095,8 @@ static/js/help_content.js is null (owner to supply). Incident: brain #388.
 
 ## Live deployment: Ubuntu edge box (updated 2026-10-01)
 
+**Running version (2026-10-29 18:17 AEDT):** 2.10.0, commit `c99a87b`: Simple mode by default, learnt store hours, approved automations. Earlier that day: 2.9.0 `7bc882c` (audit fixes; m0024 indexes) and 2.8.0 `7cd4af9` (restricted areas, camera coverage; m0022/m0023). Full suite 1723 passed. Live checks: dashboard 28-46 requests/min idle (was 155-174), calibration banner "32 placed, 0 calibrated", box clock Australia/Melbourne. `.env` has FLEET_CONTROL_PUBLIC_KEY (the line appears twice; dedupe optional). The VPS audit fixes are deployed too (Server project map). Brain #427, #429-#438. Not done: clean-up batch (dead code, CSS, docs, deps, duplicate root docs, repo site data) and the phone app rebuild (fake DVR screen removed in source).
+
 **Disk unlock (2026-10-28):** full-disk LUKS2 unlocks by TPM2 (PCR 7) at boot; passphrase + offline recovery key remain. Details, rebuild command and re-enrol after BIOS/Secure Boot updates: brain #424. Box release 95fc122 (Report a problem + issue log) deployed 2026-10-28 13:22 AEDT, reboot-tested 13:52. Pending on site: BIOS 'Restore after AC Power Loss' = Power On, ErP Ready Disabled; UPS.
 
 **Box:** `securitypc-MS-7D90`, Ubuntu 26.04, i5-14400F (no iGPU), RX 9060 XT 16 GB (gfx1200),
