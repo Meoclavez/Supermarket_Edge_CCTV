@@ -1,7 +1,7 @@
 /**
  * Night watch: the per-camera section in the camera settings modal and the
  * "Night watch" card (who is armed now, the next window, recent night
- * events) on the Loss prevention view.
+ * events) on the Security view.
  *
  * APIs (routes/night_watch.py):
  *   GET  /api/v1/cameras/{id}/night-watch   settings, store time zone, live state
@@ -116,7 +116,7 @@
         <p class="dept-hint">While armed and nothing moves, the pose model is paused on this camera (its share of the
           GPU goes to the other cameras) and a light motion check runs instead. Movement starts a short person check:
           a person sends a <b>high alert</b> to this dashboard and paired phones; movement with nobody is only listed
-          under Loss prevention. People counting and theft cues pause on this camera while it is armed.</p>
+          under Security. People counting and theft cues pause on this camera while it is armed.</p>
         <div class="form-grid-2col">
           <div class="form-group">
             <label for="nwStart">Start <span class="nw-zone" data-nw-zone>(store time)</span></label>

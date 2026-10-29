@@ -1,4 +1,4 @@
-// Settings: "Recorder sub-streams" (#settings-recorder-streams).
+// Settings: "Camera picture quality" (#settings-recorder-streams).
 //
 // Upgrades a Dahua recorder's CIF sub-streams to D1 and puts saved settings
 // back. Everything is started by the operator here; nothing runs by itself.
@@ -68,7 +68,7 @@
     if (!host) return;
     const r = rec();
     const running = !!(result && result.running);
-    let html = `<div class="card-title"><span>Recorder sub-streams</span>${running
+    let html = `<div class="card-title"><span>Camera picture quality</span>${running
       ? '<span class="badge badge-warning">Working…</span>' : ''}</div>`;
     if (!recorders.length) {
       host.innerHTML = html + `<div class="fp-empty">No camera uses a Dahua recorder channel

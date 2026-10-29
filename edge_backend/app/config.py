@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     APP_NAME: str = "Universal Edge AI CCTV System"
     # This release. Reported by the fleet check-in (box.software_version),
     # /api/v1/health, / and the Settings > iKorex service card.
-    APP_VERSION: str = "2.9.0"
+    APP_VERSION: str = "2.10.0"
     VERSION: str = APP_VERSION  # older alias (/api/v1/health); always the same value
     # DEBUG makes logging more verbose and serves the API docs (/docs, /redoc,
     # /openapi.json) on the local address; never through the public hostname.

@@ -79,7 +79,11 @@ async def put_camera_night_watch(camera_id: str, config: NightWatchConfig, db: A
     """Save the camera's night watch; the running worker picks it up on its next frame."""
     cam = await _camera(db, camera_id)
     features = dict(cam.features or {})
-    features["night_watch"] = config.model_dump()
+    new = config.model_dump()
+    if "follow_store_hours" not in config.model_fields_set:
+        # A dashboard or phone that does not know "outside store hours" keeps it as it was.
+        new["follow_store_hours"] = bool((features.get("night_watch") or {}).get("follow_store_hours"))
+    features["night_watch"] = new
     merged = CameraFeatureConfig.model_validate(features)
     cam.features = merged.model_dump()
     await db.commit()

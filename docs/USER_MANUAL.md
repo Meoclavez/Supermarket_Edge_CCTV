@@ -127,7 +127,7 @@ This account is the owner. To add accounts for managers and staff, see 4.6.
 | Operator | Daily use: watch cameras, review, acknowledge and record outcomes of alerts, act on recommendations, take snapshots and clips, reconnect a camera, change their own password. An operator cannot change setup. |
 
 When an operator tries to change setup, the change is refused with "Your account can't change setup.
-Ask an administrator." Setup cards such as "Store", "Evidence storage" and "Alerts and detection" are
+Ask an administrator." Setup cards such as "Store", "Saved pictures and clips" and "Alerts and detection" are
 read-only for operators, the "Accounts" card is hidden from them, and "Backups and reset" and "Till
 key" show only a note that an owner or administrator is needed.
 
@@ -146,8 +146,8 @@ key" show only a note that an owner or administrator is needed.
 ### 1.6 Finding your way around
 
 **Header:** the store name and a camera summary (for example "3 of 4 cameras working · 1 turned
-off"), then "Help" (see 1.7), the "⚙️ Settings" gear, the Light / Dark / System theme switch, and
-"Sign out".
+off"), then "👁 Simple" / "All settings" (owners and administrators, see 1.6a), "Help" (see 1.7), the
+"⚙️ Settings" gear, the Light / Dark / System theme switch, and "Sign out".
 
 **Main tabs**
 
@@ -157,17 +157,38 @@ off"), then "Help" (see 1.7), the "⚙️ Settings" gear, the Light / Dark / Sys
 | "📹 Cameras" | Live video, camera settings, turning cameras on or off |
 | "🗺️ Store map" | Drawing the store, adding, placing and calibrating cameras, live people, heatmaps |
 | "📈 Insights" | Recommendations, footfall, heatmap history, the daily report |
-| "🚨 Loss prevention" | The review queue, area & line alerts, evidence, patterns, night watch |
+| "🛡️ Security" | The review queue, restricted areas, area alerts, evidence, patterns, night watch |
 | "Features" | Every feature in plain words with its status, "Easy setup" and "Full settings" (see 1.8) |
 | "⚙️ Settings" (header gear) | Accounts, store settings, evidence storage, alert settings, online access, phones, sales data, backups, system health |
 
-On phones and narrow windows the tabs become a bottom bar ("Map", "Alerts", "Features"; six buttons
+On phones and narrow windows the tabs become a bottom bar ("Map", "Security", "Features"; six buttons
 share the width). The Store map is
 view-only on a phone until you press "Edit map".
 
 **Camera setup** is a second page used to draw lines and areas on a camera's picture. Open it from a
 camera tile → "Camera setup", or from a setup checklist button. When you come from a checklist, use
 "← Back to setup checklist" to return.
+
+### 1.6a Simple and All settings
+
+The dashboard starts in the **simple view** for everyone: the everyday screens with fewer numbers.
+Nothing is switched off; the extra settings are only out of sight.
+
+| Where | Simple view | Under All settings as well |
+|---|---|---|
+| Today | Visitors today, busiest hour, sales (once the tills are connected), the cameras tile only when a camera is not working, the top two recommendations, the next setup step | People in the store now, average visit, the notes under each figure, finished and optional checklist steps |
+| Store map | Areas, cameras, people, coverage and heatmap; the inspector shows the size and the main figures | "Walls & shelves", "Labels", "Grid" and "Blind spots" switches; "Cameras & devices"; the inspector details under "More" (open by default) |
+| Insights | Recommendations and the daily report | "Shoppers & footfall", the AI summary option, dismissed recommendations |
+| Security | Review queue, restricted areas, area alerts, night watch | The summary figures, alert levels, "Live activity", "Wrong alerts", "Patterns", filters and "Refresh" buttons |
+| Settings | Store, store hours, phone alerts, accounts, help and support, iKorex service, "How many theft alerts", system status, and sales data until the tills are connected | Every other card: saved pictures and clips, alerts and detection, theft alert levels, restricted areas, performance, online access, live video, phone app, camera picture quality, backups |
+| Camera settings | Name, purpose, the AI features most stores use, night watch, and a link to place it on the Store map | Channel, stream, password, frame rate, stream quality, placement numbers, analysis speed, person size, still-figure filter |
+
+**Switch:** owners and administrators press "Simple" at the top to switch to "All settings", and again to
+go back. The choice is kept for your account on this device. Operators always see the simple view.
+
+**Links always work:** a guide, a checklist step or a "Full settings" button that needs a hidden setting
+shows it straight away, with a note at the bottom: "Show all settings" or "Hide it again". It is hidden
+again when you open another tab.
 
 ### 1.7 Getting help in the dashboard
 
@@ -227,7 +248,7 @@ test alert to their own phone, record a heatmap hour or run the analysis.
 | Card | Easy setup | Full settings opens |
 |---|---|---|
 | Theft alerts | Cameras that look for theft; "Alerts from confidence"; exit-without-checkout check | Settings → "Alerts and detection" |
-| Alert levels | Watch / Alert / Critical from risk score; Alert to phones; escalate | Settings → "Theft alert levels" |
+| Alert levels | "Fewer alerts", "Balanced" or "More alerts" (simple view); every threshold and weight under All settings | Settings → "How many theft alerts" |
 | Area and line alerts | Restricted areas on/off; lines that alert; repeat times | Camera setup (Restricted area tool) |
 | Night watch | Camera, on/off, start and end, nights, IR / low light | That camera's settings at "Night watch" |
 | Phone alerts | Who is told (First priority / Backup / Not told); backup after (minutes); theft alerts from (%); "Send a test alert to my phone" | Settings → "Phone alerts" |
@@ -243,13 +264,13 @@ test alert to their own phone, record a heatmap hour or run the analysis.
 | Camera placement and calibration | Link uncalibrated cameras to the area they look at ("Counts into zone") | Calibration on the Store map |
 | Store areas | List of areas; "Draw an area" | Store map, Zone tool |
 | Privacy masks and ignore areas | "Ignore figures that never move" per camera | Camera setup (Privacy mask tool) |
-| Recorder picture quality | Guide only | Settings → "Recorder sub-streams" |
+| Recorder picture quality | Guide only | Settings → "Camera picture quality" |
 | Online access | Turn on/off (once the installer filled in the details); "Verify now" | Settings → "Online access" |
 | Live video away from the store | Most live videos at once; what plays in the store | Settings → "Live video" |
 | Staff accounts | Add an account (username, name, role, first password) | Settings → "Accounts" |
 | Phone app (backup) | Guide only | Settings → "Phone app (backup)" |
 | Store name and time zone | Store name; time zone | Settings → "Store" |
-| Evidence storage | Size limit; days kept (lowering asks you to press Save again); night-watch clip | Settings → "Evidence storage" |
+| Evidence storage | Size limit; days kept (lowering asks you to press Save again); night-watch clip | Settings → "Saved pictures and clips" |
 | Backups | "Back up now" | Settings → "Backups and reset" |
 | Analysis speed | Share of the device for detection; most pictures per second per camera | Settings → "Analysis speed" |
 | Help and support | "Report a problem", "My reports", guides | Settings → "Help and support" |
@@ -272,7 +293,7 @@ it, so you can stop and continue later.
 | 2.2 | Draw the store plan | Store map |
 | 2.3 | Add the cameras | Store map → "Cameras & devices" |
 | 2.4 | Name each camera and choose its purpose | Camera "Settings" |
-| 2.5 | Upgrade recorder sub-streams to D1 | Settings → "Recorder sub-streams" |
+| 2.5 | Upgrade recorder sub-streams to D1 | Settings → "Camera picture quality" |
 | 2.6 | Place cameras on the plan | Store map |
 | 2.7 | Calibrate each camera to the floor | Store map → "Calibrate" |
 | 2.8 | Draw lines and areas on the camera pictures | Camera setup |
@@ -304,6 +325,28 @@ keep the same "Store name" and give each device its own "Device name".
 
 Each setting shows its default (from the device's `.env`, see 1.2). After a change it shows "Changed
 from the default (…)" and a "Reset to default" button.
+
+### 2.1a Store hours (learnt automatically)
+
+The system learns when the store is open from the shoppers the cameras see and, when the tills are
+connected (2.10), from when sales are rung up. Settings → "Store hours" shows the result, for example
+"Mon–Fri 08:00–21:00, Sat–Sun 09:00–18:00".
+
+- Until 7 usable days are recorded it says "Learning your opening hours … N of 7 days". A day counts
+  when the tills sent at least 5 sales, or when the cameras were watching for at least 20 hours of it.
+  It then uses the last 14 days: per weekday the middle (median) opening and closing time, rounded to
+  the half hour. A weekday seen only closed is "Closed"; a weekday not seen yet is "estimated" from
+  the other days.
+- **Change it:** "Change hours" (owners and administrators). Type the open and close time, or tick
+  "Closed". A day you set always wins over the learnt one; "Use learnt" gives it back. "Learn again
+  now" re-reads the last 14 days at once (it also runs by itself every 6 hours).
+- The same card shows the **time zone** ("Automatic: Australia/Melbourne" when it comes from the box),
+  the **nightly backup** time (the middle of the hours the store is closed, never 04:00 when the
+  database is tidied, 03:00 until hours are known), and how much space **saved pictures and clips**
+  and **backups** may use (sized to the disk automatically unless you set a limit).
+
+Night watch (2.9) and restricted areas (2.8a) can be guarded "outside store hours": they follow this
+card and change by themselves when the hours change (each change is in the restricted-area audit).
 
 ### 2.2 Draw the store plan
 
@@ -530,7 +573,7 @@ and save again. The purpose is saved separately, by "Use this purpose".
 Many recorders ship with CIF (352x288) sub-streams, which are too small for reliable detection.
 
 1. Make sure the recorder login is saved (step 2.3 A, "Save sign-in").
-2. Settings → "Recorder sub-streams". Choose the "Recorder" and, if needed, its "Recorder web port".
+2. Settings → "Camera picture quality". Choose the "Recorder" and, if needed, its "Recorder web port".
 3. Press "Check sub-streams". This only reads the recorder and lists what would change.
 4. Press "Upgrade CIF sub-streams to D1" and confirm ("Yes, upgrade N"). Channels are changed one at
    a time. Each channel's settings are saved first and put back if the recorder or camera does not
@@ -721,7 +764,7 @@ Use one across every entrance to get exact visitor counts.
    wrong.
 3. Tick "Counts store footfall (entrance line)" for store entrances.
 4. Optionally tick "Alert staff on crossing" and choose "Alert when crossing": In, Out or Either way,
-   with an "Alert severity". These alerts appear in Loss prevention → "Area & line alerts" (3.5) and
+   with an "Alert severity". These alerts appear in Security → "Area alerts" (3.5) and
    on paired phones.
 5. Press "💾 Save tripwire".
 
@@ -742,14 +785,14 @@ doors, or the shop floor after closing.
    zone (Settings → "Store"); fill it in only for an area that must follow a different zone.
 6. Save.
 
-Restricted-area alerts appear in Loss prevention → "Area & line alerts" (3.5), in the alert banner
+Restricted-area alerts appear in Security → "Area alerts" (3.5), in the alert banner
 and on paired phones. How soon the same person in the same area can alert again is set in Settings →
 "Alerts and detection" (4.2).
 
 Since 2026-10-28 every area drawn here also becomes a **high-security restricted area** (2.8a): it
 keeps its name, schedule, minimum dwell (as "Inside for at least") and severity (High = Alert,
 Warning = Watch, Info = Review), and from then on its alerts, arming, announcements and outcomes are
-handled in Loss prevention → "Restricted areas". The points you draw here still define where the
+handled in Security → "Restricted areas". The points you draw here still define where the
 area is on that camera.
 
 #### 🧾 Checkout / queue area (3+ points)
@@ -861,7 +904,7 @@ closing. While an area is **armed**, anyone inside who has not announced it is a
 a second, on every open dashboard and every alert phone. The system never recognises faces or
 identifies anyone: it follows a person-shaped track and the body pose, nothing else.
 
-**Where.** Open Loss prevention → "Restricted areas" → "Settings" (owners and administrators), or on
+**Where.** Open Security → "Restricted areas" → "Settings" (owners and administrators), or on
 the Store map select a zone and press "Restricted area settings". Choose one or both:
 
 - a **zone on the store map** (category "RESTRICTED" marks it). It works on every *calibrated* camera
@@ -874,8 +917,25 @@ Privacy comes first: an area that lies inside a privacy mask is refused with a m
 always win"); move the area or change the mask. People in "Ignore area (no AI)" areas are never seen,
 and every evidence picture is masked.
 
-**When.** "Always armed" or "On a schedule": add rows of days and "From" / "To" in store time (a "To"
-before the "From" runs past midnight; daylight saving is handled), armed during or outside those times.
+**When it is guarded.** "Always", "Outside store hours" or "Custom times".
+
+- "Outside store hours" guards the area whenever the store is closed, using the store hours the system
+  learns (2.1a). It follows the hours when they change. Until the hours are learnt it says "Store hours
+  not learnt yet"; use "Always" or "Custom times" meanwhile.
+- "Custom times": add rows of days and "From" / "To" in store time (a "To" before the "From" runs past
+  midnight; daylight saving is handled), armed during or outside those times.
+
+**How strict.** One choice switches on a set of triggers:
+
+| Level | Triggers on |
+|---|---|
+| "Standard" | Entry without notice, stayed longer than announced, inside too long, too many people, camera tampering |
+| "High" | Standard, plus running, pacing, lingering at the edge and going near a marked point |
+| "Maximum" | Every trigger (crouching, reaching up, erratic movement too; "Wrong door" once door lines are chosen) |
+
+"Fine-tune triggers" opens the full list below (closed in the simple view, open under All settings).
+Ticking a trigger by hand changes "How strict" to "Custom". Points of interest and sensitivity are under
+All settings.
 
 **What raises an alert.** Each trigger can be switched on or off, has its own thresholds, an alert
 level (Critical, Alert, Watch, Review, the same levels as theft alerts) and a "Repeat at most every"
@@ -922,8 +982,13 @@ camera looks for movement; a person seen is a high alert.
 5. Choose "Motion sensitivity" (Low, Medium, High) and "Quiet time after an alert (minutes)".
 6. Press "Save night watch". It applies from the next frame.
 
-Night events appear in Loss prevention → "Night watch". To also save a short clip with each night
-event, tick "Save a clip with each night-watch event" in Settings → "Evidence storage" (4.2).
+Night events appear in Security → "Night watch". To also save a short clip with each night
+event, tick "Save a clip with each night-watch event" in Settings → "Saved pictures and clips" (4.2).
+
+**Outside store hours.** Once the store hours are known (2.1a), Today offers "Guard after hours":
+an administrator presses "Apply" and night watch on those cameras is armed whenever the store is
+closed, instead of the fixed start and end times. With no night watch at all it offers to turn it on
+for the door cameras. The camera's own times are used again while the store hours are not known.
 
 ### 2.10 Connect the tills (optional)
 
@@ -970,14 +1035,14 @@ Firebase account are needed. It works only on the store's **public address**
   "Escalate to backup after" (default 5 min), the backup people get it as well, titled
   "Not acknowledged". If no first-priority phone can be reached at all, it goes to backup at once.
 - "Alert phones from confidence" (default 75 %): only incidents at or above this level wake phones.
-  Lower ones are still recorded and shown on the Loss prevention tab.
-- "Night watch intrusions" and "Area & line alerts" can be switched on or off for phones.
+  Lower ones are still recorded and shown on the Security tab.
+- "Night watch intrusions" and "Area alerts" can be switched on or off for phones.
 - "Alert if the store's CCTV goes offline" (default on, after 15 min): the VPS sends this when
   the box stops calling in (power cut, internet down). The box sends "back online" when it returns.
   It needs Online access (2.12).
 
 **Acknowledge** an alert with the notification's "Acknowledge" button (Android) or in the app
-(Loss prevention → the incident → "Acknowledge"). Everyone who got it then sees
+(Security → the incident → "Acknowledge"). Everyone who got it then sees
 "Acknowledged: …", and escalation stops.
 
 "Connected phones" lists every phone with alerts on, with "Test" and "Remove". An operator sees and
@@ -1007,7 +1072,7 @@ The phone app currently shows live video only on the store network. Away from th
 play live video until the app is updated.
 
 Alerts reach phones and the dashboard independently: restricted-area and line-crossing alerts are
-also listed in Loss prevention → "Area & line alerts", so they are seen even without push. How often
+also listed in Security → "Area alerts", so they are seen even without push. How often
 the same alert can repeat is set in Settings → "Alerts and detection" (4.2). Quiet hours use store
 time.
 
@@ -1074,6 +1139,19 @@ Refreshes every 15 seconds.
 - **"Top recommendations"** and **"Needs review"**: the three most important open recommendations
   and up to five incidents waiting for review.
 - **"Store setup":** see 2.13.
+- **"Suggestions":** things the system worked out by itself. Nothing changes until an owner or
+  administrator presses "Apply"; "Not now" hides a suggestion for 30 days, and every applied
+  suggestion has an "Undo". Operators see them read-only. Each is in the audit trail.
+  - *Guard after hours:* night watch and restricted areas follow the store hours (2.1a, 2.9). An
+    area that is always guarded, or guarded mostly while the store is open, is never offered this.
+  - *Fewer wrong alerts:* when at least 5 alerts of one kind on one camera (theft) or in one area
+    (restricted area) were reviewed in 14 days and at least 70 % were marked wrong, that one check
+    is made one step less quick (theft: it needs more confidence; restricted areas: a longer time or
+    larger movement). Entry without notice, tampering, people count, the door rule and any check set
+    to Critical are never changed.
+  - *Link cameras to areas:* a camera placed on the map but not calibrated, with at least 60 % of
+    what it sees in one area that no other camera counts into, is offered "Count into …". Cameras
+    with a clash are listed as "check first".
 
 ### 3.2 Cameras: live view
 
@@ -1151,7 +1229,6 @@ camera there takes about 1.5 s for H.264 cameras and about 4 s for H.265 ones. I
   hover for the reason: till receipts are not linked to store areas or shoppers, so lost sales are
   not estimated.
 - "Product shelf reaches today".
-- "Shopper profile" always says no demographic classifier is enabled. This is deliberate.
 - **"Heatmap history":** choose "Where", the type ("Walked", "Stopped", "Touched shelves") and
   period (Hour, Day, Week), then the date and hour. "Play day" animates a day. "Compare with…"
   compares two periods (for example this week against last week, or "Custom…"). "Record now" saves
@@ -1162,13 +1239,13 @@ camera there takes about 1.5 s for H.264 cameras and about 4 s for H.265 ones. I
 Today's summary. "Refresh" updates it, "Print / save PDF" prints it or saves it as a PDF. It always
 shows today; there is no date choice.
 
-### 3.5 Loss prevention: reviewing alerts
+### 3.5 Security: reviewing alerts
 
 **When an alert comes in,** a red banner appears on every page with a short tone: "Please check:
 <check> on <camera>", the confidence and the time. Press "Review now", or "Dismiss" to hide it until
 the next new incident. Alerts appear within about 5 seconds. The banner also shows the newest
 restricted-area or line alert that nobody has acknowledged yet (for example "Please check: someone in
-Stockroom on <camera>"), and the Loss prevention tab badge counts both incidents waiting for review
+Stockroom on <camera>"), and the Security tab badge counts both incidents waiting for review
 and area or line alerts not acknowledged.
 
 An alert is **suspicious behaviour for a person to check, not a finding of theft.** The checks are:
@@ -1194,9 +1271,9 @@ An alert is **suspicious behaviour for a person to check, not a finding of theft
    offered, the value recovered. Press "Save outcome". "False alarm" is also a one-click button.
 
 Always record an outcome. The figures "Value in confirmed incidents" and "False-alarm rate", and
-the "False alarms by rule" table, are built only from recorded outcomes.
+the "Wrong alerts" table, are built only from recorded outcomes.
 
-**"Area & line alerts"** lists restricted-area and line-crossing alerts: someone inside a restricted
+**"Area alerts"** lists restricted-area and line-crossing alerts: someone inside a restricted
 area during its hours, or crossing a line set to "Alert staff on crossing" (2.8). Like the review
 queue, these are prompts to check, not theft findings. Times are store time.
 
@@ -1227,7 +1304,7 @@ tab" and save it elsewhere straight away. There is no bulk export.
 ### 3.5a Restricted areas: going in, arming and alerts
 
 **Going in.** Before you enter an armed area, press "I'm going in" (in the strip at the top of every
-page, or on the area in Loss prevention → "Restricted areas"). Choose the area, for how long (5 to
+page, or on the area in Security → "Restricted areas"). Choose the area, for how long (5 to
 120 minutes, default 15), how many people and an optional note, then confirm. Everyone signed in now
 sees "Cash office — announced by <you> until 14:20" with the minutes left. Press "I'm out" when you
 leave. If you stay longer than announced, an alert "Stayed longer than announced" goes out after a
@@ -1252,8 +1329,18 @@ be filtered by area, by trigger and by "Needs outcome".
 
 ### 4.1 System health
 
-Settings → "System health" (read-only): video decoding, detection engine and speed, processor,
+Settings → "System status" (read-only; the simple view shows the uptime and saved pictures, All settings everything): video decoding, detection engine and speed, processor,
 memory, uptime and evidence storage use ("x of y · n files").
+
+At the top it says what the box chose by itself:
+
+- **Analysis speed:** "automatic", chosen from the measured AI accelerator and the number of cameras
+  (re-checked daily and 10 minutes after cameras are added or removed): how often a busy camera is
+  checked, how often a quiet one is, and how many pictures a second are read from each camera. It
+  never goes below 3 checks a second, so restricted areas stay watched. A value set by hand in
+  Settings → "Analysis speed" always wins. "Check speed again" (administrators) re-checks now.
+- **Restarts:** a camera that sends no new picture for twice its stall time is restarted by itself,
+  at most 6 times an hour and 5 minutes apart. "Restarted by itself today: Aisle 3 (2×)".
 
 ### 4.2 Evidence storage and alert settings
 
@@ -1262,7 +1349,7 @@ restart. Operators can read the cards but not change them. Each field shows its 
 the device's `.env`), and after a change "Changed from the default (…) by <account>" with a "Reset to
 default" button.
 
-**Settings → "Evidence storage"** shows "Evidence now" (used of the limit) and the disk's free
+**Settings → "Saved pictures and clips"** shows "Evidence now" (used of the limit) and the disk's free
 space, then:
 
 | Field | What it does | Default |
@@ -1289,7 +1376,7 @@ limit (…): the oldest evidence above it is deleted straight away." with "Yes, 
 | "Check for exit without passing checkout" | Turns the "Exit without passing checkout" check on or off | On |
 | "Queue congested after (seconds)" | A checkout lane counts as congested when the average wait passes this | 270 s |
 
-Use "False alarms by rule" (3.5) before lowering the theft confidence.
+Use "Wrong alerts" (3.5) before lowering the theft confidence.
 
 Evidence must stay on the device's own disk. On a network drive nothing is deleted and System health
 reports an error.
@@ -1517,7 +1604,7 @@ the text inside quotes in error messages; counts of people or any other store da
 | "Your account can't change setup. Ask an administrator." | Signed in as an Operator | Ask an Owner or Administrator, or have them change your role (4.6) |
 | Tile says "Hidden: privacy masks" | The camera has privacy masks and the device could not build the masked live view (for example the camera has sent no picture yet, or the video tools failed) | Check the camera works on the store network; press "Try again" on the tile. The raw picture is never shown instead |
 | All remote tiles drop for a few seconds | Someone added, changed or deleted a privacy mask | None; the tiles reconnect by themselves (2.8) |
-| No restricted-area or line alerts in "Area & line alerts" | The line is not set to "Alert staff on crossing", the area's schedule is not active, or the repeat time has not passed | Check the line or area in Camera setup (2.8) and the repeat times in Settings → "Alerts and detection" |
+| No restricted-area or line alerts in "Area alerts" | The line is not set to "Alert staff on crossing", the area's schedule is not active, or the repeat time has not passed | Check the line or area in Camera setup (2.8) and the repeat times in Settings → "Alerts and detection" |
 | "This restricted area is inside a privacy mask" | Privacy masks always win over restricted areas | Move the area, or change the mask in Camera setup (2.8a) |
 | A restricted area shows "no camera watches it yet" | The store-map zone is not seen by a calibrated camera and no camera is linked to it | Calibrate a camera (2.7), link one to the zone, or draw the area on a camera (2.8a) |
 | "Camera tampered with" alerts at night in a dark room | A camera without infrared sees a completely black picture when the lights go off | Use an IR camera, keep a light on, or switch "Camera tampered with" off for that area |

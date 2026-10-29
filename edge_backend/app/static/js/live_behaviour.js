@@ -117,9 +117,9 @@
     const note = $('liveBehaviourNote');
     let html;
     if (state.status === 'unavailable') {
-      html = `<div class="fp-empty">Live behaviour is not available on this box: live AI data unavailable. ${esc(state.reason)}</div>`;
+      html = `<div class="fp-empty">Live activity is not available on this box: live AI data unavailable. ${esc(state.reason)}</div>`;
     } else if (state.status === 'denied') {
-      html = `<div class="fp-empty">Live behaviour is not available for this sign-in. ${esc(state.reason)}</div>`;
+      html = `<div class="fp-empty">Live activity is not available for this sign-in. ${esc(state.reason)}</div>`;
     } else if (state.status === 'error' && !state.tracks.length) {
       html = `<div class="fp-empty">No answer from the box (${esc(state.reason)}). Retrying.</div>`;
     } else if (state.status === 'unknown') {
@@ -144,7 +144,7 @@
     if (!host) return;
     let html = '';
     if (state.status === 'unavailable' || state.status === 'denied') {
-      html = '<span class="lb-strip-title">Live behaviour</span><span class="lb-strip-off">live AI data unavailable</span>';
+      html = '<span class="lb-strip-title">Live activity</span><span class="lb-strip-off">live AI data unavailable</span>';
     } else if (state.tracks.length) {
       const chips = state.tracks.slice(0, STRIP_MAX).map((t) => {
         const level = t.level === 'alert' ? 'alert' : 'watch';
@@ -158,8 +158,8 @@
           title="${esc(`${word}: ${labels.join(' · ') || 'live cue'} on ${t.camera_name || t.camera_id}. Click to watch.`)}">
           <span class="lb-chip-level ${wordCls}">${esc(word)}</span> ${esc(t.camera_name || t.camera_id)} · ${esc(label)}</button>`;
       }).join('');
-      const more = state.tracks.length > STRIP_MAX ? `<span class="lb-strip-off">+${state.tracks.length - STRIP_MAX} more on Loss prevention</span>` : '';
-      html = `<span class="lb-strip-title">Live behaviour</span>${chips}${more}`;
+      const more = state.tracks.length > STRIP_MAX ? `<span class="lb-strip-off">+${state.tracks.length - STRIP_MAX} more on Security</span>` : '';
+      html = `<span class="lb-strip-title">Live activity</span>${chips}${more}`;
     }
     host.hidden = !html;
     if (host.getAttribute('data-sig') !== html) {

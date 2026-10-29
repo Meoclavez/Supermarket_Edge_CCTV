@@ -35,6 +35,8 @@
   <link rel="stylesheet" href="/static/css/help.css?v=2.6.0" />
   <link rel="stylesheet" href="/static/css/support.css?v=2.6.0" />
   <link rel="stylesheet" href="/static/css/features.css?v=2.6.0" />
+  <!-- Automations (learnt store hours, suggestions, self-tuning): js/automation.js. -->
+  <link rel="stylesheet" href="/static/css/automation.css?v=2.6.0" />
   <!-- auth.js stays a classic (blocking) script: it must wrap fetch before any
        module runs. Everything else is deferred and runs in document order after
        parsing; theme.js is listed last so it still runs after the modules.
@@ -42,6 +44,8 @@
   <script src="/static/js/auth.js?v=2.6.0"></script>
   <!-- Shared polling: hidden-page pause, shared GETs, 429 back-off, the one alert websocket. -->
   <script src="/static/js/poll.js?v=2.6.0"></script>
+  <!-- Simple / All settings: sets <html data-mode> before the first paint (js/view_mode.js). -->
+  <script src="/static/js/view_mode.js?v=2.6.0"></script>
   <!-- Icons (Lucide sprite, icons/sprite.svg): window.EdgeIcon, used by every module below. -->
   <!-- Versioned icon sprite URL for js/icons.js (the server adds ?v=<hash>; a template loads nothing). -->
   <template id="edgeIconSprite"><img src="/static/icons/sprite.svg" alt=""></template>
@@ -98,7 +102,7 @@
           <span class="tab-count" id="tabActionCountBadge" title="Open recommendations" hidden>0</span>
         </button>
         <button type="button" class="tab-btn" data-tab="loss" onclick="switchTab('loss')">
-          <span class="tab-icon" aria-hidden="true"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-shield-alert"></use></svg></span><span class="tab-label" data-short="Alerts">Loss prevention</span>
+          <span class="tab-icon" aria-hidden="true"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-shield-alert"></use></svg></span><span class="tab-label" data-short="Security">Security</span>
           <span class="tab-count tab-count-alert" id="tabTheftCountBadge" title="Incidents waiting for review" hidden>0</span>
         </button>
         <button type="button" class="tab-btn" data-tab="features" onclick="switchTab('features')" title="Features: what each one does, easy setup and full settings">
@@ -108,6 +112,11 @@
       </nav>
 
       <div class="header-actions">
+        <!-- Simple / All settings (js/view_mode.js): owners and admins only; operators always see Simple. -->
+        <button type="button" class="btn btn-sm btn-ghost view-mode-toggle" id="viewModeToggle" aria-pressed="false" data-admin-only hidden
+                title="Simple view: the everyday settings. Click to show every setting.">
+          <svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-eye"></use></svg><span class="view-mode-label">Simple</span>
+        </button>
         <!-- Help panel: how-to guides, Getting started, iKorex support (js/help.js). -->
         <button type="button" class="btn btn-sm btn-ghost header-help" id="navHelp" data-help-centre aria-haspopup="dialog" aria-expanded="false"
                 title="Help: how-to guides and iKorex support" aria-label="Help">
@@ -152,6 +161,8 @@
          ========================================== -->
     <main id="tab-today" class="tab-view">
       <div id="dataStateBanner" class="data-state-banner" role="status" style="display:none;"></div>
+      <!-- Suggestions the system worked out by itself (js/automation.js): confirm or dismiss. -->
+      <div id="autoSuggestions"></div>
 
       <!-- Getting started checklist: setup steps in order with live status (js/onboarding.js). -->
       <div id="gettingStartedMount" hidden></div>
@@ -162,7 +173,7 @@
           <span class="stat-val metric-unobserved" id="kpiCameras">&mdash;</span>
           <span class="stat-note" id="kpiCamerasNote"></span>
         </div>
-        <div class="stat-box">
+        <div class="stat-box" data-advanced>
           <span class="stat-label">In the store now</span>
           <span class="stat-val metric-unobserved" id="kpiActiveShoppers">&mdash;</span>
           <span class="stat-note" id="kpiActiveShoppersNote"></span>
@@ -170,14 +181,14 @@
         <div class="stat-box">
           <span class="stat-label">Visitors today</span>
           <span class="stat-val metric-unobserved" id="kpiFootfallToday">&mdash;</span>
-          <span class="stat-note" id="kpiFootfallSource"></span>
+          <span class="stat-note" id="kpiFootfallSource" data-advanced></span>
         </div>
         <div class="stat-box">
           <span class="stat-label">Busiest hour so far</span>
           <span class="stat-val metric-unobserved" id="kpiBusiestHour">&mdash;</span>
-          <span class="stat-note" id="kpiBusiestHourNote"></span>
+          <span class="stat-note" id="kpiBusiestHourNote" data-advanced></span>
         </div>
-        <div class="stat-box">
+        <div class="stat-box" data-advanced>
           <span class="stat-label">Average visit</span>
           <span class="stat-val metric-unobserved" id="kpiAvgDwell">&mdash;</span>
           <span class="stat-note">time a shopper spends inside</span>
@@ -194,11 +205,11 @@
           <div class="glass-card today-chart-card">
             <div class="card-title">
               <span data-help="visitors-by-hour">Visitors by hour</span>
-              <span class="badge metric-unobserved" id="todayHourlySource">&mdash;</span>
+              <span class="badge metric-unobserved" id="todayHourlySource" data-advanced>&mdash;</span>
             </div>
-            <div class="hourly-legend" id="todayHourlyLegend"></div>
+            <div class="hourly-legend" id="todayHourlyLegend" data-advanced></div>
             <div class="chart-container hourly-chart"><canvas id="todayHourlyChart" aria-label="Visitors by hour today, with yesterday and the same day last week"></canvas></div>
-            <div class="hourly-note" id="todayHourlyNote"></div>
+            <div class="hourly-note" id="todayHourlyNote" data-advanced></div>
           </div>
 
           <div class="glass-card today-recs-card" id="todayRecsCard">
@@ -213,7 +224,7 @@
           <div class="glass-card today-incidents-card" id="todayIncidentsCard">
             <div class="card-title">
               <span data-help="needs-review">Needs review</span>
-              <button type="button" class="btn btn-sm" onclick="switchTab('loss')">Open loss prevention</button>
+              <button type="button" class="btn btn-sm" onclick="switchTab('loss')">Open Security</button>
             </div>
             <div id="todayIncidents" class="today-list"><div class="fp-empty">Loading…</div></div>
           </div>
@@ -250,7 +261,7 @@
         <!-- AI overlay on live video (js/live_overlay.js) and the analysed frame rate (Settings > Analysis speed). -->
         <div class="filter-group" id="aiOverlayChips">
           <button type="button" class="fps-btn lo-toggle active" id="aiOverlayToggle" aria-pressed="true" onclick="toggleAiOverlay()">AI overlay: On</button>
-          <a class="fps-btn lo-link" href="#settings-analysis" onclick="return openAnalysisSettings()"
+          <a class="fps-btn lo-link" data-advanced href="#settings-analysis" onclick="return openAnalysisSettings()"
             title="How many frames per second the AI analyses, per camera and for the whole box">Analysis speed</a>
         </div>
 
@@ -331,14 +342,14 @@
                the kind buttons, legend and note into #fpHeatBar). -->
           <div class="fp-layerbar" id="fpLayerBar">
             <span class="fp-bar-label fp-layer-opt">Show:</span>
-            <label class="fp-toggle fp-layer-opt" for="layerStructures"><input type="checkbox" id="layerStructures" name="layerStructures" checked onchange="blueprintEditor.toggleLayer('structures', this.checked)"> Walls &amp; shelves</label>
+            <label class="fp-toggle fp-layer-opt" data-advanced for="layerStructures"><input type="checkbox" id="layerStructures" name="layerStructures" checked onchange="blueprintEditor.toggleLayer('structures', this.checked)"> Walls &amp; shelves</label>
             <label class="fp-toggle fp-layer-opt" for="layerZones"><input type="checkbox" id="layerZones" name="layerZones" checked onchange="blueprintEditor.toggleLayer('zones', this.checked)"> Areas</label>
             <label class="fp-toggle fp-layer-opt" for="layerCameras"><input type="checkbox" id="layerCameras" name="layerCameras" checked onchange="blueprintEditor.toggleLayer('cameras', this.checked)"> Cameras</label>
             <label class="fp-toggle fp-layer-opt" for="layerPersons"><input type="checkbox" id="layerPersons" name="layerPersons" checked onchange="blueprintEditor.toggleLayer('persons', this.checked)"> People</label>
-            <label class="fp-toggle fp-layer-opt" for="layerLabels"><input type="checkbox" id="layerLabels" name="layerLabels" checked onchange="blueprintEditor.toggleLayer('labels', this.checked)"> Labels</label>
-            <label class="fp-toggle fp-layer-opt" for="layerGrid"><input type="checkbox" id="layerGrid" name="layerGrid" checked onchange="blueprintEditor.toggleLayer('grid', this.checked)"> Grid</label>
+            <label class="fp-toggle fp-layer-opt" data-advanced for="layerLabels"><input type="checkbox" id="layerLabels" name="layerLabels" checked onchange="blueprintEditor.toggleLayer('labels', this.checked)"> Labels</label>
+            <label class="fp-toggle fp-layer-opt" data-advanced for="layerGrid"><input type="checkbox" id="layerGrid" name="layerGrid" checked onchange="blueprintEditor.toggleLayer('grid', this.checked)"> Grid</label>
             <label class="fp-toggle fp-layer-opt" for="layerCoverage" data-help-after="coverage" title="What each camera really sees: its cone or calibrated footprint, cut by walls and shelves. Darker where cameras overlap."><input type="checkbox" id="layerCoverage" name="layerCoverage" onchange="blueprintEditor.toggleLayer('coverage', this.checked)"> Coverage</label>
-            <label class="fp-toggle fp-layer-opt" for="layerGaps" title="Floor no placed camera sees, in red (stronger inside zones)"><input type="checkbox" id="layerGaps" name="layerGaps" onchange="blueprintEditor.toggleLayer('gaps', this.checked)"> Blind spots</label>
+            <label class="fp-toggle fp-layer-opt" data-advanced for="layerGaps" title="Floor no placed camera sees, in red (stronger inside zones)"><input type="checkbox" id="layerGaps" name="layerGaps" onchange="blueprintEditor.toggleLayer('gaps', this.checked)"> Blind spots</label>
             <span class="fp-sep fp-layer-opt"></span>
             <label class="fp-toggle" for="layerHeatmap"><input type="checkbox" id="layerHeatmap" name="layerHeatmap" checked onchange="blueprintEditor.toggleLayer('heatmap', this.checked)"> Heatmap</label>
             <span class="fp-heatbar" id="fpHeatBar"></span>
@@ -406,7 +417,7 @@
           </div>
 
           <!-- Device manager: scan, add, place, calibrate, remove. -->
-          <div class="glass-card" id="deviceManagerCard">
+          <div class="glass-card" id="deviceManagerCard" data-advanced>
             <div class="card-title dev-card-title"><span data-help="add-cameras">Cameras &amp; devices</span></div>
             <div class="dev-toolbar" role="group" aria-label="Add cameras">
               <button type="button" class="btn btn-sm btn-primary" onclick="deviceManager.scan()" id="btnScanDevices" title="Look for cameras on USB and the local network"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-search"></use></svg>Scan network</button>
@@ -543,7 +554,7 @@
     <section id="tab-insights" class="tab-view">
       <nav class="sub-nav" id="insightsSubNav" aria-label="Insights">
         <button type="button" class="sub-nav-btn" data-sub="recs" onclick="switchTab('insights/recs')">Recommendations</button>
-        <button type="button" class="sub-nav-btn" data-sub="footfall" onclick="switchTab('insights/footfall')">Shoppers &amp; footfall</button>
+        <button type="button" class="sub-nav-btn" data-sub="footfall" data-advanced onclick="switchTab('insights/footfall')">Shoppers &amp; footfall</button>
         <button type="button" class="sub-nav-btn" data-sub="report" onclick="switchTab('insights/report')">Daily report</button>
       </nav>
 
@@ -554,24 +565,24 @@
             <span data-help="recommendations">Recommendations</span>
             <span class="badge metric-unobserved" id="recsOpenBadge">&mdash;</span>
           </div>
-          <p class="ins-intro">What the store analysis suggests you change, from measured visits, dwell, shelf reaches and recorded heatmaps. It runs by itself every hour; you can also run it now.</p>
+          <p class="ins-intro" data-advanced>What the store analysis suggests you change, from measured visits, dwell, shelf reaches and recorded heatmaps. It runs by itself every hour; you can also run it now.</p>
           <div class="ins-run-row">
             <button type="button" class="btn btn-primary btn-sm" id="btnRunAnalysis" data-action="run-analysis">Run analysis now</button>
-            <label class="ins-check" for="runNarrate" title="Asks the local AI model for a short written summary. Takes longer (up to a minute).">
+            <label class="ins-check" for="runNarrate" data-advanced title="Asks the local AI model for a short written summary. Takes longer (up to a minute).">
               <input type="checkbox" id="runNarrate" name="runNarrate"> Add AI summary (slower)
             </label>
             <span class="ins-run-status" id="runAnalysisStatus" role="status" aria-live="polite"></span>
           </div>
           <div class="ins-meta" id="recsLastRun">Last analysis: &mdash;</div>
-          <div class="ins-meta" id="recsInputs"></div>
-          <div class="ins-meta" id="recsModelStatus"></div>
+          <div class="ins-meta" id="recsInputs" data-advanced></div>
+          <div class="ins-meta" id="recsModelStatus" data-advanced></div>
         </div>
 
         <div class="glass-card">
           <div class="ins-filter-row" role="group" aria-label="Filter recommendations">
             <button type="button" class="ins-chip active" data-rec-filter="open" aria-pressed="true">Open</button>
             <button type="button" class="ins-chip" data-rec-filter="all" aria-pressed="false">All</button>
-            <label class="ins-check" for="recsShowDismissed">
+            <label class="ins-check" for="recsShowDismissed" data-advanced>
               <input type="checkbox" id="recsShowDismissed" name="recsShowDismissed"> Show dismissed
             </label>
           </div>
@@ -633,8 +644,7 @@
           </div>
         </div>
 
-        <div class="analytics-two-col">
-          <div class="glass-card">
+        <div class="glass-card">
             <div class="card-title">
               <span data-help="friction">Areas where shoppers leave without engaging</span>
             </div>
@@ -652,16 +662,6 @@
                 <tbody id="frictionZonesTableBody"></tbody>
               </table>
             </div>
-          </div>
-
-          <div class="glass-card">
-            <div class="card-title">
-              <span>Shopper profile</span>
-            </div>
-            <div class="chart-container demographics-chart">
-              <canvas id="demographicsChart"></canvas>
-            </div>
-          </div>
         </div>
 
         <!-- Product shelf reaches: js/product_reach.js -->
@@ -684,7 +684,7 @@
           <div class="card-title ins-card-title">
             <span><span id="digestStoreName">Store</span> daily report</span>
             <span class="ins-title-actions">
-              <button type="button" class="btn btn-sm" id="btnRefreshDigest" data-action="refresh-report">Refresh</button>
+              <button type="button" class="btn btn-sm" id="btnRefreshDigest" data-action="refresh-report" data-advanced>Refresh</button>
               <button type="button" class="btn btn-primary btn-sm" id="btnPrintDigest" data-action="print-report">Print / save PDF</button>
             </span>
           </div>
@@ -699,9 +699,9 @@
          ========================================== -->
     <section id="tab-theft" class="tab-view">
       <!-- Live behaviour (js/live_behaviour.js): watch / alert cues on the cameras right now. -->
-      <div class="glass-card" id="liveBehaviourCard">
+      <div class="glass-card" id="liveBehaviourCard" data-advanced>
         <div class="card-title">
-          <span data-help="live-behaviour">Live behaviour</span>
+          <span data-help="live-behaviour">Live activity</span>
           <span class="lb-note" id="liveBehaviourNote" aria-live="polite"></span>
         </div>
         <p class="loss-intro">
@@ -713,7 +713,7 @@
       </div>
 
       <!-- LOSS:BEGIN (loss.js owns this region) -->
-      <section class="overview-strip loss-kpis" aria-label="Loss prevention at a glance">
+      <section class="overview-strip loss-kpis" aria-label="Security at a glance" data-advanced>
         <div class="stat-box">
           <span class="stat-label">Waiting for review</span>
           <span class="stat-val metric-unobserved" id="lossKpiOpen">&mdash;</span>
@@ -736,14 +736,14 @@
         </div>
       </section>
       <!-- By alert level (loss.js renderTierKpis, GET /theft/statistics by_tier / active_by_tier). -->
-      <section class="loss-tier-kpis" id="lossTierKpis" aria-label="Incidents by alert level"><div class="fp-empty">Loading…</div></section>
+      <section class="loss-tier-kpis" id="lossTierKpis" aria-label="Incidents by alert level" data-advanced><div class="fp-empty">Loading…</div></section>
 
       <div class="glass-card">
         <div class="card-title">
           <span data-help="review-queue">Review queue</span>
-          <button type="button" class="btn btn-sm" data-action="refresh">Refresh</button>
+          <button type="button" class="btn btn-sm" data-action="refresh" data-advanced>Refresh</button>
         </div>
-        <p class="loss-intro">
+        <p class="loss-intro" data-advanced>
           Each entry is <b>suspicious behaviour for staff to check</b>, not a finding of theft. Look at the evidence
           image and the live camera, then record what really happened. Your outcomes decide which rules are trusted.
           Each entry has an <b>alert level</b> (Critical, Alert, Watch or Review) from its risk score; open
@@ -751,7 +751,7 @@
         </p>
         <div class="loss-legacy" id="lossLegacyNotice" role="status" hidden></div>
         <div class="loss-chips" id="lossFilterChips" role="group" aria-label="Show incidents"></div>
-        <div class="loss-chips" id="lossTierChips" role="group" aria-label="Show alert level"></div>
+        <div class="loss-chips" id="lossTierChips" role="group" aria-label="Show alert level" data-advanced></div>
         <div id="theftIncidentsList" class="loss-list"><div class="fp-empty">Loading…</div></div>
       </div>
 
@@ -761,7 +761,7 @@
         <div class="card-title">
           <span data-help="restricted-areas">Restricted areas</span>
         </div>
-        <p class="loss-intro">
+        <p class="loss-intro" data-advanced>
           Cash office, safe room, stockroom: while an area is <b>armed</b>, every movement there is tracked and flagged at
           once. Tap <b>I'm going in</b> before entering and <b>I'm out</b> when you leave. Every alert is closed with what
           really happened. No faces are recognised and nobody is identified.
@@ -772,19 +772,19 @@
       <!-- Area & line alerts (js/zone_alerts.js): restricted-area and line-crossing alerts from the alert log. -->
       <div class="glass-card" id="zoneAlertsCard">
         <div class="card-title">
-          <span data-help="zone-alerts">Area &amp; line alerts</span>
-          <button type="button" class="btn btn-sm" data-za="refresh">Refresh</button>
+          <span data-help="zone-alerts">Area alerts</span>
+          <button type="button" class="btn btn-sm" data-za="refresh" data-advanced>Refresh</button>
         </div>
-        <p class="loss-intro">
+        <p class="loss-intro" data-advanced>
           Someone inside a restricted area during its hours, or crossing a line set to alert staff. These are
           <b>prompts to check</b>, not theft findings. Times are the store's.
         </p>
-        <div class="loss-chips" id="zoneAlertsChips" role="group" aria-label="Show area and line alerts"></div>
+        <div class="loss-chips" id="zoneAlertsChips" role="group" aria-label="Show area and line alerts" data-advanced></div>
         <div id="zoneAlertsList" class="loss-list"><div class="fp-empty">Loading…</div></div>
       </div>
 
-      <div class="glass-card">
-        <div class="card-title"><span data-help="false-alarms">False alarms by rule</span></div>
+      <div class="glass-card" id="lossRulesCard" data-advanced>
+        <div class="card-title"><span data-help="false-alarms">Wrong alerts</span></div>
         <p class="loss-intro">How often each check was wrong, from the outcomes staff recorded. A high rate means the rule needs tuning for this store.</p>
         <div class="loss-table-wrap">
           <table class="friction-table loss-rule-table">
@@ -795,7 +795,7 @@
       </div>
 
       <!-- Patterns (GET /api/v1/theft/patterns): built from recorded incidents only. -->
-      <div class="glass-card" id="lossPatternsCard">
+      <div class="glass-card" id="lossPatternsCard" data-advanced>
         <div class="card-title">
           <span data-help="patterns">Patterns</span>
           <span class="loss-chips loss-pattern-days" id="lossPatternDays" role="group" aria-label="Period">
@@ -864,9 +864,9 @@
       <div class="glass-card" id="nightWatchCard">
         <div class="card-title">
           <span data-help="night-watch">Night watch</span>
-          <button type="button" class="btn btn-sm" data-nw="refresh">Refresh</button>
+          <button type="button" class="btn btn-sm" data-nw="refresh" data-advanced>Refresh</button>
         </div>
-        <p class="loss-intro">
+        <p class="loss-intro" data-advanced>
           Cameras set to watch at night pause their normal analysis and look for movement; a person seen then is a
           high alert. Times are the store's; your own time is shown next to them when it differs.
         </p>
@@ -899,6 +899,8 @@
           </div>
         </div>
         <p class="feat-summary" id="featSummary" role="status" aria-live="polite">Loading…</p>
+        <p class="simple-hint" data-simple-only data-admin-only data-help-after="view-mode">This is the simple view. <b>Full settings</b> still opens every control;
+          to see every option all the time, switch to <b>All settings</b> at the top of the page.</p>
       </div>
       <div id="featureGroups" class="feat-groups"><div class="fp-empty">Loading…</div></div>
     </section>
@@ -917,23 +919,23 @@
         <a class="btn btn-sm" href="#settings-support" onclick="return jumpTo('settings-support')">Help and support</a>
         <a class="btn btn-sm" href="#settings-account" onclick="return jumpTo('settings-account')">Your account</a>
         <a class="btn btn-sm" href="#settings-accounts" onclick="return jumpTo('settings-accounts')" data-admin-only>Accounts</a>
-        <a class="btn btn-sm" href="#settings-recorder-streams" onclick="return jumpTo('settings-recorder-streams')">Recorder sub-streams</a>
+        <a class="btn btn-sm" href="#settings-recorder-streams" onclick="return jumpTo('settings-recorder-streams')" data-advanced>Camera picture quality</a>
         <a class="btn btn-sm" href="#settings-phone-alerts" onclick="return jumpTo('settings-phone-alerts')">Phone alerts</a>
-        <a class="btn btn-sm" href="#settings-pairing" onclick="return jumpTo('settings-pairing')">Phone app (backup)</a>
+        <a class="btn btn-sm" href="#settings-pairing" onclick="return jumpTo('settings-pairing')" data-advanced>Phone app (backup)</a>
         <a class="btn btn-sm" href="#settings-store" onclick="return jumpTo('settings-store')">Store</a>
-        <a class="btn btn-sm" href="#settings-evidence" onclick="return jumpTo('settings-evidence')">Evidence storage</a>
-        <a class="btn btn-sm" href="#settings-alerts" onclick="return jumpTo('settings-alerts')">Alerts and detection</a>
-        <a class="btn btn-sm" href="#settings-theft-alerts" onclick="return jumpTo('settings-theft-alerts')">Theft alert levels</a>
-        <a class="btn btn-sm" href="#settings-restricted-areas" data-ra-jump="settings-restricted-areas">Restricted areas</a>
-        <a class="btn btn-sm" href="#settings-analysis" onclick="return jumpTo('settings-analysis')">Analysis speed</a>
-        <a class="btn btn-sm" href="#settings-remote" onclick="return jumpTo('settings-remote')">Online access</a>
-        <a class="btn btn-sm" href="#settings-remote-video" onclick="return jumpTo('settings-remote-video')">Live video</a>
-        <a class="btn btn-sm" href="#settings-pos" onclick="return jumpTo('settings-pos')">Sales data</a>
-        <a class="btn btn-sm" href="#settings-backups" onclick="return jumpTo('settings-backups')">Backups</a>
-        <a class="btn btn-sm" href="#settings-health" onclick="return jumpTo('settings-health')">System health</a>
-        <a class="btn btn-sm" href="#settings-appearance" onclick="return jumpTo('settings-appearance')">Appearance</a>
+        <a class="btn btn-sm" href="#settings-evidence" onclick="return jumpTo('settings-evidence')" data-advanced>Saved pictures and clips</a>
+        <a class="btn btn-sm" href="#settings-alerts" onclick="return jumpTo('settings-alerts')" data-advanced>Alerts and detection</a>
+        <a class="btn btn-sm" href="#settings-theft-alerts" onclick="return jumpTo('settings-theft-alerts')">How many theft alerts</a>
+        <a class="btn btn-sm" href="#settings-restricted-areas" data-ra-jump="settings-restricted-areas" data-advanced>Restricted areas</a>
+        <a class="btn btn-sm" href="#settings-analysis" onclick="return jumpTo('settings-analysis')" data-advanced>Performance</a>
+        <a class="btn btn-sm" href="#settings-remote" onclick="return jumpTo('settings-remote')" data-advanced>Online access</a>
+        <a class="btn btn-sm" href="#settings-remote-video" onclick="return jumpTo('settings-remote-video')" data-advanced>Live video</a>
+        <a class="btn btn-sm" href="#settings-pos" id="jumpPos" onclick="return jumpTo('settings-pos')">Sales data</a>
+        <a class="btn btn-sm" href="#settings-backups" onclick="return jumpTo('settings-backups')" data-advanced>Backups</a>
+        <a class="btn btn-sm" href="#settings-health" onclick="return jumpTo('settings-health')">System status</a>
+        <a class="btn btn-sm" href="#settings-appearance" onclick="return jumpTo('settings-appearance')" data-phone-only>Colour theme</a>
       </div>
-      <div class="glass-card" id="settings-device"></div>
+      <div class="glass-card" id="settings-device" data-advanced></div>
       <!-- iKorex service: plan, licence, features included, last contact, control key (fleet.js). -->
       <div class="glass-card" id="settings-fleet"></div>
       <!-- Help and support: Report a problem, My reports, support contact (support.js). -->
@@ -946,29 +948,31 @@
       <div class="glass-card" id="settings-accounts" data-admin-only hidden></div>
       <!-- Site settings: Store, Evidence storage, Alerts and detection (site_settings.js). -->
       <div class="glass-card" id="settings-store"></div>
-      <div class="glass-card" id="settings-evidence"></div>
-      <div class="glass-card" id="settings-alerts"></div>
+      <!-- Store hours learnt from visits and sales (js/automation.js fills it). -->
+      <section id="settings-store-hours" class="glass-card"></section>
+      <div class="glass-card" id="settings-evidence" data-advanced></div>
+      <div class="glass-card" id="settings-alerts" data-advanced></div>
       <!-- Theft alert levels: thresholds, who is told at each level, weights, combined signs, and the
            policy explainer from GET /api/v1/theft/alert-policy (site_settings.js, group theft_alerts). -->
       <div class="glass-card" id="settings-theft-alerts"></div>
       <!-- Restricted areas: one line and the buttons to the panel and each area's settings (restricted.js). -->
-      <div class="glass-card" id="settings-restricted-areas"></div>
+      <div class="glass-card" id="settings-restricted-areas" data-advanced></div>
       <!-- Analysis speed: GPU share, decode cap, per-camera ceiling, idle rate, motion wake, and the
            capacity the box can sustain (site_settings.js, GET /api/v1/system/analysis-capacity). -->
-      <div class="glass-card" id="settings-analysis"></div>
-      <div class="glass-card" id="settings-remote"></div>
+      <div class="glass-card" id="settings-analysis" data-advanced></div>
+      <div class="glass-card" id="settings-remote" data-advanced></div>
       <!-- Online access > Live video: direct WebRTC settings and "Check remote video" (remote_video.js). -->
-      <div class="glass-card" id="settings-remote-video"></div>
-      <div class="glass-card" id="settings-pairing"></div>
-      <div class="glass-card" id="settings-push"></div>
-      <div class="glass-card" id="settings-devices"></div>
+      <div class="glass-card" id="settings-remote-video" data-advanced></div>
+      <div class="glass-card" id="settings-pairing" data-advanced></div>
+      <div class="glass-card" id="settings-push" data-advanced></div>
+      <div class="glass-card" id="settings-devices" data-advanced></div>
       <!-- Recorder sub-streams: CIF -> D1 upgrade with restore (recorder_streams.js). -->
-      <div class="glass-card" id="settings-recorder-streams"></div>
+      <div class="glass-card" id="settings-recorder-streams" data-advanced></div>
 
-      <!-- Appearance: the same light / dark / system choice as the header switch
-           (on phones the header switch is hidden to make room). -->
+      <!-- Colour theme: the same light / dark / system choice as the header switch. Shown on
+           phones only, where the header switch is hidden to make room (css/style.css). -->
       <div class="glass-card" id="settings-appearance">
-        <div class="card-title"><span>Appearance</span></div>
+        <div class="card-title"><span>Colour theme</span></div>
         <div class="appearance-row" role="radiogroup" aria-label="Colour theme">
           <button type="button" class="btn btn-sm" data-set-theme="light" role="radio"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-sun"></use></svg>Light</button>
           <button type="button" class="btn btn-sm" data-set-theme="dark" role="radio"><svg class="icon icon-md" aria-hidden="true"><use href="/static/icons/sprite.svg#i-moon"></use></svg>Dark</button>
@@ -977,7 +981,7 @@
       </div>
 
       <!-- Point of sale: whether sales data arrives and how to connect it (analytics.js). -->
-      <div class="glass-card" id="settings-pos">
+      <div class="glass-card" id="settings-pos" data-advanced>
         <div class="card-title"><span data-help="sales-data">Sales data (point of sale)</span><span class="badge metric-unobserved" id="posStatusBadge">&mdash;</span></div>
         <div id="posStatusBody"><div class="fp-empty">Loading…</div></div>
         <!-- Till key for POST /pos/ingest: status, create/replace, revoke (pos_key.js). -->
@@ -985,29 +989,31 @@
       </div>
 
       <!-- Backups and reset: list, back up now, download, restore, upload, factory reset (backups.js). -->
-      <div class="glass-card" id="settings-backups"></div>
+      <div class="glass-card" id="settings-backups" data-advanced></div>
 
       <!-- System health: moved here from the page header (analytics.js). -->
       <div class="glass-card" id="settings-health">
-        <div class="card-title"><span data-help="system-health">System health</span></div>
+        <div class="card-title"><span data-help="system-health">System status</span></div>
+        <!-- What the box tuned by itself (analysis speed, storage, backups): js/automation.js. -->
+        <div id="autoTuneStatus"></div>
         <div class="health-grid">
-          <div class="telemetry-item" title="How video is decoded on this device">
+          <div class="telemetry-item" title="How video is decoded on this device" data-advanced>
             <span class="telemetry-label">Video decoding</span>
             <span class="telemetry-val" id="telemetryDecoderBadge">&mdash;</span>
           </div>
-          <div class="telemetry-item" title="The engine that runs person detection">
+          <div class="telemetry-item" title="The engine that runs person detection" data-advanced>
             <span class="telemetry-label">Detection engine</span>
             <span class="telemetry-val" id="telemetryInferenceBadge">&mdash;</span>
           </div>
-          <div class="telemetry-item">
+          <div class="telemetry-item" data-advanced>
             <span class="telemetry-label">Detection speed</span>
             <span class="telemetry-val" id="telemetryLatencyVal">&mdash;</span>
           </div>
-          <div class="telemetry-item">
+          <div class="telemetry-item" data-advanced>
             <span class="telemetry-label">Processor</span>
             <span class="telemetry-val" id="telemetryCpuVal">&mdash;</span>
           </div>
-          <div class="telemetry-item">
+          <div class="telemetry-item" data-advanced>
             <span class="telemetry-label">Memory</span>
             <span class="telemetry-val" id="telemetryRamVal">&mdash;</span>
           </div>
@@ -1016,15 +1022,16 @@
             <span class="telemetry-val" id="telemetryUptimeVal">&mdash;</span>
           </div>
           <div class="telemetry-item" title="Alert evidence (stills and short clips) kept on this device's own disk; the oldest is deleted first when the limit is reached">
-            <span class="telemetry-label">Evidence storage</span>
+            <span class="telemetry-label">Saved pictures and clips</span>
             <span class="telemetry-val" id="telemetryEvidenceVal">&mdash;</span>
           </div>
         </div>
         <!-- Pose-model trial (services/shadow_trial.py): read-only, shown only when one is configured or has data. -->
-        <div class="shadow-trial" id="shadowTrialBlock" hidden>
+        <div class="shadow-trial" id="shadowTrialBlock" data-advanced hidden>
           <div class="telemetry-label" title="A second pose model compared with the live one on the same frames. Shadow only: it never changes counts or alerts.">Pose model trial (shadow only)</div>
           <div class="shadow-trial-body" id="shadowTrialBody"></div>
         </div>
+        <p class="simple-hint" data-simple-only data-admin-only>Backups, online access and the full system details are under <b>All settings</b> (top of the page).</p>
       </div>
     </section>
   </div>
@@ -1047,13 +1054,13 @@
             <label for="configCameraName">Camera name</label>
             <input type="text" class="form-input" id="configCameraName" name="cameraName" required />
           </div>
-          <div class="form-group">
+          <div class="form-group" data-advanced>
             <label for="configChannelNumber">Channel number</label>
             <input type="number" min="1" max="64" class="form-input" id="configChannelNumber" name="channelNumber" required />
           </div>
         </div>
 
-        <div class="form-grid-2col" style="margin-top: 12px;">
+        <div class="form-grid-2col" style="margin-top: 12px;" data-advanced>
           <div class="form-group">
             <label for="configDepartment" data-help-after="department">Department label (optional)</label>
             <!-- Free text, suggestions are departments already in use. What the
@@ -1071,12 +1078,12 @@
         <!-- V2 MOUNT POINT: camera role picker and setup checklist. -->
         <div id="cameraRoleMount" data-mount="camera-role"></div>
 
-        <div class="form-group" style="margin-top: 12px;">
+        <div class="form-group" style="margin-top: 12px;" data-advanced>
           <label for="configRtspUrl">Stream source (RTSP URL or /dev/video path)</label>
           <input type="text" class="form-input" id="configRtspUrl" name="rtspUrl" />
         </div>
 
-        <div class="form-grid-2col" style="margin-top: 12px;">
+        <div class="form-grid-2col" style="margin-top: 12px;" data-advanced>
           <div class="form-group">
             <label for="configCamUser">Camera username</label>
             <input type="text" class="form-input" id="configCamUser" name="cameraUsername" autocomplete="off" placeholder="unchanged" />
@@ -1087,7 +1094,7 @@
           </div>
         </div>
 
-        <div class="form-grid-2col" style="margin-top: 12px;">
+        <div class="form-grid-2col" style="margin-top: 12px;" data-advanced>
           <div class="form-group">
             <label for="configFps">Capture FPS</label>
             <input type="number" min="1" max="60" class="form-input" id="configFps" name="fps" />
@@ -1100,7 +1107,7 @@
         </div>
 
         <!-- Stream quality (Dahua recorder channels; services/stream_selection.py). -->
-        <div class="form-group" style="margin-top: 12px;">
+        <div class="form-group" style="margin-top: 12px;" data-advanced>
           <label for="configStreamQuality" data-help-after="stream-quality">Stream quality (analysis)</label>
           <select class="form-input" id="configStreamQuality" name="streamQuality" aria-describedby="configStreamStatus">
             <option value="auto">Auto: smallest sub-stream of at least D1 (recommended)</option>
@@ -1112,8 +1119,10 @@
             title="Open each sub-stream once to read its size (read-only), then apply Auto's choice">Check sub-streams again</button>
         </div>
 
-        <div class="form-section-title" data-help="placement">Placement on the blueprint (metres, origin top-left)</div>
-        <div class="form-grid-2col">
+        <p class="simple-hint" data-simple-only>Where the camera is and which way it looks: drag it on the
+          <button type="button" class="link-btn" onclick="closeCameraConfigModal(); switchTab('map')">Store map</button>.</p>
+        <div class="form-section-title" data-help="placement" data-advanced>Placement on the blueprint (metres, origin top-left)</div>
+        <div class="form-grid-2col" data-advanced>
           <div class="form-group">
             <label for="configFloorX">Floor X (m)</label>
             <input type="number" step="any" min="0" class="form-input" id="configFloorX" name="floorX" required />
@@ -1123,7 +1132,7 @@
             <input type="number" step="any" min="0" class="form-input" id="configFloorY" name="floorY" required />
           </div>
         </div>
-        <div class="form-grid-2col" style="margin-top: 12px;">
+        <div class="form-grid-2col" style="margin-top: 12px;" data-advanced>
           <div class="form-group">
             <label for="configFloorZ">Mounting height Z (m)</label>
             <input type="number" step="any" min="0" class="form-input" id="configFloorZ" name="floorZ" />
@@ -1133,7 +1142,7 @@
             <input type="number" step="any" min="1" max="180" class="form-input" id="configFovDeg" name="fovDeg" />
           </div>
         </div>
-        <div class="form-group" style="margin-top: 12px;">
+        <div class="form-group" style="margin-top: 12px;" data-advanced>
           <div style="display: flex; justify-content: space-between; align-items: center;">
             <label for="configAzimuthSlider">Azimuth (0-360°, 0 = facing +x)</label>
             <span id="configAzimuthVal" class="num" style="font-size: 12px; color: var(--text-secondary);">0°</span>
@@ -1145,19 +1154,19 @@
           <label data-help="ai-features">AI features on this camera</label>
           <div class="checkbox-group-grid">
             <label class="checkbox-label" for="featPeopleCounting" title="Zone visits, dwell, queues and footfall from tracked people"><input type="checkbox" id="featPeopleCounting" name="featPeopleCounting" /> People counting &amp; dwell</label>
-            <label class="checkbox-label" for="featShelfInteraction" title="Hand-to-shelf interactions from pose keypoints"><input type="checkbox" id="featShelfInteraction" name="featShelfInteraction" /> Shelf interaction</label>
+            <label class="checkbox-label" data-advanced for="featShelfInteraction" title="Hand-to-shelf interactions from pose keypoints"><input type="checkbox" id="featShelfInteraction" name="featShelfInteraction" /> Shelf interaction</label>
             <label class="checkbox-label" for="featTheftDetection" title="Suspicious behaviour flagged for staff review"><input type="checkbox" id="featTheftDetection" name="featTheftDetection" /> Theft detection</label>
-            <label class="checkbox-label" for="featTheftClip" title="Save about 5 s before and 10 s after each theft incident with its evidence"><input type="checkbox" id="featTheftClip" name="featTheftClip" /> Theft evidence clip</label>
-            <label class="checkbox-label" for="featStaticFigureFilter" title="Posters, mannequins and cut-outs that never move are shown as static and not counted or analysed"><input type="checkbox" id="featStaticFigureFilter" name="featStaticFigureFilter" /> Ignore figures that never move</label>
+            <label class="checkbox-label" data-advanced for="featTheftClip" title="Save about 5 s before and 10 s after each theft incident with its evidence"><input type="checkbox" id="featTheftClip" name="featTheftClip" /> Theft evidence clip</label>
+            <label class="checkbox-label" data-advanced for="featStaticFigureFilter" title="Posters, mannequins and cut-outs that never move are shown as static and not counted or analysed"><input type="checkbox" id="featStaticFigureFilter" name="featStaticFigureFilter" /> Ignore figures that never move</label>
           </div>
-          <div class="cam-feat-hint" id="featTheftClipHint">
+          <div class="cam-feat-hint" id="featTheftClipHint" data-advanced>
             Evidence clip: with theft detection on, this camera keeps the last few seconds in memory only and saves a
             short clip (about 5&nbsp;s before to 10&nbsp;s after) with each incident. Nothing is recorded continuously;
             clips count towards the evidence storage limit and are deleted with the incident's image.
           </div>
         </div>
 
-        <div class="form-group cam-feat-static" id="configStaticFigureGroup">
+        <div class="form-group cam-feat-static" id="configStaticFigureGroup" data-advanced>
           <label for="configStaticFigureSeconds">Treat a figure as static after (seconds without movement)</label>
           <input type="number" min="10" max="3600" step="1" class="form-input" id="configStaticFigureSeconds" name="staticFigureSeconds" placeholder="Server default" />
           <div class="cam-feat-hint">
@@ -1168,7 +1177,7 @@
           </div>
         </div>
 
-        <div class="form-group" style="margin-top: 12px;">
+        <div class="form-group" style="margin-top: 12px;" data-advanced>
           <label for="configPersonMaxFrac">Largest person size (% of the frame)</label>
           <input type="number" min="5" max="100" step="1" class="form-input" id="configPersonMaxFrac" name="personMaxFrac" placeholder="Server default" />
           <div class="field-hint">
@@ -1180,8 +1189,8 @@
         </div>
 
         <!-- Analysis speed for this camera (features.analysis_priority / max_analysis_fps). -->
-        <div class="form-section-title">Analysis speed</div>
-        <div class="form-grid-2col">
+        <div class="form-section-title" data-advanced>Analysis speed</div>
+        <div class="form-grid-2col" data-advanced>
           <div class="form-group">
             <label for="configAnalysisPriority">Analysis priority</label>
             <select class="form-input" id="configAnalysisPriority" name="analysisPriority" aria-describedby="configAnalysisHint">
@@ -1197,12 +1206,12 @@
               placeholder="Site default" inputmode="decimal" aria-describedby="configAnalysisHint" />
           </div>
         </div>
-        <div class="cam-feat-hint" id="configAnalysisHint">
+        <div class="cam-feat-hint" id="configAnalysisHint" data-advanced>
           When the AI cannot analyse every camera at full speed, it shares its capacity out: a High camera gets about
           twice the frames of a Normal one, a Low one about half. The frame-rate cap limits this camera even when there
           is capacity to spare; leave it empty for the site default (Settings &gt; Analysis speed), 0.5 to 30.
         </div>
-        <div class="dept-hint" id="configAnalysisRateNow" aria-live="polite"></div>
+        <div class="dept-hint" id="configAnalysisRateNow" aria-live="polite" data-advanced></div>
 
         <!-- Night watch section (js/night_watch.js mounts it when the dialog opens). -->
         <div id="nightWatchMount" data-mount="night-watch" style="margin-top: 12px;"></div>
@@ -1272,6 +1281,7 @@
   <script src="/static/js/support.js?v=2.6.0" defer></script>
   <script src="/static/js/onboarding.js?v=2.6.0" defer></script>
   <script src="/static/js/features.js?v=2.6.0" defer></script>
+  <script src="/static/js/automation.js?v=2.6.0" defer></script>
   <script src="/static/js/theme.js?v=2.6.0" defer></script>
 </body>
 </html>

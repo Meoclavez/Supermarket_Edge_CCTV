@@ -62,6 +62,8 @@ OUTCOMES = {
     "incident": "Real incident",
 }
 ARMING_MODES = ("always", "schedule")
+# Where an armed schedule comes from: left out = typed by hand.
+ARMING_SOURCES = ("store_hours",)
 SCHEDULE_MODES = ("armed_during", "armed_outside")
 ANNOUNCE_MIN, ANNOUNCE_MAX, ANNOUNCE_DEFAULT = 5, 120, 15
 ANNOUNCE_PEOPLE_MAX = 10
@@ -362,6 +364,13 @@ def validate_arming(raw: Any) -> Dict[str, Any]:
     if mode == "schedule" and not rows:
         raise AreaError("Add at least one time when the area is armed, or choose \"Always armed\".")
     out = {"mode": mode, "schedule": rows, "schedule_mode": smode}
+    # "Outside store hours" (services/automation.py): the schedule is rewritten
+    # whenever the learnt or edited store hours change.
+    source = raw.get("source")
+    if source not in (None, "", *ARMING_SOURCES):
+        raise AreaError("arming.source must be 'store_hours' or left out.")
+    if source:
+        out["source"] = source
     tz = str(raw.get("timezone") or "").strip()
     if tz:
         # Only for an area that must follow another zone than the store's.

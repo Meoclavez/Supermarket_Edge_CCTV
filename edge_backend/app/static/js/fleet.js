@@ -339,7 +339,7 @@
       if (where === 'inside') anchor.insertBefore(n, anchor.firstChild);
       else if (anchor.parentNode) anchor.parentNode.insertBefore(n, anchor);
     });
-    // The Loss prevention tab when none of its alerts are in the plan.
+    // The Security tab when none of its alerts are in the plan.
     const lossOff = ['theft_detection', 'zone_alerts', 'night_watch'].every((k) => features[k] === false);
     document.querySelectorAll('#mainNav [data-tab="loss"]').forEach((b) => b.classList.toggle('fleet-off', lossOff));
     // Insights > Recommendations / Daily report sub-tabs.

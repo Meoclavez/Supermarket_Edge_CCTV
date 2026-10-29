@@ -73,6 +73,9 @@
     const note = el('kpiCamerasNote');
     if (!pipe) { setMetric('kpiCameras', null); if (note) note.textContent = 'Camera status unavailable.'; return; }
     const tot = pipe.cameras_total, on = pipe.cameras_online;
+    const box = el('kpiCamerasBox');
+    // Simple view: the camera tile only appears when something needs attention.
+    if (box) box.removeAttribute('data-advanced');
     if (!tot) {
       setMetric('kpiCameras', null);
       if (note) note.innerHTML = 'No cameras yet. <button type="button" class="link-btn" onclick="openDeviceManager()">Add a camera</button>';
@@ -81,7 +84,6 @@
     const turnedOff = isNum(pipe.cameras_off) ? pipe.cameras_off : 0;
     const enabled = isNum(pipe.cameras_enabled) ? pipe.cameras_enabled : tot - turnedOff;
     const offNote = turnedOff ? ` (${turnedOff} turned off)` : '';
-    const box = el('kpiCamerasBox');
     if (!enabled) {
       setMetric('kpiCameras', 'All off');
       if (box) box.classList.remove('stat-box-alert');
@@ -94,7 +96,10 @@
     }
     setMetric('kpiCameras', `${on ?? DASH} / ${enabled}`);
     const off = notWorking(pipe);
-    if (box) box.classList.toggle('stat-box-alert', off.length > 0);
+    if (box) {
+      box.classList.toggle('stat-box-alert', off.length > 0);
+      box.toggleAttribute('data-advanced', !off.length);
+    }
     if (!note) return;
     if (!off.length) {
       note.textContent = `All cameras that are on are sending pictures${offNote}`;
@@ -136,6 +141,9 @@
 
     const connected = pos ? !!pos.connected : !!(overview && overview.pos_connected);
     const salesNote = el('kpiSalesNote');
+    // Simple view: sales only once the tills send them (Settings shows how to connect them).
+    const salesBox = el('kpiSalesBox');
+    if (salesBox) salesBox.toggleAttribute('data-advanced', !connected);
     if (!connected) {
       setMetric('kpiRevenue', 'Not connected');
       const v = el('kpiRevenue');
@@ -224,7 +232,7 @@
           </div>
           <button type="button" class="btn btn-sm btn-primary" data-review="${escapeHtml(i.id)}">Review</button>
         </div>`;
-    }).join('') + (open.length > 5 ? `<div class="fp-empty">${open.length - 5} more waiting in Loss prevention.</div>` : '');
+    }).join('') + (open.length > 5 ? `<div class="fp-empty">${open.length - 5} more waiting in Security.</div>` : '');
     host.querySelectorAll('[data-review]').forEach((b) => b.addEventListener('click', () => {
       switchTab('loss');
       if (window.edgeLoss && typeof window.edgeLoss.focusIncident === 'function') window.edgeLoss.focusIncident(b.dataset.review);
@@ -327,8 +335,11 @@
         ${step.label ? `<button type="button" class="btn btn-sm btn-primary" id="todayNextStep">${escapeHtml(step.label)}</button>` : ''}
       </div>
       ${duplicatesHtml(setup.duplicates)}
-      ${window.edgeRoles ? window.edgeRoles.storeCamerasHtml(setup) : ''}
-      <ul class="setup-list">${rows}</ul>`;
+      <div data-advanced>${window.edgeRoles ? window.edgeRoles.storeCamerasHtml(setup) : ''}
+      <ul class="setup-list">${rows}</ul></div>`;
+    // Simple view: the card is only the next step, and goes away once setup is complete.
+    const card = el('todaySetupCard');
+    if (card) card.toggleAttribute('data-advanced', isNum(sc.percent) && sc.percent >= 100);
     const btn = el('todayNextStep');
     if (btn && step.run) btn.addEventListener('click', () => step.run());
     const dup = el('todayResolveDuplicates');

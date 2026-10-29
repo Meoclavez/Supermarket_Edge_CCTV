@@ -281,6 +281,9 @@ class CameraState:
     # role cache: scaled theft thresholds, exit-rule gate, zone valuation.
     role: Optional[str] = None
     thresholds: Dict[str, Any] = field(default_factory=dict)
+    # Per rule on this camera (CameraFeatureConfig.theft_rule_sensitivity): < 1
+    # raises that rule's minimum confidence ("Learn from wrong alerts").
+    rule_factors: Dict[str, float] = field(default_factory=dict)
     exit_rule_on: bool = True
     zones_role: Optional[str] = None
     # Frame time of the latest observe() (the live view's "now").
@@ -402,6 +405,12 @@ class PoseAnalytics:
             cam.thresholds = {}
             cam.exit_rule_on = True
         cam.role = role
+        try:
+            from app.services.feature_manager import feature_manager
+
+            cam.rule_factors = dict(feature_manager.get_setting(cam.camera_id, "theft_rule_sensitivity") or {})
+        except Exception:  # noqa: BLE001 - unreadable: every rule as usual
+            cam.rule_factors = {}
 
     @staticmethod
     def _thr(cam: CameraState, key: str, default: Any) -> Any:
@@ -1641,7 +1650,11 @@ class PoseAnalytics:
         if not cam.theft_on:
             return False
         confidence = float(verdict.get("confidence") or 0.0)
-        if confidence < self._thr(cam, "min_confidence", settings.THEFT_MIN_CONFIDENCE):
+        min_conf = float(self._thr(cam, "min_confidence", settings.THEFT_MIN_CONFIDENCE))
+        factor = cam.rule_factors.get(rule)
+        if factor and 0 < factor < 1:
+            min_conf = min(0.95, min_conf / factor)   # this rule made less sensitive on this camera
+        if confidence < min_conf:
             return False
         last = st.fired.get(rule)
         if last is not None and ts - last < settings.THEFT_INCIDENT_COOLDOWN_SEC:

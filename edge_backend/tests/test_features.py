@@ -50,7 +50,7 @@ def test_legacy_stored_keys_are_ignored():
                                 "person_max_frame_fraction": None, "night_watch": None,
                                 "decode_max_width": None, "stream_quality": None,
                                 "static_figure_filter": True, "static_figure_seconds": None, "theft_clip": False,
-                                "analysis_priority": None, "max_analysis_fps": None}
+                                "analysis_priority": None, "max_analysis_fps": None, "theft_rule_sensitivity": {}}
 
     fm = FeatureManager()
     assert fm.get_camera_features("cam_old", stored=legacy).shelf_interaction is False

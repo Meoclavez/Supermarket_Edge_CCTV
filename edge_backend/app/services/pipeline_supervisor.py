@@ -253,11 +253,20 @@ class PipelineSupervisor:
                 rt = live_engine.runtimes.get(cam_id)
                 source = _camera_source(cam)
                 if rt is not None and rt.enabled and rt.source == source:
+                    from app.services.camera_restarts import camera_restarts
+
                     if live_engine.worker_alive(cam_id):
-                        continue
-                    # The worker thread died (an uncaught error): restart it
-                    # instead of leaving the camera silently dark (audit M2).
-                    logger.error(f"Camera {cam_id}: its worker stopped unexpectedly; restarting it")
+                        # Alive but stuck (STALLED for a while): restart it, with
+                        # back-off so a broken camera is not restarted in a loop (A9).
+                        if not (camera_restarts.stuck_for_restart(rt) and camera_restarts.may_restart(cam_id)):
+                            continue
+                        logger.error(f"Camera {cam_id}: no new picture for a long time; restarting its worker")
+                        camera_restarts.record(cam_id, "stuck")
+                    else:
+                        # The worker thread died (an uncaught error): restart it
+                        # instead of leaving the camera silently dark (audit M2).
+                        logger.error(f"Camera {cam_id}: its worker stopped unexpectedly; restarting it")
+                        camera_restarts.record(cam_id, "stopped")
                 logger.info(f"Starting worker for {cam_id} -> {redact_url(source)}")
                 live_engine.start_camera(cam_id, cam.name, source, enabled=True)
 

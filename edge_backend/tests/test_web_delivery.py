@@ -178,8 +178,9 @@ def test_pages_load_scripts_locally_and_deferred():
             assert src.startswith("/static/"), f"{page}: third-party script {src}"
             deferred = "defer" in before + after
             # auth.js must run before anything else can fetch, then poll.js wraps that fetch
-            # (429 back-off, shared polls) before any module polls; the rest defer.
-            sync = src.startswith("/static/js/auth.js") or src.startswith("/static/js/poll.js")
+            # (429 back-off, shared polls) before any module polls, and view_mode.js sets the
+            # Simple / All settings mode before the first paint; the rest defer.
+            sync = src.startswith(("/static/js/auth.js", "/static/js/poll.js", "/static/js/view_mode.js"))
             assert deferred == (not sync), f"{page}: {src}"
         names = [s for _b, s, _a in srcs]
         assert names[0].startswith("/static/js/auth.js")

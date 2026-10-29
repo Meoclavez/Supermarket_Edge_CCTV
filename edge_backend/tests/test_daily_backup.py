@@ -37,7 +37,7 @@ def test_scheduler_backs_up_with_auto_tag_and_applies_retention(monkeypatch):
             calls.append(("retention",))
             return {}
 
-    monkeypatch.setattr(bs, "seconds_until_daily_backup", lambda now: 0.01)
+    monkeypatch.setattr(bs, "seconds_until_daily_backup", lambda now, hour=3: 0.01)
 
     async def run():
         sched = bs.DailyBackupScheduler(FakeService())
@@ -64,7 +64,7 @@ def test_a_failed_night_does_not_stop_the_scheduler(monkeypatch):
         def apply_retention(self, now=None):
             return {}
 
-    monkeypatch.setattr(bs, "seconds_until_daily_backup", lambda now: 0.01)
+    monkeypatch.setattr(bs, "seconds_until_daily_backup", lambda now, hour=3: 0.01)
 
     async def run():
         sched = bs.DailyBackupScheduler(FailingService())

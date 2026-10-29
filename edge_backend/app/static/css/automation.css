@@ -1,0 +1,55 @@
+/* Automations (js/automation.js): the Today suggestions, the Settings store-hours
+   card and the System status "chosen by itself" lines. Design tokens only, so
+   light and dark follow the theme; laid out to work from 360 px wide. */
+
+#autoSuggestions[hidden] { display: none; }
+#autoSuggestions { display: flex; flex-direction: column; gap: var(--space-2); }
+.auto-card .card-title > span:first-child { display: inline-flex; align-items: center; gap: 6px; }
+.auto-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr)); gap: var(--space-3); }
+.auto-item {
+  display: flex; flex-direction: column; gap: var(--space-2); min-width: 0;
+  padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2);
+}
+.auto-title { margin: 0; font-size: 15px; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+.auto-detail, .auto-lead { margin: 0; font-size: 14px; color: var(--text); overflow-wrap: anywhere; }
+.auto-lead { display: flex; align-items: flex-start; gap: 6px; margin-bottom: var(--space-2); }
+.auto-muted { color: var(--text-secondary); font-size: 13px; }
+.auto-muted:is(p) { margin: 0 0 var(--space-2); }
+.auto-note { margin: var(--space-2) 0 0; font-size: 13px; color: var(--text-secondary); }
+.auto-warn { color: var(--warning); font-weight: 600; }
+.auto-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; margin-top: auto; }
+.auto-links { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.auto-links label { display: flex; align-items: flex-start; gap: 8px; cursor: pointer; overflow-wrap: anywhere; }
+.auto-links input { margin-top: 2px; flex: 0 0 auto; }
+.auto-link-check label { cursor: default; opacity: 0.8; }
+.auto-done {
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--success-border); background: var(--success-bg); color: var(--text);
+  border-radius: var(--radius-sm); font-size: 14px;
+}
+.auto-done > span { flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; }
+
+/* Store hours card */
+.auto-table-wrap { overflow-x: auto; max-width: 100%; }
+.auto-hours { border-collapse: collapse; width: 100%; font-size: 14px; }
+.auto-hours th, .auto-hours td { text-align: left; padding: 6px var(--space-2) 6px 0; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.auto-hours th { font-weight: 600; white-space: nowrap; color: var(--text); }
+.auto-edit { display: flex; flex-wrap: wrap; align-items: center; gap: 6px var(--space-2); }
+.auto-edit input[type="time"] {
+  min-height: 34px; padding: 2px 6px; border: 1px solid var(--border); border-radius: var(--radius-xs, 6px);
+  background: var(--surface); color: var(--text); font: inherit; max-width: 130px;
+}
+.auto-closed { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; color: var(--text-secondary); }
+.auto-facts { list-style: none; margin: var(--space-3) 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 14px; }
+.auto-facts li { display: flex; flex-wrap: wrap; gap: 2px var(--space-3); }
+.auto-facts li > span:first-child { flex: 0 0 180px; color: var(--text-secondary); }
+.auto-facts li > span:last-child { flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; }
+
+/* System status lines */
+.auto-tune { display: flex; flex-direction: column; gap: 4px; margin-bottom: var(--space-3); font-size: 14px; }
+.auto-tune p { margin: 0; display: flex; align-items: flex-start; gap: 6px; overflow-wrap: anywhere; }
+.auto-tune .btn { align-self: flex-start; }
+
+@media (max-width: 600px) {
+  .auto-facts li > span:first-child { flex-basis: 100%; }
+}

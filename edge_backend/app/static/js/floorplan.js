@@ -2581,6 +2581,13 @@
     // ------------------------------------------- coverage in the inspector
 
     camName(id) { const c = this.cameras.find((x) => x.camera_id === id); return c ? (c.name || c.camera_id) : id; }
+
+    /** Detail behind "More": folded in the simple view, open under All settings (js/view_mode.js). */
+    moreHtml(inner, label) {
+      if (!inner || !String(inner).trim()) return '';
+      const open = window.edgeMode && window.edgeMode.mode() === 'all' ? ' open' : '';
+      return `<details class="fp-more"${open}><summary>${escapeHtml(label || 'More')}</summary>${inner}</details>`;
+    }
     zoneName(id) { const z = this.zones.find((x) => x.id === id); return z ? z.name : id; }
 
     /** Fill the coverage box of the open inspector (#fpCovBox) from the current numbers. */
@@ -2653,12 +2660,12 @@
           <span>Shown as</span><b>${how}${v.mode === 'manual' && v.rangeIsDefault ? ' (default reach)' : ''}</b>
         </div>
         ${notes.map((n) => `<div class="fp-hintline">${n}</div>`).join('')}
-        <div class="fp-cov-sub">Zones in view</div>
-        ${zoneRows ? `<ul class="fp-cov-list">${zoneRows}</ul>` : '<div class="fp-hintline">No zone in view.</div>'}
         ${suggest}
+        ${this.moreHtml(`<div class="fp-cov-sub">Zones in view</div>
+        ${zoneRows ? `<ul class="fp-cov-list">${zoneRows}</ul>` : '<div class="fp-hintline">No zone in view.</div>'}
         <div class="fp-cov-sub">Shelves and counters in view</div>
         ${shelfRows ? `<ul class="fp-cov-list">${shelfRows}</ul>` : '<div class="fp-hintline">No shelf front in view.</div>'}
-        ${overlaps ? `<div class="fp-hintline">Overlaps with ${overlaps}.</div>` : ''}`;
+        ${overlaps ? `<div class="fp-hintline">Overlaps with ${overlaps}.</div>` : ''}`, 'More: zones and shelves it sees')}`;
     }
 
     zoneCoverageHtml(id) {
@@ -2679,7 +2686,7 @@
           <span>Size</span><b>${fmt1(+zone.area_m2 || polygonArea(zone.polygon))} m²${len ? ` · ${fmt1(len)} m long` : ''}</b>
           <span>In view</span><b>${zc && zc.covered_fraction !== null ? pct(zc.covered_fraction) : '—'}${blind}</b>
         </div>
-        ${rows ? `<ul class="fp-cov-list">${rows}</ul>` : '<div class="fp-hintline">No camera sees this zone on the map, so nothing can be measured here.</div>'}
+        ${rows ? '' : '<div class="fp-hintline">No camera sees this zone on the map, so nothing can be measured here.</div>'}
         <div class="metric-pill-grid">
           <div class="metric-pill"><span class="metric-pill-label">Visits per m²</span><span class="metric-pill-val">${per(m && m.visits_per_m2, '')}</span></div>
           <div class="metric-pill"><span class="metric-pill-label">Time spent per m²</span><span class="metric-pill-val">${per(m && m.dwell_seconds_per_m2, ' s')}</span></div>
@@ -2688,7 +2695,8 @@
           ${zone.category === 'CHECKOUT' ? `<div class="metric-pill" data-queue-length><span class="metric-pill-label">Queue now</span><span class="metric-pill-val">${per(m && m.queue_length_m, ' m')}</span></div>` : ''}
         </div>
         ${zone.category === 'CHECKOUT' ? this.queueHintHtml(m && m.queue) : ''}
-        <div class="fp-hintline">Per m² figures compare big and small zones fairly. A dash means nothing was measured here today.</div>`;
+        ${this.moreHtml(`${rows ? `<ul class="fp-cov-list">${rows}</ul>` : ''}
+        <div class="fp-hintline">Per m² figures compare big and small zones fairly. A dash means nothing was measured here today.</div>`, 'More: cameras on this zone')}`;
     }
 
     /** Queue length of a checkout zone: measured from calibrated floor positions, else the reason. */
@@ -2714,7 +2722,7 @@
           <span>Shelf front</span><b>${fmt1(sh.front_m)} m (both long sides)</b>
           <span>In view</span><b>${fmt1(sh.seen_front_m)} m${sh.front_m ? ` (${pct(sh.seen_front_m / sh.front_m)})` : ''}</b>
         </div>
-        ${rows ? `<ul class="fp-cov-list">${rows}</ul>` : '<div class="fp-hintline">No camera sees this shelf front: reaches here cannot be measured.</div>'}`;
+        ${rows ? this.moreHtml(`<ul class="fp-cov-list">${rows}</ul>`, 'More: cameras on this shelf') : '<div class="fp-hintline">No camera sees this shelf front: reaches here cannot be measured.</div>'}`;
     }
 
     storeCoverageHtml() {
@@ -2733,7 +2741,7 @@
       const spd = (v, unit) => (v === null || v === undefined ? '<span class="fp-dash">&mdash;</span>' : `${v}${unit}`);
       return `<div class="fp-cov-title">Store coverage</div>
         <div class="fp-cov-big">${s.coverage_pct === null ? '—' : `${s.coverage_pct}%`}<small> of the floor is in view of a camera</small></div>
-        <div class="fp-kv">
+        ${this.moreHtml(`<div class="fp-kv">
           <span>Floor</span><b>${fmt1(s.floor_m2)} m²</b>
           <span>In view</span><b>${fmt1(s.covered_m2)} m²</b>
           <span>Blind spots</span><b>${fmt1(s.uncovered_m2)} m²</b>
@@ -2747,7 +2755,7 @@
         <div class="fp-cov-sub">Biggest blind spots</div>
         ${gaps ? `<ul class="fp-cov-list">${gaps}</ul>` : '<div class="fp-hintline">No blind spot of 1 m² or more.</div>'}
         <div class="fp-cov-sub">Floor each camera sees</div>
-        ${cams ? `<ul class="fp-cov-list">${cams}</ul>` : '<div class="fp-hintline">No camera is placed and switched on.</div>'}
+        ${cams ? `<ul class="fp-cov-list">${cams}</ul>` : '<div class="fp-hintline">No camera is placed and switched on.</div>'}`, 'More: blind spots and each camera')}
         <div class="fp-cov-title">Today per square metre</div>
         <div class="metric-pill-grid">
           <div class="metric-pill"><span class="metric-pill-label">Sales per m²</span><span class="metric-pill-val">${spd(sp && sp.sales_per_m2 !== null && sp.sales_per_m2 !== undefined ? `$${sp.sales_per_m2}` : null, '')}</span></div>
@@ -2759,8 +2767,7 @@
         <ul class="fp-cov-list" data-queue-list>${sp.queues.slice(0, 8).map((q) => `<li><span>${escapeHtml(q.name || q.zone_id)}</span>
           <span>${q.length_m === null || q.length_m === undefined ? 'not measured (no calibrated camera)' : `${fmt1(q.length_m)} m · ${q.people} ${q.people === 1 ? 'person' : 'people'}`}</span></li>`).join('')}</ul>` : ''}
         <div class="fp-hintline">Sales per m² needs the till (POS) connected; it is for the whole store, because the tills send product codes without departments. "Avg walk" is the distance a shopper walks while one calibrated camera follows them. Queue length is measured only by calibrated cameras.</div>
-        <div class="fp-cov-title">Print or save the map</div>
-        <div class="fp-field-row">
+        ${this.moreHtml(`<div class="fp-field-row">
           <div class="fp-field"><label for="fpExportScale">Scale</label>
             <select id="fpExportScale" name="fpExportScale">
               <option value="fit">Fit an A4 page</option><option value="fitA3">Fit an A3 page</option>
@@ -2769,7 +2776,7 @@
           <div class="fp-field fp-field-end"><button type="button" class="btn btn-secondary btn-xs" id="fpExportPng">${ico('download', { size: 'sm' })}Save picture</button></div>
         </div>
         <div class="fp-cov-actions"><button type="button" class="btn btn-secondary btn-xs" id="fpExportPrint">${ico('printer', { size: 'sm' })}Print to scale</button></div>
-        <div class="fp-hintline">True to scale: 1:100 means 1 cm on paper is 1 m in the store. The picture has a scale bar, so it stays measurable when printed at any size.</div>`;
+        <div class="fp-hintline">True to scale: 1:100 means 1 cm on paper is 1 m in the store. The picture has a scale bar, so it stays measurable when printed at any size.</div>`, 'Print or save the map')}`;
     }
 
     /** Zoom to a blind spot from the store coverage list. */
@@ -5174,6 +5181,14 @@
       window.storeFloorplanHUD = window.blueprintEditor;   // older inline handlers
     }
   }
+
+  // Simple / All settings changed: the inspector's "More" sections open or fold to match.
+  window.addEventListener('edge:view-mode', () => {
+    const ed = window.blueprintEditor;
+    const box = document.getElementById('fpCovBox');
+    if (box) box._html = null;
+    if (ed && typeof ed._refreshCoverageBoxes === 'function') { try { ed._refreshCoverageBoxes(); } catch (_) { /* map not ready */ } }
+  });
 
   // Start only after auth.js has checked the stored token (edgeAuth.onReady).
   if (window.edgeAuth && typeof window.edgeAuth.onReady === 'function') {

@@ -448,6 +448,11 @@ class SiteSettingsStore:
         self._lock = threading.RLock()
         self.overrides: Dict[str, Any] = {}
         self.changed: Dict[str, Dict[str, Any]] = {}   # key -> {"at", "by"}
+        # Values chosen automatically (services/automation.py, e.g. analysis
+        # speed for this hardware). A saved dashboard value always wins; an
+        # automatic one wins over the .env default.
+        self.auto: Dict[str, Any] = {}
+        self.auto_source: Dict[str, str] = {}
         self.loaded = False
 
     # ---------------------------------------------------------------- persistence
@@ -512,7 +517,37 @@ class SiteSettingsStore:
     # ---------------------------------------------------------------- effect
 
     def effective(self, key: str) -> Any:
-        return self.overrides[key] if key in self.overrides else ENV_DEFAULTS[key]
+        if key in self.overrides:
+            return self.overrides[key]
+        if key in self.auto:
+            return self.auto[key]
+        return ENV_DEFAULTS[key]
+
+    def set_auto(self, values: Dict[str, Any], source: str = "automatic") -> Dict[str, Tuple[Any, Any]]:
+        """Replace the automatic values (key -> value; a missing key = no automatic value).
+
+        Refused values are dropped with a warning (an automatic choice never
+        blocks the rest). Keys with a saved dashboard value keep it. Returns
+        {key: (old effective, new effective)} for what changed in effect.
+        """
+        clean: Dict[str, Any] = {}
+        for k, raw in (values or {}).items():
+            if k not in SPECS_BY_KEY:
+                continue
+            try:
+                clean[k] = validate_one(k, raw)
+            except (ValueError, KeyError) as exc:
+                logger.warning(f"Automatic value {k}={raw!r} refused ({exc})")
+        with self._lock:
+            before = {k: self.effective(k) for k in set(clean) | set(self.auto)}
+            self.auto = clean
+            self.auto_source = {k: source for k in clean}
+            diff = {k: (before[k], self.effective(k)) for k in before if before[k] != self.effective(k)}
+            if diff:
+                self.apply(set(diff))
+        for k, (a, b) in sorted(diff.items()):
+            logger.info(f"Automatic setting {k} ({source}): {a!r} -> {b!r}")
+        return diff
 
     def apply(self, changed_keys: Optional[set] = None) -> None:
         """Write every effective value onto ``settings``; tell caching consumers about changes."""
@@ -547,7 +582,7 @@ class SiteSettingsStore:
             effective = {s.key: self.effective(s.key) for s in SPECS}
             effective.update(clean)
             for k in resets:
-                effective[k] = ENV_DEFAULTS[k]
+                effective[k] = self.auto.get(k, ENV_DEFAULTS[k])
             if not errors:
                 _cross_check(effective, {**clean, **{k: None for k in resets}}, errors)
             if errors:
@@ -563,7 +598,7 @@ class SiteSettingsStore:
             # Changed = a different effective value, or the override was added / removed.
             diff: Dict[str, Tuple[Any, Any]] = {}
             for k in set(clean) | set(resets):
-                new = new_over[k] if k in new_over else ENV_DEFAULTS[k]
+                new = new_over[k] if k in new_over else self.auto.get(k, ENV_DEFAULTS[k])
                 if before[k] != new or (k in new_over) != (k in self.overrides):
                     diff[k] = (before[k], new)
             if not diff:
@@ -604,6 +639,10 @@ class SiteSettingsStore:
                 "key": spec.key, "group": spec.group, "label": spec.label, "help": spec.help,
                 "type": spec.kind, "value": self.effective(spec.key), "default": ENV_DEFAULTS[spec.key],
                 "overridden": spec.key in self.overrides,
+                # Chosen automatically for this box (shown as "Automatic"); a saved value wins.
+                "auto": spec.key in self.auto and spec.key not in self.overrides,
+                "auto_value": self.auto.get(spec.key),
+                "auto_source": self.auto_source.get(spec.key),
                 "min": spec.extra.get("min_nonzero", spec.min), "max": mx, "unit": spec.unit,
                 "zero_means": spec.extra.get("zero_means"),
                 "applies": spec.extra.get("applies", "live"),
@@ -614,6 +653,13 @@ class SiteSettingsStore:
         # What "Automatic (10% of disk)" means on this disk, so the dashboard can
         # tell whether switching to it (or resetting to it) lowers the limit.
         auto = _auto_cap_bytes(disk)
+        tz = items.get("SITE_TIMEZONE")
+        if tz is not None and not str(tz.get("value") or "").strip():
+            # No zone saved: the box's own zone is used (timeutil), so show it as automatic.
+            from app.services.timeutil import site_tz_source
+            src = site_tz_source()
+            if src.get("source") == "host":
+                tz.update(auto=True, auto_value=src["name"], auto_source="box clock")
         return {"settings": items, "groups": GROUP_KEYS, "group_labels": GROUP_LABELS,
                 "sections": SECTION_LABELS, "store_time": store_time(),
                 "disk": {**disk, "max_evidence_gb": most, "auto_evidence_cap_bytes": auto,

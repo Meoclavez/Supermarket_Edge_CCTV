@@ -230,7 +230,7 @@
         },
         render(d) {
           return checkRows('Look for theft on these cameras', 'cam', camRows(d.cameras, 'theft_detection'), { empty: 'No cameras yet. Add cameras first.' })
-            + numField('THEFT_MIN_CONFIDENCE', 'Alerts from confidence', pctOf(sv(d, 'THEFT_MIN_CONFIDENCE')), Object.assign(siteRange(d, 'THEFT_MIN_CONFIDENCE', true), { hint: 'Lower finds more but brings more false alarms. Check "False alarms by rule" in Loss prevention first.' }))
+            + numField('THEFT_MIN_CONFIDENCE', 'Alerts from confidence', pctOf(sv(d, 'THEFT_MIN_CONFIDENCE')), Object.assign(siteRange(d, 'THEFT_MIN_CONFIDENCE', true), { hint: 'Lower finds more but brings more false alarms. Check "Wrong alerts" in Security first.' }))
             + checkField('THEFT_EXIT_RULE_ENABLED', 'Check for leaving without passing a checkout', !!sv(d, 'THEFT_EXIT_RULE_ENABLED'), { hint: 'Needs ENTRANCE, EXIT and CHECKOUT store areas on the map.' });
         },
         async save(form, d) {
@@ -808,7 +808,7 @@
       title: 'Recorder picture quality',
       what: 'Upgrades a recorder\'s very small sub-streams (CIF) to D1, so the AI sees far-away shoppers.',
       why: 'Small pictures miss people at the far end of an aisle. It changes one channel at a time and can be undone.',
-      full: { go: 'settings:settings-recorder-streams', label: 'Recorder sub-streams', admin: true },
+      full: { go: 'settings:settings-recorder-streams', label: 'Camera picture quality', admin: true },
       setup: null,
     },
 

@@ -607,6 +607,88 @@ default grouped view, "Show every insight" = old list; badge = open topics. Test
 * **[`docs/supermarket_cctv/Supermarket_Edge_AI_CCTV_Hardware_and_Services_Guide.pdf`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/docs/supermarket_cctv/Supermarket_Edge_AI_CCTV_Hardware_and_Services_Guide.pdf):** Print-ready formal PDF document (5 pages, A4) detailing 32-camera deterministic mathematical sizing, single NVDEC decode throughput, 10-Pillar Foolproof Engineering Validation Matrix, itemized BOM, 32-channel store layout, and procurement checklist.
 * **[`docs/supermarket_cctv/Supermarket_Edge_AI_CCTV_Hardware_and_Services_Guide.html`](file:///home/meoclavezz/Projects-1/Supermarket_Edge_CCTV/docs/supermarket_cctv/Supermarket_Edge_AI_CCTV_Hardware_and_Services_Guide.html):** Paged-media HTML source for regenerating the 32-camera PDF specification document.
 
+## Simple / All settings (2026-10-29, SIMPLE MODE stream, not committed)
+
+Owner decision (brain #431): Simple is the default for everyone; owners/admins switch to "All settings" in the header.
+* **Mechanism**: `static/js/view_mode.js` (classic script in `<head>` after poll.js, sets `<html data-mode>` before first
+  paint; `window.edgeMode` = mode / set / reveal / isHidden / canSwitch; `localStorage edge_view_mode:<account id>` +
+  `:last`; operators forced to simple; `edge:view-mode` event). CSS (style.css): `html[data-mode="simple"] [data-advanced]
+  :not([data-revealed]):not([data-revealed] [data-advanced]) {display:none!important}`; `[data-simple-only]` hidden in All.
+  Mark anything advanced with `data-advanced` (static in index.html, or in a module's template).
+* **Deep links**: `edgeMode.reveal(id|node)` marks the target and its advanced ancestors `data-revealed` until the next
+  tab change (`edge:tab`), with a bottom note "Show all settings" / "Hide it again". Called by help.js go()
+  (openSettingsCard / openOnView / openCameraPart), analytics.js jumpTo + openDeviceManager; safety net:
+  `Element.prototype.scrollIntoView` reveals a hidden advanced element first. Every go() action (66 incl. Features
+  "Full settings") swept visible in Simple on a scratch box.
+* **What Simple hides**: Today (active shoppers, avg visit, notes, legend; cameras tile only when one is not working,
+  sales only when POS connected; top 2 recs; checklist hides done/optional steps; setup card = next step, hidden at
+  100%); Map (Walls/Labels/Grid/Blind spots switches, `deviceManagerCard`; inspector details under `<details class=
+  "fp-more">` via `moreHtml`, open in All); Insights (footfall sub-nav, AI summary, dismissed); Security (KPIs, tier
+  KPIs/chips, Live activity, Wrong alerts, Patterns, intros, Refresh, RA filters/audit); Settings: 13 cards
+  `data-advanced` (device, evidence, alerts, restricted areas, analysis, remote, remote video, pairing, push, devices,
+  recorder streams, backups, POS once connected); camera dialog: stream/credentials/fps/placement/analysis/etc.
+* **Theft preset** (site_settings.js `PRESETS`): Fewer 0.45/0.65/0.88, Balanced = null (box defaults), More
+  0.25/0.45/0.72; writes only THEFT_TIER_*_MIN. Simple shows only the preset row ("How many theft alerts").
+* **Restricted dialog** (restricted.js): "When it is guarded" Always / Outside store hours / Custom times (store hours
+  -> `arming {mode:'schedule', schedule_mode:'armed_outside', schedule: edgeAutomation.storeHours().rows,
+  source:'store_hours'}`); "How strict" Standard / High / Maximum (`STRICT`, Custom when hand-ticked); triggers under
+  `<details id="raFineTune">`; POIs and sensitivity `data-advanced`.
+* **Renames**: Loss prevention -> Security (tab id stays `loss`), Area & line alerts -> Area alerts, False alarms by rule
+  -> Wrong alerts, Live behaviour -> Live activity, Recorder sub-streams -> Camera picture quality, Evidence storage ->
+  Saved pictures and clips, Analysis speed -> Performance, System health -> System status, Appearance -> Colour theme
+  (phones only, <=760 px). Removed: Shopper profile card, dead selftest CSS.
+* **Automation contract**: mounts `#autoSuggestions`, `#settings-store-hours`, `#autoTuneStatus`; automation.css/js tags.
+* Tests: `tests/test_view_mode_static.py`; script-order tests in test_ui_design_system / test_web_delivery allow the sync
+  view_mode.js. Help: topic + guide `view-mode`. Docs: USER_MANUAL 1.6a, 2.8a; FEATURES.md.
+
+## Automations: store hours, self-tuning, confirm-first suggestions (2026-10-29, AUTOMATION stream, not committed)
+
+Owner decisions: brain #431. Service `app/services/automation.py`, routes `app/routes/automation.py`
+(prefix `/api/v1`), restart counter `app/services/camera_restarts.py`, UI `static/js/automation.js` +
+`static/css/automation.css` rendering into `#autoSuggestions` (Today), `#settings-store-hours`,
+`#autoTuneStatus` (System status); containers and script tags are in index.html (SIMPLE stream). No migration:
+state in `system_setup` keys `store_hours` ({learned, manual}) and `automation_state` ({dismissed, applied[50] with
+undo payloads, auto_tune}); audit rows in `restricted_area_audit` (actions store_hours_set, hours_rewrite,
+auto_apply, auto_dismiss, auto_undo, auto_tune; area NULL unless an area changed).
+* **Store hours (A2):** `observe_days` = per store-local hour, people first seen (customer_tracks >= 3 s), till
+  sales (distinct transaction_id), watched hours (heatmap_snapshots uptime >= 600 s/hour); `classify_day`: >= 5
+  sales -> hours with >= 5 % of the busiest sales hour; else needs >= 20 watched hours (when uptime is recorded),
+  busiest hour < 10 people = closed, open hours >= max(3, 15 % of peak). `aggregate`: last 14 days, >= 7 usable
+  = "learned", median per weekday (open floored / close ceiled to 30 min), closed only if every sample closed,
+  missing weekday estimated from all open days. Manual day wins; `store_hours_minutes()` is None until all 7 days
+  are known. Relearn every 6 h (AutomationService loop: 2 min after start, then every 10 min tick).
+  `window.edgeAutomation.storeHours()` -> null | {learnt, label "Mon–Fri 08:00–21:00, Sat–Sun …", rows (arming
+  schedule shape)}; event `edge:store-hours`.
+* **Store-hours arming (A3):** restricted.js saves `arming = {mode:"schedule", schedule_mode:"armed_outside",
+  schedule:rows, source:"store_hours"}`; `validate_arming` keeps `source` (only "store_hours"). On any change of
+  effective hours `on_hours_changed` rewrites every such area (closed every day -> `{mode:"always"}`), audit
+  `hours_rewrite`. Night watch: `NightWatchConfig.follow_store_hours`; `night_watch.windows()` = `closed_windows()`
+  (DST-correct wall times) when hours are known, else the camera's own start/end. PUT night-watch without the
+  field keeps the stored value (older dashboards / phone).
+* **Backup hour (A4):** `quietest_hour`: middle of the longest run of hours closed on every day, never 04:00
+  (db_maintenance), else the quietest footfall hour, else 03:00; DailyBackupScheduler reads `backup_hour()` each night.
+* **Storage (A5):** already automatic (EVIDENCE_MAX_GB 0 = 10 % of disk; backup budget 15 %); shown only.
+* **Analysis speed (A7):** `choose_rates(budget_per_sec, cameras, cpu, cpu_only, current_decode)`: busy = 40 % of
+  cameras, max fps = budget/busy rounded to 0.5 in [max(3, RESTRICTED_MIN_ANALYSIS_FPS), 10], idle = 10 % of the
+  budget per camera in [0.3, 1], decode = ceil(max(max fps, 5)) <= 10 and only moved by >= 2 fps (reconnects every
+  camera), pose share 0.6 (0.5 CPU-only). Applied via `site_settings.set_auto` (new auto layer: saved override >
+  automatic > .env; describe() has `auto`/`auto_value`/`auto_source`; reset goes back to automatic). Daily, 10 min
+  after the streaming-camera count changes, or until the first measurement. POST /automation/tune (admin).
+* **Stuck cameras (A9):** pipeline_supervisor restarts an alive worker ONLINE with no frame for 2x
+  `stall_seconds()`, at most 6/h and 5 min apart; dead and stuck restarts counted per store day (memory only).
+* **Suggestions** (GET /automation/suggestions; apply/dismiss/undo admin-only via require_admin; dismiss/undo
+  hide for 30 days): guard_hours (night watch cameras -> follow_store_hours; no night watch -> enable on
+  entrance/exit role cameras; restricted areas on a schedule with >= 70 % of armed time while closed, never
+  always-armed or day-guarded areas), less_sensitive (theft rule per camera from `review_outcome`: >= 5 reviewed,
+  >= 70 % FALSE_ALARM, factor x0.8 down to 0.5 in `CameraFeatureConfig.theft_rule_sensitivity`, pose_analytics
+  `_raise` divides that rule's min confidence by it; restricted triggers via `RA_STEPS`, never `RA_NEVER`
+  (unannounced_entry, tamper, people_count, wrong_door, announced_overstay) or tier critical), link_zone
+  (coverage_report: uncalibrated, placed, counted, enabled, top countable zone >= 60 % of its seen floor, zone not
+  linked, best camera per zone; others "check first"). Plan-gated per feature (night_watch, restricted_areas,
+  theft_detection).
+* Tests: `tests/test_automation.py` (20); updated test_night_watch, test_daily_backup, test_camera_roles, test_features for the new fields. Docs: USER_MANUAL 2.1a, 2.9, 3.1, 4.1; FEATURES Today / Night watch /
+  Settings rows.
+
 ## Restricted areas, high security (2026-10-28, BOX stream, not committed / not deployed)
 
 Owner request: restricted areas where movements are tracked and flagged instantly; entry without notice,

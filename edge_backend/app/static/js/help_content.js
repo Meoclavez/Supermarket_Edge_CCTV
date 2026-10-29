@@ -50,6 +50,26 @@
 
   // ---------------------------------------------------------------- "?" topics
   const topics = {
+    'view-mode': {
+      title: 'Simple and All settings',
+      text: ['The dashboard starts in the simple view: the everyday screens and settings, with fewer numbers. Nothing is switched off; the extra settings are only out of sight.',
+        'Owners and administrators can press the "Simple" button at the top to switch to "All settings" and see every option. Press it again to go back. Each person\'s choice is remembered on this device.',
+        'A guide, checklist step or "Full settings" button that needs a hidden setting shows it straight away, with a note at the bottom of the screen.'],
+      article: 'view-mode',
+    },
+    'store-hours': {
+      title: 'Store hours',
+      text: ['The box learns when the store is open from the shoppers the cameras see and the till sales, over the last 14 days. It needs 7 days before it shows the hours.',
+        'An administrator can change any day; a changed day stays as set until you press "Use learnt". The time zone, the nightly backup time and the storage sizes shown here are set automatically.',
+        'Night watch and restricted areas set to "Outside store hours" follow these hours by themselves.'],
+      article: 'store-hours',
+    },
+    'auto-suggestions': {
+      title: 'Suggestions',
+      text: ['Changes the box suggests from what it has measured: guard after hours, make one camera less jumpy after many wrong alerts, or link a camera to the area it mostly sees.',
+        'Nothing changes until an administrator presses Apply. Every change can be undone, and Dismiss hides a suggestion for 30 days. Alarms for restricted-area entry and camera tampering are never made less sensitive.'],
+      article: 'store-hours',
+    },
     'store-setup': {
       title: 'Store setup',
       text: ['Shows how complete the setup of each camera is for the purpose you gave it, and the next step to do. "N% DONE" counts only the required steps.',
@@ -65,7 +85,7 @@
     'needs-review': {
       title: 'Needs review',
       text: ['Up to five alerts waiting for a person to check. An alert is suspicious behaviour to look at, never a finding of theft.',
-        'Press Review to open it in Loss prevention and record what really happened.'],
+        'Press Review to open it in Security and record what really happened.'],
       article: 'review-alert',
     },
     'map-tools': {
@@ -121,7 +141,7 @@
       article: 'zones',
     },
     'zone-alerts': {
-      title: 'Area & line alerts',
+      title: 'Area alerts',
       text: ['Alerts when someone is inside a restricted area (for example the stockroom after closing) or crosses a line set to alert staff.',
         'They are set up per camera in Camera setup and are prompts to check, not theft findings. Press "Acknowledge" when someone has looked into it.'],
       article: 'area-line-alerts',
@@ -140,7 +160,7 @@
       article: 'night-watch',
     },
     'live-behaviour': {
-      title: 'Live behaviour',
+      title: 'Live activity',
       text: ['People the cameras are watching right now, for example a reach into a shelf or a hand at a pocket. These are live cues, not findings.',
         '"Watch live" opens the camera enlarged with the person outlined.'],
       article: 'review-alert',
@@ -152,7 +172,7 @@
       article: 'review-alert',
     },
     'false-alarms': {
-      title: 'False alarms by rule',
+      title: 'Wrong alerts',
       text: ['How often each check was wrong, from the outcomes staff recorded. A high rate means that check needs adjusting for this store; look here before lowering the theft confidence in Settings.'],
       article: 'review-alert',
     },
@@ -202,7 +222,7 @@
     'stream-quality': {
       title: 'Stream quality',
       text: ['Keep "Auto". It picks the smallest sub-stream that is at least D1 (704 x 576), which is enough for the AI and light on this device.',
-        'Very small CIF sub-streams (352 x 288) miss far-away shoppers: upgrade them in Settings > Recorder sub-streams.'],
+        'Very small CIF sub-streams (352 x 288) miss far-away shoppers: upgrade them in Settings > Camera picture quality.'],
       article: 'sub-streams',
     },
     'placement': {
@@ -260,7 +280,7 @@
     'alerts-detection': {
       title: 'Alerts and detection',
       text: ['How sensitive the alerts are and how soon the same alert can repeat. Every change applies at once.',
-        'Check "False alarms by rule" in Loss prevention before lowering "Theft minimum confidence (%)"; lower finds more but brings more false alarms.'],
+        'Check "Wrong alerts" in Security before lowering "Theft minimum confidence (%)"; lower finds more but brings more false alarms.'],
       article: 'evidence',
     },
     'theft-levels': {
@@ -292,7 +312,7 @@
       article: 'phone-alerts',
     },
     'sub-streams': {
-      title: 'Recorder sub-streams',
+      title: 'Camera picture quality',
       text: ['Many recorders ship with very small (CIF) sub-streams that are too small for reliable detection. This upgrades them to D1, one channel at a time, and puts a channel back if it does not work.',
         '"Check sub-streams" only reads the recorder. Save the recorder sign-in first (Store map > Dahua recorder > "Save sign-in").'],
       article: 'sub-streams',
@@ -485,9 +505,9 @@
       keywords: 'restricted stockroom after hours line crossing back door acknowledge alert',
       summary: 'Alerts when someone is somewhere they should not be, or crosses a line.',
       steps: ['Set up (administrators): in Camera setup, draw a restricted area with a schedule, or tick "Alert staff on crossing" on a line.',
-        'When one comes in: Loss prevention > "Area & line alerts". Look at the picture or watch the camera.',
+        'When one comes in: Security > "Area alerts". Look at the picture or watch the camera.',
         'Press "Acknowledge" when someone has looked into it.'],
-      go: 'loss', goLabel: 'Open Loss prevention',
+      go: 'loss', goLabel: 'Open Security',
     },
     {
       id: 'restricted-areas', title: 'Restricted areas: how they work',
@@ -496,7 +516,7 @@
       steps: ['An administrator sets up the area: a zone on the Store map or an area drawn on a camera, when it is armed, and which signs to flag.',
         'Before going in, tap "I\'m going in" (dashboard or phone). Tap "I\'m out" when you leave.',
         'While it is armed, someone inside without notice is an urgent alert with an evidence clip; running, pacing, crouching, reaching up high, too many people or a covered camera are flagged too.',
-        'Open each alert in Loss prevention > "Restricted areas" and record what happened.'],
+        'Open each alert in Security > "Restricted areas" and record what happened.'],
       tips: ['No faces are recognised and nobody is identified: the system only sees a person, their movement and their pose.',
         'Privacy masks always win: an area inside a privacy mask is refused.'],
       go: 'restricted', goLabel: 'Open Restricted areas',
@@ -505,7 +525,7 @@
       id: 'restricted-announce', title: "I'm going in / I'm out (announce entry)",
       keywords: "announce entry going in i'm going in im out leave restricted cash office stockroom safe staff contractor minutes countdown phone",
       summary: 'Tell the system you are entering a restricted area, so your visit is not an alert.',
-      steps: ['Tap "I\'m going in" at the top of any page or on the area in Loss prevention > "Restricted areas".',
+      steps: ['Tap "I\'m going in" at the top of any page or on the area in Security > "Restricted areas".',
         'Choose the area, how long (5 to 120 minutes, 15 by default), how many people and an optional note, then "Announce".',
         'Everyone sees "announced by you until 14:20" with a countdown.',
         'Tap "I\'m out" when you leave. Staying longer than announced (after a short grace time) is an alert.'],
@@ -549,7 +569,7 @@
       steps: ['Open the camera settings and scroll to "Night watch".',
         'Tick "Watch this camera at night", set "Start" and "End" in store time and tick the days.',
         'Press "Save night watch".'],
-      tips: ['Night events show in Loss prevention > "Night watch" and go to phones as high alerts.'],
+      tips: ['Night events show in Security > "Night watch" and go to phones as high alerts.'],
       go: 'cameras', goLabel: 'Open Cameras',
     },
     {
@@ -569,14 +589,14 @@
       id: 'review-alert', title: 'Review a theft alert',
       keywords: 'alert incident review evidence outcome false alarm acknowledge checking staff sent banner',
       summary: 'An alert is suspicious behaviour for a person to check, never a finding of theft.',
-      steps: ['Press "Review now" on the red banner, or open Loss prevention > "Review queue".',
+      steps: ['Press "Review now" on the red banner, or open Security > "Review queue".',
         'Look at the evidence picture (click it to enlarge) and the live camera.',
         'Press "I\'m checking" so colleagues know someone has it.',
         'If someone goes to the floor, press "Mark: staff sent".',
         'When it is over, press "Record outcome", choose what happened and press "Save outcome".'],
       tips: ['Always record an outcome, including "False alarm". It keeps the false-alarm rate honest and improves the checks.',
         'Evidence is deleted oldest first. To keep it, open it with "Open in new tab" and save it elsewhere.'],
-      go: 'loss', goLabel: 'Open Loss prevention',
+      go: 'loss', goLabel: 'Open Security',
     },
     {
       id: 'reading-figures', title: 'Reading Today and the figures',
@@ -640,10 +660,10 @@
       keywords: 'cif d1 sub-stream resolution recorder dahua far away missed small picture',
       summary: 'Small CIF pictures miss far-away shoppers; D1 fixes that.',
       steps: ['Save the recorder sign-in first (Store map > "Dahua recorder" > "Save sign-in").',
-        'Settings > Recorder sub-streams: choose the recorder and press "Check sub-streams".',
+        'Settings > Camera picture quality: choose the recorder and press "Check sub-streams".',
         'Press "Upgrade CIF sub-streams to D1" and confirm.'],
       tips: ['"Restore previous stream settings" undoes the change.'],
-      go: 'settings:settings-recorder-streams', goLabel: 'Open Recorder sub-streams',
+      go: 'settings:settings-recorder-streams', goLabel: 'Open Camera picture quality',
     },
     {
       id: 'online-access', title: 'Online access (away from the store)', role: 'admin',
@@ -708,6 +728,31 @@
       go: 'cameras', goLabel: 'Open Cameras',
     },
     {
+      id: 'store-hours', title: 'Store hours and automatic settings',
+      keywords: 'store hours opening hours closing learnt automatic time zone backup time storage suggestions apply undo guard after hours',
+      summary: 'The box learns your opening hours and sets the time zone, backup time, storage and analysis speed by itself.',
+      steps: ['Settings > Store hours shows the opening hours the box learnt from shoppers and till sales. It needs 7 days of data first.',
+        'To change a day, press "Change hours", edit the day and save. Press "Use learnt" to go back to the learnt hours.',
+        'The time zone, nightly backup time (the quietest hour), storage sizes and analysis speed are chosen automatically. You can override them in All settings.',
+        'On Today, Suggestions offer to guard after hours, calm a camera with many wrong alerts, or link cameras to the areas they see. Nothing changes until you press Apply, and Undo puts it back.'],
+      tips: ['Only owners and administrators can apply suggestions or change the hours.',
+        'Restricted-area entry and camera-tamper alarms are never made less sensitive automatically.'],
+      go: 'settings:settings-store-hours', goLabel: 'Open Store hours',
+    },
+    {
+      id: 'view-mode', title: 'Simple and All settings',
+      keywords: 'simple view all settings advanced more options hidden setting missing where is switch show every setting',
+      summary: 'The simple view shows the everyday settings; All settings shows every option.',
+      steps: ['Everyone starts in the simple view: Today shows the main numbers, Settings shows Store, Phone alerts, Accounts, Help and support, iKorex service and System status.',
+        'Owners and administrators: press "Simple" at the top of the page to switch to "All settings". Press it again to go back.',
+        'In the simple view, theft alerts are one choice in Settings: Fewer alerts, Balanced or More alerts.',
+        'A restricted area is set with "When it is guarded" and "How strict"; "Fine-tune triggers" holds every trigger.',
+        'Guides and "Full settings" buttons always open the right control, even when it is normally hidden. A note at the bottom offers "Show all settings".'],
+      tips: ['Operators always see the simple view: they do not change setup.',
+        'On the Store map, details such as each camera\'s zones and the blind-spot list are under "More".'],
+      go: 'settings:settings-store', goLabel: 'Open Settings',
+    },
+    {
       id: 'features-tab', title: 'The Features tab: every feature on one page',
       keywords: 'features list tab overview easy setup full settings needs setup status on off plan admin',
       summary: 'Everything the system can do, in plain words, with whether it is working and the quickest way to set it up.',
@@ -730,7 +775,7 @@
       steps: ['Tick the cameras that should look for theft (usually aisles, high-value areas and exits).',
         'Keep "Alerts from confidence" at 30 % to start; raise it if there are many false alarms.',
         'Draw product shelves in Camera setup so reaches into shelves can be checked.',
-        'When an alert comes in: Loss prevention > Review queue, then record what really happened.'],
+        'When an alert comes in: Security > Review queue, then record what really happened.'],
       go: 'feature-setup:theft-alerts', goLabel: 'Open easy setup',
     },
     {
@@ -749,7 +794,7 @@
       steps: ['Open Camera setup for the camera that sees the place.',
         'Draw a "Restricted area" and set its hours, or draw a "Tripwire" and tick "Alert staff on crossing".',
         'Switch each one on or off here, and choose how soon the same alert may repeat.',
-        'Alerts show in Loss prevention > "Area & line alerts"; press "Acknowledge" once checked.'],
+        'Alerts show in Security > "Area alerts"; press "Acknowledge" once checked.'],
       go: 'feature-setup:area-line-alerts', goLabel: 'Open easy setup',
     },
     {
@@ -769,7 +814,7 @@
       steps: ['Choose a camera that sees a door or the shop floor.',
         'Tick "Watch this camera at night" and set the start and end in store time (an end before the start runs into the next morning).',
         'Tick the nights it starts on and press Save. Repeat for other cameras.',
-        'Night events show in Loss prevention > "Night watch" and go to phones.'],
+        'Night events show in Security > "Night watch" and go to phones.'],
       go: 'feature-setup:night-watch', goLabel: 'Open easy setup',
     },
     {

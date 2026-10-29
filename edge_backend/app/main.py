@@ -197,6 +197,14 @@ async def lifespan(app: FastAPI):
     except Exception as exc:  # never block the store system
         startup_log.exception(f"Restricted areas failed to start: {exc}")
 
+    # 4a2. Automatic set-up: learnt store hours, analysis speed, suggestions (automation.py).
+    from .services.automation import automation as automation_service
+    try:
+        if not paused:
+            await automation_service.start()
+    except Exception as exc:  # never block the store system
+        startup_log.exception(f"Automation failed to start: {exc}")
+
     # 4b. Recorded heatmap history: hourly snapshots, daily roll-ups, backfill.
     from .services.heatmap_history import heatmap_recorder
     try:
@@ -299,6 +307,7 @@ async def lifespan(app: FastAPI):
         # Before the pipeline: its final partial-hour record reads the live engine.
         await heatmap_recorder.stop()
         await restricted_area_service.stop()
+        await automation_service.stop()
         await pipeline_supervisor.stop()
         await asyncio.to_thread(pose_analytics.stop)
         await remote_access_service.stop()
@@ -428,6 +437,10 @@ from .routes import restricted_areas as restricted_areas_routes  # noqa: E402
 
 app.include_router(restricted_areas_routes.status_router)
 app.include_router(restricted_areas_routes.router)
+# Automatic set-up: store hours, chosen values, suggestions (routes/automation.py).
+from .routes import automation as automation_routes  # noqa: E402
+
+app.include_router(automation_routes.router)
 
 # Mount Static Files
 STATIC_DIR = Path(__file__).resolve().parent / "static"

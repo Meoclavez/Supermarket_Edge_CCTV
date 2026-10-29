@@ -1,7 +1,7 @@
 /**
  * Edge AI CCTV - dashboard controller
  *
- * Owns: navigation (Today / Cameras / Store map / Insights / Loss prevention,
+ * Owns: navigation (Today / Cameras / Store map / Insights / Security,
  * Settings behind the header gear) with redirects for the old hashes, the
  * header, the live camera matrix, the camera configuration modal, the
  * "Shoppers & footfall" insights view (visitors by hour, journey, areas), the
@@ -213,6 +213,7 @@ document.addEventListener('error', (e) => {
 /** Scroll a section into view at once (no smooth scroll, so tests can measure). */
 function jumpTo(id) {
   const node = el(id);
+  if (node && window.edgeMode) window.edgeMode.reveal(node);   // Simple view: show it if it is an advanced card
   if (node) node.scrollIntoView({ behavior: 'instant', block: 'start' });
   return false;
 }
@@ -298,6 +299,7 @@ function openDeviceManager() {
   setTimeout(() => {
     const card = el('deviceManagerCard');
     if (card) {
+      if (window.edgeMode) window.edgeMode.reveal(card);   // the device manager is an All settings card
       card.scrollIntoView({ behavior: 'instant', block: 'start' });
       card.classList.add('flash-highlight');
       setTimeout(() => card.classList.remove('flash-highlight'), 1600);
@@ -530,6 +532,8 @@ async function loadPosCard() {
   if (!body) return;
   const s = await getJSON('/api/v1/analytics/pos/status', null);
   if (!s) { body.innerHTML = emptyState('Sales data status is unavailable: the server did not respond.'); return; }
+  // Simple view: the card is a setup step until the tills are connected, then it moves to All settings.
+  ['settings-pos', 'jumpPos'].forEach((id) => { const n = el(id); if (n) n.toggleAttribute('data-advanced', !!s.connected); });
   if (badge) {
     badge.textContent = s.connected ? 'CONNECTED' : 'NOT CONNECTED';
     badge.classList.toggle('metric-unobserved', !s.connected);
@@ -2226,11 +2230,6 @@ async function initOrUpdateCharts() {
       'This ranking needs shelf reaches. Draw product shelf areas in Camera setup and turn on shelf interaction for that camera.');
   } else {
     renderFrictionZones(observedZones);
-  }
-
-  const demo = funnel.demographics;
-  if (!demo || demo.available === false) {
-    showPanelEmptyState(null, (demo && demo.reason) || 'Shopper profile is not measured on this system (no age or basket classifier is enabled).', 'demographicsChart');
   }
 }
 

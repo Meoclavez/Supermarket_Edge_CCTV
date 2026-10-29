@@ -839,7 +839,7 @@ def seconds_until_daily_backup(now_local: datetime, hour: int = 3) -> float:
 
 
 class DailyBackupScheduler:
-    """Takes an automatic snapshot every night at 03:00 store time.
+    """Takes an automatic snapshot every night in the store's quietest hour (03:00 by default).
 
     Uses the "auto" tag, so an unchanged database is skipped (content dedupe)
     and retention keeps one per day for BACKUP_KEEP_DAILY_DAYS. The store
@@ -873,7 +873,15 @@ class DailyBackupScheduler:
         from app.services.timeutil import local_now
 
         while True:
-            await asyncio.sleep(seconds_until_daily_backup(local_now()))
+            # The quietest hour (services/automation.py: the middle of the hours the
+            # store is closed, else the quietest footfall hour); 03:00 without data.
+            try:
+                from app.services.automation import backup_hour
+
+                hour = backup_hour()
+            except Exception:  # noqa: BLE001
+                hour = 3
+            await asyncio.sleep(seconds_until_daily_backup(local_now(), hour))
             try:
                 res = await asyncio.to_thread(self._service.create_backup, "auto")
                 if res.get("status") == "skipped":

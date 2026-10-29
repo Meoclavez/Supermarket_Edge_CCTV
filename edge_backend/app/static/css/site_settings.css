@@ -19,7 +19,9 @@
 .ss-err:empty { display: none; }
 .ss-preview { font-size: 12px; color: var(--text-soft); margin-top: 2px; }
 .ss-preview.form-status-error { color: var(--rose); }
-.ss-actions, .ss-form > .form-status, .ss-form > .ra-hint { grid-column: 1 / -1; }
+.ss-actions, .ss-form > .form-status, .ss-form > .ra-hint, .ss-form-body > .ra-hint { grid-column: 1 / -1; }
+/* The fields' wrapper (hidden as a whole in the simple view for theft levels) keeps the form grid. */
+.ss-form-body { display: contents; }
 .ss-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .ss-confirm { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; font-size: 12px; color: var(--text-soft); }
 .ss-usage { display: flex; gap: 8px 24px; flex-wrap: wrap; font-size: 12px; color: var(--text-soft); margin-bottom: 12px; }
@@ -27,7 +29,7 @@
 
 /* Theft alert levels (#settings-theft-alerts): section headings in the form and the policy explainer. */
 .ss-section { grid-column: 1 / -1; margin-top: 8px; padding-top: 12px; border-top: 1px solid var(--border); }
-.ss-form > .ss-section:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+.ss-form-body > .ss-section:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
 .ss-section-title { margin: 0; font-size: 14px; font-weight: 600; color: var(--text); }
 .ss-section-note { margin: 4px 0 0; }
 .ta-explain { display: flex; flex-direction: column; gap: 8px; margin: 0 0 16px; padding: 12px 16px; border-radius: var(--radius-md);
@@ -52,3 +54,7 @@
 @media (pointer: coarse) {
   .ta-more summary { min-height: 40px; }
 }
+
+/* Theft alert levels: Fewer / Balanced / More (site_settings.js presetHtml). */
+.ta-presets { margin: 4px 0 12px; }
+.ta-preset-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }

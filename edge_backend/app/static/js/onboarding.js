@@ -128,8 +128,11 @@
         if (!ok(d.site)) return unknown(d.site);
         const s = d.site.data.settings || {};
         const name = s.STORE_NAME && String(s.STORE_NAME.value || '').trim();
-        const tz = s.SITE_TIMEZONE && String(s.SITE_TIMEZONE.value || '').trim();
-        if (name && tz) return { state: 'done', detail: `${name} · ${tz}` };
+        const tzSet = s.SITE_TIMEZONE && String(s.SITE_TIMEZONE.value || '').trim();
+        // An unset zone is taken from the box's clock (automatic), which also counts.
+        const tzAuto = !tzSet && s.SITE_TIMEZONE && s.SITE_TIMEZONE.auto && String(s.SITE_TIMEZONE.auto_value || '').trim();
+        const tz = tzSet || tzAuto;
+        if (name && tz) return { state: 'done', detail: `${name} · ${tz}${tzAuto ? ' (automatic)' : ''}` };
         return { state: name || tz ? 'partial' : 'todo', detail: name ? 'Pick the store\'s time zone.' : 'Enter the store name.', go: 'settings:settings-store', goLabel: 'Open Store settings' };
       },
       go: 'settings:settings-store',
@@ -431,18 +434,18 @@
       const btnCls = s.state === 'done' ? 'btn btn-sm btn-ghost' : isNext ? 'btn btn-sm btn-primary' : 'btn btn-sm';
       const label = s.state === 'done' ? 'Open' : s.goLabel;
       return `
-        <li class="gs-step gs-${esc(s.state)}${isNext ? ' gs-next' : ''}">
+        <li class="gs-step gs-${esc(s.state)}${isNext ? ' gs-next' : ''}"${s.state === 'done' || (s.optional && !isNext) ? ' data-advanced' : ''}>
           <span class="gs-icon" aria-hidden="true">${ico(STATE_ICON[s.state] || 'circle', 'md')}</span>
           <div class="gs-main">
             <div class="gs-step-title"><span class="gs-num">${i + 1}.</span> ${esc(s.title)}
               ${s.optional ? '<span class="badge badge-neutral">Optional</span>' : ''}
               <span class="sr-only">: ${esc(STATE_WORD[s.state] || '')}</span></div>
-            <div class="gs-why">${esc(s.why)}</div>
+            <div class="gs-why"${isNext ? '' : ' data-advanced'}>${esc(s.why)}</div>
             <div class="gs-detail">${esc(s.detail || '')}</div>
           </div>
           <div class="gs-actions">
             ${s.go ? `<button type="button" class="${btnCls} gs-go" data-gs-go="${esc(s.id)}">${esc(label)}</button>` : ''}
-            ${s.card ? `<button type="button" class="link-btn gs-card-link" data-help-go="feature-setup:${esc(s.card)}" title="Open this feature's easy setup on the Features tab">Easy setup</button>` : ''}
+            ${s.card ? `<button type="button" class="link-btn gs-card-link" data-advanced data-help-go="feature-setup:${esc(s.card)}" title="Open this feature's easy setup on the Features tab">Easy setup</button>` : ''}
           </div>
         </li>`;
     }).join('');
@@ -467,6 +470,7 @@
         <ol class="gs-list" id="gsList"${collapsed ? ' hidden' : ''}>${rows}</ol>
         <div class="gs-foot">
           ${hiddenByPlan ? `<span class="gs-note">${plural(hiddenByPlan, 'step')} hidden: not included in your iKorex plan.</span>` : ''}
+          ${steps.some((s) => s.state === 'done' || s.optional) ? '<span class="gs-note" data-simple-only data-admin-only>Finished and optional steps show under All settings.</span>' : ''}
           <button type="button" class="link-btn" data-gs="help">Open Help</button>
         </div>
       </section>`;
@@ -529,7 +533,7 @@
     {
       title: 'Welcome to your store dashboard',
       body: ['This system does three things, all on this device in your store:'],
-      list: ['Loss prevention: it flags suspicious behaviour for staff to check. An alert is never proof of theft.',
+      list: ['Security: it flags suspicious behaviour for staff to check. An alert is never proof of theft.',
         'Store analysis: visitors, time spent, entrances and shelf reaches, turned into recommendations.',
         'Customer heatmaps: where shoppers walk, stop and touch shelves.'],
       after: 'A dash means "not measured yet". Every figure comes from what the cameras saw; nothing is guessed.',
@@ -541,7 +545,7 @@
         'Cameras: live video and each camera\'s settings.',
         'Store map: the plan of the store, cameras and live shoppers.',
         'Insights: recommendations, footfall and heatmap history.',
-        'Loss prevention: alerts to review, area and line alerts, night watch.',
+        'Security: alerts to review, area and line alerts, night watch.',
         'Features: everything the system can do, with easy setup.',
         'Settings (the gear): phones, accounts, store settings, backups.'],
     },

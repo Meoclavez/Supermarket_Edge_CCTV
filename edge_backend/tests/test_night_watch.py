@@ -591,12 +591,12 @@ def test_settings_round_trip_and_survive_a_restart(api):
             "when_dark": True, "sensitivity": "high", "cooldown_sec": 300}
     r = api.put(f"/api/v1/cameras/{CAM}/night-watch", json=body)
     assert r.status_code == 200, r.text
-    assert r.json()["config"] == body and r.json()["configured"] is True
+    assert r.json()["config"] == {**body, "follow_store_hours": False} and r.json()["configured"] is True
 
     feature_manager.remove_camera(CAM)                   # cold cache, as after a restart
     cfg = feature_manager.get_setting(CAM, "night_watch")
     assert cfg.enabled and cfg.start == "21:30" and cfg.days == ["mon", "tue", "sat"]
-    assert api.get(f"/api/v1/cameras/{CAM}/night-watch").json()["config"] == body
+    assert api.get(f"/api/v1/cameras/{CAM}/night-watch").json()["config"] == {**body, "follow_store_hours": False}
 
     # Clients that only know the toggles (older dashboard, phone app) keep it.
     api.put(f"/api/v1/cameras/{CAM}/features", json={"people_counting": True, "shelf_interaction": False,
@@ -605,7 +605,7 @@ def test_settings_round_trip_and_survive_a_restart(api):
     api.put(f"/api/v1/cameras/{CAM}", json={**cam, "features": {"people_counting": True,
                                                                  "shelf_interaction": True,
                                                                  "theft_detection": True}})
-    assert api.get(f"/api/v1/cameras/{CAM}/night-watch").json()["config"] == body
+    assert api.get(f"/api/v1/cameras/{CAM}/night-watch").json()["config"] == {**body, "follow_store_hours": False}
 
     assert api.put(f"/api/v1/cameras/{CAM}/night-watch", json={**body, "start": "24:10"}).status_code == 422
     assert api.put("/api/v1/cameras/nope/night-watch", json=body).status_code == 404

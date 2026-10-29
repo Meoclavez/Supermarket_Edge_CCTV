@@ -150,7 +150,7 @@ def test_apply_defaults_semantics(api):
                                "person_max_frame_fraction": 0.6, "night_watch": None,
                                "decode_max_width": None, "stream_quality": None,
                                 "static_figure_filter": True, "static_figure_seconds": None, "theft_clip": False,
-                                "analysis_priority": None, "max_analysis_fps": None}
+                                "analysis_priority": None, "max_analysis_fps": None, "theft_rule_sensitivity": {}}
     assert api.get("/api/v1/cameras/cr_aisle").json()["role"] == "aisle"
 
     # The operator switches theft off afterwards...
@@ -168,7 +168,7 @@ def test_apply_defaults_semantics(api):
                                "person_max_frame_fraction": None, "night_watch": None,
                                "decode_max_width": None, "stream_quality": None,
                                 "static_figure_filter": True, "static_figure_seconds": None, "theft_clip": False,
-                                "analysis_priority": None, "max_analysis_fps": None}
+                                "analysis_priority": None, "max_analysis_fps": None, "theft_rule_sensitivity": {}}
     assert feature_manager.is_enabled("cr_aisle", "shelf_interaction") is False
     # Clearing the role leaves the toggles alone.
     out = _role(api, "cr_aisle", None)

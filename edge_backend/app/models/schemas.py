@@ -139,6 +139,10 @@ class NightWatchConfig(BaseModel):
     when_dark: bool = Field(False, description="Also armed while the camera is in IR / low light")
     sensitivity: str = Field("medium", description="low | medium | high")
     cooldown_sec: int = Field(120, ge=10, le=3600, description="Per-camera quiet time after an event")
+    # "Guard after hours" (services/automation.py): armed whenever the store is
+    # closed by its learnt or edited store hours; start/end/days are then used
+    # only while no store hours are known.
+    follow_store_hours: bool = Field(False, description="Armed outside the store's opening hours")
 
     @field_validator("start", "end")
     @classmethod
@@ -249,6 +253,24 @@ class CameraFeatureConfig(BaseModel):
     )
     # Night watch schedule and options; None = never configured (off).
     night_watch: Optional[NightWatchConfig] = None
+    # Per theft rule on this camera: < 1 = less sensitive (the rule's minimum
+    # confidence is divided by it). Set by "Learn from wrong alerts"
+    # (services/automation.py) after an administrator confirms; empty = as usual.
+    theft_rule_sensitivity: Dict[str, float] = Field(default_factory=dict)
+
+    @field_validator("theft_rule_sensitivity", mode="before")
+    @classmethod
+    def _rule_sensitivity(cls, v: Any) -> Dict[str, float]:
+        out: Dict[str, float] = {}
+        for k, f in (v or {}).items():
+            try:
+                f = float(f)
+            except (TypeError, ValueError):
+                continue
+            key = str(k).strip().upper()[:40]
+            if key and 0.3 <= f < 1.0:
+                out[key] = round(f, 3)
+        return out
 
 
 class HardwareProfile(BaseModel):

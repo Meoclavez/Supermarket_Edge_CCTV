@@ -178,8 +178,65 @@ def wall_ts(d: date, hhmm: str) -> float:
     return naive.timestamp()   # host zone: mktime, per-date offset
 
 
+def _wall_minutes(d: date, minutes: int) -> float:
+    """Epoch seconds of ``minutes`` after store-local midnight of ``d`` (1440 = next midnight)."""
+    extra, minutes = divmod(int(minutes), 1440)
+    return wall_ts(d + timedelta(days=extra), f"{minutes // 60:02d}:{minutes % 60:02d}")
+
+
+def closed_windows(hours: dict, around_ts: float, days_back: int = 1,
+                   days_ahead: int = 8) -> list[tuple[float, float]]:
+    """When the store is closed near ``around_ts``: merged (start, end) epoch pairs.
+
+    ``hours`` maps mon..sun to ``(open_min, close_min)`` (a close at or before
+    the open runs past midnight) or None for a closed day. Built from wall-clock
+    times per date, so DST nights are as long as the clock says.
+    """
+    d0 = local_dt(around_ts).date()
+    first, last = d0 - timedelta(days=days_back + 1), d0 + timedelta(days=days_ahead + 1)
+    opened: list[tuple[float, float]] = []
+    d = first
+    while d <= last:
+        spec = hours.get(DAY_KEYS[d.weekday()])
+        if spec:
+            o, c = int(spec[0]), int(spec[1])
+            s = _wall_minutes(d, o)
+            e = _wall_minutes(d, c if c > o else c + 1440)
+            if e > s:
+                opened.append((s, e))
+        d += timedelta(days=1)
+    opened.sort()
+    out: list[tuple[float, float]] = []
+    cursor = _wall_minutes(first, 0)
+    end = _wall_minutes(last + timedelta(days=1), 0)
+    for s, e in opened:
+        if s > cursor:
+            out.append((cursor, s))
+        cursor = max(cursor, e)
+    if end > cursor:
+        out.append((cursor, end))
+    return out
+
+
+def _store_hours() -> Optional[dict]:
+    try:
+        from app.services.automation import store_hours_minutes
+
+        return store_hours_minutes()
+    except Exception:  # noqa: BLE001 - unknown hours: the camera's own schedule applies
+        return None
+
+
 def windows(cfg, around_ts: float, days_back: int = 1, days_ahead: int = 8) -> list[tuple[float, float]]:
-    """The schedule's windows near ``around_ts`` as merged (start, end) epoch pairs."""
+    """The schedule's windows near ``around_ts`` as merged (start, end) epoch pairs.
+
+    With ``follow_store_hours`` and known store hours, the windows are the
+    times the store is closed; otherwise the camera's own start/end/days.
+    """
+    if getattr(cfg, "follow_store_hours", False):
+        hours = _store_hours()
+        if hours is not None:
+            return closed_windows(hours, around_ts, days_back, days_ahead)
     days = set(getattr(cfg, "days", None) or [])
     if not days:
         return []
@@ -223,6 +280,8 @@ def next_transitions(cfg, ts: float) -> dict:
 
 
 def window_label(cfg) -> str:
+    if getattr(cfg, "follow_store_hours", False) and _store_hours() is not None:
+        return "Outside store hours"
     return f"{cfg.start}–{cfg.end}"
 
 

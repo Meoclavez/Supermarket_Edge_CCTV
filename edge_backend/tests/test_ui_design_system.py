@@ -237,8 +237,12 @@ def test_icons_js_loads_before_every_other_dashboard_script(page):
     html = (STATIC / page).read_text(encoding="utf-8")
     srcs = _script_srcs(html)
     assert srcs[0] == "/static/js/auth.js", srcs
-    # index.html: poll.js (fetch wrapper, not deferred) sits between auth.js and icons.js.
-    rest = srcs[2:] if page == "index.html" and srcs[1] == "/static/js/poll.js" else srcs[1:]
+    # index.html: poll.js (fetch wrapper) and view_mode.js (Simple / All settings before the
+    # first paint), both not deferred, sit between auth.js and icons.js.
+    rest = srcs[1:]
+    if page == "index.html":
+        assert srcs[1:3] == ["/static/js/poll.js", "/static/js/view_mode.js"], srcs
+        rest = srcs[3:]
     assert rest[0] == "/static/js/icons.js", srcs
     assert re.search(r'<script src="/static/js/icons\.js\?v=[0-9.]+" defer></script>', html)
     assert "fonts.googleapis.com" not in html

@@ -337,7 +337,7 @@
     return `<h3 class="pa-h">Who gets alerts</h3>
       ${warn}
       <div class="pr-hint">An alert goes to every phone of the <b>first-priority</b> people (at least ${roster.min_first_priority}).
-        If nobody acknowledges it in time, the <b>backup</b> people get it too. Acknowledge from the notification or on the Loss prevention tab.</div>
+        If nobody acknowledges it in time, the <b>backup</b> people get it too. Acknowledge from the notification or on the Security tab.</div>
       <div class="us-table-wrap"><table class="us-table pa-table">
         <thead><tr><th>Person</th><th>Role</th><th>Alerts</th><th>Phones</th></tr></thead>
         <tbody>${rows}</tbody></table></div>
@@ -355,7 +355,7 @@
           <div class="pa-inline"><input id="paEscalate" type="number" class="form-input" min="${(lim.escalate_after_min || {}).min || 1}"
             max="${(lim.escalate_after_min || {}).max || 60}" step="1" value="${esc(d.escalate_after_min)}" ${dis}><span>min without acknowledgement</span></div></div>
         <div class="fp-field"><label class="pa-check"><input type="checkbox" id="paNight" ${d.night_intrusion ? 'checked' : ''} ${dis}> Night watch intrusions</label>
-          <label class="pa-check"><input type="checkbox" id="paArea" ${d.area_alerts ? 'checked' : ''} ${dis}> Area &amp; line alerts</label>
+          <label class="pa-check"><input type="checkbox" id="paArea" ${d.area_alerts ? 'checked' : ''} ${dis}> Area alerts</label>
           <label class="pa-check"><input type="checkbox" id="paRestricted" ${d.restricted_alerts !== false ? 'checked' : ''} ${dis}> Restricted area alerts (Critical goes to every alert phone at once, even in quiet hours)</label></div>
         <div class="fp-field"><label class="pa-check"><input type="checkbox" id="paWatchdog" ${d.watchdog_enabled ? 'checked' : ''} ${dis}> Alert if the store's CCTV goes offline</label>
           <div class="pa-inline"><span>after</span><input id="paWatchdogMin" type="number" class="form-input" min="${(lim.watchdog_offline_min || {}).min || 5}"

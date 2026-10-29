@@ -2348,16 +2348,12 @@ input[type="file"]::file-selector-button:hover { background: var(--surface-2); }
 .evidence-thumb-empty { flex: 0 0 180px; font-size: 12px; color: var(--text-dim);
   border: 1px dashed var(--border); border-radius: var(--radius-sm); padding: 8px; }
 
-.selftest-results { position: fixed; bottom: 0; left: 0; right: 0; max-height: 45vh; overflow: auto; margin: 0; padding: 12px;
-  background: var(--term-bg); color: var(--term-fg); font: 12px/1.5 var(--font-mono); z-index: 99999; white-space: pre-wrap; }
-
 /* ==========================================================================
    v2.2 navigation, Today, Insights shell, Settings cards, phone layout
    ========================================================================== */
 
 .empty-action { margin-left: 8px; }
 .funnel-list { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
-.demographics-chart { height: 220px; }
 
 /* Cameras view */
 .camera-card-titles { min-width: 0; }
@@ -2478,8 +2474,13 @@ input[type="file"]::file-selector-button:hover { background: var(--surface-2); }
   .settings-jump > * { flex: 0 0 auto; }
 }
 
-/* Settings > Appearance */
+/* Settings > Colour theme: only on phones, where the header switch is hidden to make room. */
 .appearance-row { display: flex; flex-wrap: wrap; gap: 8px; }
+#settings-appearance, .settings-jump [data-phone-only] { display: none; }
+@media (max-width: 760px) {
+  #settings-appearance { display: block; }
+  .settings-jump [data-phone-only] { display: inline-flex; }
+}
 
 @media (max-width: 760px) {
   /* Room for the store name: the theme switch lives in Settings > Appearance on phones. */
@@ -2527,3 +2528,25 @@ input[type="file"]::file-selector-button:hover { background: var(--surface-2); }
   border-radius: var(--radius-md); padding: 8px 12px; margin: 8px 0; font-size: 12px; }
 .setup-dups-title { font-weight: 600; color: var(--amber); }
 .setup-dups ul { margin: 4px 0 8px; padding-left: 16px; }
+
+/* ==========================================================================
+   Simple / All settings (js/view_mode.js). Simple hides everything marked
+   data-advanced, except what a link revealed (data-revealed, until the tab changes).
+   ========================================================================== */
+html[data-mode="simple"] [data-advanced]:not([data-revealed]):not([data-revealed] [data-advanced]) { display: none !important; }
+html[data-mode="all"] [data-simple-only] { display: none !important; }
+.view-mode-toggle[hidden] { display: none; }   /* .btn sets display, which beats the hidden attribute */
+.view-mode-toggle .icon { flex: none; }
+.view-mode-toggle[aria-pressed="true"] { background: var(--accent-bg); border-color: var(--accent-border); color: var(--accent-text); }
+.mode-reveal-note { position: fixed; z-index: 900; left: 50%; bottom: 16px; transform: translateX(-50%); display: flex; align-items: center;
+  flex-wrap: wrap; gap: 8px; max-width: calc(100vw - 32px); padding: 8px 12px; border-radius: var(--radius-md);
+  background: var(--surface); border: 1px solid var(--accent-border); box-shadow: var(--shadow-overlay); font-size: 13px; color: var(--text); }
+.mode-reveal-note[hidden] { display: none; }
+.simple-hint { font-size: 13px; color: var(--text-dim); margin: 8px 0 0; }
+/* Automation mounts (js/automation.js) take no room until they have something to show. */
+#autoSuggestions:empty, #autoTuneStatus:empty, #settings-store-hours:empty { display: none; }
+/* Today in Simple: the two strongest recommendations. */
+html[data-mode="simple"] #todayRecs > :nth-child(n+3) { display: none; }
+@media (max-width: 760px) {
+  .view-mode-toggle .view-mode-label { display: none; }
+}

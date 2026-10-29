@@ -234,7 +234,7 @@ message, licence status/date, features, last check-in time, fingerprint; no toke
 and `POST /api/v1/fleet/reset-key` (admin), `POST /api/v1/fleet/checkin-now` (admin).
 Settings card "iKorex service": plan status, licence date, features included, last contact,
 verified contact, offline limit, control key fingerprint, software version (`APP_VERSION`,
-2.9.0 for this release, also in `box.software_version` and `/api/v1/health`, which without a
+2.10.0 for this release, also in `box.software_version` and `/api/v1/health`, which without a
 session answers only `{"status", "version"}`).
 
 ## VPS: `cctv-control` container (~/Projects-1/Server/cctv-tunnel/control/)

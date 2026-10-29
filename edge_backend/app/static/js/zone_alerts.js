@@ -1,5 +1,5 @@
 /**
- * Area & line alerts (Loss prevention tab).
+ * Area alerts (Security tab).
  *
  * Restricted-area (RESTRICTED_AREA) and tripwire (TRIPWIRE_ALERT) alerts are
  * stored in the alert log and pushed to paired phones. This card shows them

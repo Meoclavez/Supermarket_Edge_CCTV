@@ -77,7 +77,7 @@
       keys: ['STORE_NAME', 'SITE_TIMEZONE'],
     },
     evidence: {
-      host: 'settings-evidence', title: 'Evidence storage',
+      host: 'settings-evidence', title: 'Saved pictures and clips',
       intro: 'This device keeps only evidence for alerts (stills and short clips); the store recorder keeps the continuous video. When a limit is passed, the oldest evidence is deleted first.',
       keys: ['EVIDENCE_MAX_GB', 'STORAGE_RETENTION_DAYS', 'STORAGE_MAX_DISK_PERCENT', 'NIGHT_WATCH_EVIDENCE_MAX_MB', 'NIGHT_WATCH_CLIP'],
     },
@@ -88,7 +88,7 @@
         'THEFT_EXIT_RULE_ENABLED', 'QUEUE_CONGESTED_WAIT_SEC'],
     },
     analysis: {
-      host: 'settings-analysis', title: 'Analysis speed', group: 'analysis',
+      host: 'settings-analysis', title: 'Performance', group: 'analysis',
       intro: 'How many camera frames per second the AI analyses. The box shares its capacity between the cameras: '
         + 'cameras with people or movement get more, empty ones are checked slowly until something moves. '
         + 'A camera\'s own priority and frame-rate cap are in its Settings.',
@@ -240,20 +240,29 @@
       bindCapacity(host);
       return;
     }
+    // Theft alert levels: the simple view shows only Fewer / Balanced / More; the thresholds,
+    // routing and weights are under All settings (js/view_mode.js).
+    const theft = name === 'theftAlerts';
+    const adv = theft ? ' data-advanced' : '';
     host.innerHTML = `
-      <div class="card-title"><span>${esc(card.title)}</span></div>
-      ${card.intro ? `<p class="ra-hint ss-intro">${esc(card.intro)}</p>` : ''}
+      <div class="card-title">${theft ? `<span data-advanced>${esc(card.title)}</span><span data-simple-only>How many theft alerts</span>`
+        : `<span>${esc(card.title)}</span>`}</div>
+      ${theft ? presetHtml(dis) : ''}
+      ${card.intro ? `<p class="ra-hint ss-intro"${adv}>${esc(card.intro)}</p>` : ''}
       ${name === 'evidence' ? usageHtml() : ''}
       ${name === 'analysis' ? capacityHtml() : ''}
-      ${explain}
+      ${explain ? `<div${adv}>${explain}</div>` : ''}
       <form class="ss-form" id="ss_form_${name}" autocomplete="off" novalidate>
+        <div class="ss-form-body"${adv}>
         ${card.sections ? sectionedFields(items, dis) : items.map((s) => field(s, dis)).join('')}
         ${dis ? '<div class="ra-hint">Only an owner or admin can change these settings.</div>' : `
         <div class="ss-actions" id="ss_actions_${name}">
           <button type="submit" class="btn btn-primary btn-sm">Save</button>
         </div>`}
+        </div>
         <div class="form-status ${isError ? 'form-status-error' : ''}" id="ss_status_${name}" aria-live="polite">${esc(statusText || '')}</div>
       </form>`;
+    if (theft) host.querySelectorAll('[data-ta-preset]').forEach((b) => b.addEventListener('click', () => applyPreset(b.dataset.taPreset)));
     const form = $(`ss_form_${name}`);
     form.addEventListener('submit', (ev) => { ev.preventDefault(); onSave(name); });
     form.addEventListener('input', (ev) => {
@@ -281,6 +290,49 @@
   }
 
   // ------------------------------------------------------------------ theft alert levels
+
+  // One choice instead of the thresholds: each preset writes only the three THEFT_TIER_*_MIN
+  // values (Balanced = back to this box's defaults); weights and routing are left alone.
+  const PRESETS = [
+    { id: 'fewer', label: 'Fewer alerts', help: 'Only the clearest cases reach phones. Fewer false alarms, but a borderline case waits in the review list.', tiers: [0.45, 0.65, 0.88] },
+    { id: 'balanced', label: 'Balanced', help: 'The recommended levels for most stores.', tiers: null },
+    { id: 'more', label: 'More alerts', help: 'Borderline cases reach phones too. Catches more, with more false alarms to check.', tiers: [0.25, 0.45, 0.72] },
+  ];
+
+  function tierValues(field) { return TIER_KEYS.map((k) => (data && data.settings[k] ? Number(data.settings[k][field]) : NaN)); }
+  const near = (x, y) => Number.isFinite(x) && Number.isFinite(y) && Math.abs(x - y) < 0.005;
+
+  /** Which preset the saved thresholds match ('custom' when none). */
+  function currentPreset() {
+    const cur = tierValues('value');
+    for (const p of PRESETS) {
+      const want = p.tiers || tierValues('default');
+      if (cur.every((v, i) => near(v, want[i]))) return p.id;
+    }
+    return 'custom';
+  }
+
+  function presetHtml(dis) {
+    if (!TIER_KEYS.every((k) => data && data.settings[k])) return '';
+    const cur = currentPreset();
+    const p = PRESETS.find((x) => x.id === cur);
+    return `<div class="ta-presets">
+      <p class="ra-hint">How readily a possible theft is sent to the alert phones. Every case still goes to the review list.</p>
+      <div class="ta-preset-row" role="radiogroup" aria-label="How many theft alerts">
+        ${PRESETS.map((x) => `<button type="button" class="btn btn-sm${x.id === cur ? ' btn-primary' : ''}" role="radio" aria-checked="${x.id === cur}"
+          data-ta-preset="${x.id}"${dis ? ' disabled' : ''} title="${esc(x.help)}">${esc(x.label)}</button>`).join('')}
+      </div>
+      <p class="ra-hint" aria-live="polite">${p ? esc(p.help) : 'Custom levels are set under All settings.'}</p>
+    </div>`;
+  }
+
+  function applyPreset(id) {
+    const p = PRESETS.find((x) => x.id === id);
+    if (!p || !data || !canEdit()) return;
+    const values = {};
+    TIER_KEYS.forEach((k, i) => { values[k] = p.tiers ? p.tiers[i] : null; });
+    send('theftAlerts', values);
+  }
 
   /** Fields grouped by their section (server sub-headings, in the server's order). */
   function sectionedFields(items, dis) {

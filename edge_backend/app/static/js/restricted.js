@@ -1,5 +1,5 @@
 /**
- * Restricted areas (high security): the Loss prevention card, the announcement
+ * Restricted areas (high security): the Security card, the announcement
  * strip on every page, "I'm going in" / "I'm out", arming, the settings dialog,
  * restricted-area alerts with their outcome, the audit trail and the instant
  * alert feed.
@@ -46,6 +46,22 @@
   const DAYS = [['mon', 'Mon'], ['tue', 'Tue'], ['wed', 'Wed'], ['thu', 'Thu'], ['fri', 'Fri'], ['sat', 'Sat'], ['sun', 'Sun']];
   const TIER_LABEL = { review: 'Review', watch: 'Watch', alert: 'Alert', critical: 'Critical' };
   const TIER_ICON = { review: 'info', watch: 'eye', alert: 'bell', critical: 'siren' };
+  // "How strict": each level switches on a set of triggers (the rest are switched off); the
+  // 13-trigger table stays under "Fine-tune triggers" for anything in between ("Custom").
+  const STRICT_STANDARD = ['unannounced_entry', 'announced_overstay', 'dwell', 'people_count', 'tamper'];
+  const STRICT = [
+    { id: 'standard', label: 'Standard', help: 'Entry without notice, staying too long, too many people and camera tampering.', on: STRICT_STANDARD },
+    { id: 'high', label: 'High', help: 'Standard, plus running, pacing, lingering at the edge and going near a marked spot.',
+      on: STRICT_STANDARD.concat(['speed', 'pacing', 'boundary_linger', 'poi_approach']) },
+    { id: 'maximum', label: 'Maximum', help: 'Every trigger, including crouching, reaching up and erratic movement.', on: null },
+  ];
+  /** Store hours learnt by js/automation.js ({label, rows}) or null. */
+  function storeHours() {
+    try {
+      const h = window.edgeAutomation && typeof window.edgeAutomation.storeHours === 'function' ? window.edgeAutomation.storeHours() : null;
+      return h && Array.isArray(h.rows) && h.rows.length ? h : null;
+    } catch (_) { return null; }
+  }
   const ADMIN_ONLY_MSG = 'Only an owner or administrator can change these settings. You can see how they are set.';
   const ACTIONS = {
     created: 'created the area', settings_changed: 'changed the settings', deleted: 'deleted the area',
@@ -342,9 +358,9 @@
         ${[['open', 'Needs outcome'], ['all', 'All']].map(([k, l]) => `<button type="button" class="loss-chip ${f.needs === k ? 'active' : ''}" data-ra="filter-needs" data-ra-value="${k}" aria-pressed="${f.needs === k}">${esc(l)}${k === 'open' && state.status ? ` <span class="loss-chip-n">${esc(state.status.open_events_total || 0)}</span>` : ''}</button>`).join('')}
       </div>
       <label class="sr-only" for="raFilterArea">Area</label>
-      <select class="select ra-select" id="raFilterArea" data-ra-filter="area"><option value="">Every area</option>${areas().map((a) => `<option value="${esc(a.id)}"${f.area === a.id ? ' selected' : ''}>${esc(a.name)}</option>`).join('')}</select>
+      <select class="select ra-select" id="raFilterArea" data-ra-filter="area" data-advanced><option value="">Every area</option>${areas().map((a) => `<option value="${esc(a.id)}"${f.area === a.id ? ' selected' : ''}>${esc(a.name)}</option>`).join('')}</select>
       <label class="sr-only" for="raFilterTrigger">Sign</label>
-      <select class="select ra-select" id="raFilterTrigger" data-ra-filter="trigger"><option value="">Every sign</option>${trig.map((t) => `<option value="${esc(t.id)}"${f.trigger === t.id ? ' selected' : ''}>${esc(t.label)}</option>`).join('')}</select>
+      <select class="select ra-select" id="raFilterTrigger" data-ra-filter="trigger" data-advanced><option value="">Every sign</option>${trig.map((t) => `<option value="${esc(t.id)}"${f.trigger === t.id ? ' selected' : ''}>${esc(t.label)}</option>`).join('')}</select>
     </div>`;
   }
 
@@ -363,7 +379,7 @@
     const head = `<div class="ra-card-actions">
       ${list.some((a) => a.enabled) ? `<button type="button" class="btn btn-sm btn-primary" data-ra="announce">${ico('log-in')}I'm going in</button>` : ''}
       ${isAdmin() ? `<button type="button" class="btn btn-sm" data-ra="new">${ico('plus')}New area</button>` : ''}
-      <button type="button" class="btn btn-sm btn-ghost" data-ra="refresh">${ico('refresh-cw')}Refresh</button></div>`;
+      <button type="button" class="btn btn-sm btn-ghost" data-ra="refresh" data-advanced>${ico('refresh-cw')}Refresh</button></div>`;
     const areasHtml = list.length ? `<div class="ra-areas">${list.map(areaHtml).join('')}</div>`
       : `<div class="fp-empty">No restricted area yet. ${isAdmin() ? 'Press "New area", or select a zone on the Store map and press "Restricted area settings".' : 'An owner or administrator sets them up.'}</div>`;
     const ev = state.events;
@@ -375,7 +391,7 @@
       <h3 class="ra-sub">Restricted area alerts</h3>
       ${filtersHtml()}
       <div class="loss-list ra-events" id="raEventList">${evHtml}</div>
-      <details class="ra-audit" id="raAudit"${auditOpen ? ' open' : ''}><summary>Audit trail: who armed, announced and closed what</summary><div id="raAuditList"></div></details>`, fromPoll);
+      <details class="ra-audit" id="raAudit" data-advanced${auditOpen ? ' open' : ''}><summary>Audit trail: who armed, announced and closed what</summary><div id="raAuditList"></div></details>`, fromPoll);
     if (changed && auditOpen) renderAudit();
   }
 
@@ -614,7 +630,9 @@
       }
     }
     if (!area) area = blankArea(null, '');
-    state.settings = { list: L, cat, area: JSON.parse(JSON.stringify(area)), id: area.id, editable: !!L.can_edit, zoneCams: null, confirmDelete: false };
+    state.settings = { list: L, cat, area: JSON.parse(JSON.stringify(area)), id: area.id, editable: !!L.can_edit, zoneCams: null, confirmDelete: false,
+      // "Fine-tune triggers" starts open in All settings, closed in the simple view.
+      fineTuneOpen: !!(window.edgeMode && window.edgeMode.mode() === 'all') };
     if (area.floor_zone_id && !area.id) fetchZoneCameras(area.floor_zone_id);
     renderSettings();
   }
@@ -701,6 +719,9 @@
     const pois = a.points_of_interest || [];
     const sec = Math.round(num((a.security || {}).confidence_delta, 0.05) * 100);
     const cams = L.cameras || [];
+    const hours = storeHours();
+    const armSel = arm.mode !== 'schedule' ? 'always' : (arm.source === 'store_hours' ? 'store_hours' : 'schedule');
+    const strict = strictOf(a, s);
     const body = `
       ${s.editable ? '' : `<div class="ra-locked" role="note">${ico('lock')}<span>${esc(ADMIN_ONLY_MSG)}</span></div>`}
       <div class="ra-field"><label for="raSetName">Name</label><input class="input" type="text" id="raSetName" name="name" maxlength="64" value="${esc(a.name)}" autocomplete="off" placeholder="e.g. Cash office"></div>
@@ -719,12 +740,15 @@
       </fieldset>
       <div class="ra-field"><span class="ra-label">Cameras that watch it</span><div id="raWatching">${watchingHtml()}</div></div>
 
-      <h3 class="ra-sub">When it is armed${tz ? ` (store time, ${esc(tz)})` : ' (store time)'}</h3>
-      <div class="ra-radios" role="radiogroup" aria-label="When it is armed">
-        <label class="ra-check" for="raArmAlways"><input type="radio" id="raArmAlways" name="arm_mode" value="always"${arm.mode !== 'schedule' ? ' checked' : ''}> Always armed</label>
-        <label class="ra-check" for="raArmSched"><input type="radio" id="raArmSched" name="arm_mode" value="schedule"${arm.mode === 'schedule' ? ' checked' : ''}> On a schedule</label>
+      <h3 class="ra-sub">When it is guarded${tz ? ` (store time, ${esc(tz)})` : ' (store time)'}</h3>
+      <div class="ra-radios" role="radiogroup" aria-label="When it is guarded">
+        <label class="ra-check" for="raArmAlways"><input type="radio" id="raArmAlways" name="arm_mode" value="always"${armSel === 'always' ? ' checked' : ''}> Always</label>
+        <label class="ra-check" for="raArmHours"><input type="radio" id="raArmHours" name="arm_mode" value="store_hours"${armSel === 'store_hours' ? ' checked' : ''}${hours || armSel === 'store_hours' ? '' : ' disabled'}> Outside store hours</label>
+        <label class="ra-check" for="raArmSched"><input type="radio" id="raArmSched" name="arm_mode" value="schedule"${armSel === 'schedule' ? ' checked' : ''}> Custom times</label>
       </div>
-      <div class="ra-schedule"${arm.mode === 'schedule' ? '' : ' hidden'}>
+      <p class="ra-hint">${armSel === 'store_hours' ? `Guarded outside the store's hours${hours ? `: open ${esc(hours.label || '')}` : ''}. It follows the hours the system learns.`
+        : hours ? '' : 'Outside store hours: Store hours not learnt yet. The system learns them from about two weeks of visits and sales; until then use Always or Custom times.'}</p>
+      <div class="ra-schedule"${armSel === 'schedule' ? '' : ' hidden'}>
         <div class="ra-field"><label for="raSchedMode">The times below are when it is</label><select class="select" id="raSchedMode" name="schedule_mode">
           <option value="armed_during"${arm.schedule_mode !== 'armed_outside' ? ' selected' : ''}>armed (armed during these times)</option>
           <option value="armed_outside"${arm.schedule_mode === 'armed_outside' ? ' selected' : ''}>open (armed outside these times)</option></select></div>
@@ -737,10 +761,19 @@
         <p class="ra-hint">A time that ends before it starts runs past midnight (e.g. 18:00 to 07:00).</p>
       </div>
 
-      <h3 class="ra-sub">What is flagged</h3>
-      <ul class="ra-tier-help">${(s.cat.tiers || []).map((x) => `<li><span class="tier-badge tier-${esc(x.id)}">${esc(x.label)}</span> ${esc(x.help)}</li>`).join('')}</ul>
-      ${(s.cat.triggers || []).map((t) => triggerHtml(t, (a.triggers || {})[t.id] || {}, s)).join('')}
+      <h3 class="ra-sub">How strict</h3>
+      <div class="ra-radios" role="radiogroup" aria-label="How strict">
+        ${STRICT.map((x) => `<label class="ra-check" for="raStrict_${x.id}" title="${esc(x.help)}"><input type="radio" id="raStrict_${x.id}" name="ra_strict" value="${x.id}"${strict === x.id ? ' checked' : ''}> ${esc(x.label)}</label>`).join('')}
+      </div>
+      <p class="ra-hint" id="raStrictHint">${strictHint(strict)}</p>
+      <p class="ra-hint">Alerts go to the store's alert phones (Settings &gt; Phone alerts) and to every open dashboard, straight away.</p>
+      <details class="ra-finetune" id="raFineTune"${s.fineTuneOpen ? ' open' : ''}>
+        <summary>Fine-tune triggers (${(s.cat.triggers || []).length})</summary>
+        <ul class="ra-tier-help">${(s.cat.tiers || []).map((x) => `<li><span class="tier-badge tier-${esc(x.id)}">${esc(x.label)}</span> ${esc(x.help)}</li>`).join('')}</ul>
+        ${(s.cat.triggers || []).map((t) => triggerHtml(t, (a.triggers || {})[t.id] || {}, s)).join('')}
+      </details>
 
+      <div data-advanced>
       <h3 class="ra-sub">Points of interest (safe, cash drawer, key box)</h3>
       ${pois.map((p, i) => `<div class="ra-poi" data-ra-poi="${i}">
         <div class="ra-field"><label for="raP${i}_name">Name</label><input class="input" type="text" id="raP${i}_name" name="p${i}:name" maxlength="40" value="${esc(p.name || '')}"></div>
@@ -756,12 +789,15 @@
         <input type="hidden" name="p${i}:id" value="${esc(p.id || '')}">
         <button type="button" class="btn btn-xs btn-ghost" data-ra="poi-del" data-ra-row="${i}">${ico('trash-2')}Remove</button></div>`).join('')}
       <button type="button" class="btn btn-sm" data-ra="poi-add">${ico('plus')}Add a point</button>
+      </div>
 
+      <div data-advanced>
       <h3 class="ra-sub">Sensitivity</h3>
       <div class="ra-field"><label for="raSens">${esc((s.cat.security && s.cat.security.confidence_delta.label) || 'Extra sensitivity inside the area')}</label>
         <div class="ra-inline"><input class="input ra-num" type="number" id="raSens" name="confidence_delta" min="0" max="20" step="1" value="${sec}"><span>points</span></div>
         <p class="ra-hint">${esc((s.cat.security && s.cat.security.confidence_delta.explain) || '')}</p></div>
-      ${a.state && a.state.still_figures ? `<p class="ra-hint">${esc(plural(a.state.still_figures, 'still figure'))} (posters, mannequins) learnt while the area was not guarded.</p>` : ''}`;
+      ${a.state && a.state.still_figures ? `<p class="ra-hint">${esc(plural(a.state.still_figures, 'still figure'))} (posters, mannequins) learnt while the area was not guarded.</p>` : ''}
+      </div>`;
     const f = $('raDialogForm');
     const keepScroll = f ? f.scrollTop : 0;
     const foot = s.editable
@@ -777,6 +813,8 @@
     $('raDialogFoot').innerHTML = foot;
     if (!s.editable) f.querySelectorAll('input, select, button').forEach((n) => { if (!n.hasAttribute('data-operator-ok')) n.disabled = true; });
     wirePickers(f, s.editable);
+    const fine = $('raFineTune');
+    if (fine) fine.addEventListener('toggle', () => { s.fineTuneOpen = fine.open; });
   }
 
   // ------------------------------------------------ click-to-place points of interest
@@ -945,14 +983,24 @@
     if (el('floor_zone_id')) a.floor_zone_id = v('floor_zone_id') || null;
     const ca = (s.list.camera_areas || []).filter((x) => c(`ca:${x.id}`)).map((x) => ({ camera_id: x.camera_id, intrusion_zone_id: x.id }));
     a.camera_regions = ca.concat((a.camera_regions || []).filter((r) => !r.intrusion_zone_id));
-    const mode = (f.querySelector('input[name="arm_mode"]:checked') || {}).value || 'always';
-    const rows = [];
-    f.querySelectorAll('[data-ra-row]').forEach((rowEl) => {
-      if (!rowEl.classList.contains('ra-sched-row')) return;
-      const i = rowEl.getAttribute('data-ra-row');
-      rows.push({ days: DAYS.map(([k]) => k).filter((k) => c(`s${i}:${k}`)), from: v(`s${i}:from`) || '18:00', to: v(`s${i}:to`) || '07:00' });
-    });
-    a.arming = { mode, schedule: rows, schedule_mode: v('schedule_mode') || 'armed_during' };
+    const pick = (f.querySelector('input[name="arm_mode"]:checked') || {}).value || 'always';
+    const prev = a.arming || {};
+    if (pick === 'store_hours') {
+      // Guarded outside the learnt store hours: the open times are the schedule, armed outside them.
+      const hours = storeHours();
+      if (hours) a.arming = { mode: 'schedule', schedule: hours.rows.map((x) => Object.assign({}, x)), schedule_mode: 'armed_outside', source: 'store_hours' };
+      else if (prev.source !== 'store_hours') a.arming = { mode: 'always', schedule: [], schedule_mode: 'armed_during' };
+    } else {
+      const rows = [];
+      f.querySelectorAll('[data-ra-row]').forEach((rowEl) => {
+        if (!rowEl.classList.contains('ra-sched-row')) return;
+        const i = rowEl.getAttribute('data-ra-row');
+        rows.push({ days: DAYS.map(([k]) => k).filter((k) => c(`s${i}:${k}`)), from: v(`s${i}:from`) || '18:00', to: v(`s${i}:to`) || '07:00' });
+      });
+      // Coming from "Outside store hours": start the custom times from those hours.
+      const keep = !rows.length && prev.source === 'store_hours' ? (prev.schedule || []) : rows;
+      a.arming = { mode: pick, schedule: keep, schedule_mode: v('schedule_mode') || prev.schedule_mode || 'armed_during' };
+    }
     const trig = {};
     (s.cat.triggers || []).forEach((t) => {
       const p = `t_${t.id}`;
@@ -1047,10 +1095,59 @@
       s.zoneCams = null;
       renderSettings();
       if (s.area.floor_zone_id) fetchZoneCameras(s.area.floor_zone_id);
+    } else if (n === 'ra_strict') {
+      readSettings();
+      applyStrict(e.target.value);
+      renderSettings();
     } else if (/^t_[a-z_]+:enabled$/.test(n)) {
       const fs = e.target.closest('.ra-trigger');
       if (fs) fs.classList.toggle('is-on', e.target.checked);
+      syncStrict();   // "How strict" follows the hand-picked triggers (or says Custom)
     }
+  }
+
+  function strictHint(level) {
+    return level === 'custom' ? 'Custom: the triggers were fine-tuned one by one.' : esc((STRICT.find((x) => x.id === level) || {}).help || '');
+  }
+
+  /** After a trigger was ticked by hand: mark the matching level, without redrawing the form. */
+  function syncStrict() {
+    const s = state.settings;
+    const a = readSettings();
+    if (!s || !a) return;
+    const level = strictOf(a, s);
+    document.querySelectorAll('#raDialogForm input[name="ra_strict"]').forEach((x) => { x.checked = x.value === level; });
+    const hint = $('raStrictHint');
+    if (hint) hint.innerHTML = strictHint(level);
+  }
+
+  /** The trigger ids a strictness level switches on ("maximum": all; wrong door only with door lines). */
+  function strictSet(level, s, a) {
+    const ids = (s.cat.triggers || []).map((t) => t.id);
+    const p = STRICT.find((x) => x.id === level);
+    if (!p) return null;
+    if (p.on) return new Set(p.on.filter((id) => ids.includes(id)));
+    const doors = ((a.triggers || {}).wrong_door || {}).door_line_ids || [];
+    return new Set(ids.filter((id) => id !== 'wrong_door' || doors.length));
+  }
+
+  function strictOf(a, s) {
+    const on = new Set(Object.entries(a.triggers || {}).filter(([, cfg]) => cfg && cfg.enabled).map(([id]) => id));
+    for (const p of STRICT) {
+      const want = strictSet(p.id, s, a);
+      if (want && want.size === on.size && [...want].every((id) => on.has(id))) return p.id;
+    }
+    return 'custom';
+  }
+
+  function applyStrict(level) {
+    const s = state.settings;
+    if (!s) return;
+    const want = strictSet(level, s, s.area);
+    if (!want) return;
+    const trig = Object.assign({}, s.area.triggers || {});
+    (s.cat.triggers || []).forEach((t) => { trig[t.id] = Object.assign({}, trig[t.id] || {}, { enabled: want.has(t.id) }); });
+    s.area.triggers = trig;
   }
 
   function onDialogInput() { /* drafts are read on save; nothing to do per keystroke */ }
@@ -1278,6 +1375,10 @@
     });
     document.addEventListener('visibilitychange', () => { if (!document.hidden && state.started && !state.poll) { load(); schedule(); } });
     window.addEventListener('edge:account', () => render());
+    // Learnt store hours arrived or changed (js/automation.js): "Outside store hours" can be offered.
+    window.addEventListener('edge:store-hours', () => {
+      if (state.settings && state.dialog && state.dialog.kind === 'settings' && $('raDialogForm')) { readSettings(); renderSettings(); }
+    });
     state.tick = setInterval(tickCountdowns, 1000);
     const canPollNow = typeof canPoll === 'function' ? canPoll() : true;
     if (!canPollNow) return;       // signed out: the gate reloads the page after sign-in

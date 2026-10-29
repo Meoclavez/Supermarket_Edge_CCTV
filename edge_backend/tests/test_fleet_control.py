@@ -538,13 +538,13 @@ def test_dev_checkin_url_is_loopback_only(monkeypatch):
 # --------------------------------------------------------------------------- version
 
 def test_this_release_is_reported_everywhere(vps):
-    assert settings.APP_VERSION == "2.9.0" and settings.VERSION == settings.APP_VERSION
+    assert settings.APP_VERSION == "2.10.0" and settings.VERSION == settings.APP_VERSION
     _checkin()
-    assert vps.body()["box"]["software_version"] == "2.9.0"
+    assert vps.body()["box"]["software_version"] == "2.10.0"
     c = TestClient(app)
-    assert c.get("/api/v1/health").json()["version"] == "2.9.0"
+    assert c.get("/api/v1/health").json()["version"] == "2.10.0"
     st = c.get("/api/v1/fleet/status").json()
-    assert st["software_version"] == "2.9.0"                    # Settings > iKorex service card
+    assert st["software_version"] == "2.10.0"                    # Settings > iKorex service card
 
 
 # --------------------------------------------------------------------------- offline standby

@@ -108,11 +108,15 @@
     setTimeout(() => node.classList.remove('flash-highlight'), 1600);
   }
 
+  /** Simple view: an advanced card or field a link points to is shown (js/view_mode.js). */
+  function reveal(node) { if (node && window.edgeMode) window.edgeMode.reveal(node); }
+
   function openSettingsCard(id) {
     call('switchTab', 'settings');
     later(() => {
       const card = $(id);
       if (!card) return;
+      reveal(card);
       card.scrollIntoView({ behavior: 'instant', block: 'start' });
       flash(card);
     }, 150);
@@ -124,6 +128,7 @@
     later(() => {
       const node = $(id);
       if (!node) return;
+      reveal(node);
       node.scrollIntoView({ behavior: 'instant', block: 'start' });
       flash(node);
     }, 200);
@@ -134,6 +139,7 @@
     Promise.resolve(call('openCameraConfigModal', camId)).then(() => later(() => {
       const node = $(partId);
       if (!node) return;
+      reveal(node);
       node.scrollIntoView({ behavior: 'instant', block: 'start' });
       flash(node);
     }, 300));
@@ -153,7 +159,7 @@
    *   feature:<id>                    the Features tab at that feature's card
    *   feature-setup:<id>              the same, with its Easy setup open
    *   help:<article id>               that guide in the Help panel
-   *   restricted                      Loss prevention at the "Restricted areas" card
+   *   restricted                      Security at the "Restricted areas" card
    *   restricted:<area id>            the settings of that restricted area (js/restricted.js)
    */
   function go(action) {

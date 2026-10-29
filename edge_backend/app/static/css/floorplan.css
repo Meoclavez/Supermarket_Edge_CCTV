@@ -233,7 +233,6 @@ button.fp-badge { line-height: inherit; text-align: left; }
 #tab-floorplan .btn:disabled { opacity: 0.45; cursor: not-allowed; box-shadow: none; }
 
 /* ---- self-test log (only rendered with ?__fptest=1) --------------- */
-#selftestLog { font-variant-numeric: tabular-nums; font-size: 12px; white-space: pre-wrap; color: var(--hud-text); background: var(--media-bg); border: 1px solid var(--hud-border); border-radius: var(--radius-md); padding: 12px; margin-top: 12px; font-family: var(--font-mono); }
 
 /* ---- map editor additions (store map v2) --------------------------- */
 /* "Extend the map to fit?" offer, inside the map, above the plan. */
@@ -281,6 +280,10 @@ button.fp-badge { line-height: inherit; text-align: left; }
 .fp-cov-box:empty { display: none; }
 .fp-cov-box { border-top: 1px solid var(--border); margin-top: 10px; padding-top: 8px; }
 .fp-cov-title { font-size: 13px; font-weight: 700; color: var(--text); margin: 6px 0 2px; }
+/* "More" in the inspector (floorplan.js moreHtml): folded in the simple view. */
+.fp-more { margin: 8px 0 2px; }
+.fp-more > summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--accent-text); padding: 2px 0; }
+.fp-more[open] > summary { margin-bottom: 4px; }
 .fp-cov-sub { font-size: 12px; font-weight: 600; color: var(--text-dim); margin: 8px 0 2px; }
 .fp-cov-big { font-size: 26px; font-weight: 800; color: var(--text); font-variant-numeric: tabular-nums; line-height: 1.2; }
 .fp-cov-big small { font-size: 13px; font-weight: 500; color: var(--text-dim); margin-left: 4px; }
