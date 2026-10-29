@@ -169,10 +169,28 @@
       // Only cameras that are on: a camera turned off is not "not sending".
       const off = notWorking(pipe);
       html = `None of your ${off.length} camera(s) that are on is sending pictures: ${escapeHtml(problemSummary(off))}.` +
-        ' <button type="button" class="btn btn-secondary btn-sm" onclick="switchTab(\'cameras\')">Check cameras</button>';
+        ' <button type="button" class="btn btn-primary btn-sm" onclick="switchTab(\'cameras\')">Check cameras</button>';
     } else if (overview && c.cameras_total && !c.cameras_calibrated) {
-      html = 'People are counted, but no camera is placed on the store map yet, so the map and heatmap stay empty.' +
-        ' <button type="button" class="btn btn-secondary btn-sm" onclick="switchTab(\'map\')">Place a camera</button>';
+      // Placed and calibrated are two different steps (services/camera_setup_state.py):
+      // "not on the map yet" and "on the map but not calibrated" each get their own text and button.
+      const cs = c.camera_setup || (setup && setup.camera_setup) || null;
+      // Placing and calibrating are admin work: operators get the reason, not a button that is refused.
+      const admin = !window.EdgeAuth || window.EdgeAuth.isAdmin !== false;
+      const btn = (go, label, step) => (admin
+        ? ` <button type="button" class="btn btn-primary btn-sm" data-help-go="${escapeHtml(go)}" data-cam-step="${step}">${label}</button>`
+        : ' An administrator does this.');
+      if (cs && cs.step === 'place') {
+        html = `People are counted, but the map and heatmap stay empty: ${escapeHtml(cs.counts)}. Place each camera on the store map, then calibrate it.` +
+          btn('place-cameras', 'Place cameras', 'place');
+      } else if (cs && cs.step === 'calibrate') {
+        html = `People are counted, but the map and heatmap stay empty: ${escapeHtml(cs.counts)}. Placing is done; now calibrate each camera so people are placed on the floor in metres.` +
+          btn(cs.action ? cs.action.go : 'calibrate-next', 'Calibrate a camera', 'calibrate') +
+          ' <button type="button" class="btn btn-ghost btn-sm" data-help-open="calibrate">Why calibrate?</button>';
+      } else {
+        // Older server without camera_setup: say only what is known (none calibrated).
+        html = `People are counted, but none of the ${c.cameras_total} cameras is calibrated, so the map and heatmap stay empty.` +
+          btn('calibrate-next', 'Calibrate a camera', 'calibrate');
+      }
     }
     banner.innerHTML = html;
     banner.style.display = html ? 'flex' : 'none';
@@ -325,15 +343,20 @@
       // Features not in the iKorex plan (fleet.js) answer 403: skip them.
       const fleet = window.edgeFleet && typeof window.edgeFleet.status === 'function' ? window.edgeFleet.status() : null;
       const off = (k) => !!(fleet && fleet.features && fleet.features[k] === false);
+      // Shared, slower reads (js/poll.js): the figures that change by the minute are
+      // re-read at most once a minute; the pipeline and incidents reuse what the header
+      // and Loss prevention already fetched a moment ago.
+      const EP = window.EdgePoll;
+      const shared = (url, age) => (EP ? EP.get(url, age) : getJSON(url, null));
       const [pipe, overview, hourly, incidents, recs, setup, layout, pos] = await Promise.all([
-        getJSON('/api/v1/layout/pipeline/status', null),
+        shared('/api/v1/layout/pipeline/status', 10000),
         getJSON('/api/v1/analytics/overview', null),
-        getJSON('/api/v1/analytics/footfall/hourly', null),
-        off('theft_detection') ? { notInPlan: true } : getJSON('/api/v1/theft/incidents', null),
-        off('business_insights') ? { notInPlan: true } : getJSON('/api/v1/analytics/recommendations?days=7', null),
-        getJSON('/api/v1/store/setup', null),
-        getJSON('/api/v1/layout', null),
-        off('pos_integration') ? null : getJSON('/api/v1/analytics/pos/status', null),
+        shared('/api/v1/analytics/footfall/hourly', 60000),
+        off('theft_detection') ? { notInPlan: true } : shared('/api/v1/theft/incidents?limit=200', 30000),
+        off('business_insights') ? { notInPlan: true } : shared('/api/v1/analytics/recommendations?days=7', 60000),
+        shared('/api/v1/store/setup', 60000),
+        shared('/api/v1/layout', 60000),
+        off('pos_integration') ? null : shared('/api/v1/analytics/pos/status', 60000),
       ]);
       renderCameras(pipe);
       renderOverview(overview, hourly, pos);
@@ -350,6 +373,7 @@
   function start() {
     clearInterval(timer);
     refresh();
+    if (window.EdgePoll) { if (!timer) timer = window.EdgePoll.every(POLL_MS, refresh, { when: visible }); return; }
     timer = setInterval(refresh, POLL_MS);
   }
 

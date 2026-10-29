@@ -184,6 +184,11 @@ def _append_path_point(t, fx: float, fy: float, w: int, h: int, floor, now: floa
     pts.append(p)
 
 
+def stall_seconds() -> float:
+    """No frame for this long while ONLINE = STALLED (6 read timeouts, at least 30 s)."""
+    return max(30.0, 6.0 * float(getattr(settings, "CAMERA_READ_TIMEOUT_SEC", 5) or 5))
+
+
 def _reset_pose_camera(camera_id: str) -> None:
     pa = _get_pose_analytics()
     if pa is None:
@@ -412,11 +417,25 @@ class CameraRuntime:
             "boxes": boxes,
         }
 
+    def effective_status(self) -> tuple[str, Optional[str]]:
+        """(status, note): ONLINE becomes STALLED when no picture arrived for a while.
+
+        A worker hung inside a decoder or the accelerator kept reporting ONLINE
+        (and health HEALTHY) while nothing was analysed (audit M2).
+        """
+        if self.status == "ONLINE" and self.last_frame_at:
+            since = time.time() - self.last_frame_at
+            if since > stall_seconds():
+                return "STALLED", f"no new picture for {since:.0f} s (the camera worker may be stuck)"
+        return self.status, None
+
     def to_dict(self) -> dict:
+        status, stall_note = self.effective_status()
         return {
             "camera_id": self.camera_id,
             "name": self.name,
-            "status": self.status,
+            "status": status,
+            "stall_note": stall_note,
             "enabled": self.enabled,
             "frames_read": self.frames_read,
             "detections_last_frame": self.detections_last,
@@ -610,6 +629,12 @@ def decode_threads_for(width: Optional[int], height: Optional[int]) -> int:
 # Last known frame size per source URL, so a reconnect opens with the right
 # thread count straight away.
 _source_sizes: dict[str, tuple[int, int]] = {}
+_ENV_LOCK = threading.Lock()
+
+
+def _size_key(source: str) -> str:
+    """Stream sizes are remembered per URL without its login (no passwords kept in memory)."""
+    return redact_url(source or "")
 
 
 def is_file_source(src: Optional[str]) -> bool:
@@ -713,6 +738,23 @@ class CameraWorker(threading.Thread):
         # (services/motion_gate.py, ANALYTICS_MOTION_WAKE).
         self._motion_gate = MotionGate()
         self._motion_gate_on = False
+        # Consecutive analysis failures and when one was last logged (M3).
+        self._analysis_errors = 0
+        self._analysis_error_logged = 0.0
+
+    def _analysis_error(self, exc: Exception) -> None:
+        self._analysis_errors += 1
+        self.rt.analysis_errors = getattr(self.rt, "analysis_errors", 0) + 1
+        self.rt.last_error = f"analysis error: {redact_url(str(exc))[:200]}"
+        now = time.monotonic()
+        if now - self._analysis_error_logged > 60.0:
+            self._analysis_error_logged = now
+            logger.error(f"Camera {self.rt.camera_id}: analysis failed ({self._analysis_errors} in a row, "
+                         f"stream kept): {redact_url(str(exc))}", exc_info=self._analysis_errors == 1)
+
+    def _is_current(self) -> bool:
+        """Still the engine's worker for this camera (not replaced by a restart)."""
+        return self.engine.workers.get(self.rt.camera_id) in (None, self)
 
     def stop(self) -> None:
         self._stop.set()
@@ -795,11 +837,11 @@ class CameraWorker(threading.Thread):
 
     def _known_size(self, src: str) -> Optional[tuple[int, int]]:
         """The stream's last measured native size: this process, else the saved one."""
-        size = _source_sizes.get(src)
+        size = _source_sizes.get(_size_key(src))
         if size is None:
             size = capture_backends.stream_sizes.get(self.rt.camera_id, src)
             if size is not None:
-                _source_sizes[src] = size
+                _source_sizes[_size_key(src)] = size
         return size
 
     def _open_hw(self, src: str, probe):
@@ -933,7 +975,13 @@ class CameraWorker(threading.Thread):
             # hostname does not resolve would hold every other worker's open.
             # Resolve first, bounded, outside that lock.
             _resolve_host_bounded(src, settings.CAMERA_OPEN_TIMEOUT_SEC)
-            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = ffmpeg_capture_options()
+            # Same value for every open: written once (setenv from several worker
+            # threads at the same time can crash glibc's getenv elsewhere).
+            opts = ffmpeg_capture_options()
+            if os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS") != opts:
+                with _ENV_LOCK:
+                    if os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS") != opts:
+                        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = opts
             open_ms = int(max(0.5, settings.CAMERA_OPEN_TIMEOUT_SEC) * 1000)
             read_ms = int(max(0.5, settings.CAMERA_READ_TIMEOUT_SEC) * 1000)
             params = [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, open_ms, cv2.CAP_PROP_READ_TIMEOUT_MSEC, read_ms]
@@ -941,7 +989,7 @@ class CameraWorker(threading.Thread):
             # per-capture open parameter, so concurrent opens cannot race).
             n_threads = getattr(cv2, "CAP_PROP_N_THREADS", None)
             if n_threads is not None:
-                self._decode_threads = decode_threads_for(*_source_sizes.get(src, (None, None)))
+                self._decode_threads = decode_threads_for(*_source_sizes.get(_size_key(src), (None, None)))
                 params += [n_threads, self._decode_threads]
             cap = cv2.VideoCapture(src, cv2.CAP_FFMPEG, params)
         else:
@@ -1164,6 +1212,12 @@ class CameraWorker(threading.Thread):
                             else:
                                 self._analyse(frame.bgr(), now)
                                 inference_scheduler.set_activity(self.rt.camera_id, self._people_in_view())
+                            self._analysis_errors = 0
+                        except Exception as exc:  # noqa: BLE001
+                            # An analysis bug (bad zone polygon, model error) is not a
+                            # camera disconnect: keep the stream, count and report it
+                            # (audit M3; it used to loop OFFLINE -> reconnect).
+                            self._analysis_error(exc)
                         finally:
                             inference_scheduler.done(self.rt.camera_id)
 
@@ -1182,9 +1236,12 @@ class CameraWorker(threading.Thread):
                 self.rt.next_retry_at = time.time() + wait
                 self.rt.decoder = None
                 # A camera that drops out contributes nothing until it returns,
-                # and its share of the accelerator goes to the others.
-                inference_scheduler.forget(self.rt.camera_id)
-                nw.night_watch.forget(self.rt.camera_id)
+                # and its share of the accelerator goes to the others. Shared
+                # per-camera state only while this is still the camera's worker:
+                # a replaced worker must not wipe its successor's (audit M4).
+                if self._is_current():
+                    inference_scheduler.forget(self.rt.camera_id)
+                    nw.night_watch.forget(self.rt.camera_id)
                 self._night_armed = False
                 for t in self.tracker.flush_all():
                     self.engine.close_track(t, reason="camera_offline")
@@ -1192,7 +1249,8 @@ class CameraWorker(threading.Thread):
                 self.rt.live_track_count = 0
                 self.rt.detections_last = 0
                 self.rt.ignored_detections_last = 0
-                _reset_pose_camera(self.rt.camera_id)
+                if self._is_current():
+                    _reset_pose_camera(self.rt.camera_id)
                 if isinstance(e, CameraAuthError):
                     logger.warning(
                         f"Camera {self.rt.camera_id} login failed: {clean_err}; not retrying for "
@@ -1227,15 +1285,18 @@ class CameraWorker(threading.Thread):
 
         self.rt.status = "DISABLED" if not self.rt.enabled else "OFFLINE"
         self.rt.decoder = None
-        inference_scheduler.forget(self.rt.camera_id)
-        nw.night_watch.forget(self.rt.camera_id)
         for t in self.tracker.flush_all():
             self.engine.close_track(t, reason="worker_stopped")
-        _reset_pose_camera(self.rt.camera_id)
-        # Turned off (or removed) while a last frame was being buffered.
-        current = self.engine.runtimes.get(self.rt.camera_id)
-        if current is None or not current.enabled:
-            _drop_clip_buffer(self.rt.camera_id)
+        # Keyed by camera id: after a restart (credential edit) the new worker
+        # already owns this state, so a replaced worker leaves it alone (M4).
+        if self._is_current():
+            inference_scheduler.forget(self.rt.camera_id)
+            nw.night_watch.forget(self.rt.camera_id)
+            _reset_pose_camera(self.rt.camera_id)
+            # Turned off (or removed) while a last frame was being buffered.
+            current = self.engine.runtimes.get(self.rt.camera_id)
+            if current is None or not current.enabled:
+                _drop_clip_buffer(self.rt.camera_id)
 
     def _after_first_frame(self, cap, source: str, frame):
         """Remember the stream's size; move the camera to the cheaper decoder once.
@@ -1254,7 +1315,7 @@ class CameraWorker(threading.Thread):
         h, w = frame.shape[:2]
         if hw and cap.source_size:
             w, h = cap.source_size            # native, before any DECODE_MAX_WIDTH scaling
-        _source_sizes[source] = (int(w), int(h))
+        _source_sizes[_size_key(source)] = (int(w), int(h))
         normalise = cap.colour_nonstandard if hw and cap.nv12 else None
         capture_backends.stream_sizes.put(self.rt.camera_id, source, int(w), int(h), normalise=normalise)
         # Pixel geometry authored at another size is scaled to this one.
@@ -1306,7 +1367,7 @@ class CameraWorker(threading.Thread):
         it directly. A stream that needs fewer keeps the capture it has.
         """
         h, w = frame.shape[:2]
-        _source_sizes[source] = (int(w), int(h))
+        _source_sizes[_size_key(source)] = (int(w), int(h))
         wanted = decode_threads_for(w, h)
         if self._decode_threads is None or wanted <= self._decode_threads:
             return cap
@@ -1909,6 +1970,11 @@ class LiveAnalyticsEngine:
             w.stop()
         self.runtimes.pop(camera_id, None)
 
+    def worker_alive(self, camera_id: str) -> bool:
+        """An enabled camera's worker thread is still running (False = died; restart it)."""
+        w = self.workers.get(camera_id)
+        return w is not None and w.is_alive()
+
     def stop_all(self, timeout: float = 3.0) -> list[str]:
         """Stop every worker and wait (bounded) for them to finish.
 
@@ -1943,7 +2009,9 @@ class LiveAnalyticsEngine:
         return rt.get_raw_frame() if rt else None
 
     def status(self) -> dict:
-        runtimes = [rt.to_dict() for rt in self.runtimes.values()]
+        # list(): called from worker threads (fleet check-in) while the loop
+        # adds/removes cameras ("dictionary changed size during iteration").
+        runtimes = [rt.to_dict() for rt in list(self.runtimes.values())]
         online = sum(1 for r in runtimes if r["status"] == "ONLINE")
         off = sum(1 for r in runtimes if not r["enabled"])
         return {

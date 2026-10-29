@@ -1632,9 +1632,21 @@ class PersonDetector:
                 except Exception as e:  # the pose model's own keypoints stand
                     logger.error(f"Keypoint refinement failed: {e}")
         except Exception as e:
-            logger.error(f"Inference failed: {e}")
+            # Once a minute, then counted: a broken model logged an ERROR on every
+            # frame of every camera. The count and error stay in status() so health
+            # does not look like an empty store (audit LOW).
+            self.infer_failures = getattr(self, "infer_failures", 0) + 1
             self.last_error = str(e)
+            self.last_error_at = time.time()
+            now = time.monotonic()
+            if now - getattr(self, "_infer_error_logged", 0.0) > 60.0:
+                self._infer_error_logged = now
+                logger.error(f"Inference failed ({self.infer_failures} so far): {e}")
             return []
+        if getattr(self, "last_error_at", None) and self.last_error_at > getattr(self, "last_ok_at", 0.0):
+            # Inference works again: the per-frame failure is over.
+            self.last_error = None
+        self.last_ok_at = time.time()
         # Read back by the shadow trial on this thread: the same frame's cost.
         self._tls.last = {"infer_ms": infer_ms, "refine_ms": refine_ms, "enhance": enhance,
                           "model": spec.path.name, "provider": self.provider}
@@ -1849,6 +1861,11 @@ class PersonDetector:
             "lighting": low_light.lighting_monitor.status(),
             "error": self.last_error,
             "last_error": self.last_error,
+            # Inference raising on real frames (detections silently empty): the
+            # count since start and whether it is failing right now.
+            "inference_failures": getattr(self, "infer_failures", 0),
+            "inference_failing": bool(getattr(self, "last_error_at", None)
+                                      and self.last_error_at > getattr(self, "last_ok_at", 0.0)),
             "provider_attempts": list(self.provider_attempts),
             "available_providers": list(self.available_providers),
             "onnxruntime_version": self.ort_version,

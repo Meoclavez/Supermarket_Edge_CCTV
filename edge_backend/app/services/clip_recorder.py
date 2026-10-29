@@ -20,7 +20,6 @@ from pathlib import Path
 import numpy as np
 
 from app.config import settings
-from app.services.auth_service import auth_service
 from app.services.evidence_storage import note_evidence_written
 from app.services.resilience import ServiceHealthTracker
 
@@ -41,8 +40,18 @@ class StreamRingBuffer:
         self._lock = threading.Lock()
 
     def push_frame(self, frame: np.ndarray):
-        """Compress BGR frame to JPEG and store with timestamp under mutex lock."""
-        ret, encoded_jpeg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+        """Compress BGR frame to JPEG and store with timestamp under mutex lock.
+
+        Frames wider than CLIP_MAX_WIDTH are scaled down first: the encode is
+        on the camera thread and its cost grows with the pixels (audit opt. 6).
+        The latest full-size frame is kept for snapshots.
+        """
+        small = frame
+        limit = int(getattr(settings, "CLIP_MAX_WIDTH", 0) or 0)
+        if limit > 0 and frame.ndim >= 2 and frame.shape[1] > limit:
+            h = max(2, int(round(frame.shape[0] * limit / frame.shape[1])) // 2 * 2)
+            small = cv2.resize(frame, (limit // 2 * 2, h), interpolation=cv2.INTER_AREA)
+        ret, encoded_jpeg = cv2.imencode(".jpg", small, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
         if not ret:
             return
 
@@ -69,6 +78,21 @@ class StreamRingBuffer:
             if img is not None:
                 frames.append(img)
         return frames
+
+    def get_pre_event_jpegs(self, max_age: Optional[float] = None) -> List[Tuple[float, bytes]]:
+        """Like get_pre_event_frames, as (timestamp, JPEG bytes): nothing decoded.
+
+        Clips are muxed straight from these, so a clip holds compressed frames
+        only (a 30 s post-roll of decoded 6 MP frames was ~8 GB; audit L7/M6).
+        """
+        limit = time.time() - (self.max_seconds + 1.0 if max_age is None else float(max_age))
+        with self._lock:
+            return [(ts, bytes(enc)) for ts, enc in self.buffer if ts >= limit]
+
+    def jpegs_since(self, ts: float) -> List[Tuple[float, bytes]]:
+        """Frames pushed after ``ts`` (each frame once: no repeats in a clip)."""
+        with self._lock:
+            return [(t, bytes(enc)) for t, enc in self.buffer if t > ts]
 
     def get_latest_frame_copy(self) -> Optional[np.ndarray]:
         with self._lock:
@@ -208,10 +232,10 @@ class ClipRecorderService:
             return None
         note_evidence_written(filepath)
 
-        token = auth_service.generate_clip_token(event_id)
-        # A same-origin path, not EDGE_BASE_URL: right on every address the
-        # dashboard or phone uses (services/evidence_urls.py).
-        return f"/api/v1/events/snapshots/{filename}?token={token}"
+        # A same-origin path without a token, not EDGE_BASE_URL: right on every
+        # address the dashboard or phone uses; a scoped token is added when the
+        # link is served (services/evidence_urls.py).
+        return f"/api/v1/events/snapshots/{filename}"
 
     async def record_event_clip(
         self,
@@ -220,9 +244,18 @@ class ClipRecorderService:
         post_roll_seconds: int = 10,
         fps: int = 15
     ) -> str:
-        """Capture pre-event buffer and record post-roll frames, muxing into an optimized MP4."""
-        total, used, free = shutil.disk_usage(str(settings.CLIPS_DIR))
-        if (used / total) > 0.90:
+        """Pre-event ring plus post-roll as an MP4; returns its link, or "" when no clip was written.
+
+        The waiting and muxing run on a worker thread (they used to decode the
+        ring and copy a frame every 1/15 s on the event loop), each new ring
+        frame is used once, and the clip plays at the rate the frames were
+        captured, not 3x fast (audit L7).
+        """
+        try:
+            total, used, free = shutil.disk_usage(str(settings.CLIPS_DIR))
+        except OSError:
+            total, used = 1, 0
+        if total and (used / total) > 0.90:
             logger.critical(f"Disk usage > 90% ({(used/total)*100:.1f}%), skipping clip recording for {event_id}")
             ServiceHealthTracker.report_status("clip_recorder", "degraded", "Disk usage critical")
             return ""
@@ -231,36 +264,111 @@ class ClipRecorderService:
         # CLIP_PRE_EVENT_BUFFER says (pre-event frames exist only where it is kept).
         self.request(camera_id, post_roll_seconds + 2.0)
         buf = self.get_or_create_buffer(camera_id, fps=fps)
-        pre_frames = buf.get_pre_event_frames()
-        post_frames = []
+        output_path = settings.CLIPS_DIR / f"{event_id}.mp4"
+        ok = await asyncio.to_thread(self._record_blocking, buf, output_path, time.time(),
+                                     None, float(post_roll_seconds))
+        if not ok:
+            logger.info(f"No clip for {event_id}: camera {camera_id} delivered no frames")
+            return ""
+        ServiceHealthTracker.report_status("clip_recorder", "healthy", "Clip recorded successfully")
+        # No token in the stored link (services/evidence_urls.py).
+        return f"/api/v1/events/clips/{output_path.name}"
 
-        logger.info(f"Starting clip capture for {event_id} ({camera_id}): {len(pre_frames)} pre-frames")
+    def _record_blocking(self, buf: "StreamRingBuffer", path: Path, event_ts: float,
+                         pre_seconds: Optional[float], post_seconds: float) -> bool:
+        """Collect the ring's frames around ``event_ts`` and mux them to ``path`` (blocking)."""
+        now = time.time()
+        max_age = None if pre_seconds is None else (now - event_ts) + float(pre_seconds)
+        items = buf.get_pre_event_jpegs(max_age=max_age)
+        end = event_ts + max(0.0, float(post_seconds))
+        last_ts = items[-1][0] if items else now - 1.0
+        tick = 1.0 / max(1, int(buf.fps))
+        while time.time() < end:
+            time.sleep(min(tick, max(0.0, end - time.time())) or 0.01)
+            new = buf.jpegs_since(last_ts)
+            if new:
+                items.extend(new)
+                last_ts = new[-1][0]
+        if not items:
+            return False
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self._mux_jpegs_to_mp4(items, path)
+        except Exception as e:  # noqa: BLE001 - an encoder failure loses the clip, not the alert
+            logger.error(f"Clip {path.name} not written: {e}")
+            return False
+        if not path.is_file():
+            return False
+        note_evidence_written(path)
+        logger.info(f"Clip recorded: {path.name} ({len(items)} frames, {path.stat().st_size} bytes)")
+        return True
 
-        start_time = time.time()
-        while time.time() - start_time < post_roll_seconds:
-            # Not a frame left over from an earlier, on-demand feed.
-            latest = buf.get_latest_frame_copy() if buf.latest_frame_time >= start_time - 1.0 else None
-            if latest is not None:
-                post_frames.append(latest)
-            await asyncio.sleep(1.0 / fps)
+    @staticmethod
+    def capture_fps(items: List[Tuple[float, bytes]], default: float = 5.0) -> float:
+        """Frames per second the ring was really fed at (so clips play in real time)."""
+        if len(items) < 2:
+            return float(default)
+        span = items[-1][0] - items[0][0]
+        if span <= 0:
+            return float(default)
+        return float(min(30.0, max(1.0, (len(items) - 1) / span)))
 
-        all_frames = pre_frames + post_frames
+    def _mux_jpegs_to_mp4(self, items: List[Tuple[float, bytes]], output_path: Path,
+                          fps: Optional[float] = None) -> None:
+        """H.264 MP4 (+faststart) from JPEG bytes piped to ffmpeg; no decoded frame list in memory."""
+        if not items:
+            return
+        rate = fps or self.capture_fps(items)
+        tmp = output_path.with_suffix(f".{os.getpid()}.part.mp4")
+        cmd = ["ffmpeg", "-y", "-loglevel", "error", "-f", "image2pipe", "-framerate", f"{rate:.3f}",
+               "-c:v", "mjpeg", "-i", "-",
+               "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-c:v", "libx264", "-preset", "veryfast",
+               "-crf", "23", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-f", "mp4", str(tmp)]
+        started = time.time()
+        try:
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.PIPE)
+        except OSError as e:  # no ffmpeg: decode one frame at a time into OpenCV's writer
+            logger.warning(f"ffmpeg not available ({e}); writing {output_path.name} with OpenCV")
+            self._write_opencv(items, output_path, rate)
+            return
+        try:
+            for _, data in items:
+                proc.stdin.write(data)
+            proc.stdin.close()
+            _, err = proc.communicate(timeout=120.0)
+        except Exception:
+            proc.kill()
+            proc.wait()
+            tmp.unlink(missing_ok=True)
+            raise
+        if proc.returncode != 0 or not tmp.is_file():
+            tmp.unlink(missing_ok=True)
+            logger.error(f"ffmpeg could not encode {output_path.name}: {(err or b'').decode(errors='replace')[:300]}")
+            self._write_opencv(items, output_path, rate)
+            return
+        os.replace(tmp, output_path)
+        logger.info(f"Encoding successful for {output_path.name} | {len(items)} frames at {rate:.1f} fps | "
+                    f"encoding_latency_ms={int((time.time() - started) * 1000)}")
 
-        output_filename = f"{event_id}.mp4"
-        output_path = settings.CLIPS_DIR / output_filename
-
-        await asyncio.to_thread(self._mux_frames_to_mp4, all_frames, output_path, fps)
-
-        if output_path.exists():
-            file_size_bytes = output_path.stat().st_size
-            clip_duration_ms = int((len(all_frames) / fps) * 1000)
-            logger.info(f"Clip recorded: {output_filename} | clip_duration_ms={clip_duration_ms} | file_size_bytes={file_size_bytes}")
-            ServiceHealthTracker.report_status("clip_recorder", "healthy", "Clip recorded successfully")
-            note_evidence_written(output_path)
-
-        token = auth_service.generate_clip_token(event_id)
-        clip_url = f"/api/v1/events/clips/{output_filename}?token={token}"
-        return clip_url
+    @staticmethod
+    def _write_opencv(items: List[Tuple[float, bytes]], output_path: Path, rate: float) -> None:
+        writer = None
+        size = None
+        try:
+            for _, data in items:
+                img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+                if img is None:
+                    continue
+                if writer is None:
+                    size = (img.shape[1], img.shape[0])
+                    writer = cv2.VideoWriter(str(output_path), cv2.VideoWriter_fourcc(*"mp4v"), rate, size)
+                if (img.shape[1], img.shape[0]) != size:
+                    img = cv2.resize(img, size)
+                writer.write(img)
+        finally:
+            if writer is not None:
+                writer.release()
 
     def record_incident_clip(
         self,
@@ -300,31 +408,10 @@ class ClipRecorderService:
             if buf is None:
                 logger.info(f"No clip for incident {incident_id}: camera {camera_id} delivered no frames")
                 return None
-        frames = buf.get_pre_event_frames(max_age=(now - event_ts) + pre)
-        fps = max(1, int(buf.fps))
-        last_t = buf.latest_frame_time
-        while time.time() < end:
-            time.sleep(1.0 / fps)
-            if buf.latest_frame_time != last_t:
-                last_t = buf.latest_frame_time
-                f = buf.get_latest_frame_copy()
-                if f is not None:
-                    frames.append(f)
-        if not frames:
+        path = Path(out_dir) / f"{incident_id}.mp4"
+        if not self._record_blocking(buf, path, event_ts, pre, post):
             logger.info(f"No clip for incident {incident_id}: no frames from {camera_id} around the event")
             return None
-        out_dir = Path(out_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        path = out_dir / f"{incident_id}.mp4"
-        try:
-            self._mux_frames_to_mp4(frames, path, fps)
-        except Exception as e:  # noqa: BLE001 - an encoder failure loses the clip, not the incident
-            logger.error(f"Theft clip for {incident_id} not written: {e}")
-            return None
-        if not path.is_file():
-            return None
-        note_evidence_written(path)
-        logger.info(f"Theft clip saved: {path.name} ({len(frames)} frames at {fps} fps)")
         return path
 
     def _mux_frames_to_mp4(self, frames: List[np.ndarray], output_path: Path, fps: int):

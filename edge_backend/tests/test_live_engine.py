@@ -425,7 +425,7 @@ def test_people_counting_off_records_no_visits_and_no_tracks(worker, stub_detect
     for i in range(settings.TRACK_MIN_HITS + 3):
         w._analyse(frame, now=10000.0 + i)
     (track,) = w.tracker.tracks.values()
-    assert track.confirmed and track.current_zone_id is None and track.floor_points == []
+    assert track.confirmed and track.current_zone_id is None and not track.floor_points
     assert rt.to_dict()["analysis_flags"]["people_counting"] is False
     # Tracking still runs (overlay, shelf/theft analytics) ...
     assert rt.live_track_count == 1

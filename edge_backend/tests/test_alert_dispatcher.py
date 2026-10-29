@@ -198,9 +198,12 @@ def test_fcm_v1_request_shape_and_token_cache():
     data = msg["data"]
     assert all(isinstance(v, str) for v in data.values())
     ident = device_identity.get_identity()
-    assert data["device_id"] == ident["device_id"] and data["device_name"] == ident["device_name"]
+    assert data["device_id"] == ident["device_id"]
     assert data["event_type"] == "CONCEALMENT" and data["severity"] == "HIGH"
     assert data["incident_id"] == "inc_42" and data["camera_id"] == CAM and data["alert_id"]
+    # FCM data crosses Google in plain text: ids and codes only (no names, notes, links).
+    assert set(data) - {"title", "body", "type"} <= set(ad.FCM_DATA_KEYS), sorted(data)
+    assert "device_name" not in data and "confidence" not in data
 
     # A second alert reuses the cached OAuth token.
     _run(alert_dispatcher.dispatch("SHELF_SWEEP", "HIGH", "t", "b", {"camera_id": CAM}))

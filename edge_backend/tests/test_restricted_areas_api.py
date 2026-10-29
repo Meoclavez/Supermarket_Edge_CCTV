@@ -303,7 +303,32 @@ def test_detection_to_dispatch_through_the_real_dispatcher(api):
     assert st["last_events"][0]["id"] == eid
 
 
-def test_qa_feed_is_not_reachable_without_the_qa_switch(api):
+def test_repeated_operator_announcements_raise_one_review_notice(api):
+    # An announcement keeps an armed area quiet and operators may renew it:
+    # owners hear about an area announced more than 3 times in 4 hours.
+    c, h = api
+    area = _create(c, h).json()
+    sent = []
+
+    async def fake_dispatch(event_type, severity, title, body, data=None, **kw):
+        sent.append((event_type, data.get("ra_trigger"), data.get("alert_tier")))
+        return {"push": {}}
+
+    from app.services.alert_dispatcher import alert_dispatcher
+
+    orig = alert_dispatcher.dispatch
+    alert_dispatcher.dispatch = fake_dispatch
+    try:
+        for i in range(5):
+            who = OP1 if i % 2 == 0 else OP2
+            assert c.post(f"{BASE}/{area['id']}/announce", json={"minutes": 5}, headers=h[who]).status_code == 201
+    finally:
+        alert_dispatcher.dispatch = orig
+    assert sent == [("RESTRICTED_AREA", "repeated_announcements", "review")]
+    assert [a for a in _audit(c, h) if a[0] == "announce_repeated"]
+
+
+def test_no_synthetic_feed_route_exists(api):
     c, h = api
     r = c.post(f"{BASE}/qa/feed", json={"camera_id": CAM, "frames": []}, headers=h[ADMIN])
     assert r.status_code in (404, 405)

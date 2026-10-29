@@ -98,11 +98,13 @@
     return state.presets;
   }
 
-  async function loadCameras() {
+  async function loadCameras(shared) {
     if (!authed()) return;
+    // The 30 s refresh shares the camera list and store setup other modules read anyway (js/poll.js).
+    const EP = shared === true ? window.EdgePoll : null;
     const [cams, setup] = await Promise.all([
-      getJ('/api/v1/cameras', null),
-      getJ('/api/v1/store/setup', null),
+      EP ? EP.get('/api/v1/cameras', 25000) : getJ('/api/v1/cameras', null),
+      EP ? EP.get('/api/v1/store/setup', 25000) : getJ('/api/v1/store/setup', null),
     ]);
     if (cams && Array.isArray(cams.cameras)) {
       const next = {};
@@ -743,7 +745,7 @@
     await loadCameras();
     openFromUrl();
     clearInterval(timer);
-    timer = setInterval(() => { if (document.visibilityState === 'visible') loadCameras(); }, POLL_MS);
+    timer = setInterval(() => { if (document.visibilityState === 'visible') loadCameras(true); }, POLL_MS);
     window.addEventListener('edge:cameras-changed', () => loadCameras());
     window.addEventListener('edge:tab', (e) => { if (e.detail && e.detail.tab === 'cameras') loadCameras(); });
   }

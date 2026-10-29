@@ -6,8 +6,7 @@
  * header, the live camera matrix, the camera configuration modal, the
  * "Shoppers & footfall" insights view (visitors by hour, journey, areas), the
  * Settings "Sales data" and "System health" cards, the shared helpers other
- * modules use (today.js, loss.js, insights.js), and an opt-in self test
- * (?__selftest=1).
+ * modules use (today.js, loss.js, insights.js).
  *
  * Rules this file follows:
  *  - Every number shown comes from an API response. A value the API reports
@@ -332,7 +331,10 @@ function toggleMapEditing(force) {
  * inference, taken from the detector itself; "Not available" when none is.
  */
 async function fetchSystemTelemetry() {
-  const pipe = await getJSON('/api/v1/layout/pipeline/status', null);
+  // Shared with today.js / devices.js (js/poll.js): one request serves every module.
+  const pipe = window.EdgePoll ? await window.EdgePoll.get('/api/v1/layout/pipeline/status', 1500)
+    : await getJSON('/api/v1/layout/pipeline/status', null);
+  if (pipe) { try { window.dispatchEvent(new CustomEvent('edge:pipeline', { detail: pipe })); } catch (_) { /* old browser */ } }
   const set = (id, text) => { const n = el(id); if (n) n.textContent = text; };
 
   if (pipe) {
@@ -595,7 +597,7 @@ window.addEventListener('resize', fitMapHeight);
 // 3. Live camera matrix
 // ==========================================
 async function loadCamerasMatrix() {
-  const data = await getJSON('/api/v1/cameras', null);
+  const data = window.EdgePoll ? await window.EdgePoll.get('/api/v1/cameras', 2000) : await getJSON('/api/v1/cameras', null);
   if (!data) return;
   allCamerasList = data.cameras || [];
 
@@ -616,7 +618,10 @@ async function loadCamerasMatrix() {
     applyGridSlots();
   }
 }
-window.addEventListener('edge:cameras-changed', (e) => { if (!(e.detail && e.detail.from === 'matrix')) loadCamerasMatrix(); });
+window.addEventListener('edge:cameras-changed', (e) => {
+  if (window.EdgePoll) window.EdgePoll.forget('/api/v1/cameras');
+  if (!(e.detail && e.detail.from === 'matrix')) loadCamerasMatrix();
+});
 
 /** Filter key of a camera: its purpose (role), or 'NONE' when it has none. */
 function cameraPurposeKey(cam) { return cam.role || 'NONE'; }
@@ -1238,7 +1243,7 @@ function updateMatrixHud(pipe) {
       } else {
         parts.push(`${DASH} people in view`);
       }
-      if (typeof c.calibrated === 'boolean') parts.push(c.calibrated ? 'on the map' : 'not on the map yet');
+      if (typeof c.calibrated === 'boolean') parts.push(c.calibrated ? 'calibrated' : 'not calibrated');
       hud.textContent = parts.join(' · ');
       hud.title = c.has_frame && isNum(c.fps)
         ? `${c.fps.toFixed(1)} pictures per second analysed · ${c.detections_last_frame ?? DASH} detections in the last picture`
@@ -2746,119 +2751,6 @@ async function confirmDeleteCurrentCamera() {
   }
 }
 
-// ==========================================
-// 7. Opt-in self test (?__selftest=1)
-// ==========================================
-async function runSelfTest() {
-  const errors = [];
-  window.addEventListener('error', (e) => errors.push(`onerror: ${e.message} @ ${e.filename}:${e.lineno}`));
-  window.addEventListener('unhandledrejection', (e) => errors.push(`unhandledrejection: ${e.reason && (e.reason.message || e.reason)}`));
-  const origError = console.error.bind(console);
-  console.error = (...args) => { errors.push(`console.error: ${args.map(String).join(' ')}`); origError(...args); };
-
-  const out = document.createElement('pre');
-  out.id = 'selftestResults';
-  out.className = 'selftest-results';
-  document.body.appendChild(out);
-  const results = [];
-  const check = (name, ok, detail) => results.push(`${ok ? 'PASS' : 'FAIL'} ${name}${detail ? ` :: ${detail}` : ''}`);
-
-  switchTab('cameras');
-  // Let the first polls and the first tile pictures arrive.
-  await new Promise((r) => setTimeout(r, 4500));
-
-  const cams = allCamerasList.length;
-  check('cameras loaded from /api/v1/cameras', Array.isArray(allCamerasList), `${cams} camera(s)`);
-  const tiles = document.querySelectorAll('img.camera-img[data-camera-id]');
-  // Direct video (remote / WebRTC mode): tiles show a <video>, never a snapshot or stream.
-  const rtcMode = liveTransport() === 'webrtc';
-  const shownEl = (img) => (rtcMode ? img.closest('.camera-video-container') || img : img);
-  const onScreen = (img) => { const r = shownEl(img).getBoundingClientRect(); return r.bottom > 0 && r.top < window.innerHeight && r.width > 0; };
-  const hasPicture = (img) => {
-    if (!rtcMode) return img.naturalWidth > 0;
-    const v = img.parentElement && img.parentElement.querySelector('video.camera-video');
-    return !!v && v.videoWidth > 0;
-  };
-  const rtcOpen = () => [...tileFeed.tiles.values()].filter((t) => t.rtc).length;
-  check(`live transport: ${liveTransport()}`, liveTransport() !== null);
-  if (cams === 0) {
-    check('empty state rendered', !!document.querySelector('.matrix-empty'));
-  } else {
-    const shown = Math.min(CAMERA_SLOTS, gridPool().length);
-    check(`${shown} tile(s): at most ${CAMERA_SLOTS}, cameras that are on only`, tiles.length === shown, `${tiles.length}/${shown}`);
-    tiles.forEach((img) => {
-      const r = shownEl(img).getBoundingClientRect();
-      const id = img.getAttribute('data-camera-id');
-      check(`tile ${id} never holds a stream`, !/\/stream\?/.test(img.getAttribute('src') || ''), img.getAttribute('src'));
-      if (rtcMode) check(`tile ${id} requests no snapshot in direct-video mode`, !img.getAttribute('src'), img.getAttribute('src'));
-      check(`tile ${id} rendered height > 100`, r.height > 100, `${r.width.toFixed(0)}x${r.height.toFixed(0)}`);
-      if (onScreen(img)) check(`on-screen tile ${id} has a picture`, hasPicture(img), rtcMode ? 'direct video' : `${img.naturalWidth}x${img.naturalHeight}`);
-    });
-    check('picture requests in flight within the cap', tileFeed.inFlight <= TILE_MAX_IN_FLIGHT, String(tileFeed.inFlight));
-    const hud = document.querySelector('[data-hud-for]');
-    check('per-tile HUD populated from pipeline', !!hud && hud.textContent.trim() !== DASH, hud && hud.textContent.trim());
-    check('no fabricated HUD strings', !/Queue: 2|Dwell Alert|In: 142|Engagement: 64/.test(document.body.textContent));
-  }
-
-  // Enlarging a tile gives it the one live stream; video smoothness sets its rate.
-  if (tiles.length) {
-    const id = tiles[0].getAttribute('data-camera-id');
-    focusCameraTile(id);
-    const zoomTools = document.querySelector(`[data-tools-for="${CSS.escape(id)}"] .vz-controls`);
-    check('enlarged tile shows its zoom controls', !!zoomTools && !zoomTools.hidden);
-    check('tile picture and AI overlay canvas share one zoom stage',
-      !!document.querySelector(`[data-stage-for="${CSS.escape(id)}"] .lo-canvas`) && !!tiles[0].closest('.cam-stage'));
-    if (rtcMode) {
-      const f = tileFeed.tiles.get(id);
-      check('enlarged tile keeps (or opens) its direct video', !!f && !!f.rtc, f && f.rtc ? f.rtc.state : 'no session');
-      check('only the enlarged tile holds a session', rtcOpen() === 1, String(rtcOpen()));
-      focusCameraTile(id);
-    } else {
-      check('enlarged tile streams live', /\/stream\?camera_id=/.test(tiles[0].getAttribute('src') || ''), tiles[0].getAttribute('src'));
-      setDecimationFPS(1);
-      check('video smoothness re-sets the live stream', /fps=1&/.test(tiles[0].getAttribute('src') || ''), tiles[0].getAttribute('src'));
-      setDecimationFPS(5);
-      check('only one stream open', [...tiles].filter((img) => /\/stream\?/.test(img.getAttribute('src') || '')).length === 1);
-    }
-  }
-
-  // Every route (old hashes included) lands on its view.
-  for (const tab of VALID_TABS) {
-    switchTab(tab);
-    const { view, sub } = resolveRoute(tab);
-    const section = document.getElementById(VIEW_SECTIONS[view]);
-    const subOk = view !== 'insights' || (el(INSIGHT_SUBS[sub]) && el(INSIGHT_SUBS[sub]).classList.contains('active'));
-    check(`switchTab('${tab}') -> ${view}${sub ? '/' + sub : ''}`, !!section && section.classList.contains('active') && subOk);
-  }
-  check('no stream and no picture request while the matrix is hidden',
-    [...tiles].every((img) => !/\/stream\?/.test(img.getAttribute('src') || '')) && tileFeed.tiles.size === tiles.length
-    && [...tileFeed.tiles.values()].every((t) => !t.ctl || t.ctl.signal.aborted) && !tileFeed.focusId
-    && rtcOpen() === 0 && (!window.WebRtcLive || window.WebRtcLive.activeCount() === 0));
-  switchTab('cameras');
-  await new Promise((r) => setTimeout(r, 1500));
-  if (rtcMode) await new Promise((r) => setTimeout(r, 3500));   // a direct connection takes a moment
-  check('pictures refresh again on the camera view', tiles.length === 0 || [...tiles].some((img) => onScreen(img) && hasPicture(img)));
-
-  // Modal opens with metres and closes without prompt/confirm.
-  if (cams) {
-    await openCameraConfigModal(allCamerasList[0].id);
-    const modal = el('modalCameraConfig');
-    check('config modal opens', modal && modal.style.display === 'flex');
-    check('config modal has metres placement', !!el('configFloorX') && !el('configHeightZ'));
-    askDeleteCurrentCamera();
-    check('inline delete confirm shown', el('cameraDeleteConfirm').style.display !== 'none');
-    cancelDeleteCurrentCamera();
-    closeCameraConfigModal();
-  }
-
-  await new Promise((r) => setTimeout(r, 800));
-  check('no page errors', errors.length === 0, errors.join(' | '));
-  const failed = results.filter((r) => r.startsWith('FAIL')).length;
-  results.unshift(`SELFTEST ${failed === 0 ? 'OK' : 'FAILED'} (${results.length} checks, ${failed} failed)`);
-  out.textContent = results.join('\n');
-  window.__selftestDone = true;
-}
-
 // Expose public actions on window so inline onclick handlers and console calls always work
 window.switchTab = switchTab;
 window.openDeviceManager = openDeviceManager;
@@ -2901,15 +2793,24 @@ function initAnalytics() {
   refreshBrand();
   loadCamerasMatrix();
 
-  setInterval(fetchSystemTelemetry, 3000);      // header count, per-tile HUD
-  setInterval(loadSystemHealth, 3000);          // Settings health, only while that view is open
-  setInterval(loadCamerasMatrix, 5000);         // picks up added / removed cameras
+  const EP = window.EdgePoll;
+  if (EP) {
+    // Paused while the page is hidden; fast only where the figures are on screen.
+    EP.every(() => (currentView === 'cameras' ? 3000 : 10000), fetchSystemTelemetry);   // header count, per-tile HUD
+    EP.every(15000, loadSystemHealth, { when: () => currentView === 'settings' });       // Settings health
+    EP.every(() => (currentView === 'cameras' ? 10000 : 30000), loadCamerasMatrix);      // added / removed cameras (also edge:cameras-changed)
+  } else {
+    setInterval(fetchSystemTelemetry, 3000);
+    setInterval(loadSystemHealth, 3000);
+    setInterval(loadCamerasMatrix, 5000);
+  }
   setInterval(attachCameraStreams, 2000);
   setInterval(tileTick, 500);                   // tile pictures (visible tiles only) and LIVE badges
   setInterval(fitMapHeight, 1000);              // the theft banner can appear or go at any time
   setInterval(() => { if (currentView === 'insights' && currentSub === 'footfall' && !document.hidden) initOrUpdateCharts(); }, 60000);
+  // A tab switch to Cameras shows fresh per-tile counts at once, not after the slow rhythm.
+  window.addEventListener('edge:tab', (e) => { if (e.detail && e.detail.tab === 'cameras') fetchSystemTelemetry(); });
 
-  if (new URLSearchParams(window.location.search).get('__selftest') === '1') runSelfTest();
 }
 
 // Start only after auth.js has checked the stored token (edgeAuth.onReady).

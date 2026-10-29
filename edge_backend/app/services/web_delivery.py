@@ -223,7 +223,9 @@ class CachedStaticFiles(StaticFiles):
 # HTML pages
 # --------------------------------------------------------------------------- #
 
-_ASSET_ATTR_RE = re.compile(r"""(\b(?:src|href)=)(["'])(/static/[^"'?#]+)(?:\?[^"'#]*)?\2""")
+# A fragment (``sprite.svg#i-house`` in an SVG ``<use href>``) is kept after the ``?v=``:
+# without the version the icon sprite was revalidated on every re-render (no-cache).
+_ASSET_ATTR_RE = re.compile(r"""(\b(?:src|href)=)(["'])(/static/[^"'?#]+)(?:\?[^"'#]*)?(#[^"']*)?\2""")
 _INLINE_SCRIPT_RE = re.compile(r"<script\b(?![^>]*\bsrc\s*=)[^>]*>(.*?)</script>", re.S | re.I)
 
 
@@ -299,7 +301,7 @@ def rewrite_asset_urls(html: str, versions: Optional[dict[str, Optional[str]]] =
             version = asset_hashes.version(full) if full else None
         if not version:
             return m.group(0)
-        return f"{m.group(1)}{m.group(2)}{ref}?v={version}{m.group(2)}"
+        return f"{m.group(1)}{m.group(2)}{ref}?v={version}{m.group(4) or ''}{m.group(2)}"
 
     return _ASSET_ATTR_RE.sub(sub, html)
 

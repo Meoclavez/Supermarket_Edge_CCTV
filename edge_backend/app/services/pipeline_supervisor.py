@@ -43,6 +43,11 @@ logger = logging.getLogger(__name__)
 
 FLUSH_INTERVAL_SECONDS = 5.0
 RECONCILE_INTERVAL_SECONDS = 15.0
+# A flush that fails (database locked past busy_timeout) keeps its rows for
+# the next try instead of dropping 5 s of visits and tracks; a lost "close"
+# used to leave a ghost shopper in the zone until restart. Newest kept.
+RETRY_MAX_VISITS = 20000
+RETRY_MAX_TRACKS = 5000
 WORKER_STOP_TIMEOUT_SECONDS = 3.0
 
 
@@ -84,6 +89,9 @@ class PipelineSupervisor:
         self._running = False
         self._layout_stamp: str = ""
         self._reconcile_lock: tuple[object, asyncio.Lock] | None = None
+        self._retry_visits: list = []
+        self._retry_tracks: list = []
+        self.flush_failures = 0
 
     def _lock(self) -> asyncio.Lock:
         """One reconcile at a time on the running loop.
@@ -245,7 +253,11 @@ class PipelineSupervisor:
                 rt = live_engine.runtimes.get(cam_id)
                 source = _camera_source(cam)
                 if rt is not None and rt.enabled and rt.source == source:
-                    continue
+                    if live_engine.worker_alive(cam_id):
+                        continue
+                    # The worker thread died (an uncaught error): restart it
+                    # instead of leaving the camera silently dark (audit M2).
+                    logger.error(f"Camera {cam_id}: its worker stopped unexpectedly; restarting it")
                 logger.info(f"Starting worker for {cam_id} -> {redact_url(source)}")
                 live_engine.start_camera(cam_id, cam.name, source, enabled=True)
 
@@ -271,6 +283,10 @@ class PipelineSupervisor:
 
         crossings = await flush_tripwire_events(async_session_factory)
         visits, tracks = live_engine.drain()
+        if self._retry_visits or self._retry_tracks:
+            visits = self._retry_visits + list(visits)
+            tracks = self._retry_tracks + list(tracks)
+            self._retry_visits, self._retry_tracks = [], []
         if not visits and not tracks:
             return crossings
 
@@ -345,7 +361,7 @@ class PipelineSupervisor:
                             # heatmap_history); floor-only for older Track objects.
                             trajectory_points=(
                                 list(getattr(t, "path_points", None) or [])[:settings.TRAJECTORY_MAX_POINTS]
-                                or t.floor_points[:500]
+                                or list(t.floor_points)[:500]
                             ),
                         )
                     )
@@ -353,7 +369,13 @@ class PipelineSupervisor:
 
                 await db.commit()
         except Exception as e:
-            logger.error(f"Failed to flush pipeline facts: {e}")
+            self.flush_failures += 1
+            self._retry_visits = list(visits)[-RETRY_MAX_VISITS:]
+            self._retry_tracks = list(tracks)[-RETRY_MAX_TRACKS:]
+            dropped = len(visits) - len(self._retry_visits) + len(tracks) - len(self._retry_tracks)
+            logger.error(f"Failed to flush pipeline facts (kept {len(self._retry_visits)} visit and "
+                         f"{len(self._retry_tracks)} track record(s) for the next try"
+                         + (f", dropped {dropped} oldest" if dropped else "") + f"): {e}")
             return 0
 
         if written:

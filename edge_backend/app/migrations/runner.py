@@ -207,6 +207,138 @@ def _backup(db_path: Path, backups_dir: Optional[Path], tag: str) -> str:
     return res["filepath"]
 
 
+# --------------------------------------------------------------------------- backup safety
+#
+# A pre-migration backup is a full copy of the database (2.8 GB at Pearcedale).
+# Without a space check a nearly full disk turned every restart into another
+# failed multi-GB copy and a refusal to start: the store went dark until someone
+# freed space over ssh. Now:
+#   * the copy is attempted only with free space >= BACKUP_SPACE_FACTOR x the
+#     database (plus WAL) size;
+#   * when space is short, or the copy failed recently for the same target
+#     version, pending migrations that are all ADDITIVE (module attribute
+#     ``ADDITIVE = True``: only CREATE ... IF NOT EXISTS / ADD COLUMN) run without
+#     the copy, with an ERROR in the log (reaches the iKorex issue log) and a
+#     marker file that storage health reports;
+#   * anything else still refuses to start (the original data stays untouched),
+#     but without copying again on every systemd restart.
+
+BACKUP_SPACE_FACTOR = 1.2
+_RETRY_AFTER_S = 30 * 60
+
+
+def _marker_path(db_path: Path) -> Path:
+    return Path(str(db_path) + ".backup-status.json")
+
+
+def _db_bytes(db_path: Path) -> int:
+    total = 0
+    for suffix in ("", "-wal"):
+        try:
+            total += os.path.getsize(str(db_path) + suffix)
+        except OSError:
+            pass
+    return total
+
+
+def _resolve_backups_dir(db_path: Path, backups_dir: Optional[Path]) -> Path:
+    if backups_dir is not None:
+        return Path(backups_dir)
+    try:
+        from app.config import settings
+        if Path(settings.DATABASE_PATH).resolve() == Path(db_path).resolve():
+            return Path(settings.BACKUPS_DIR)
+    except Exception:
+        pass
+    return Path(db_path).parent / "backups"
+
+
+def _free_bytes(path: Path) -> int:
+    import shutil
+    p = Path(path)
+    while not p.exists() and p != p.parent:
+        p = p.parent
+    return shutil.disk_usage(str(p)).free
+
+
+def backup_space_ok(db_path: Path, backups_dir: Optional[Path] = None) -> tuple[bool, str]:
+    """(ok, reason): is there room for a full copy of ``db_path`` in the backups folder?"""
+    need = int(_db_bytes(Path(db_path)) * BACKUP_SPACE_FACTOR)
+    try:
+        free = _free_bytes(_resolve_backups_dir(Path(db_path), backups_dir))
+    except OSError as exc:
+        return False, f"cannot read free disk space: {exc}"
+    if free >= need:
+        return True, ""
+    return False, (f"only {free / 1e9:.1f} GB free, a backup copy needs about {need / 1e9:.1f} GB "
+                   f"({BACKUP_SPACE_FACTOR:g}x the database)")
+
+
+def _read_marker(db_path: Path) -> dict:
+    try:
+        import json
+        return json.loads(_marker_path(db_path).read_text())
+    except Exception:
+        return {}
+
+
+def _write_marker(db_path: Path, data: Optional[dict]) -> None:
+    import json
+    path = _marker_path(db_path)
+    try:
+        if data is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_text(json.dumps(data, sort_keys=True))
+    except OSError as exc:
+        logger.warning(f"could not update {path.name}: {exc}")
+
+
+def backup_warning(db_path: Optional[Path] = None) -> Optional[dict]:
+    """The last skipped/failed pre-migration backup (for storage health), or None."""
+    data = _read_marker(Path(db_path or _default_db_path()).resolve())
+    return data or None
+
+
+def _pre_migration_backup(db_path: Path, backups_dir: Optional[Path], pending: list[Migration],
+                          backup_fn, report: dict) -> Optional[str]:
+    target = pending[-1].version
+    tag = f"pre-v{target:04d}"
+    additive = all(bool(getattr(m.module, "ADDITIVE", False)) for m in pending)
+    marker = _read_marker(db_path)
+    recent_failure = (marker.get("target") == target and marker.get("state") == "failed"
+                      and time.time() - float(marker.get("at") or 0) < _RETRY_AFTER_S)
+    ok, why = backup_space_ok(db_path, backups_dir)
+    if ok and recent_failure:
+        ok, why = False, f"the backup copy failed {int(time.time() - float(marker['at']))} s ago: {marker.get('error')}"
+
+    if ok:
+        try:
+            path = backup_fn(db_path, backups_dir, tag)
+        except Exception as exc:
+            _write_marker(db_path, {"target": target, "state": "failed", "at": time.time(),
+                                    "error": str(exc)[:300], "additive": additive})
+            if not additive:
+                raise MigrationError(f"pre-migration backup failed, not migrating: {exc}") from exc
+            why = f"the backup copy failed: {exc}"
+        else:
+            _write_marker(db_path, None)
+            logger.info(f"backup before migrating to v{target}: {path}")
+            return path
+
+    if not additive:
+        _write_marker(db_path, {"target": target, "state": marker.get("state") or "no_space", "at":
+                                marker.get("at") or time.time(), "error": why, "additive": False})
+        raise MigrationError(f"pre-migration backup not possible ({why}); not migrating. "
+                             f"Free disk space (old backups, clips) and restart.")
+    logger.error(f"Migrating to v{target} WITHOUT a backup copy ({why}). "
+                 f"The pending changes only add tables/columns/indexes. Free disk space soon.")
+    _write_marker(db_path, {"target": target, "state": "skipped", "at": time.time(), "error": why,
+                            "additive": True})
+    report["backup_skipped"] = why
+    return None
+
+
 # --------------------------------------------------------------------------- main API
 
 def status(db_path: Optional[Path] = None, metadata=None) -> dict:
@@ -273,12 +405,8 @@ def run_migrations(
             pending = [m for m in migrations if m.version not in applied]
             has_data = user_tables_have_rows(conn)
             if pending and has_data:
-                tag = f"pre-v{pending[-1].version:04d}"
-                try:
-                    report["backup"] = backup_fn(db_path, backups_dir, tag)
-                except Exception as exc:
-                    raise MigrationError(f"pre-migration backup failed, not migrating: {exc}") from exc
-                logger.info(f"backup before migrating to v{pending[-1].version}: {report['backup']}")
+                report["backup"] = _pre_migration_backup(
+                    db_path, backups_dir, pending, backup_fn, report)
             # Created after the backup so the snapshot is the untouched original.
             conn.execute(SCHEMA_TABLE_DDL)
 
@@ -304,9 +432,17 @@ def run_migrations(
                     from app.models.db_models import Base
                     metadata = Base.metadata
                 plan = _reconcile.plan(conn, metadata)
-                if plan.ops and has_data and report["backup"] is None:
-                    report["backup"] = backup_fn(db_path, backups_dir, "pre-reconcile")
-                    logger.info(f"backup before reconcile: {report['backup']}")
+                if plan.ops and has_data and report["backup"] is None and not report.get("backup_skipped"):
+                    # Reconcile only adds tables/columns/indexes: never refuse to start over it.
+                    ok, why = backup_space_ok(db_path, backups_dir)
+                    if ok:
+                        try:
+                            report["backup"] = backup_fn(db_path, backups_dir, "pre-reconcile")
+                            logger.info(f"backup before reconcile: {report['backup']}")
+                        except Exception as exc:
+                            logger.error(f"backup before reconcile failed, continuing (additive change): {exc}")
+                    else:
+                        logger.error(f"backup before reconcile skipped: {why}")
                 report["reconcile"] = _reconcile.apply(conn, plan)
                 if not plan.ops:
                     logger.info("reconcile: schema matches the models; nothing to add")

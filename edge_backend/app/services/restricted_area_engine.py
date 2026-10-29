@@ -338,6 +338,7 @@ class RestrictedAreaEngine:
         self._figures_dirty = 0.0
         self._alerts: List[PendingAlert] = []
         self._alerts_lock = threading.Lock()
+        self._health_gate: Dict[str, float] = {}
         self._wake = threading.Event()
         self._writer: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -484,19 +485,33 @@ class RestrictedAreaEngine:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Restricted area still figures not read (%s); starting empty", exc)
 
-    def _save_figures(self, force: bool = False) -> None:
+    def _figures_to_save(self, force: bool = False) -> Optional[str]:
+        """Under the lock: the JSON to write, or None when nothing is due."""
         now = time.time()
         if not force and (not self._figures_dirty or now - self._figures_dirty < 10):
-            return
+            return None
         self._figures_dirty = 0.0
+        try:
+            return json.dumps(self._figures)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Restricted area still figures not saved: %s", exc)
+            return None
+
+    def _write_figures(self, data: Optional[str]) -> None:
+        """Outside the lock: the file write (camera threads wait on the lock)."""
+        if data is None:
+            return
         try:
             p = self._figures_path()
             p.parent.mkdir(parents=True, exist_ok=True)
-            tmp = p.with_suffix(".tmp")
-            tmp.write_text(json.dumps(self._figures))
+            tmp = p.with_suffix(f".{threading.get_ident()}.tmp")
+            tmp.write_text(data)
             tmp.replace(p)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Restricted area still figures not saved: %s", exc)
+
+    def _save_figures(self, force: bool = False) -> None:
+        self._write_figures(self._figures_to_save(force))
 
     @staticmethod
     def _kp_list(kp):
@@ -620,7 +635,8 @@ class RestrictedAreaEngine:
             for area in areas:
                 self._eval_area(area, camera_id, camera_name, tracks, fw, fh, now, frame, out)
             self._prune(now)
-            self._save_figures()
+            figures = self._figures_to_save()
+        self._write_figures(figures)
         return out
 
     def _prune(self, now: float) -> None:
@@ -920,6 +936,13 @@ class RestrictedAreaEngine:
         """
         now = self.clock() if now is None else now
         self._frames[camera_id] = now
+        # Every decoded frame comes here; the checks run at most once per
+        # HEALTH_EVERY_SEC per camera, so skip the plan and schedule work on
+        # the frames in between (audit optimisation 9).
+        last = self._health_gate.get(camera_id)
+        if last is not None and 0.0 <= now - last < HEALTH_EVERY_SEC:
+            return None
+        self._health_gate[camera_id] = now
         if not self._plan_on():
             return None
         areas = [a for a in self._snapshot().by_camera.get(camera_id, [])
@@ -1006,6 +1029,17 @@ class RestrictedAreaEngine:
             names = {cid: getattr(rt, "name", cid) for cid, rt in live_engine.runtimes.items()}
         except Exception:  # noqa: BLE001
             pass
+        # The engine lock is shared with the camera threads' per-frame evaluation:
+        # waiting for it here blocked the event loop (audit LOW). Only the
+        # selection runs under it; alerts are raised after it is released.
+        due = await asyncio.to_thread(self._offline_due, now)
+        for area, cam, cfg in due:
+            if self._tamper_alert(area, cam, "offline", cfg, now, camera_name=names.get(cam)):
+                n += 1
+        return n
+
+    def _offline_due(self, now: float) -> list:
+        due = []
         with self._lock:
             for area in self._snapshot().areas:
                 if not area.enabled or not area.armed_state(now)[0]:
@@ -1020,9 +1054,8 @@ class RestrictedAreaEngine:
                     st = self._tamper.setdefault((area.id, cam), TamperState())
                     if now - ref > limit and not st.offline_alerted:
                         st.offline_alerted = True
-                        if self._tamper_alert(area, cam, "offline", cfg, now, camera_name=names.get(cam)):
-                            n += 1
-        return n
+                        due.append((area, cam, cfg))
+        return due
 
     # ------------------------------------------------------------ alerts
     def _fire(self, area, rt, trigger, cfg, cam, cam_name, tr, st, now, frame, out, title, body, extra,
@@ -1165,6 +1198,14 @@ class RestrictedAreaEngine:
                 self.stats["latency_ms"] = ms
                 self.stats["latency_max_ms"] = max(ms, self.stats["latency_max_ms"] or 0.0)
                 self.last_delivery = {"alert_id": alert.alert_id, "latency_ms": ms, "result": result}
+            except Exception as e:  # noqa: BLE001
+                self.stats["errors"] += 1
+                self.last_delivery = {"alert_id": alert.alert_id, "error": str(e)}
+                logger.error(f"Restricted area alert {alert.alert_id} not delivered: {e}")
+                return
+            # The alert is out: a failed audit write is an audit problem, not an
+            # undelivered alert (it used to be counted as one).
+            try:
                 await self._service().audit_now(
                     "test_alert" if alert.data.get("test") else "alert", SimpleNamespace(id=alert.area_id, name=alert.area_name),
                     {"name": alert.data.get("ra_test_by") or "System", "role": None}, event_id=alert.alert_id,
@@ -1175,9 +1216,8 @@ class RestrictedAreaEngine:
                                                   "inside_sec", "seconds", "poi_name", "distance", "tamper",
                                                   "calibrated")}})
             except Exception as e:  # noqa: BLE001
-                self.stats["errors"] += 1
-                self.last_delivery = {"alert_id": alert.alert_id, "error": str(e)}
-                logger.error(f"Restricted area alert {alert.alert_id} not delivered: {e}")
+                self.stats["audit_errors"] = self.stats.get("audit_errors", 0) + 1
+                logger.error(f"Restricted area alert {alert.alert_id} delivered, but not written to the audit: {e}")
 
         loop = self._loop
         if loop is None:
@@ -1256,13 +1296,13 @@ class RestrictedAreaEngine:
             self._wake.clear()
             self.process_pending_alerts()
 
-    # ------------------------------------------------------------ QA feed (tests / QA box only)
+    # ------------------------------------------------------------ synthetic feed (tests only)
     def qa_feed(self, camera_id: str, frames: List[dict], fw: int, fh: int, camera_name: Optional[str] = None,
                 now: Optional[float] = None) -> dict:
         """Feed synthetic tracks: frames ``[{dt, tracks: [{id, bbox, keypoints?, floor?, static?}]}]``.
 
         ``dt`` is seconds before ``now`` of each frame (the last one is usually 0).
-        Only reachable when RESTRICTED_QA_HOOK is set (never on a store box).
+        Called by the tests only; no route exposes it.
         """
         now = self.clock() if now is None else now
         out = {"alerts": [], "occupancy": {}}

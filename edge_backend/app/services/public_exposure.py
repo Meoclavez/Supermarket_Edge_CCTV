@@ -92,6 +92,7 @@ REMOTE_VIDEO_REFUSED = tuple(re.compile(p) for p in (
     r"^/api/v1/dvr/cameras/[^/]+/hls(?:/|$)",         # DVR HLS
     r"^/api/v1/dvr/segments/[^/]+/video/?$",          # recorded video segment
     r"^/api/v1/dvr/archives/[^/]+/download/?$",       # recorded video export
+    r"^/api/v1/system/shadow-trial/samples/[^/]+/?$",  # pose-model trial crops (pictures of people)
 ))
 REMOTE_VIDEO_DETAIL = ("Live camera video is not sent through the online-access tunnel. Remote viewers get "
                        "it directly from this device (peer-to-peer WebRTC, /api/v1/webrtc/config).")

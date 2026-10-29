@@ -698,6 +698,118 @@ User docs: `docs/USER_MANUAL.md` 2.8a + 3.5a, `docs/FEATURES.md` "Restricted are
   144 API requests/min (2/min restricted-area ones besides the exempt status poll).
 * Tests: `tests/test_restricted_area_engine.py` (synthetic tracks, fake clock), `tests/test_restricted_areas_api.py`.
 
+## Audit fixes: disk safety, data loss, event loop (2026-10-29, DATA/PERF stream, not committed)
+Fixes from the 2026-10-29 whole-system audit (finding ids L/M in the audit report).
+- **Upgrades on a full disk (L2)**: `migrations/runner.py` checks free space >= 1.2 x (DB + WAL) before the
+  pre-vNNNN copy. Short of space (or the copy failed < 30 min ago for the same target) a pending set that is
+  all `ADDITIVE = True` (module attribute; m0024 is) runs without the copy (ERROR log, marker
+  `<db>.backup-status.json`, shown in the storage report `other_data.migration_backup`); a non-additive set
+  refuses to start without copying again on every restart. A later successful backup clears a "skipped" marker.
+- **Backups (L3, M10)**: dedupe by a cheap change key (`backup_service.change_key`: schema, every table's
+  count + max rowid, full rows of tables <= 50k rows) stored as `<name>.key.json`; unchanged and < 24 h old =
+  no copy at all. Retention keeps 2 per other kind (pre-v*, manual, ...), compresses all but the newest and
+  the newest pre-v*, and holds a byte budget `BACKUP_MAX_GB` (0 = 15 % of the disk, >= 2.2 DB copies).
+  Free-space check before every copy. The startup backup runs in the background 30 s after start
+  (skipped when the start already made a pre-upgrade copy). Upload limit follows the DB size.
+  The 03:00 backup is DST-correct (UTC subtraction).
+- **Evidence never wiped by DB/backups (L3)**: `evidence_storage` trims for the disk limit only down to
+  `evidence_floor_bytes(cap)` (25 % of the cap, >= 512 MB) when non-evidence data alone is over the limit,
+  and reports `disk_warning` (health DEGRADED). Expiry UPDATEs commit per 200 keys.
+- **Nightly upkeep (L10, M20)**: `services/db_maintenance.py`, 04:00 store time: `trajectory_points` emptied
+  (`[]`) after `TRACK_POINTS_RETENTION_DAYS` (21, never inside the heatmap backfill window), track rows
+  deleted after `TRACK_ROWS_RETENTION_DAYS` (396), batches of 300 in short transactions, 20 min per night;
+  then `PRAGMA optimize` + `wal_checkpoint(TRUNCATE)`. Connection PRAGMAs: journal_size_limit 64 MB,
+  cache 8/16 MB by RAM, temp_store MEMORY (`database.apply_connection_pragmas`).
+- **m0024 `hot_query_indexes`** (additive): security_events (event_type, timestamp) and (camera_id,
+  timestamp), partial `zone_visits(zone_id) WHERE exited_at IS NULL`, theft_incidents (status, timestamp).
+  1.6 s on a 1.67 GB synthetic DB with 200k events.
+- **Lost writes (L4, L5, M1, M9)**: insight narration commits before the model call; business narration
+  runs in a thread; a failed pipeline flush keeps its batch (newest 20k visits / 5k tracks) for the next
+  try; theft evidence stills are written before the DB session opens and incidents get 30 flush tries.
+- **Live video (L6)**: `/stream` encodes each new frame once per (camera, overlay, width) on a worker
+  thread, shared by every viewer (`main.shared_mjpeg_frame`, `MJPEG_STATS`).
+- **Clips (L7, M6, opt 6)**: clips are muxed from the ring's JPEG bytes piped to ffmpeg (image2pipe), each
+  ring frame once, at the measured capture rate (no more 3x-fast pre-roll); `record_event_clip` runs off
+  the loop and returns "" when nothing was written; ring frames wider than `CLIP_MAX_WIDTH` (1920) are
+  scaled before the encode.
+- **Cameras (M2-M5)**: ONLINE with no frame for 6 read timeouts (>= 30 s) reports `STALLED`; a dead worker
+  thread is restarted by the supervisor; analysis exceptions no longer drop the stream (rate-limited
+  ERROR, `rt.analysis_errors`); a replaced worker no longer wipes its successor's scheduler/night-watch/
+  pose state; `Track.floor_points` is a deque(500).
+- **Other**: offline watchdog bundle disabled when phone alerts are not in the plan or the store is paused
+  (M14); `site_tz()` resolves the host IANA zone when `SITE_TIMEZONE` is empty (M18; night-watch zone info
+  carries a warning when neither is known); restricted alert counts in SQL (`restricted_areas.
+  open_outcome_counts` / `event_ids`; the route must call them); restricted engine file writes and the
+  1 s tamper tick run outside its lock / off the loop; frame_health gated per camera; inference and pose
+  per-frame errors log once a minute; feature flags are not cached after a failed DB read; stream sizes
+  keyed by redacted URL; OpenCV env written once; insights/heatmap loops idle outside the plan.
+- **Heatmaps / walking distance**: path JSON is fetched as text and decoded + binned on a worker thread;
+  windows reaching past the raw-path retention are clipped and say so (`paths_from`, `note`); older
+  periods come from the recorded heatmap history. `/digest?date=` uses that day for every figure
+  (`overview(day=)`); `/decisions` and `/actions` take `limit` (200, max 1000).
+- **Time zone**: `timeutil.configured_tz()` = the Settings value or None ("automatic");
+  `site_tz()` = the resolved zone (host IANA zone when automatic); `site_tz_source()` for the UI.
+- Not done (reasons): opt 7 per-camera config snapshot (a stale cache could leave privacy-mask edits
+  unapplied), opt 8 NV12 letterbox (detection-accuracy risk without on-box A/B), heatmaps from
+  snapshots for past hours (different grid; clipped + pointed at history instead), layout extend/fit
+  batching (atomic by design; retention shrinks the rewrite), dvr_recorder day bounds (continuous-
+  recording leftover; remove in the clean-up batch).
+
+## Place-then-calibrate states, POI picker, queue metres, request rate (2026-10-29, not committed)
+
+Owner report: Pearcedale has every camera placed but none calibrated; the Today banner said "no camera
+is placed" (it tested `cameras_calibrated == 0`) with "Place a camera", so calibration was missed.
+
+* **`services/camera_setup_state.py`** (pure, the one source of truth): per camera placed = `map_placed is True`,
+  calibrated = homography; `camera_setup_state(cameras, zone_ids)` -> `step` add_cameras | place | calibrate | done,
+  `level`, counts (`placed`, `unplaced`, `calibrated`, `placed_uncalibrated`, `zone_linked`), `first_unplaced`,
+  `first_uncalibrated` (a placed one first), `counts` ("32 cameras placed, 0 calibrated" / "31 of 32 cameras placed, ..."),
+  `headline`, `detail` (why: estimated coverage, nobody on map/heatmap, body heights not metres), `action`
+  {go: place-cameras | calibrate:<id> | add-cameras}. A "Counts into zone" link is NOT calibration (never done).
+  Exposed as `setup.camera_setup` + `setup.cameras_placed` (`GET /api/v1/layout`) and `coverage.camera_setup` +
+  `coverage.cameras_placed` (`GET /api/v1/analytics/overview`); `routes/features.py _placement` uses it (setup until all
+  calibrated; `links.first_unplaced`, `first_to_calibrate` prefers placed). Tests: `tests/test_camera_setup_state.py`.
+* **Dashboard:** today.js banner (separate place / calibrate texts, btn-primary, `data-help-go`, operators get
+  "An administrator does this."); onboarding steps "Put each camera on the map" (go place-cameras) and "Calibrate
+  each camera to the floor" (linked != done); features.js card full link place-cameras or calibrate:<id>, Easy
+  setup "Place, then calibrate" with the open step's button; floorplan.js side box `#fpCamStatePanel`
+  (`renderCameraState`, counts from memory, "Hide" per browser until counts change) and `#fpStats` "(N placed, M
+  calibrated)"; help.js go `place-cameras` (map + `EdgeCameraGallery.showUnplaced()`, camera_gallery.js) and
+  `calibrate-next` (waits for FloorplanAPI.ready); help_content guides say place first THEN calibrate and why.
+  Wrong texts fixed: camera tile HUD "on the map" -> "calibrated", insights report "N placed" (was calibrated count),
+  heatmap empty text, troubleshooting line.
+* **POI click-to-place (restricted.js `pickerHtml` / `wirePickers`):** floor POIs on an SVG mini-map of the area's
+  zone (+ structures via new `FloorplanAPI.getZone(id)` / `structuresIn(box)`), camera POIs on the camera snapshot
+  with the area's regions; click, drag (pointer capture), arrow keys (0.1 m / 0.01, Shift x5); numbers stay as the
+  fallback and follow. New floor POI starts mid-zone. CSS in `restricted.css` (`.ra-pick*`).
+* **Queue length (m):** `services/queue_length.py` (min-area-rectangle long axis, spread first..last person,
+  spacing, `length_estimate_m` = n x spacing; null + reason when calibrated cameras see < 50% of the zone).
+  `retail_metrics_service.queue_lengths(zones)` (live_snapshot persons, coverage = max `restricted_areas.floor_coverage`
+  over calibrated cameras) -> ZoneMetrics `queue` / `queue_length_m` (CHECKOUT zones), lanes `queue_length_m`,
+  `/analytics/space` `queues`. UI: zone inspector "Queue now" pill + hint; "Store coverage" "Checkout queues now".
+  Tests: `tests/test_queue_length.py`.
+* **Sales per m² per zone: NOT implemented.** `pos_transactions` = line items (transaction_id, register_id,
+  sku_id, quantity, amount), no department/category; `planogram_items` (sku -> category/shelf_zone_id) has no UI
+  and is empty; zone `products` is free text. `/analytics/space` returns `zone_sales_per_m2: null` + reason. Needs
+  a department/category per line (or a SKU -> department catalogue) whose names match the zones' "Products sold here".
+* **Request rate (`static/js/poll.js`, window.EdgePoll, loaded sync right after auth.js):** `every(ms|fn, fn,
+  {hiddenMs, wsMs, when})` (paused while hidden, slower while the alert websocket is up, paused during 429 back-off,
+  overdue polls run on visibilitychange), `get(url, maxAge)` shared/deduped GETs, fetch wrapper: 429 on /api/ ->
+  back-off for Retry-After (else 30 s), the ONE alert websocket `EdgePoll.ws.on` (restricted.js, loss.js,
+  zone_alerts.js listen; `edge:alert`, `edge:alert-ws`). analytics.js pipeline 3 s cameras tab / 10 s else (shared,
+  `edge:pipeline` event), /cameras 10/30 s, system health 15 s on Settings; devices.js no 6 s full /layout poll
+  (status from `edge:pipeline`, 60 s refresh on the Map tab); today.js shared reads (layout/setup/recs/pos/hourly
+  60 s); loss.js 5 s without ws, 15 s (Loss tab) / 30 s with ws + immediate load on ws alerts; zone_alerts 5/30 s;
+  restricted `/status` 5 s / 10 s with ws / 30 s hidden; floorplan live 1 s only with a calibrated ONLINE camera
+  (else 5 s), metrics 15 s; live_behaviour 2 s when someone is flagged else 6 s; remote-access 10 s; pairing idle
+  30 s; camera_roles shared reads. Icon sprite: `web_delivery._ASSET_ATTR_RE` keeps `#fragment` after `?v=`,
+  `<template id="edgeIconSprite">` gives icons.js / view_zoom.js the versioned URL (immutable, no refetch).
+  Measured idle /api per minute (scratch box, 32 cameras, headless): before Today 154, Cameras 249 (incl. ~110 tile
+  pictures), Map 197, Insights 108, Loss 142, Settings 197; after: Today 46, Cameras 168 (54 without ~114 tile
+  pictures), Map 47, Insights 27, Loss 45, Settings 48 (limited bucket 5-16/min idle, a page load adds 9-29;
+  sprite 14-20/min -> 0; all include the exempt restricted /status 6-7/min). Server Retry-After header on
+  429 (`auth_service.RateLimiter`) is a pending change owned by another stream (patch handed to the integrator).
+
 ## Camera coverage, reach and real sizes (2026-10-28, MAP stream, not committed / not deployed)
 
 Contract: `docs/STORE_MAP_V2_CONTRACT.md` "Camera coverage, reach and real sizes". User docs: manual 2.6 step 3, 2.6a, 2.6b, 3.3; FEATURES "Store map and calibration".

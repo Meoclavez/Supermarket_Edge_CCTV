@@ -55,15 +55,23 @@ def _warn_once(key: str, msg: str) -> None:
         logger.warning(msg)
 
 
+# Stands in for the real masks when they cannot be read (see camera_masks).
+FAIL_CLOSED_MASK = {"id": "__privacy_fail_closed__", "enabled": True, "mask_mode": "BLACKOUT",
+                    "points": [{"x": 0.0, "y": 0.0}, {"x": 1.0, "y": 0.0}, {"x": 1.0, "y": 1.0},
+                               {"x": 0.0, "y": 1.0}]}
+
+
 def camera_masks(camera_id: str) -> list[dict]:
     """Enabled mask records for this camera (read live, so edits apply at once)."""
     try:
         from app.services.ai_zone_service import ai_zone_service
 
         masks = ai_zone_service.get_all_zones(camera_id).get("exclusion_masks", [])
-    except Exception as e:  # zone store unreadable: no masks known
-        _warn_once("load", f"privacy masks could not be read: {e}")
-        return []
+    except Exception as e:  # zone store unreadable: fail closed
+        # Unknown masks must not mean "no masks": black out the whole picture
+        # (evidence, live video) until the store can be read again.
+        _warn_once("load", f"privacy masks could not be read, blacking out the picture: {e}")
+        return [dict(FAIL_CLOSED_MASK, camera_id=camera_id)]
     return [m for m in masks if m.get("enabled", True) and len(m.get("points") or []) >= 3]
 
 

@@ -190,6 +190,20 @@ class SystemSetupService:
             session.add(SystemSetupModel(key="setup_completed", value="true"))
         await session.commit()
 
+    _hw_cache: Dict[str, Any] = {}
+
+    @classmethod
+    def cached_hardware(cls, max_age_s: float = 600.0) -> Dict[str, Any]:
+        """:meth:`detect_hardware`, re-run at most every ``max_age_s`` seconds."""
+        import time as _time
+
+        now = _time.monotonic()
+        if cls._hw_cache and now - cls._hw_cache.get("at", 0.0) < max_age_s:
+            return cls._hw_cache["report"]
+        report = cls.detect_hardware()
+        cls._hw_cache = {"at": now, "report": report}
+        return report
+
     @staticmethod
     def detect_hardware() -> Dict[str, Any]:
         hailo_available = os.path.exists("/dev/hailo0")

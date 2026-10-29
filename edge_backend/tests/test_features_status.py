@@ -174,8 +174,13 @@ def test_state_rules_on_plain_data():
     assert feat._footfall(dict(on, tripwires=[{"counts_footfall": True}]))["state"] == "on"
     assert feat._footfall(on)["state"] == "setup"
     assert feat._area_lines(dict(base, tripwires=[{"alert_enabled": True}]))["state"] == "on"
-    assert feat._placement(dict(base, cameras=[_cam_row(watch_zone_id="z1")], zone_ids={"z1"}))["state"] == "on"
-    assert feat._placement(dict(base, cameras=[_cam_row(placed=False)]))["state"] == "setup"
+    # Linked to an area is not calibrated: the step stays open until the camera is calibrated.
+    linked = feat._placement(dict(base, cameras=[_cam_row(watch_zone_id="z1")], zone_ids={"z1"}))
+    assert linked["state"] == "setup" and "1 camera placed, 0 calibrated, 1 linked" in linked["detail"]
+    assert "calibrate \"Aisle\" next" in linked["detail"]
+    assert feat._placement(dict(base, cameras=[_cam_row(calibrated=True)]))["state"] == "on"
+    unplaced = feat._placement(dict(base, cameras=[_cam_row(placed=False)]))
+    assert unplaced["state"] == "setup" and "0 of 1 camera placed" in unplaced["detail"] and "then calibrate" in unplaced["detail"]
     assert feat._online(dict(base, remote={"enabled": True, "connected": False}))["state"] == "setup"
     assert feat._backups({"backups": [{"tag": "startup"}]})["state"] == "setup"
     assert feat._backups({"backups": [{"tag": "manual"}]})["state"] == "on"

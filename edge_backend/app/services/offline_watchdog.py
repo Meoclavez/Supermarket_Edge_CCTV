@@ -120,7 +120,11 @@ class OfflineWatchdog:
         from app.services import web_push
         from app.services.push_alerts import recipient_subscriptions, store_label
 
-        enabled = bool(roster.get("watchdog_enabled"))
+        # Phone alerts left out of the plan, or the store paused/expired: the
+        # VPS gets an empty, disabled bundle, so no "CCTV offline" push goes
+        # out for a store that is not meant to alert (audit M14).
+        from app.services.entitlements import feature_safe
+        enabled = bool(roster.get("watchdog_enabled")) and feature_safe("phone_alerts")
         minutes = int(roster.get("watchdog_offline_min") or 15)
         messages: List[Dict[str, Any]] = []
         subs = await recipient_subscriptions() if enabled else []

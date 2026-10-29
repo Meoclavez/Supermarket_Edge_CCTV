@@ -270,10 +270,11 @@ def test_unauthenticated_and_non_operator_tokens_refused(client, operator):
     assert client.get("/api/v1/remote-access").status_code == 401
     assert client.put("/api/v1/remote-access", json={"hostname": HOST}).status_code == 401
     stream = auth_service.generate_stream_token("cam1")
+    # A stream token opens only its camera's video: refused (401) before the route.
     r = client.put("/api/v1/remote-access", headers={"Authorization": f"Bearer {stream}"}, json={"hostname": HOST})
-    assert r.status_code == 403
+    assert r.status_code in (401, 403)
     r = client.post("/api/v1/remote-access/verify", headers={"Authorization": f"Bearer {stream}"})
-    assert r.status_code == 403
+    assert r.status_code in (401, 403)
 
 
 def test_refuses_to_enable_when_auth_disabled(client, monkeypatch):

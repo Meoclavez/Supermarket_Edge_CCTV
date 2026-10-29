@@ -159,7 +159,12 @@ def test_time_zone_applies_without_restart(store):
     store.update({"SITE_TIMEZONE": "Australia/Adelaide"})
     assert timeutil.local_now().utcoffset() in (timedelta(hours=9, minutes=30), timedelta(hours=10, minutes=30))
     store.update({"SITE_TIMEZONE": ""})                     # this device's own zone
-    assert timeutil.site_tz() is None
+    assert timeutil.configured_tz() is None                 # "automatic" in Settings
+    # Resolved: the host's IANA zone (follows daylight saving), None only when unknown.
+    host = timeutil.host_zone_name()
+    tz = timeutil.site_tz()
+    assert (tz is None) if host is None else getattr(tz, "key", None) == host
+    assert timeutil.site_tz_source()["source"] in ("host", "fixed_offset")
 
 
 def test_evidence_limits_apply_without_restart(store):

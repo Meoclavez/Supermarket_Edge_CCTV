@@ -135,34 +135,47 @@ def test_entry_fields_camera_name_zone_store_time_and_evidence(seeded):
 
 
 def test_evidence_links_are_paths_and_legacy_absolute_links_are_normalised(seeded):
-    # Older builds stored EDGE_BASE_URL links (http://localhost:8000/...), which
-    # break on a phone, another address or online access.
+    # Older builds stored EDGE_BASE_URL links (http://localhost:8000/...) with a
+    # 24-hour, unscoped token in them. Read back: the host and the old token go;
+    # the dashboard gets a plain path (its session cookie opens it) and the phone
+    # an absolute link with a fresh token for exactly that file.
+    from urllib.parse import parse_qs, urlsplit
+
     client, h, ids = seeded
-    snap = "/api/v1/events/snapshots/legacy.jpg?token=abc"
-    clip = "/api/v1/events/clips/legacy.mp4?token=def"
+    snap = "/api/v1/events/snapshots/legacy.jpg"
+    clip = "/api/v1/events/clips/legacy.mp4"
     with _db() as conn:
         conn.execute("UPDATE security_events SET snapshot_url = ?, clip_url = ? WHERE id = ?",
-                     (f"http://localhost:8000{snap}", f"http://localhost:8000{clip}", ids["line"]))
+                     (f"http://localhost:8000{snap}?token=abc", f"http://localhost:8000{clip}?token=def", ids["line"]))
     got = {e["id"]: e for e in _mine(client.get(f"/api/v1/events?types={TYPES}&limit=200", headers=h).json())}
     line = got[ids["line"]]
-    assert line["evidence_url"] == snap                       # dashboard: same-origin path
+    assert line["evidence_url"] == snap                       # dashboard: same-origin path, no token
     # The phone plays clip_url as given: absolute on the address the caller used.
-    assert line["snapshot_url"] == f"http://testserver{snap}"
-    assert line["clip_url"] == f"http://testserver{clip}"
+    for key, path in (("snapshot_url", snap), ("clip_url", clip)):
+        u = urlsplit(line[key])
+        assert f"{u.scheme}://{u.netloc}{u.path}" == f"http://testserver{path}"
+        tok = parse_qs(u.query)["token"][0]
+        claims = auth_service.verify_token(tok)
+        assert claims["type"] == "clip_access" and claims["file"] == path.rsplit("/", 1)[1]
+        assert claims["sub"] == USER_ID and claims["exp"] - claims["iat"] <= 900
     other = client.get(f"/api/v1/events/{ids['line']}", headers={**h, "Host": "192.168.1.50:8000"}).json()
-    assert other["clip_url"] == f"http://192.168.1.50:8000{clip}" and other["evidence_url"] == snap
-    # Paths stored by this build stay paths for the dashboard too.
+    assert other["clip_url"].startswith(f"http://192.168.1.50:8000{clip}?token=") and other["evidence_url"] == snap
+    # Paths that are not evidence files keep no token.
     assert got[ids["area_new"]]["snapshot_url"] == f"http://testserver/api/zones/alerts/{ids['area_new']}/snapshot"
 
 
 def test_evidence_path_helper():
-    from app.services.evidence_urls import evidence_path
+    from app.services.evidence_urls import evidence_path, scoped_file
 
-    assert evidence_path("http://localhost:8000/api/v1/events/clips/a.mp4?token=x") == "/api/v1/events/clips/a.mp4?token=x"
+    assert evidence_path("http://localhost:8000/api/v1/events/clips/a.mp4?token=x") == "/api/v1/events/clips/a.mp4"
+    assert evidence_path("/api/v1/events/snapshots/a.jpg?token=x&w=2") == "/api/v1/events/snapshots/a.jpg?w=2"
     assert evidence_path("https://shop.example/api/v1/theft/incidents/1/evidence") == "/api/v1/theft/incidents/1/evidence"
     assert evidence_path("/api/v1/night-watch/evidence/a.mp4") == "/api/v1/night-watch/evidence/a.mp4"
     assert evidence_path("https://cdn.example/other.jpg") == "https://cdn.example/other.jpg"   # not ours
     assert evidence_path(None) is None and evidence_path("") == ""
+    assert scoped_file("/api/v1/events/clips/a.mp4") == "a.mp4"
+    assert scoped_file("/api/v1/dvr/archives/arc1/download") == "arc1"
+    assert scoped_file("/api/v1/theft/incidents/1/evidence") is None
 
 
 def test_snapshot_and_clip_links_are_stored_as_paths(monkeypatch, tmp_path):
@@ -174,7 +187,8 @@ def test_snapshot_and_clip_links_are_stored_as_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "SNAPSHOTS_DIR", tmp_path)
     monkeypatch.setattr(live_engine, "get_frame", lambda cam: np.zeros((8, 8, 3), dtype=np.uint8))
     url = clip_recorder_service.save_snapshot("cam_za_path_nobuf", "evt_path")
-    assert url and url.startswith("/api/v1/events/snapshots/evt_path.jpg?token="), url
+    # Stored without any token: one is minted when the link is served.
+    assert url == "/api/v1/events/snapshots/evt_path.jpg", url
 
 
 def test_unknown_type_is_rejected(seeded):
@@ -195,8 +209,9 @@ def test_camera_scoped_video_token_does_not_open_the_alert_log(seeded):
     client, _, ids = seeded
     stream = auth_service.create_access_token({"sub": "viewer", "type": "stream_access", "camera_id": CAM})
     h = {"Authorization": f"Bearer {stream}"}
-    assert client.get(f"/api/v1/events?types={TYPES}", headers=h).status_code == 403
-    assert client.post(f"/api/v1/events/{ids['area_new']}/acknowledge", headers=h).status_code == 403
+    # Refused at the door now (a stream token opens only its camera's video): 401.
+    assert client.get(f"/api/v1/events?types={TYPES}", headers=h).status_code in (401, 403)
+    assert client.post(f"/api/v1/events/{ids['area_new']}/acknowledge", headers=h).status_code in (401, 403)
 
 
 def test_operator_acknowledges_and_who_is_recorded(seeded):

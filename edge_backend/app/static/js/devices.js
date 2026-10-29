@@ -58,8 +58,14 @@
     async init() {
       this.bindAddPanel();
       await this.refresh();
-      // Keep camera status fresh so an operator sees a feed drop out.
-      setInterval(() => this.refreshCameras(), 6000);
+      // Keep camera status fresh so an operator sees a feed drop out: from the header's
+      // pipeline poll (analytics.js 'edge:pipeline'), not a full /layout read every 6 s.
+      window.addEventListener('edge:pipeline', (e) => this.applyPipeline(e.detail));
+      if (window.EdgePoll) {
+        window.EdgePoll.every(60000, () => this.refreshCameras(), { when: () => { const t = document.getElementById('tab-floorplan'); return !!(t && t.classList.contains('active')); } });
+      } else {
+        setInterval(() => this.refreshCameras(), 6000);
+      }
       window.addEventListener('edge:cameras-changed', (e) => {
         if (!(e.detail && e.detail.from === 'devices')) this.refreshCameras();
       });
@@ -91,6 +97,24 @@
           });
         }
       } catch (_) { /* transient */ }
+    },
+
+    /** Status, calibration and picture size from GET /layout/pipeline/status (shared poll). */
+    applyPipeline(pipe) {
+      if (!pipe || !Array.isArray(pipe.cameras) || !this.cameras.length) return;
+      const by = new Map(pipe.cameras.map((c) => [c.camera_id, c]));
+      const ed = window.blueprintEditor;
+      let changed = false;
+      this.cameras.forEach((c) => {
+        const p = by.get(c.camera_id);
+        if (!p) return;
+        const next = { status: p.status, has_homography: !!p.calibrated };
+        if (p.frame_width) { next.frame_width = p.frame_width; next.frame_height = p.frame_height; }
+        Object.keys(next).forEach((k) => { if (c[k] !== next[k]) { c[k] = next[k]; changed = true; } });
+        const e = ed && Array.isArray(ed.cameras) ? ed.cameras.find((x) => x.camera_id === c.camera_id) : null;
+        if (e) Object.assign(e, next);
+      });
+      if (changed) this.renderCameras();
     },
 
     async refreshDevices() {

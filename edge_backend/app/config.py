@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     APP_NAME: str = "Universal Edge AI CCTV System"
     # This release. Reported by the fleet check-in (box.software_version),
     # /api/v1/health, / and the Settings > iKorex service card.
-    APP_VERSION: str = "2.8.0"
+    APP_VERSION: str = "2.9.0"
     VERSION: str = APP_VERSION  # older alias (/api/v1/health); always the same value
     # DEBUG makes logging more verbose and serves the API docs (/docs, /redoc,
     # /openapi.json) on the local address; never through the public hostname.
@@ -85,11 +85,16 @@ class Settings(BaseSettings):
     SQLITE_DB_PATH: Path = get_storage_root() / "cctv_core.db"
     DATABASE_PATH: Path = get_storage_root() / "cctv_core.db"
     BACKUPS_DIR: Path = get_default_dir("backups")
-    # Backup retention (app/services/backup_service.py). Applies to automatic
-    # "startup"/"auto" snapshots only; pre-migration ("pre-v*") and operator
-    # backups are never pruned automatically.
+    # Backup retention (app/services/backup_service.py): the newest
+    # BACKUP_KEEP_STARTUP automatic snapshots plus one per day for
+    # BACKUP_KEEP_DAILY_DAYS; the last 2 of every other kind (before upgrade,
+    # manual, before restore, ...). All backups together stay under
+    # BACKUP_MAX_GB (0 = automatic: 15 % of the backups disk, at least 2
+    # database copies), oldest pruned first; the newest backup is never pruned.
     BACKUP_KEEP_STARTUP: int = int(os.getenv("BACKUP_KEEP_STARTUP", "7"))
     BACKUP_KEEP_DAILY_DAYS: int = int(os.getenv("BACKUP_KEEP_DAILY_DAYS", "14"))
+    BACKUP_KEEP_PER_KIND: int = int(os.getenv("BACKUP_KEEP_PER_KIND", "2"))
+    BACKUP_MAX_GB: float = float(os.getenv("BACKUP_MAX_GB", "0"))
     BACKUP_COMPRESS: bool = os.getenv("BACKUP_COMPRESS", "true").lower() in ("1", "true", "yes")
     # Person pose estimation: RTMO-s (one-stage, mmpose, Apache-2.0; box + 17
     # COCO keypoints, static 640x640 export, see models/manifest.json). Which
@@ -489,9 +494,13 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     AUTH_SECRET_KEY: str = ""
     TOKEN_EXPIRY_SECONDS: int = 86400
-    STREAM_TOKEN_EXPIRE_SECONDS: int = 86400
-    STREAM_TOKEN_EXPIRY_SECONDS: int = 86400
-    CLIP_TOKEN_EXPIRY_SECONDS: int = 86400
+    # Stream and clip tokens are scoped links (one camera, one evidence file),
+    # bound to the session that asked for them and minted when a link is
+    # served; they are never stored. 15 minutes: long enough to open an alert
+    # and play its clip, short enough that a forwarded link soon goes dead.
+    STREAM_TOKEN_EXPIRE_SECONDS: int = 900
+    STREAM_TOKEN_EXPIRY_SECONDS: int = 900
+    CLIP_TOKEN_EXPIRY_SECONDS: int = 900
     INTERNAL_SERVICE_KEY: str = ""
     # Encrypts NVR/camera passwords at rest (storage/nvr_credentials.json).
     NVR_CREDENTIAL_KEY: str = ""
@@ -563,6 +572,9 @@ class Settings(BaseSettings):
     # "on": every streaming camera (the old behaviour; the encoding was ~27 %
     # of the camera threads' CPU on the store box). "off": never, post-roll only.
     CLIP_PRE_EVENT_BUFFER: str = os.getenv("CLIP_PRE_EVENT_BUFFER", "auto")
+    # Clip ring frames wider than this are scaled down before the JPEG encode
+    # (a 6 MP frame cost 25-40 ms per push on the camera thread). 0 = full size.
+    CLIP_MAX_WIDTH: int = int(os.getenv("CLIP_MAX_WIDTH", "1920"))
     
     # Push notifications: Firebase Cloud Messaging HTTP v1 only (APNs via FCM).
     # The service-account JSON is uploaded in Settings and stored encrypted as
@@ -841,9 +853,6 @@ class Settings(BaseSettings):
     # A share of an area (0..1) covered by privacy masks at or above which the
     # area is refused: privacy masks always win over restricted areas.
     RESTRICTED_MASK_REFUSE_FRACTION: float = float(os.getenv("RESTRICTED_MASK_REFUSE_FRACTION", "0.5"))
-    # QA / tests only: POST /api/v1/restricted-areas/qa/feed feeds synthetic
-    # tracks into the engine. Never set on a store box.
-    RESTRICTED_QA_HOOK: bool = os.getenv("EDGE_RESTRICTED_QA_HOOK", "").lower() in ("1", "true", "yes")
     # The store's IANA time zone (e.g. Australia/Melbourne): "today", hourly
     # curves, restricted-area and night-watch schedules and alert times are
     # store-local. Empty = the host's own time zone. Default only: Settings >
@@ -1000,6 +1009,12 @@ class Settings(BaseSettings):
     HEATMAP_TICK_SEC: float = float(os.getenv("HEATMAP_TICK_SEC", "30"))
     # Startup backfill of missing past hours from existing rows (bounded).
     HEATMAP_BACKFILL_DAYS: int = int(os.getenv("HEATMAP_BACKFILL_DAYS", "14"))
+    # Raw shopper paths (customer_tracks.trajectory_points) are emptied after this
+    # many days (never inside the backfill window) and whole track rows deleted
+    # after TRACK_ROWS_RETENTION_DAYS; heatmap snapshots keep the history
+    # (services/db_maintenance.py, nightly 04:00 store time). 0 = keep forever.
+    TRACK_POINTS_RETENTION_DAYS: int = int(os.getenv("TRACK_POINTS_RETENTION_DAYS", "21"))
+    TRACK_ROWS_RETENTION_DAYS: int = int(os.getenv("TRACK_ROWS_RETENTION_DAYS", "396"))
     # Retention: hourly snapshots / daily roll-ups.
     HEATMAP_HOURLY_RETENTION_DAYS: int = int(os.getenv("HEATMAP_HOURLY_RETENTION_DAYS", "35"))
     HEATMAP_DAILY_RETENTION_DAYS: int = int(os.getenv("HEATMAP_DAILY_RETENTION_DAYS", "400"))

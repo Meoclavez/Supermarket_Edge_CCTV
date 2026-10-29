@@ -132,12 +132,18 @@ def zone_info(ts: Optional[float] = None) -> dict:
     tz = store_tz()
     dt = local_dt(ts)
     off = dt.utcoffset() or timedelta(0)
-    return {
-        "name": (settings.SITE_TIMEZONE or "").strip() if tz is not None else _host_zone_name(),
-        "source": "SITE_TIMEZONE" if tz is not None else "host",
+    from app.services.timeutil import site_tz_source
+
+    src = site_tz_source()
+    out = {
+        "name": src.get("name") or _host_zone_name(),
+        "source": {"setting": "SITE_TIMEZONE", "host": "host"}.get(src["source"], "fixed_offset"),
         "abbreviation": dt.tzname(),
         "utc_offset_min": int(off.total_seconds() // 60),
     }
+    if src.get("warning"):
+        out["warning"] = src["warning"]
+    return out
 
 
 def time_info(ts: float) -> dict:
@@ -759,27 +765,10 @@ class NightWatch:
         buf = clip_recorder_service.buffers.get(p.camera_id)
         if buf is None:
             return False
-        frames = buf.get_pre_event_frames()
-        fps = max(1, int(buf.fps))
-        end = time.monotonic() + max(0.0, float(settings.NIGHT_WATCH_CLIP_POST_SEC))
-        last_t = buf.latest_frame_time
-        while time.monotonic() < end:
-            time.sleep(1.0 / fps)
-            if buf.latest_frame_time != last_t:
-                last_t = buf.latest_frame_time
-                f = buf.get_latest_frame_copy()
-                if f is not None:
-                    frames.append(f)
-        if not frames:
-            return False
+        # Compressed frames only, each once, at the captured rate (clip_recorder).
         path = self.evidence_dir() / f"{p.alert_id}.mp4"
-        clip_recorder_service._mux_frames_to_mp4(frames, path, fps)
-        if path.is_file():
-            from app.services.evidence_storage import note_evidence_written
-
-            note_evidence_written(path)
-            return True
-        return False
+        return clip_recorder_service._record_blocking(
+            buf, path, time.time(), None, max(0.0, float(settings.NIGHT_WATCH_CLIP_POST_SEC)))
 
     def enforce_cap(self) -> int:
         """Delete the oldest night-watch evidence until it is within NIGHT_WATCH_EVIDENCE_MAX_MB.

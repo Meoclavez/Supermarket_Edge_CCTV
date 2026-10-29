@@ -17,7 +17,7 @@ import os
 import shutil
 import time
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 
@@ -187,9 +187,27 @@ def _overall(services: dict) -> str:
     return "healthy"
 
 
+def _signed_in(request: Request) -> bool:
+    """A dashboard/phone session or the internal key (or AUTH_DISABLED)."""
+    from fastapi import HTTPException
+
+    from app.services.auth_service import auth_service
+
+    try:
+        return bool(auth_service.verify_api_access(request, None, None, None))
+    except HTTPException:
+        return False
+
+
 @router.get("")
-async def health_check():
-    """Returns hardware, storage, pipeline and service telemetry."""
+async def health_check(request: Request):
+    """Hardware, storage, pipeline and service telemetry for a signed-in caller.
+
+    Without a session (container healthcheck, install script, the offline
+    page and phone reachability checks, anyone on the internet through the
+    online address) the answer is only ``{"status", "version"}``: camera
+    names, errors, log paths and live counts are not public.
+    """
     tracker = ServiceHealthTracker()
     total, used, free = shutil.disk_usage(str(settings.STORAGE_DIR))
     used_pct = round((used / total) * 100, 1)
@@ -278,6 +296,8 @@ async def health_check():
             "active_person_tracks": pipeline.get("live_tracks"),
         },
     }
+    if not _signed_in(request):
+        body = {"status": overall, "version": settings.VERSION}
     # 503 only when the database itself is down, so container healthchecks
     # (curl -f) restart a broken instance but not one with an offline camera.
     return JSONResponse(body, status_code=503) if overall == "unhealthy" else body

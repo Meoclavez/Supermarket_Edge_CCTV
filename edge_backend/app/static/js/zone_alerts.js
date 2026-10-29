@@ -478,6 +478,16 @@
   }
 
   function schedule() {
+    const EP = window.EdgePoll;
+    if (EP) {
+      // Area and line alerts are pushed over the alert websocket (restricted.js ingests
+      // area alerts at once; any alert re-reads the list here). The poll is the fallback:
+      // 5 s while the websocket is down, 30 s while it is up; paused while hidden.
+      if (state.poll) return;
+      state.poll = EP.every(POLL_MS, () => load(false), { wsMs: 30000 });
+      EP.ws.on(() => load(false));
+      return;
+    }
     clearTimeout(state.timer);
     state.timer = setTimeout(async () => {
       if (!document.hidden) await load(false);

@@ -65,6 +65,23 @@ def _require_operator(request: Request) -> None:
         raise HTTPException(status_code=403, detail="Only an operator signed in to the dashboard can change remote access.")
 
 
+def _refuse_fixed_server_change(new_url: Optional[str]) -> None:
+    """With the iKorex key fixed in .env (FLEET_CONTROL_PUBLIC_KEY) the iKorex
+    server address is fixed too: pointing the box elsewhere would only stop
+    its plan check-ins (offline standby), so it is not offered."""
+    if new_url is None:
+        return
+    from app.services import remote_access_service as ras
+    from app.services.fleet_control import env_public_key
+
+    if not env_public_key():
+        return
+    current = (ras.load_settings().get("server_url") or "").strip().rstrip("/")
+    if (new_url or "").strip().rstrip("/") != current:
+        raise HTTPException(status_code=403, detail="The iKorex server address is fixed on this box. "
+                                                    "Contact iKorex to change it.")
+
+
 @router.get("")
 async def get_remote_access():
     return await asyncio.to_thread(remote_access_service.status)
@@ -73,6 +90,7 @@ async def get_remote_access():
 @router.put("")
 async def put_remote_access(body: RemoteAccessUpdate, request: Request):
     _require_operator(request)
+    _refuse_fixed_server_change(body.server_url)
     try:
         return await asyncio.to_thread(
             remote_access_service.update,

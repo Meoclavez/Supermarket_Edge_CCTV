@@ -250,9 +250,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..database import get_db
 from ..services.auth_service import require_admin
 from ..services.backup_service import (
-    MAX_UPLOAD_BYTES,
     backup_kind,
     backup_service,
+    max_upload_bytes,
 )
 
 _backup_log = logging.getLogger("SystemBackups")
@@ -318,7 +318,7 @@ def backups_payload() -> dict:
         "backups": items,
         "total": len(items),
         "restart_supported": restart_supported(),
-        "max_upload_bytes": MAX_UPLOAD_BYTES,
+        "max_upload_bytes": max_upload_bytes(),
         "contents": ("The database: store layout, cameras, settings, user accounts and recorded figures. "
                      "Evidence images and clips are not included."),
     }
@@ -443,8 +443,10 @@ async def upload_backup(request: Request, filename: str = ""):
     import shutil
 
     declared = request.headers.get("content-length")
-    if declared and declared.isdigit() and int(declared) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail="The file is larger than the 2 GB limit.")
+    limit = max_upload_bytes()
+    too_big = f"The file is larger than the {limit / 1024 ** 3:.1f} GB limit."
+    if declared and declared.isdigit() and int(declared) > limit:
+        raise HTTPException(status_code=413, detail=too_big)
     backup_service.backups_dir.mkdir(parents=True, exist_ok=True)
     free = shutil.disk_usage(str(backup_service.backups_dir)).free
     need = int(declared) * 3 if declared and declared.isdigit() else 0
@@ -457,8 +459,8 @@ async def upload_backup(request: Request, filename: str = ""):
             os.fchmod(fh.fileno(), 0o600)
             async for chunk in request.stream():
                 size += len(chunk)
-                if size > MAX_UPLOAD_BYTES:
-                    raise HTTPException(status_code=413, detail="The file is larger than the 2 GB limit.")
+                if size > limit:
+                    raise HTTPException(status_code=413, detail=too_big)
                 fh.write(chunk)
         if size == 0:
             raise HTTPException(status_code=400, detail="The upload was empty.")

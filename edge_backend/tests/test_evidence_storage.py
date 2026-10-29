@@ -128,6 +128,20 @@ def test_disk_limit_trims_evidence(store, monkeypatch):
     assert "STORAGE_MAX_DISK_PERCENT" in rep["limited_by"]
 
 
+def test_full_disk_from_database_does_not_wipe_evidence(store, monkeypatch):
+    """Audit L3: the database and backups past the disk limit no longer delete all evidence."""
+    es, root, _, _ = store
+    files = [put(root / "clips" / f"evt_{i}.mp4", 1000, NOW - 400 + i) for i in range(4)]
+    DU = namedtuple("DU", "total used free")
+    # 99 kB of 100 kB used, only 4 kB of it evidence: the rest is the database.
+    monkeypatch.setattr(es_mod.shutil, "disk_usage", lambda p: DU(100_000, 99_000, 1_000))
+    monkeypatch.setattr(settings, "STORAGE_MAX_DISK_PERCENT", 85.0)
+    monkeypatch.setattr(es_mod, "evidence_floor_bytes", lambda cap: 3000)
+    rep = es.enforce(now=NOW)
+    assert [f.exists() for f in files] == [False, True, True, True]   # down to the floor, not zero
+    assert "database" in rep["disk_warning"]
+
+
 def test_auto_cap_is_a_share_of_the_disk(store, monkeypatch):
     es, _, _, _ = store
     monkeypatch.setattr(settings, "EVIDENCE_MAX_GB", 0.0)

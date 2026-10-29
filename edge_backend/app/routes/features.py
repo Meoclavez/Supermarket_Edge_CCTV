@@ -118,7 +118,7 @@ async def _collect(db: AsyncSession, plan: Dict[str, bool]) -> Dict[str, Any]:
             "id": c.id, "name": c.name, "on": bool(c.is_ai_enabled), "role": c.role,
             "online": bool(rt is not None and getattr(rt, "status", None) == "ONLINE"),
             "calibrated": bool(c.homography_matrix), "watch_zone_id": c.watch_zone_id,
-            "placed": c.map_placed is not False, "features": feats,
+            "placed": c.map_placed is True, "features": feats,
         })
     d["cameras"] = rows
 
@@ -361,18 +361,18 @@ def _map(d) -> Dict[str, str]:
 
 
 def _placement(d) -> Dict[str, str]:
-    cams = d["cameras"]
-    if not cams:
+    """Placed and calibrated are separate steps: "all on the map" is not "done"."""
+    from app.services.camera_setup_state import STEP_DONE, camera_setup_state
+
+    if not d["cameras"]:
         return _st("setup", "Add cameras first.")
-    unplaced = [c for c in cams if not c["placed"]]
-    linked = [c for c in cams if not c["calibrated"] and c["watch_zone_id"] in d["zone_ids"]]
-    cal = [c for c in cams if c["calibrated"]]
-    left = [c for c in cams if not c["calibrated"] and c["watch_zone_id"] not in d["zone_ids"]]
-    if unplaced:
-        return _st("setup", f"{len(unplaced)} of {len(cams)} not on the map yet, starting with \"{unplaced[0]['name']}\".")
-    if left:
-        return _st("setup", f"{len(cal)} calibrated, {len(linked)} linked to an area, {len(left)} still to do.")
-    return _st("on", f"All on the map: {len(cal)} calibrated, {len(linked)} linked to an area.")
+    st = camera_setup_state(d["cameras"], d["zone_ids"])
+    if st["step"] == STEP_DONE:
+        return _st("on", f"All on the map and calibrated: {st['counts']}.")
+    linked = f", {st['zone_linked']} linked to an area" if st["zone_linked"] else ""
+    if st["unplaced"]:
+        return _st("setup", f"{st['counts']}{linked}. Place \"{st['first_unplaced']['name']}\" next, then calibrate.")
+    return _st("setup", f"{st['counts']}{linked}. Placing is done; calibrate \"{st['first_uncalibrated']['name']}\" next.")
 
 
 def _areas(d) -> Dict[str, str]:
@@ -506,7 +506,9 @@ def _links(d: Dict[str, Any]) -> Dict[str, Optional[str]]:
     return {
         "first_camera": cams[0]["id"] if cams else None,
         "first_without_purpose": first(lambda c: not c["role"]),
-        "first_to_calibrate": first(lambda c: not c["calibrated"]),
+        # A camera already on the map first: calibration pairs picture spots with map spots.
+        "first_to_calibrate": first(lambda c: not c["calibrated"] and c["placed"]) or first(lambda c: not c["calibrated"]),
+        "first_unplaced": first(lambda c: not c["placed"]),
         "first_night_watch": first(lambda c: c["features"].night_watch and c["features"].night_watch.enabled)
         or (cams[0]["id"] if cams else None),
     }

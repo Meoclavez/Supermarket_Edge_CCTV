@@ -806,7 +806,12 @@ class HeatmapRecorder:
             logger.error(f"Heatmap backfill failed: {e}")
         while self._running:
             try:
-                await self.tick()
+                from app.services.entitlements import feature_safe
+
+                # Heatmaps not in the plan, or the service paused: no recording
+                # (reads are gated anyway); uptime is not credited either.
+                if feature_safe("heatmaps"):
+                    await self.tick()
                 await asyncio.sleep(max(float(settings.HEATMAP_TICK_SEC), 1.0))
             except asyncio.CancelledError:
                 raise

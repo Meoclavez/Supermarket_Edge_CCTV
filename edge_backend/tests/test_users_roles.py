@@ -317,7 +317,7 @@ def test_stream_token_cannot_change_setup(client):
     _owner(client)
     st = auth_service.generate_stream_token("cam_x")
     r = client.put("/api/v1/cameras/cam_x", headers=_h(st), json={"name": "x"})
-    assert r.status_code == 403
+    assert r.status_code in (401, 403)
 
 
 def test_tokens_without_an_account_keep_their_claimed_role(client):

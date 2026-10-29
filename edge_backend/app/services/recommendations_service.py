@@ -398,6 +398,12 @@ class RecommendationsService:
             await asyncio.sleep(delay)
             delay = float(SCHEDULE_SEC)
             try:
+                from app.services.entitlements import feature_safe
+
+                # Not in the plan, or the service is paused: nobody can read the
+                # results, so do not spend the box's CPU (and local model) on them.
+                if not feature_safe("business_insights"):
+                    continue
                 async with async_session_factory() as db:
                     await self.run(db, trigger="schedule", requested_by="scheduler", narrate=False)
             except RunInProgress:

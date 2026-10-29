@@ -60,6 +60,14 @@ from app.services import privacy_video
 from app.services.go2rtc_manager import Go2RtcError, Go2RtcUnavailable, go2rtc_manager, redact, transcode_source
 
 logger = logging.getLogger("edge.webrtc")
+_BACKGROUND: set = set()
+
+
+def _keep(task):
+    """Hold a fire-and-forget task until it finishes (the loop keeps only a weak reference)."""
+    _BACKGROUND.add(task)
+    task.add_done_callback(_BACKGROUND.discard)
+    return task
 
 RING_SIZE = 50
 STREAM_PREFIX = "ws_"
@@ -507,7 +515,7 @@ class WebRtcSessions:
         # The page closes its RTCPeerConnection with the DELETE: check soon
         # instead of waiting a full reaper tick.
         if self._loop is not None:
-            self._loop.call_later(1.0, lambda: asyncio.ensure_future(self._settle_ending()))
+            self._loop.call_later(1.0, lambda: _keep(asyncio.ensure_future(self._settle_ending())))
         return True
 
     def report(self, session_id: str, data: dict[str, Any]) -> bool:
@@ -646,7 +654,7 @@ class WebRtcSessions:
         except RuntimeError:
             running = None
         if running is loop:
-            loop.create_task(self.check_privacy())
+            _keep(loop.create_task(self.check_privacy()))
         else:
             asyncio.run_coroutine_threadsafe(self.check_privacy(), loop)
 

@@ -24,10 +24,17 @@ viewer ──UDP──> VPS STUN (coturn --stun-only, no TURN) <── box      
    `POST /api/v1/cameras/test-connection` (refuse outright), the DVR HLS
    `GET /api/v1/dvr/cameras/{id}/hls/...`, and recorded DVR video
    `GET /api/v1/dvr/segments/{id}/video` and `GET /api/v1/dvr/archives/{id}/download`
-   (the device is evidence-only anyway). The websocket and JSON endpoints keep working.
-   Stored evidence stills and short clips (theft evidence JPEG, event snapshots/clips,
-   night-watch evidence, `/api/zones/alerts/{id}/snapshot`) stay downloadable on an
-   explicit click. They are small, on-demand and not a feed.
+   (the device is evidence-only anyway), and the pose-model trial crops
+   `GET /api/v1/system/shadow-trial/samples/{file}` (pictures of people). The websocket and
+   JSON endpoints keep working.
+   Stored evidence stills and short clips stay downloadable on an explicit click: theft
+   evidence (`/api/v1/theft/incidents/{id}/evidence|clip`), event snapshots/clips
+   (`/api/v1/events/snapshots|clips/{file}`), night-watch evidence, zone alert stills
+   (`/api/zones/alerts/{id}/snapshot`) and restricted-area alert stills and clips (stored
+   as event snapshots/clips). They are small, on-demand and not a feed. Since 2.8.0 a link
+   to one carries no stored token: the dashboard opens it with its session cookie, and a
+   link that must work without a header (phone video player, websocket message) gets a
+   15-minute clip token for exactly that file and the person it is served to.
    The gateway also returns 403 for `/stream` and `*/snapshot` at the edge, as defence in depth.
 3. **On demand only.** The box opens an NVR stream for remote viewing only when a session
    exists, and closes it when the last session on that camera ends. Nothing streams or polls

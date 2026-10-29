@@ -17,6 +17,8 @@ should have filled it had no caller anywhere in the application.
 
 from __future__ import annotations
 
+import asyncio
+
 import json
 import logging
 import math
@@ -1004,8 +1006,12 @@ class BusinessAnalysisService:
             ),
         }
         if narrate:
-            result["narrative"] = self.narrate(findings, overview,
-                                               heatmap_summary=heatmap["summary"] if heatmap else None)
+            # Blocking HTTP to the local model (up to ~92 s): off the event loop,
+            # which otherwise froze the whole API, live video signalling and
+            # alert delivery meanwhile (audit L5).
+            result["narrative"] = await asyncio.to_thread(
+                self.narrate, findings, overview,
+                heatmap_summary=heatmap["summary"] if heatmap else None)
         return result
 
     @staticmethod

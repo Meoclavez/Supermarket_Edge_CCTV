@@ -229,6 +229,13 @@ async def lifespan(app: FastAPI):
         await daily_backup.start()
     except Exception as exc:
         startup_log.exception(f"Daily backup scheduler failed to start: {exc}")
+    # 4d3. Nightly database upkeep at 04:00 store time: old raw shopper paths
+    # emptied, planner statistics, WAL truncated (services/db_maintenance.py).
+    from .services.db_maintenance import db_maintenance
+    try:
+        await db_maintenance.start()
+    except Exception as exc:
+        startup_log.exception(f"Database upkeep scheduler failed to start: {exc}")
 
     # 4e. Shadow pose-model trial (developer experiment, SHADOW_POSE_MODEL):
     # off unless configured; loads on its own thread and never feeds analytics.
@@ -306,6 +313,9 @@ async def lifespan(app: FastAPI):
         await recommendations_service.stop()
         await evidence_storage.stop()
         await daily_backup.stop()
+        await db_maintenance.stop()
+        from .database import stop_background_tasks
+        await stop_background_tasks()
         await push_alerts.stop()
         await offline_watchdog.stop()
         await asyncio.to_thread(shadow_trial.stop)
@@ -513,6 +523,59 @@ def _encode_jpeg(frame, quality: int = 80):
     return buf.tobytes() if ok else None
 
 
+# One encode per new frame per (camera, overlay, width), shared by every viewer
+# of that picture, and done on a worker thread: each viewer used to convert,
+# scale, draw and JPEG-encode the same frame on the event loop (audit L6).
+_MJPEG_LATEST: dict = {}     # (camera, overlay, width) -> (frame key, jpeg bytes)
+_MJPEG_INFLIGHT: dict = {}   # (camera, overlay, width, frame key) -> Future[bytes | None]
+MJPEG_STATS = {"encodes": 0, "shared": 0}
+
+
+def _render_mjpeg_frame(cam: str, overlay: bool, max_width: int):
+    from .services.live_analytics_engine import fit_width, render_overlay
+
+    frame = live_engine.get_frame(cam)
+    if frame is None:
+        return None
+    frame, scale = fit_width(frame, max_width)
+    if overlay:
+        rt = live_engine.runtimes.get(cam)
+        if rt is not None:
+            # get_frame() returned a copy: drawing never touches the worker's frame.
+            frame = render_overlay(frame, rt, scale=scale)
+    return _encode_jpeg(frame)
+
+
+async def shared_mjpeg_frame(cam: str, key, overlay: bool, max_width: int):
+    """The JPEG for ``key`` (camera, frames_read, tracks stamp): cached, in flight, or encoded now."""
+    slot = (cam, bool(overlay), int(max_width or 0))
+    hit = _MJPEG_LATEST.get(slot)
+    if hit is not None and hit[0] == key:
+        MJPEG_STATS["shared"] += 1
+        return hit[1]
+    inflight_key = slot + (key,)
+    task = _MJPEG_INFLIGHT.get(inflight_key)
+    if task is None:
+        async def encode():
+            try:
+                payload = await asyncio.to_thread(_render_mjpeg_frame, cam, bool(overlay), int(max_width or 0))
+                MJPEG_STATS["encodes"] += 1
+                if payload:
+                    if slot not in _MJPEG_LATEST and len(_MJPEG_LATEST) >= 128:
+                        _MJPEG_LATEST.clear()  # widths come from clients: stay bounded
+                    _MJPEG_LATEST[slot] = (key, payload)
+                return payload
+            finally:
+                _MJPEG_INFLIGHT.pop(inflight_key, None)
+
+        # Its own task: a viewer that disconnects mid-encode cancels only its
+        # wait (shield), never the encode the other viewers are waiting for.
+        task = _MJPEG_INFLIGHT[inflight_key] = asyncio.ensure_future(encode())
+    else:
+        MJPEG_STATS["shared"] += 1
+    return await asyncio.shield(task)
+
+
 def _placeholder_frame(message: str, width: int = 960, height: int = 540) -> bytes:
     """A plain slate stating why there is no picture.
 
@@ -541,7 +604,6 @@ async def mjpeg_stream(request: Request, camera_id: str | None = None, fps: int 
     ``/api/v1/cameras/{id}/snapshot``: the enlarged dashboard tile asks for
     about its on-screen size instead of a 3072x2048 frame per picture.
     """
-    from .services.live_analytics_engine import fit_width, render_overlay
     from .services.shutdown_signal import shutdown_requested
 
     async def iter_frames():
@@ -564,34 +626,25 @@ async def mjpeg_stream(request: Request, camera_id: str | None = None, fps: int 
                 if rt_now is not None and rt_now.frames_read:
                     key = (cam, rt_now.frames_read, rt_now._tracks_at if overlay else None)
                 if key is not None and key == last_key and last_payload:
-                    frame, payload = None, last_payload
-                else:
-                    frame = live_engine.get_frame(cam) if cam else None
-                    payload = None
-                if payload is not None:
+                    payload = last_payload
                     await asyncio.sleep(delay)
-                elif frame is None:
-                    rt = live_engine.runtimes.get(cam) if cam else None
-                    if rt is not None and not rt.enabled:
-                        reason = "camera is turned off"
+                else:
+                    payload = (await shared_mjpeg_frame(cam, key, bool(overlay), max_width)
+                               if cam and key is not None else None)
+                    if payload:
+                        last_key, last_payload = key, payload
+                        # Dashboard tiles ask for a low frame rate: a wall of 32 feeds
+                        # re-encoding at full rate would spend the whole CPU budget on
+                        # JPEG for thumbnails nobody is inspecting frame by frame.
+                        await asyncio.sleep(delay)
                     else:
-                        reason = (rt.last_error or rt.status) if rt else "no camera configured"
-                    payload = _placeholder_frame(str(reason))
-                    await asyncio.sleep(0.5)
-                else:
-                    frame, scale = fit_width(frame, max_width)
-                    if overlay:
-                        rt = live_engine.runtimes.get(cam)
-                        if rt is not None:
-                            # get_frame() already returned a copy, so drawing here
-                            # never touches the frame the worker is analysing.
-                            frame = render_overlay(frame, rt, scale=scale)
-                    payload = _encode_jpeg(frame)
-                    last_key, last_payload = key, payload
-                    # Dashboard tiles ask for a low frame rate: a wall of 32 feeds
-                    # re-encoding at full rate would spend the whole CPU budget on
-                    # JPEG for thumbnails nobody is inspecting frame by frame.
-                    await asyncio.sleep(delay)
+                        rt = live_engine.runtimes.get(cam) if cam else None
+                        if rt is not None and not rt.enabled:
+                            reason = "camera is turned off"
+                        else:
+                            reason = (rt.last_error or rt.status) if rt else "no camera configured"
+                        payload = await asyncio.to_thread(_placeholder_frame, str(reason))
+                        await asyncio.sleep(0.5)
 
                 if payload:
                     chunk = (

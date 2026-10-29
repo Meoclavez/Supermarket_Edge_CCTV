@@ -8,12 +8,21 @@ from app.services import backup_service as bs
 
 def test_next_run_is_tonight_or_tomorrow_at_three_store_time():
     tz = ZoneInfo("Australia/Melbourne")
-    before = datetime(2026, 10, 4, 1, 30, tzinfo=tz)
+    before = datetime(2026, 10, 14, 1, 30, tzinfo=tz)
     assert bs.seconds_until_daily_backup(before) == 90 * 60
-    after = datetime(2026, 10, 4, 3, 0, tzinfo=tz)
+    after = datetime(2026, 10, 14, 3, 0, tzinfo=tz)
     assert bs.seconds_until_daily_backup(after) == 24 * 3600
-    late = datetime(2026, 10, 4, 22, 0, tzinfo=tz)
+    late = datetime(2026, 10, 14, 22, 0, tzinfo=tz)
     assert bs.seconds_until_daily_backup(late) == 5 * 3600
+
+
+def test_next_run_counts_real_time_across_daylight_saving_changes():
+    tz = ZoneInfo("Australia/Melbourne")
+    # 4 Oct 2026: clocks jump 02:00 -> 03:00, so 01:30 -> 03:00 is 30 real minutes
+    # (wall-clock subtraction said 90 and ran the backup at 04:00).
+    assert bs.seconds_until_daily_backup(datetime(2026, 10, 4, 1, 30, tzinfo=tz)) == 30 * 60
+    # 5 Apr 2026: clocks fall back 03:00 -> 02:00, so 22:00 -> 03:00 is 6 real hours.
+    assert bs.seconds_until_daily_backup(datetime(2026, 4, 4, 22, 0, tzinfo=tz)) == 6 * 3600
 
 
 def test_scheduler_backs_up_with_auto_tag_and_applies_retention(monkeypatch):

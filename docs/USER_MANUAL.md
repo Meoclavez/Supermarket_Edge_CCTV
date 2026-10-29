@@ -544,6 +544,18 @@ logged with who made it and when.
 
 ### 2.6 Place cameras on the plan
 
+Setting up a camera on the map is **two steps: place it (2.6), then calibrate it (2.7)**. Placing
+shows where the camera hangs and which way it points, but on its own it puts nobody on the map: until
+a camera is calibrated its coverage is only an estimate from the lens angle, the people it sees are
+not shown on the live map or the heatmap, and sizes, distances and speeds (walking distance, queue
+length, the restricted-area speed and distance triggers) are guessed in body heights instead of
+measured in floor metres. The dashboard says which step is open and how many cameras are in each
+state, for example "32 cameras placed, 0 calibrated": on Today (the banner under the header, with
+"Place cameras" or "Calibrate a camera"), in the Getting started checklist (two separate steps), on
+the Features card "Camera placement and calibration" and in the yellow box beside the Store map.
+"Counts into zone" (2.6a) counts an uncalibrated camera's visits into one area, but it is not
+calibration and never ticks the calibration step off.
+
 Store map. For each camera:
 
 1. Press "Place" in "Cameras & devices", then click the plan where the camera is mounted
@@ -639,6 +651,15 @@ The map is drawn in real metres, so the dashboard uses the sizes:
 - Store figures (in "Store coverage"): **sales per m²** of sales floor (needs the tills connected,
   2.10), **shoppers per 100 m²** and **average walk in view** (how far a shopper walks while one
   calibrated camera follows them).
+- **Queue length in metres** (checkout areas): select a "Checkout" store area; "Queue now" is the
+  distance from the first to the last person standing in it along its long side, with the number of
+  people and how far apart they stand. It is measured only from calibrated cameras; when no
+  calibrated camera sees at least half of the area it shows a dash and says why, even if an
+  uncalibrated camera counts people there. "Store coverage" lists every checkout queue.
+- **Sales per m² per area is not shown**: the tills send product codes (SKU) only, with no
+  department, so a sale cannot be put in a store area. It needs the tills to send a department or
+  category with each line (or a product list that gives each code its department), and the store
+  areas' "Products sold here" to use the same department names.
 - Insights compare low-traffic areas **per m²** (a small aisle is not called "dead" for being small),
   and do not judge an area the calibrated cameras see less than half of (its low count may only mean
   the cameras miss it; the reason is listed under the skipped rules).
@@ -649,9 +670,12 @@ The map is drawn in real metres, so the dashboard uses the sizes:
 
 ### 2.7 Calibrate each camera to the floor
 
-Calibration tells the system which spot on the plan each point of the floor in the camera picture
-is. Without it a camera counts people but cannot place them on the plan, so the map, heatmaps and
-store areas stay empty for that camera.
+Do this after placing the camera (2.6). Calibration tells the system which spot on the plan each
+point of the floor in the camera picture is. Without it a camera counts people but cannot place them
+on the plan, so the map, heatmaps and store areas stay empty for that camera, its coverage is only an
+estimate, and it measures in body heights instead of metres. "Calibrate a camera" (Today banner,
+checklist, Features card, Help guide "Calibrate a camera to the floor") opens this tool for the next
+placed camera that is not calibrated yet. The camera must be sending pictures.
 
 1. Press "Calibrate" (camera list or inspector, or "Calibrate on the map" in the checklist).
 2. "1 · Click a floor spot in the camera picture." Pick a mark that is on the floor and also on the
@@ -868,6 +892,11 @@ time. Defaults:
 | "Crouching or low posture" | 2 s (hips and knees must be visible) | Alert |
 | "Reaching up high" | a hand above the head for 1 s | Alert |
 | "Near a marked point" | within 1 m of a point of interest (the safe, the cash drawer) for 1 s | Alert |
+
+Points of interest are placed by **clicking or dragging** in the area's settings: on a small map of
+the zone (for an area on the store map, in floor metres) or on the camera picture (for an area drawn
+on a camera). The marker can also be moved with the arrow keys (Shift for bigger steps), and the
+numbers ("x" / "y" in metres, or "Across" / "Down" in the picture) can still be typed.
 | "Lingering at the edge" | waiting within 1 m outside the area for 8 s | Watch |
 | "Too many people inside" | more than 1 (the number announced is allowed) | Alert |
 | "Entry not through the door" | off; choose the door lines drawn in Camera setup | Alert |

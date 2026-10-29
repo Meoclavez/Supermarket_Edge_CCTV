@@ -243,6 +243,8 @@ async def update_account(user_id: str, req: AccountUpdateReq, db: AsyncSession =
     invalidate_account_cache()
     if signed_out:
         await asyncio.to_thread(auth_service.sign_out_account, u.id, True)
+        from app.services.notification_service import alert_hub
+        await alert_hub.prune_revoked()  # close its live alert sockets now
     log.warning("Account %s updated by %s: role=%s active=%s", u.username, me or "service key",
                 u.role, _active(u))
     return {**_public(u, me), "signed_out": signed_out}
@@ -263,6 +265,8 @@ async def reset_account_password(user_id: str, req: PasswordResetReq, db: AsyncS
     u.password_hash = await asyncio.to_thread(hash_password, req.new_password)
     await db.commit()
     await asyncio.to_thread(auth_service.sign_out_account, u.id, False)
+    from app.services.notification_service import alert_hub
+    await alert_hub.prune_revoked()  # close its live alert sockets now
     log.warning("Password of %s reset by %s; its browser sessions were signed out",
                 u.username, me or "service key")
     return {"status": "success", "signed_out": True, "account": _public(u, me)}
@@ -281,6 +285,8 @@ async def remove_account(user_id: str, db: AsyncSession = Depends(get_db),
     await db.commit()
     invalidate_account_cache()
     await asyncio.to_thread(auth_service.sign_out_account, user_id, True)
+    from app.services.notification_service import alert_hub
+    await alert_hub.prune_revoked()  # close its live alert sockets now
     log.warning("Account %s removed by %s; its sessions and phones were signed out",
                 username, me or "service key")
     return {"status": "removed", "id": user_id, "username": username}

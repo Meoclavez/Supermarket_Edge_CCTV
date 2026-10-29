@@ -68,7 +68,8 @@ async def get_camera_timeline(
         .order_by(SecurityEventModel.timestamp.asc())
     )
     db_events = (await db.execute(evt_stmt)).scalars().all()
-    token = auth_service.generate_stream_token(camera_id)
+    # Recorded video of this one camera, for the caller's session only.
+    token = auth_service.generate_stream_token(camera_id, owner=getattr(request.state, "user", None))
     # Links on the address this caller used (not EDGE_BASE_URL), so they work
     # from a phone, another address and online access.
     base = request_base(request)
@@ -130,7 +131,7 @@ async def get_hls_playlist(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format, expected YYYY-MM-DD")
 
-    token = auth_service.generate_stream_token(camera_id)
+    token = auth_service.generate_stream_token(camera_id, owner=token_payload)
     playlist_content = await dvr_recorder_service.generate_hls_playlist(camera_id, target_date, token)
 
     return Response(content=playlist_content, media_type="application/vnd.apple.mpegurl")
@@ -141,12 +142,20 @@ async def get_hls_playlist(
 @router.get("/dvr/segments/{segment_id}/video")
 async def stream_dvr_segment_video(
     segment_id: str,
-    token_payload: dict = Depends(auth_service.verify_clip_access),
+    request: Request,
     db: AsyncSession = Depends(get_db)
 ):
-    """Streams 1-minute MP4 segment with HTTP 206 Partial Content support."""
+    """Streams 1-minute MP4 segment with HTTP 206 Partial Content support.
+
+    A signed-in session, or the stream token of the playlist for this
+    segment's camera (the router dependency verified it; the camera is
+    checked here, where the segment is known)."""
     stmt = select(DVRSegmentModel).where(DVRSegmentModel.id == segment_id)
     seg = (await db.execute(stmt)).scalar_one_or_none()
+    user = getattr(request.state, "user", None) or {}
+    if user.get("type") == "clip_access" or (
+            user.get("type") == "stream_access" and (not seg or user.get("camera_id") != seg.camera_id)):
+        raise HTTPException(status_code=403, detail="This token is not for this recording")
     if not seg:
         raise HTTPException(status_code=404, detail="DVR segment not found")
 
@@ -168,6 +177,7 @@ async def stream_dvr_segment_video(
 async def export_custom_incident_clip(
     camera_id: str,
     export_req: DVRExportRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db)
 ):
     """Stitches and exports a custom time window into a downloadable lossless MP4."""
@@ -195,15 +205,16 @@ async def export_custom_incident_clip(
         duration_seconds=archive.duration_seconds,
         file_size_bytes=archive.file_size_bytes,
         status=archive.status,
-        download_url=archive.download_url,
+        download_url=absolute_for(request, archive.download_url),
         created_at=archive.created_at
     )
 
 
 @router.get("/dvr/archives", response_model=IncidentArchiveListResponse)
 async def list_incident_archives(
+    request: Request,
     camera_id: Optional[str] = None,
-    limit: int = 50,
+    limit: int = Query(50, ge=1, le=500),
     db: AsyncSession = Depends(get_db)
 ):
     """Lists saved incident video archives."""
@@ -226,7 +237,8 @@ async def list_incident_archives(
             duration_seconds=a.duration_seconds,
             file_size_bytes=a.file_size_bytes,
             status=a.status,
-            download_url=a.download_url,
+            # Minted per caller for this archive; the stored link has no token.
+            download_url=absolute_for(request, a.download_url),
             created_at=a.created_at
         )
         for a in archives

@@ -132,7 +132,7 @@ def test_analytics_overview_endpoint(client):
     assert (data["today_footfall"] is None) == (data["footfall_source"] is None)
     assert set(data["coverage"]) == {
         "cameras_total", "cameras_calibrated", "cameras_uncalibrated",
-        "floor_tracking_possible",
+        "cameras_placed", "floor_tracking_possible", "camera_setup",
     }
 
     # zones_total must match the blueprint, not a decorative constant.
@@ -242,7 +242,7 @@ def test_analytics_floorplan_endpoint(client):
     assert isinstance(data["active_shoppers_now"], int)
     assert set(data["coverage"]) == {
         "cameras_total", "cameras_calibrated", "cameras_uncalibrated",
-        "floor_tracking_possible",
+        "cameras_placed", "floor_tracking_possible", "camera_setup",
     }
 
 
@@ -518,20 +518,10 @@ def test_pos_ingest_stores_offset_timestamps_as_utc_and_rejects_garbage(client):
     assert bad.status_code == 422
 
 
-def test_analytics_sync_endpoint(client):
-    sync_payload = {
-        "store_id": "store_main",
-        "cloud_endpoint": "https://central-cloud.internal/api/v1/telemetry",
-        "include_raw_tracks": False
-    }
-    response = client.post("/api/v1/analytics/sync", json=sync_payload)
-    assert response.status_code == 200
-    data = response.json()
-    assert data["status"] == "success"
-    assert data["store_id"] == "store_main"
-    assert data["batch_id"].startswith("sync_")
-    assert "synced_at" in data
-    assert data["records_synced"] > 0
+def test_fake_cloud_sync_route_is_gone(client):
+    # It sent nothing anywhere but answered "success" with an invented endpoint.
+    response = client.post("/api/v1/analytics/sync", json={"store_id": "store_main"})
+    assert response.status_code in (404, 405)
 
 
 def test_analytics_planogram_endpoint(client):

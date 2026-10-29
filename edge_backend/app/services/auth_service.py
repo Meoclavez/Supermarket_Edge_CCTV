@@ -212,7 +212,10 @@ class RateLimiter:
         self.history[ip] = [t for t in self.history[ip] if now - t < self.window]
         if len(self.history[ip]) >= self.requests:
             logger.warning(f"[RateLimiter] IP {ip} exceeded rate limit")
-            raise HTTPException(status_code=429, detail="Too Many Requests")
+            # When the oldest request in the window drops out, one more is allowed:
+            # the dashboard (static/js/poll.js) pauses its polls until then.
+            retry = max(1, int(self.window - (now - self.history[ip][0]) + 0.999))
+            raise HTTPException(status_code=429, detail="Too Many Requests", headers={"Retry-After": str(retry)})
         self.history[ip].append(now)
 
 class IntrusionDetector:
@@ -296,15 +299,37 @@ class AuthService:
         self.stream_expiry = settings.STREAM_TOKEN_EXPIRY_SECONDS
         self.clip_expiry = settings.CLIP_TOKEN_EXPIRY_SECONDS
 
-    def generate_stream_token(self, camera_id: str, client_id: str = "mobile_app") -> str:
-        """Generate a short-lived token to authenticate WebRTC/HLS stream access."""
-        payload = {
-            "sub": client_id,
-            "camera_id": camera_id,
-            "type": "stream_access",
-            "iat": int(time.time()),
-            "exp": int(time.time()) + self.stream_expiry,
-        }
+    @staticmethod
+    def _derived_claims(owner: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """Claims a stream/clip token inherits from the session that asked for it.
+
+        ``sub``/``sid`` (and a phone's ``dev``/``pd``) make sign-out, account
+        deactivation, deletion and password changes revoke the scoped token
+        with its session (token_revocation keys on jti, sid and the account);
+        ``ep`` ties it to the auth epoch; ``iam`` is its own issue time, which
+        the per-account cut-off compares. Without an owner (internal key,
+        AUTH_DISABLED) the token is bound to the epoch only.
+        """
+        import uuid
+
+        now = time.time()
+        claims: Dict[str, Any] = {"iat": int(now), "iam": int(now * 1000), "jti": uuid.uuid4().hex,
+                                  "ep": current_auth_epoch()}
+        if isinstance(owner, dict):
+            for key in ("sub", "sid", "dev", "pd"):
+                if owner.get(key) is not None:
+                    claims[key] = owner[key]
+        return claims
+
+    def generate_stream_token(self, camera_id: str, owner: Optional[Dict[str, Any]] = None) -> str:
+        """A short-lived token for live video of exactly one camera (``camera_id``).
+
+        ``owner`` is the verified session payload of the caller; the token
+        dies with that session (see :meth:`_derived_claims`).
+        """
+        payload = self._derived_claims(owner)
+        payload.update({"type": "stream_access", "camera_id": str(camera_id),
+                        "exp": int(time.time()) + int(self.stream_expiry)})
         return jwt.encode(payload, self.secret, algorithm=self.algorithm)
 
     def create_access_token(self, data: dict, expires_delta: Optional[int] = None) -> str:
@@ -315,14 +340,16 @@ class AuthService:
         to_encode.update({"iat": now, "exp": expire, "type": data.get("type", "user_session")})
         return jwt.encode(to_encode, self.secret, algorithm=self.algorithm)
 
-    def generate_clip_token(self, event_id: str) -> str:
-        """Generate a signed expiring token for downloading/streaming event clips."""
-        payload = {
-            "event_id": event_id,
-            "type": "clip_access",
-            "iat": int(time.time()),
-            "exp": int(time.time()) + self.clip_expiry,
-        }
+    def generate_clip_token(self, filename: str, owner: Optional[Dict[str, Any]] = None) -> str:
+        """A short-lived token that opens exactly one evidence file.
+
+        ``filename`` is the last path segment of the link it is minted for
+        (``<event>.jpg``, ``<event>.mp4`` or an archive id); it opens nothing
+        else. Tokens are minted when a link is served, never stored.
+        """
+        payload = self._derived_claims(owner)
+        payload.update({"type": "clip_access", "file": str(filename),
+                        "exp": int(time.time()) + int(self.clip_expiry)})
         return jwt.encode(payload, self.secret, algorithm=self.algorithm)
 
     def verify_token(self, token: str) -> Optional[Dict[str, Any]]:
@@ -360,9 +387,12 @@ class AuthService:
         try:
             from app.services.token_revocation import token_revocations
             return token_revocations.is_revoked(token, payload)
-        except Exception as exc:  # the store must never take auth down
-            logger.error(f"revocation check failed: {exc}")
-            return False
+        except Exception as exc:
+            # Fail closed: a signed-out or deleted account must not get back in
+            # because the check broke. (A busy or unmigrated database never
+            # gets here: the store keeps its cached entries in that case.)
+            logger.error(f"revocation check failed, refusing the token: {exc}")
+            return True
 
     def verify_session_token(self, token: str) -> Optional[Dict[str, Any]]:
         """A signed, unexpired, not signed-out operator session from the current auth epoch."""
@@ -404,6 +434,76 @@ class AuthService:
             "refresh_token": jwt.encode(refresh_payload, self.secret, algorithm=self.algorithm),
         }
 
+    # ------------------------------------------------------------ credentials
+
+    @staticmethod
+    def _candidates(request: Request, bearer=None, token=None) -> list:
+        """Credentials on a request, most specific first: header, ``?token=``, cookie."""
+        out = []
+        raw = bearer.credentials if isinstance(bearer, HTTPAuthorizationCredentials) else None
+        if not raw:
+            auth_header = request.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                raw = auth_header.split(" ", 1)[1]
+        if raw:
+            out.append(raw)
+        q = token if isinstance(token, str) else None
+        q = q or request.query_params.get("token")
+        if q and q not in out:
+            out.append(q)
+        c = request.cookies.get("edge_cctv_token")
+        if c and c not in out:
+            out.append(c)
+        return out
+
+    def _usable(self, raw: str, payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """A verified token that is still good: current epoch, not signed out
+        (a deleted, deactivated or re-passworded account is signed out by
+        token_revocation; that check fails closed), phone still paired.
+        Stream/clip tokens must carry the epoch claim (older 24-hour tokens
+        without it are refused)."""
+        if not payload:
+            return None
+        kind = payload.get("type")
+        if kind not in ("user_session", "stream_access", "clip_access"):
+            return None
+        if kind != "user_session" and "ep" not in payload:
+            return None
+        if not token_epoch_is_current(payload):
+            return None
+        if self.is_revoked(raw, payload):
+            return None
+        if not phone_claims_ok(payload):
+            return None
+        return payload
+
+    def _scoped_access(self, request: Request, kinds: tuple, bearer=None, token=None) -> Dict[str, Any]:
+        """A signed-in session, or a stream/clip token of ``kinds`` scoped to this exact URL."""
+        ip = _client_ip(request)
+        candidates = self._candidates(request, bearer, token)
+        unverifiable = False
+        for raw in candidates:
+            payload, signed = self.inspect_token(raw)
+            unverifiable = unverifiable or not signed
+            payload = self._usable(raw, payload)
+            if not payload:
+                continue
+            kind = payload.get("type")
+            if kind == "user_session" or (kind in kinds and derived_scope_ok(request, payload)):
+                intrusion_detector.record_success(ip, kind)
+                request.state.user = payload
+                return payload
+        if settings.AUTH_DISABLED:
+            return {"sub": "dev_client", "type": kinds[0]}
+        if not candidates:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                                detail="Missing authorization token")
+        if unverifiable:
+            intrusion_detector.record_failure(ip, "token")
+            intrusion_detector.check_lockout(ip, "token")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Invalid or expired token for this item")
+
     def verify_stream_access(
         self,
         camera_id: str,
@@ -411,35 +511,9 @@ class AuthService:
         token: Optional[str] = Depends(query_token_scheme),
         bearer: Optional[HTTPAuthorizationCredentials] = Depends(security_bearer)
     ) -> Dict[str, Any]:
-        """FastAPI dependency: Enforces valid token for WebRTC / live video feeds.
-
-        A valid token always works; only an unverifiable one counts toward
-        (and is refused by) the token lockout.
-        """
-        ip = _client_ip(request)
-
-        raw_token = token or (bearer.credentials if bearer else None)
-        if not raw_token:
-            # Allow open access if development mode, but log warning
-            if settings.AUTH_DISABLED:
-                return {"sub": "dev_client", "camera_id": camera_id}
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Missing authentication stream token"
-            )
-
-        payload, signed = self.inspect_token(raw_token)
-        if (not payload or payload.get("type") != "stream_access" or payload.get("camera_id") != camera_id
-                or not phone_claims_ok(payload)):
-            if not signed:
-                intrusion_detector.record_failure(ip, "token")
-                intrusion_detector.check_lockout(ip, "token")
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Invalid or expired stream token for this camera"
-            )
-        intrusion_detector.record_success(ip, "stream_access")
-        return payload
+        """FastAPI dependency for live/recorded video of one camera: a signed-in
+        session, or a stream token minted for exactly this camera."""
+        return self._scoped_access(request, ("stream_access",), bearer, token)
 
     def verify_clip_access(
         self,
@@ -447,29 +521,10 @@ class AuthService:
         token: Optional[str] = Depends(query_token_scheme),
         bearer: Optional[HTTPAuthorizationCredentials] = Depends(security_bearer)
     ) -> Dict[str, Any]:
-        """FastAPI dependency: Enforces valid token for event clips and snapshots."""
-        ip = _client_ip(request)
-
-        raw_token = token or (bearer.credentials if bearer else None)
-        if not raw_token:
-            if settings.AUTH_DISABLED:
-                return {"sub": "dev_client", "type": "clip_access"}
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Missing clip authorization token"
-            )
-
-        payload, signed = self.inspect_token(raw_token)
-        if not payload or payload.get("type") != "clip_access" or not phone_claims_ok(payload):
-            if not signed:
-                intrusion_detector.record_failure(ip, "token")
-                intrusion_detector.check_lockout(ip, "token")
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Invalid or expired clip access token"
-            )
-        intrusion_detector.record_success(ip, "clip_access")
-        return payload
+        """FastAPI dependency for evidence files: a signed-in session (header,
+        ``?token=`` or the dashboard cookie), or a clip token minted for exactly
+        this file."""
+        return self._scoped_access(request, ("clip_access",), bearer, token)
 
     def verify_internal_key(
         self,
@@ -525,33 +580,24 @@ class AuthService:
             intrusion_detector.record_success(ip, "api_key")
             return True
 
-        # Safely resolve bearer token from dependency, Authorization header, query param, or cookie
-        raw_bearer = bearer.credentials if isinstance(bearer, HTTPAuthorizationCredentials) else None
-        if not raw_bearer:
-            auth_header = request.headers.get("Authorization", "")
-            if auth_header.startswith("Bearer "):
-                raw_bearer = auth_header.split(" ", 1)[1]
-        if not raw_bearer:
-            raw_bearer = token or request.query_params.get("token")
-        if not raw_bearer:
-            raw_bearer = request.cookies.get("edge_cctv_token")
-
-        bearer_signed = False
-        if raw_bearer:
-            payload, bearer_signed = self.inspect_token(raw_bearer)
-            if payload and payload.get("type") == "user_session":
-                if not token_epoch_is_current(payload):
-                    payload = None  # issued before an operator reset
-                elif self.is_revoked(raw_bearer, payload):
-                    payload = None  # signed out via /auth/logout
-            if payload and not phone_claims_ok(payload):
-                payload = None  # phone token for another device, or a revoked phone
-            if payload and payload.get("type") in ("user_session", "stream_access", "clip_access"):
+        # Bearer header, then ``?token=``, then the dashboard cookie: the first
+        # usable one wins. Stream and clip tokens are links to one camera or
+        # one evidence file: they open only that URL, never the rest of the API.
+        candidates = self._candidates(request, bearer, token)
+        bearer_signed = True
+        for raw in candidates:
+            payload, signed = self.inspect_token(raw)
+            bearer_signed = bearer_signed and signed
+            payload = self._usable(raw, payload)
+            if payload and payload.get("type") != "user_session" and not derived_scope_ok(request, payload):
+                payload = None
+            if payload:
                 intrusion_detector.record_success(ip, "bearer_token")
                 request.state.user = payload
                 # Operators (and stream/clip tokens) may not change setup.
                 enforce_write_role(request, payload)
                 return True
+        raw_bearer = candidates[0] if candidates else None
 
         if settings.AUTH_DISABLED:
             return True
@@ -810,6 +856,45 @@ def account_record(user_id: Optional[str]) -> Optional[Dict[str, Any]]:
     if not user_id or not isinstance(user_id, str):
         return None
     return _load_accounts().get(user_id)
+
+
+_WEBRTC_STREAM_PATHS = ("/api/v1/webrtc/config", "/api/v1/webrtc/ice-servers",
+                        "/api/v1/webrtc/sessions", "/api/v1/webrtc/offer")
+
+
+def derived_scope_ok(request, payload: Optional[Dict[str, Any]]) -> bool:
+    """Whether a stream/clip token may open this request's URL.
+
+    * clip token (``file`` claim): only ``/api/v1/events/snapshots/<file>``,
+      ``/api/v1/events/clips/<file>`` and ``/api/v1/dvr/archives/<file>/download``;
+    * stream token (``camera_id`` claim): only ``/stream?camera_id=<id>``,
+      ``/api/v1/cameras/<id>/snapshot`` and the recorded playlist of that camera.
+
+    Nothing else: not the event list, the layout, analytics, nor a token for
+    another camera (``/webrtc/token`` needs a signed-in session).
+    """
+    if not payload:
+        return False
+    path = request.url.path
+    kind = payload.get("type")
+    if kind == "clip_access":
+        f = payload.get("file")
+        if not isinstance(f, str) or not f or "/" in f or f in (".", ".."):
+            return False
+        return path in (f"/api/v1/events/snapshots/{f}", f"/api/v1/events/clips/{f}",
+                        f"/api/v1/dvr/archives/{f}/download")
+    if kind == "stream_access":
+        cam = payload.get("camera_id")
+        if not isinstance(cam, str) or not cam or "/" in cam:
+            return False
+        if path == "/stream":
+            return request.query_params.get("camera_id") == cam
+        if path in _WEBRTC_STREAM_PATHS or path.startswith("/api/v1/webrtc/sessions/"):
+            return True  # signalling; routes/webrtc.py _check_watch binds the camera
+        if path.startswith("/api/v1/dvr/segments/") and path.endswith("/video"):
+            return True  # routes/dvr.py checks the segment belongs to this camera
+        return path == f"/api/v1/cameras/{cam}/snapshot" or path.startswith(f"/api/v1/dvr/cameras/{cam}/hls/")
+    return False
 
 
 def effective_role(payload: Optional[Dict[str, Any]]) -> str:

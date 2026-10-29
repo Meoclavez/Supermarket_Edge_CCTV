@@ -5,6 +5,7 @@ not findings. They reach staff phones through ``notification_service`` and
 the dashboard through ``/api/v1/events/ws``.
 """
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime
@@ -265,35 +266,62 @@ async def trigger_event(
 ws_router = APIRouter(prefix="/api/v1/events", tags=["Loss-prevention alerts"])
 
 
-def _websocket_authorised(websocket: WebSocket) -> bool:
+def _websocket_credential(websocket: WebSocket):
     """Same rules as HTTP: a current operator session or an unrevoked phone
-    token for this device, from ``?token=``, a Bearer header or the cookie."""
+    token for this device, from ``?token=``, a Bearer header or the cookie.
+
+    Returns ``(ok, raw_token, payload)``; with AUTH_DISABLED ``(True, None, None)``.
+    """
     if settings.AUTH_DISABLED:
-        return True
-    raw = websocket.query_params.get("token")
-    if not raw:
-        header = websocket.headers.get("authorization", "")
-        if header.startswith("Bearer "):
-            raw = header.split(" ", 1)[1]
-    if not raw:
-        raw = websocket.cookies.get("edge_cctv_token")
-    return bool(raw and auth_service.verify_session_token(raw))
+        return True, None, None
+    candidates = []
+    q = websocket.query_params.get("token")
+    if q:
+        candidates.append(q)
+    header = websocket.headers.get("authorization", "")
+    if header.startswith("Bearer "):
+        candidates.append(header.split(" ", 1)[1])
+    c = websocket.cookies.get("edge_cctv_token")
+    if c:
+        candidates.append(c)
+    for raw in candidates:
+        payload = auth_service.verify_session_token(raw)
+        if payload:
+            return True, raw, payload
+    return False, None, None
+
+
+def _websocket_authorised(websocket: WebSocket) -> bool:
+    return _websocket_credential(websocket)[0]
+
+
+# A socket re-checks its session at least this often, so a sign-out, a
+# deactivated or deleted account or a revoked phone ends the feed even when
+# no alert is sent (sign-out paths also close it at once: alert_hub.prune_revoked).
+WS_RECHECK_S = 30.0
 
 
 @ws_router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """Live alert feed for the dashboard and paired phones. Each message is one alert as JSON."""
-    if not _websocket_authorised(websocket):
+    ok, raw, payload = _websocket_credential(websocket)
+    if not ok:
         # 1008 = policy violation: the client should re-authenticate, not retry blindly.
         # Accept first: a close before accept becomes an HTTP 403 handshake
         # rejection under uvicorn, and the client never sees the 1008 code.
         await websocket.accept()
         await websocket.close(code=1008)
         return
-    await alert_hub.connect(websocket)
+    await alert_hub.connect(websocket, raw, payload)
     try:
         while True:
-            await websocket.receive_text()
+            try:
+                await asyncio.wait_for(websocket.receive_text(), timeout=WS_RECHECK_S)
+            except asyncio.TimeoutError:
+                if not alert_hub.still_authorised(websocket):
+                    alert_hub.disconnect(websocket)
+                    await websocket.close(code=1008)
+                    return
     except Exception:
         alert_hub.disconnect(websocket)
 
@@ -357,7 +385,8 @@ async def list_events(
 
 @router.get("/clips/{filename}")
 async def stream_event_clip(filename: str, token_payload: dict = Depends(auth_service.verify_clip_access)):
-    """Stream a recorded MP4 alert clip (path traversal protected, token verified)."""
+    """Stream a recorded MP4 alert clip (path traversal protected): a signed-in
+    session, or a clip token minted for exactly this file."""
     safe_path = auth_service.sanitize_and_resolve_file(settings.CLIPS_DIR, filename)
     return FileResponse(path=str(safe_path), media_type="video/mp4", filename=safe_path.name,
                         headers={"Accept-Ranges": "bytes"})
@@ -365,9 +394,14 @@ async def stream_event_clip(filename: str, token_payload: dict = Depends(auth_se
 
 @router.get("/snapshots/{filename}")
 async def get_event_snapshot(filename: str, token_payload: dict = Depends(auth_service.verify_clip_access)):
-    """Return a JPEG alert snapshot (path traversal protected)."""
+    """Return a JPEG alert snapshot (path traversal protected).
+
+    A still never changes once saved, and its token opens only this file, so
+    the browser may keep it (private: never a shared cache) instead of asking
+    again on every refresh of the alert lists."""
     safe_path = auth_service.sanitize_and_resolve_file(settings.SNAPSHOTS_DIR, filename)
-    return FileResponse(path=str(safe_path), media_type="image/jpeg", filename=safe_path.name)
+    return FileResponse(path=str(safe_path), media_type="image/jpeg", filename=safe_path.name,
+                        headers={"Cache-Control": "private, max-age=3600"})
 
 
 async def _get_retail_event(event_id: str, db: AsyncSession) -> SecurityEventModel:

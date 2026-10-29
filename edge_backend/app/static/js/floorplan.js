@@ -129,7 +129,10 @@
   }
   const TRACK_TTL_MS = 3000;
   const LIVE_POLL_MS = 1000;
-  const METRICS_POLL_MS = 4000;
+  // Without a calibrated, working camera nobody can be placed: the camera chips only need
+  // their counts, so the live read slows to this.
+  const LIVE_IDLE_POLL_MS = 5000;
+  const METRICS_POLL_MS = 15000;
   const HIT_PX = 7;
   const FAN_PX = 30;              // spacing of camera markers fanned out from one shared spot
   const CAM_LIST_AUTO_OPEN = 8;   // the camera list starts open only up to this many cameras
@@ -439,6 +442,10 @@
      */
     async refreshLive() {
       if (!this.isVisible() || this.liveSupported === false && Date.now() - this.lastLiveAt < 15000) return;
+      if (window.EdgePoll && window.EdgePoll.inBackoff()) return;
+      const placeable = (this.detections || []).some((d) => d.calibrated && d.status === 'ONLINE');
+      if (!placeable && this._liveAt && Date.now() - this._liveAt < LIVE_IDLE_POLL_MS - 100) return;
+      this._liveAt = Date.now();
       if (window.edgeAuth && typeof window.edgeAuth.isAuthenticated === 'function' && !window.edgeAuth.isAuthenticated()) return;
       try {
         const res = await fetch(`${API}/live`);
@@ -1572,6 +1579,8 @@
         this.setStatus(`"${cam.name}" at ${(+cam.floor_x).toFixed(1)}, ${(+cam.floor_y).toFixed(1)} m, bearing ${Math.round(cam.azimuth_deg || 0)}°.`, 'ok');
         if (window.deviceManager && window.deviceManager.renderCameras) window.deviceManager.renderCameras();
         this.emitLayoutChanged();
+        this.renderCameraState();
+        this.emitState();
         return true;
       } catch (e) {
         if (o.before) Object.assign(cam, cameraFields(o.before));
@@ -2676,8 +2685,19 @@
           <div class="metric-pill"><span class="metric-pill-label">Time spent per m²</span><span class="metric-pill-val">${per(m && m.dwell_seconds_per_m2, ' s')}</span></div>
           ${shelf ? `<div class="metric-pill"><span class="metric-pill-label">Reaches per m of shelf</span><span class="metric-pill-val">${per(m && m.reaches_per_shelf_m, '')}</span></div>` : ''}
           <div class="metric-pill"><span class="metric-pill-label">People per m² now</span><span class="metric-pill-val">${per(m && m.people_per_m2_now, '')}</span></div>
+          ${zone.category === 'CHECKOUT' ? `<div class="metric-pill" data-queue-length><span class="metric-pill-label">Queue now</span><span class="metric-pill-val">${per(m && m.queue_length_m, ' m')}</span></div>` : ''}
         </div>
+        ${zone.category === 'CHECKOUT' ? this.queueHintHtml(m && m.queue) : ''}
         <div class="fp-hintline">Per m² figures compare big and small zones fairly. A dash means nothing was measured here today.</div>`;
+    }
+
+    /** Queue length of a checkout zone: measured from calibrated floor positions, else the reason. */
+    queueHintHtml(q) {
+      if (!q) return '<div class="fp-hintline" data-queue-hint>Queue length appears once the figures have loaded.</div>';
+      if (q.length_m === null || q.length_m === undefined) return `<div class="fp-hintline" data-queue-hint>Queue length: ${escapeHtml(q.reason || 'not measured')}</div>`;
+      const n = q.people || 0;
+      const who = n === 0 ? 'Nobody is queueing' : n === 1 ? '1 person in the queue' : `${n} people, ${fmt1(q.length_m)} m from first to last (about ${fmt1(q.spacing_m)} m apart)`;
+      return `<div class="fp-hintline" data-queue-hint>${who}. Measured in floor metres by calibrated cameras along the ${fmt1(q.zone_length_m)} m long side.</div>`;
     }
 
     structureCoverageHtml(id) {
@@ -2735,7 +2755,10 @@
           <div class="metric-pill"><span class="metric-pill-label">Avg walk in view</span><span class="metric-pill-val">${spd(sp && sp.walking && sp.walking.avg_path_m, ' m')}</span></div>
           <div class="metric-pill"><span class="metric-pill-label">Sales floor</span><span class="metric-pill-val">${spd(sp && sp.sales_floor_m2, ' m²')}</span></div>
         </div>
-        <div class="fp-hintline">Sales per m² needs the till (POS) connected. "Avg walk" is the distance a shopper walks while one calibrated camera follows them.</div>
+        ${sp && Array.isArray(sp.queues) && sp.queues.length ? `<div class="fp-cov-sub">Checkout queues now</div>
+        <ul class="fp-cov-list" data-queue-list>${sp.queues.slice(0, 8).map((q) => `<li><span>${escapeHtml(q.name || q.zone_id)}</span>
+          <span>${q.length_m === null || q.length_m === undefined ? 'not measured (no calibrated camera)' : `${fmt1(q.length_m)} m · ${q.people} ${q.people === 1 ? 'person' : 'people'}`}</span></li>`).join('')}</ul>` : ''}
+        <div class="fp-hintline">Sales per m² needs the till (POS) connected; it is for the whole store, because the tills send product codes without departments. "Avg walk" is the distance a shopper walks while one calibrated camera follows them. Queue length is measured only by calibrated cameras.</div>
         <div class="fp-cov-title">Print or save the map</div>
         <div class="fp-field-row">
           <div class="fp-field"><label for="fpExportScale">Scale</label>
@@ -2984,11 +3007,71 @@
 
     // ------------------------------------------------------- setup / status
 
+    /**
+     * Placed and calibrated are two steps (same rules as services/camera_setup_state.py,
+     * counted from the cameras in memory so they stay right after a drag or a calibration):
+     * not placed -> map_placed !== true; placed but not calibrated -> no homography.
+     */
+    cameraSetupCounts() {
+      const cams = this.cameras || [];
+      const placed = cams.filter((c) => c.map_placed === true);
+      const uncal = cams.filter((c) => !c.has_homography);
+      return {
+        total: cams.length, placed: placed.length, unplaced: cams.length - placed.length,
+        calibrated: cams.length - uncal.length, uncalibrated: uncal.length,
+        nextToPlace: cams.find((c) => c.map_placed !== true) || null,
+        nextToCalibrate: uncal.find((c) => c.map_placed === true) || uncal[0] || null,
+      };
+    }
+
+    renderCameraState() {
+      const panel = document.getElementById('fpCamStatePanel');
+      if (!panel) return;
+      const k = this.cameraSetupCounts();
+      const s = this.setup || {};
+      const sig = `${k.total}|${k.placed}|${k.calibrated}`;
+      let hidden = null;
+      try { hidden = window.localStorage.getItem('edge_fp_camstate_hidden'); } catch (_) { hidden = null; }
+      if (!k.total || !s.configured || (!k.unplaced && !k.uncalibrated) || hidden === sig) {
+        panel.hidden = true; panel.innerHTML = ''; return;
+      }
+      const canEdit = !(window.EdgeAuth && window.EdgeAuth.known && !window.EdgeAuth.canChangeSetup);
+      const cams = (n) => `${n} camera${n === 1 ? '' : 's'}`;
+      const counts = k.unplaced ? `${k.placed} of ${cams(k.total)} placed, ${k.calibrated} calibrated` : `${cams(k.placed)} placed, ${k.calibrated} calibrated`;
+      const placing = !!k.unplaced;
+      const name = (c) => escapeHtml(c ? (c.name || c.camera_id) : '');
+      const body = placing
+        ? `Step 1 of 2: place ${k.unplaced === 1 ? `"${name(k.nextToPlace)}"` : `the other ${k.unplaced} cameras`} on the map (drag from the camera gallery)${k.unplaced === 1 ? '' : `, starting with "${name(k.nextToPlace)}"`}. Step 2: calibrate each one.`
+        : `Placing is done. Step 2 of 2: calibrate ${k.calibrated ? `the other ${k.uncalibrated}` : 'each camera'}. Until a camera is calibrated, the coverage drawn is an estimate from the lens angle, the people it sees are not shown on the map or heatmap, and speeds and sizes are guessed in body heights instead of floor metres.`;
+      const btns = canEdit
+        ? (placing ? '<button type="button" class="btn btn-primary btn-sm" data-help-go="place-cameras" data-cam-step="place">Place cameras</button>' : '')
+          + (k.nextToCalibrate && !placing ? `<button type="button" class="btn btn-primary btn-sm" data-camstate="calibrate" data-cam-step="calibrate">Calibrate "${name(k.nextToCalibrate)}"</button>` : '')
+          + (k.nextToCalibrate && placing && k.placed > k.calibrated ? `<button type="button" class="btn btn-secondary btn-sm" data-camstate="calibrate">Calibrate a placed camera</button>` : '')
+        : '<span class="fp-hintline">An administrator places and calibrates cameras.</span>';
+      panel.hidden = false;
+      panel.dataset.camStep = placing ? 'place' : 'calibrate';
+      panel.innerHTML = `<div class="fp-camstate-title">${ico('scan', { size: 'sm' })}<b>${escapeHtml(counts)}</b></div>
+        <p class="fp-camstate-text">${body}</p>
+        <div class="fp-camstate-actions">${btns}
+          <button type="button" class="btn btn-ghost btn-sm" data-help-open="calibrate">Why calibrate?</button>
+          <button type="button" class="btn btn-ghost btn-sm" data-camstate="hide" title="Hidden in this browser until a camera is placed or calibrated">Hide</button></div>`;
+      panel.querySelectorAll('[data-camstate]').forEach((b) => b.addEventListener('click', () => {
+        if (b.dataset.camstate === 'hide') {
+          try { window.localStorage.setItem('edge_fp_camstate_hidden', sig); } catch (_) { /* storage blocked */ }
+          panel.hidden = true;
+          return;
+        }
+        const c = this.cameraSetupCounts().nextToCalibrate;
+        if (c && window.calibrationTool) window.calibrationTool.open(c.camera_id);
+      }));
+    }
+
     renderSetup() {
       const panel = document.getElementById('fpSetupPanel');
       const hint = document.getElementById('fpHint');
       if (!panel || !this.layout) return;
       const s = this.setup || { configured: true };
+      this.renderCameraState();
       if (s.configured) {
         panel.style.display = 'none';
         if (hint) hint.style.display = 'none';
@@ -3119,14 +3202,15 @@
     emitState() {
       const el = document.getElementById('fpStats');
       if (el && this.layout) {
-        const cal = this.coverage ? this.coverage.cameras_calibrated : this.cameras.filter((c) => c.has_homography).length;
+        const cal = this.cameras.filter((c) => c.has_homography).length;
+        const placedN = this.cameras.filter((c) => c.map_placed === true).length;
         const tot = this.cameras.length;
         const now = this.activeNow === null || this.activeNow === undefined ? '—' : this.activeNow;
         const cs = this._covStats && this._covStats.store;
         const covText = cs && cs.coverage_pct !== null && cs.cameras_counted ? ` · cameras see ${cs.coverage_pct}% of the floor` : '';
         el.textContent =
           `${escapeHtml(this.layout.name || '')} · ${this.layout.width_m}×${this.layout.height_m} m · ${this.structures.length} structures · ` +
-          `${this.zones.length} zones · ${tot} cameras (${cal} calibrated)${covText} · ${now} in store now`;
+          `${this.zones.length} zones · ${tot} cameras (${placedN} placed, ${cal} calibrated)${covText} · ${now} in store now`;
       }
       const modeEl = document.getElementById('fpMode');
       if (modeEl) {
@@ -5065,6 +5149,20 @@
     camerasSeeingZone(zoneId) { const ed = editorNow(); return ed && ed.layout ? ed.camerasSeeingZone(zoneId) : []; },
     // Store numbers {coverage_pct, floor_m2, covered_m2, uncovered_m2, overlap_m2, gaps, ...} or null.
     getCoverage() { const ed = editorNow(); const st = ed && ed.layout ? ed.coverageStats(true) : null; return st ? JSON.parse(JSON.stringify(st.store)) : null; },
+    // One zone {id, name, category, polygon:[{x,y}] metres} or null (restricted.js point-of-interest picker).
+    getZone(zoneId) {
+      const ed = editorNow();
+      const z = ed && ed.zones ? ed.zones.find((q) => q.id === zoneId) : null;
+      return z ? { id: z.id, name: z.name, category: z.category, polygon: (z.polygon || []).map((q) => ({ x: +q.x, y: +q.y })) } : null;
+    },
+    // Rooms, walls, shelves, doors... whose outline touches the box {x, y, w, h} (metres), for small map views.
+    structuresIn(box) {
+      const ed = editorNow();
+      if (!ed || !Array.isArray(ed.structures) || !box) return [];
+      const hit = (pts) => pts.some((q) => q.x >= box.x && q.x <= box.x + box.w && q.y >= box.y && q.y <= box.y + box.h);
+      return ed.structures.filter((st) => Array.isArray(st.polygon) && st.polygon.length >= 2 && hit(st.polygon))
+        .slice(0, 200).map((st) => ({ kind: st.kind, thickness_m: st.thickness_m, polygon: st.polygon.map((q) => ({ x: +q.x, y: +q.y })) }));
+    },
     // Save ('png') or print ('print') the map to scale: scale '50' | '100' | '200' | '500' | 'fit' | 'fitA3'.
     exportMap(kind, scale) { const ed = editorNow(); return ed ? ed.exportMap(kind || 'png', scale || '100') : Promise.resolve(false); },
   };
@@ -5074,12 +5172,6 @@
     if (canvas && !window.blueprintEditor) {
       window.blueprintEditor = new BlueprintEditor(canvas);
       window.storeFloorplanHUD = window.blueprintEditor;   // older inline handlers
-    }
-    // In-page self-test, only when explicitly requested in the URL.
-    if (/[?&]__fptest=1(&|$)/.test(window.location.search)) {
-      const s = document.createElement('script');
-      s.src = '/static/js/selftest.js?v=2.1.2';
-      document.body.appendChild(s);
     }
   }
 

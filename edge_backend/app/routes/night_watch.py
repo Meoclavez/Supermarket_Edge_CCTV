@@ -29,6 +29,7 @@ from app.models.db_models import CameraModel, SecurityEventModel
 from app.models.schemas import CameraFeatureConfig, NightWatchConfig
 from app.routes import ResilientRoute
 from app.services.auth_service import auth_service
+from app.services.evidence_urls import evidence_path
 from app.services.feature_manager import feature_manager
 from app.services.live_analytics_engine import live_engine
 from app.services.night_watch import ARMED_STATES, night_watch, time_info, zone_info
@@ -132,7 +133,7 @@ async def night_watch_events(limit: int = Query(30, ge=1, le=200), camera_id: Op
             "title": meta.get("title"), "body": meta.get("body"),
             "confidence": e.confidence if meta.get("confidence_measured") else None,
             "at": time_info(ts),
-            "snapshot_url": e.snapshot_url, "clip_url": e.clip_url,
+            "snapshot_url": evidence_path(e.snapshot_url), "clip_url": evidence_path(e.clip_url),
             # Deleted by the evidence storage limit (services/evidence_storage.py).
             "evidence_expired": e.evidence_expired_at is not None,
             "acknowledged": bool(e.acknowledged),

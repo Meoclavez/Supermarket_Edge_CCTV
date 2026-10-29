@@ -115,9 +115,13 @@ yet), measured before this check-in's ack.
 `ack` is present when the request carried a valid `nonce` (null for older boxes). Its payload:
 ```json
 {"type": "ack", "store_id": "pearcedale", "nonce": "<the request's nonce>",
- "server_time": "2026-10-21T10:00:00Z", "policy_version": 7}
+ "server_time": "2026-10-21T10:00:00Z", "policy_version": 7,
+ "report_updates_sha256": "<hex>"}
 ```
 `policy_version` = the VPS's current stored policy version for the store (0 = none).
+`report_updates_sha256` (only when the response's `report_updates` list is not empty; see
+docs/SUPPORT_ISSUES_CONTRACT.md "Signed replies"): sha256 of the canonical JSON of that exact
+list. The box applies replies only when it matches a verified ack.
 `policy` is returned when the VPS's version > `version_applied` (or always; box ignores
 versions <= applied).
 
@@ -130,7 +134,10 @@ versions <= applied).
   `sha256:` + first 16 hex of sha256(raw key)). A different key later is rejected and shown
   in Settings ("Control key changed — ask iKorex"); a local admin can reset the pin from
   Settings (admin only, audited locally). `.env` `FLEET_CONTROL_PUBLIC_KEY` (base64) overrides
-  TOFU when set.
+  TOFU when set, and then also fixes the box to iKorex (2.9.0): the pin reset answers 409 and
+  the Online access server address cannot be changed from the dashboard (403), so a store
+  administrator cannot point the box at another server that signs its own plan. Every box
+  should carry it (docs/DEPLOYMENT.md).
 - Box rejects: bad signature, wrong `store_id`, policy `version` <= applied, command
   `not_after` passed or command id already seen (keep last 200 ids). Acks: see "Offline
   standby" (bad signature, wrong store, wrong nonce, unparsable server_time, policy_version
@@ -152,7 +159,7 @@ versions <= applied).
   "limits": {"max_cameras": null}
 }
 ```
-`restricted_areas` (added 2026-10-28, box 2.6.x): high-security restricted areas (announce
+`restricted_areas` (added 2026-10-28, box 2.8.0): high-security restricted areas (announce
 entry, arming schedules, movement / speed / posture / people-count / tamper triggers, audit
 trail). Off = `/api/v1/restricted-areas/*` answers 403 `feature_disabled`, the live engine
 does nothing and camera-drawn restricted areas fall back to the plain `zone_alerts`
@@ -227,7 +234,8 @@ message, licence status/date, features, last check-in time, fingerprint; no toke
 and `POST /api/v1/fleet/reset-key` (admin), `POST /api/v1/fleet/checkin-now` (admin).
 Settings card "iKorex service": plan status, licence date, features included, last contact,
 verified contact, offline limit, control key fingerprint, software version (`APP_VERSION`,
-2.7.0 for this release, also in `box.software_version` and `/api/v1/health`).
+2.9.0 for this release, also in `box.software_version` and `/api/v1/health`, which without a
+session answers only `{"status", "version"}`).
 
 ## VPS: `cctv-control` container (~/Projects-1/Server/cctv-tunnel/control/)
 Python 3.13 alpine like cctv-auth, stdlib `http.server` + `cryptography` (pinned, for

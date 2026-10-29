@@ -54,6 +54,9 @@ from app.models.db_models import CustomerTrackModel, StoreZoneModel, ZoneVisitMo
 from app.services.retail_metrics_service import _track_is_real, _visit_is_real, retail_metrics_service
 from app.services.timeutil import local_midnight_utc, local_now, to_local, utcnow
 
+# How far before a window a visit/track may start and still overlap it.
+LOOKBACK = timedelta(hours=6)
+
 logger = logging.getLogger(__name__)
 
 # An hour watched for at least this share of its (elapsed) length is "measured".
@@ -180,6 +183,10 @@ async def day_series(db: AsyncSession, d: date, *, now: Optional[datetime] = Non
     visit_rows = (await db.execute(
         select(ZoneVisitModel.track_id, ZoneVisitModel.entered_at, ZoneVisitModel.exited_at).where(and_(
             ZoneVisitModel.entered_at < end,
+            # Lower bound so the index on entered_at is used: without it every
+            # 15 s poll scanned the whole history (audit L10). Nobody stays in a
+            # zone for 6 h; an older "open" row is a visit lost in a crash.
+            ZoneVisitModel.entered_at >= start - LOOKBACK,
             or_(ZoneVisitModel.exited_at.is_(None), ZoneVisitModel.exited_at >= start),
             _visit_is_real(), ZoneVisitModel.camera_id.notin_(excluded),
         ))
@@ -205,7 +212,8 @@ async def day_series(db: AsyncSession, d: date, *, now: Optional[datetime] = Non
     # ---- tracks overlapping the day (fallback source and presence)
     track_rows = (await db.execute(
         select(CustomerTrackModel.track_id, CustomerTrackModel.start_time, CustomerTrackModel.end_time).where(and_(
-            CustomerTrackModel.start_time < end, CustomerTrackModel.end_time >= start,
+            CustomerTrackModel.start_time < end, CustomerTrackModel.start_time >= start - LOOKBACK,
+            CustomerTrackModel.end_time >= start,
             _track_is_real(), CustomerTrackModel.camera_id.notin_(excluded),
         ))
     )).all()
@@ -284,10 +292,14 @@ async def day_series(db: AsyncSession, d: date, *, now: Optional[datetime] = Non
                 status = "no_data"
         known = status in ("measured", "partial")
         local_a = to_local(a)
+        label = local_a.strftime("%H:%M")
+        if any(r["label"] == label for r in out_hours):
+            # Daylight saving ends: the 02:00 hour happens twice (25-hour day).
+            label += " (2nd)"
         rec = {
             "index": i,
             "hour": local_a.hour,
-            "label": local_a.strftime("%H:%M"),
+            "label": label,
             "start": local_a.isoformat(),
             "end": to_local(b).isoformat(),
             "status": status,

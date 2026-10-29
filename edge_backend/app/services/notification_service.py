@@ -19,7 +19,7 @@ legacy FCM server-key API and the unsigned direct-APNs path were removed.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import WebSocket
 
@@ -32,26 +32,70 @@ FCM_CHANNEL_ID = "loss_prevention_alerts"
 
 
 class AlertHub:
-    """Connected dashboard websockets that receive every alert as JSON."""
+    """Connected dashboard and phone websockets that receive every alert as JSON.
+
+    Each connection keeps the credential it was opened with. Before every
+    message, and when :meth:`prune_revoked` runs after a sign-out, account
+    change or phone revocation, that credential is checked again: a socket
+    whose session ended is closed (1008) instead of streaming on. Evidence
+    links in a message get a fresh clip token for that connection's session
+    (services/evidence_urls.py); nothing stored carries a token.
+    """
 
     def __init__(self) -> None:
         self.active_connections: List[WebSocket] = []
+        self._creds: Dict[int, Tuple[Optional[str], Optional[Dict[str, Any]]]] = {}
 
-    async def connect(self, websocket: WebSocket) -> None:
+    async def connect(self, websocket: WebSocket, raw_token: Optional[str] = None,
+                      payload: Optional[Dict[str, Any]] = None) -> None:
         await websocket.accept()
         self.active_connections.append(websocket)
+        self._creds[id(websocket)] = (raw_token, payload)
 
     def disconnect(self, websocket: WebSocket) -> None:
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
+        self._creds.pop(id(websocket), None)
+
+    def still_authorised(self, websocket: WebSocket) -> bool:
+        raw, payload = self._creds.get(id(websocket), (None, None))
+        if raw is None:
+            return True  # AUTH_DISABLED, or opened without a credential by a test
+        from app.services.auth_service import auth_service
+
+        return auth_service.verify_session_token(raw) is not None
+
+    async def prune_revoked(self) -> int:
+        """Close every socket whose session no longer verifies. Returns how many."""
+        closed = 0
+        for connection in list(self.active_connections):
+            if not self.still_authorised(connection):
+                self.disconnect(connection)
+                closed += 1
+                try:
+                    await connection.close(code=1008)
+                except Exception:
+                    pass
+        return closed
+
+    def _for_connection(self, websocket: WebSocket, event_data: dict) -> dict:
+        from app.services.evidence_urls import signed_path
+
+        payload = self._creds.get(id(websocket), (None, None))[1]
+        out = dict(event_data)
+        for key in ("snapshot_url", "clip_url", "evidence_url"):
+            if out.get(key):
+                out[key] = signed_path(out[key], payload)
+        return out
 
     async def broadcast_event(self, event_data: dict) -> int:
-        """Send to every client; returns how many received it."""
+        """Send to every still-authorised client; returns how many received it."""
+        await self.prune_revoked()
         delivered = 0
         dead: List[WebSocket] = []
         for connection in list(self.active_connections):
             try:
-                await connection.send_json(event_data)
+                await connection.send_json(self._for_connection(connection, event_data))
                 delivered += 1
             except Exception:
                 dead.append(connection)

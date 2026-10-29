@@ -729,19 +729,25 @@
       title: 'Camera placement and calibration',
       what: 'Puts each camera on the plan with how far it sees, and matches its picture to the floor, so people appear in the right place.',
       why: 'Shows what each camera really covers (walls and shelves block it), the blind spots and which shelves it sees; calibrated cameras show live shoppers and feed the heatmaps.',
-      full: { go: camLink('calibrate:', 'first_to_calibrate', 'map'), label: 'Calibrate on the Store map', admin: true },
+      // Place first, then calibrate: the button goes to whichever step is still open.
+      full: { go: (st) => (st && st.links && st.links.first_unplaced ? 'place-cameras' : camLink('calibrate:', 'first_to_calibrate', 'map')(st)),
+        label: 'Place and calibrate on the Store map', admin: true },
       setup: {
-        title: 'Uncalibrated cameras: counts into area',
+        title: 'Place, then calibrate',
         async load() {
           const r = await api('/api/v1/layout');
           if (!r.ok) return { error: r.message };
-          return { cams: (r.data.cameras || []), zones: r.data.zones || [] };
+          return { cams: (r.data.cameras || []), zones: r.data.zones || [], state: (r.data.setup || {}).camera_setup || null };
         },
         render(d) {
           const unc = d.cams.filter((c) => !c.has_homography);
           const opts = [['', 'Not linked']].concat(d.zones.map((z) => [z.id, z.name || z.id]));
-          const placed = d.cams.filter((c) => c.map_placed === false).length;
-          return (placed ? hint(`${plural(placed, 'camera')} not on the map yet: drag them from the camera gallery on the Store map.`) : '')
+          const s = d.state;
+          // Placing and calibrating are two steps: say which one is open, with its own button.
+          const stepHtml = s && s.total ? `<div class="feat-field feat-camstate" data-cam-step="${esc(s.step)}"><p class="feat-hint"><b>${esc(s.headline)}</b> ${esc(s.detail)}</p>`
+            + (s.action ? button(s.step === 'place' ? 'place' : 'calibrate', s.action.label, { icon: s.step === 'place' ? 'pin' : 'scan', primary: true }) : '')
+            + '</div>' : '';
+          return stepHtml + '<p class="feat-hint">Not ready to calibrate a camera? Link it to the area it looks at so its visits still count. That is not calibration: it gives no positions, heatmap or floor-metre sizes.</p>'
             + (d.zones.length ? selectRows('Count everyone this camera sees as a visit to', 'zone', unc.map((c) => ({ id: c.camera_id, label: c.name || c.camera_id, value: c.watch_zone_id || '' })), opts,
               { empty: 'Every camera is calibrated.' })
               : hint('Draw store areas first (see "Store areas"); then you can link uncalibrated cameras to them here.'));
@@ -755,6 +761,13 @@
           }
           try { if (window.blueprintEditor && typeof window.blueprintEditor.load === 'function') window.blueprintEditor.load(); } catch (_) {}
           return { ok: true };
+        },
+        actions: {
+          place() { closeDrawer(false); if (help()) help().go('place-cameras'); },
+          calibrate(_btn, d) {
+            const go = d && d.state && d.state.action ? d.state.action.go : 'map';
+            closeDrawer(false); if (help()) help().go(go);
+          },
         },
       },
     },

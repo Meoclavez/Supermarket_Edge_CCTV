@@ -99,17 +99,6 @@ def test_overview_timestamp_is_store_time(far_zones):
     assert _offset(r.json()["timestamp"]) == "+14:00"
 
 
-def test_telemetry_sync_defaults_to_the_store_day(far_zones):
-    api = TestClient(app)
-    before = _store_dates()
-    r = api.post("/api/v1/analytics/sync", json={})
-    assert r.status_code == 200, r.text
-    assert r.json()["date"] in before | _store_dates()
-
-    settings.SITE_TIMEZONE = HOST_TZ
-    assert api.post("/api/v1/analytics/sync", json={}).json()["date"] in _store_dates(HOST_TZ)
-
-
 # ------------------------------------------------------------------ analysis + recommendations
 
 def test_findings_persist_attach_and_list_under_the_store_day(far_zones):

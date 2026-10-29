@@ -591,6 +591,22 @@ Measured on the public path (2026-10-01, build e451706): 4 live tiles ≈
    `https://<store>-cctv.ikorex.com.au/dashboard`: tiles should show
    "LIVE · Direct · srflx" (or prflx/host).
 
+7. **Box: fix the iKorex control key** (2.8.0; do it once per box). Without it
+   the box trusts the first key the server shows ("pin on first use"), and a
+   store administrator can reset that pin from Settings and point the box at a
+   server of their own that signs any plan. With it, the pin reset is refused
+   and the tunnel server address can no longer be changed from the dashboard.
+   On the dev PC: `ssh $H 'cd ~/cctv-tunnel && docker compose exec -T control manage show-key'`
+   prints the public key (base64) and its fingerprint. On the box, add
+   the base64 key to `/opt/edge-cctv/edge_backend/.env`:
+
+   ```bash
+   sudo -u edgecctv nano /opt/edge-cctv/edge_backend/.env   # FLEET_CONTROL_PUBLIC_KEY=<base64>
+   sudo systemctl restart edge-cctv
+   ```
+
+   Settings → iKorex service must then show the same fingerprint as `show-key`.
+
 It is online **only** while enabled in **Settings → Online access**; disable
 it there and the address stops working within seconds.
 

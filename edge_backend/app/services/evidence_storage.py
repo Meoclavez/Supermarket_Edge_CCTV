@@ -181,6 +181,41 @@ class _File:
     kind: str
 
 
+def evidence_floor_bytes(cap: int) -> int:
+    """Evidence the disk limit alone never deletes below: a quarter of the cap, >= 512 MB."""
+    return int(min(cap, max(cap * 0.25, 512 * MB)))
+
+
+def _other_data_usage() -> Dict[str, Any]:
+    """Database, WAL and backups: the big non-evidence users of the disk (storage card)."""
+    out: Dict[str, Any] = {}
+    try:
+        db = Path(settings.DATABASE_PATH)
+        out["database_bytes"] = sum(os.path.getsize(f"{db}{s}") for s in ("", "-wal")
+                                    if os.path.exists(f"{db}{s}"))
+    except OSError:
+        out["database_bytes"] = None
+    try:
+        from app.services.backup_service import backup_service
+        out["backups"] = backup_service.usage()
+    except Exception as exc:  # never break the storage pass
+        out["backups"] = {"error": str(exc)[:200]}
+    try:
+        from app.migrations.runner import backup_warning
+        w = backup_warning()
+        if w:
+            if w.get("state") == "skipped":
+                msg = ("The last software update was installed without a database backup because the "
+                       "disk was too full. Free disk space so the next backup can run.")
+            else:
+                msg = ("A software update could not make its database backup: "
+                       f"{w.get('error') or w.get('state')}. Free disk space.")
+            out["migration_backup"] = {**w, "message": msg}
+    except Exception:
+        pass
+    return out
+
+
 def _iso(ts: Optional[float]) -> Optional[str]:
     return datetime.fromtimestamp(ts, timezone.utc).isoformat() if ts else None
 
@@ -365,10 +400,14 @@ class EvidenceStorage:
                     extra = [now]
                 else:
                     extra = []
-                for i in range(0, len(keys), 500):
-                    chunk = keys[i:i + 500]
+                # One short transaction per chunk of 200: the snapshot_url match
+                # has no index, so a long single transaction held the write lock
+                # (and stalled the pipeline flush) for the whole sweep.
+                for i in range(0, len(keys), 200):
+                    chunk = keys[i:i + 200]
                     q = f"UPDATE {table} SET {sets} WHERE {where_col} IN ({','.join('?' * len(chunk))})"
                     changed += conn.execute(q, extra + chunk).rowcount
+                    conn.commit()
 
             run("theft_incidents", "evidence_snapshot_url = NULL", "id", theft_img)
             run("theft_incidents", "evidence_clip_url = NULL", "id", theft_clip)
@@ -456,6 +495,7 @@ class EvidenceStorage:
         used = sum(f.size for f in remaining)
         effective, limited_by = cap, "cap"
         disk: Dict[str, Any] = {}
+        disk_warning: Optional[str] = None
         try:
             du = shutil.disk_usage(str(self.root()))
             disk = {"total_bytes": du.total, "used_bytes": du.used, "free_bytes": du.free,
@@ -463,8 +503,20 @@ class EvidenceStorage:
             pct = float(settings.STORAGE_MAX_DISK_PERCENT or 0)
             if 0 < pct < 100 and du.total:
                 pending = sum(f.size for f, _ in doomed.values())
-                headroom = du.total * pct / 100.0 - (du.used - pending)
-                bound = int(max(0, used + headroom))
+                limit = du.total * pct / 100.0
+                other = du.used - pending - used          # database, backups, system, ...
+                if other >= limit:
+                    # The disk is over the limit without any evidence at all: the
+                    # database and backups filled it. Before, the bound then fell
+                    # to 0 and every theft still and clip was deleted. Evidence
+                    # is now trimmed no further than a floor, and health warns.
+                    floor = evidence_floor_bytes(cap)
+                    bound = int(min(used, floor))
+                    disk_warning = (f"The disk is above {pct:g}% full with data other than evidence "
+                                    f"(database, backups). Evidence is kept down to {floor / MB:.0f} MB; "
+                                    f"free space by removing old backups.")
+                else:
+                    bound = int(max(0, limit - other))
                 if bound < effective:
                     effective, limited_by = bound, f"disk above STORAGE_MAX_DISK_PERCENT={pct:g}"
         except OSError:
@@ -531,12 +583,23 @@ class EvidenceStorage:
             # Older continuous-recording / export directories: measured, never cleaned here.
             "not_managed": unmanaged,
         }
+        report["other_data"] = _other_data_usage()
+        if disk_warning:
+            report["disk_warning"] = disk_warning
         if any(v["files"] for n, v in unmanaged.items() if n != "archives"):
             report["note"] = ("Continuous-recording files exist under STORAGE_DIR (dvr/ or recordings/). "
                               "This device no longer records continuously; the owner decides whether to "
                               "delete them.")
         self.last_report = report
-        ServiceHealthTracker.report_status("evidence_storage", ServiceHealthTracker.HEALTHY)
+        warn = disk_warning or (report["other_data"].get("migration_backup") or {}).get("message")
+        if warn:
+            if self.stats.get("disk_warning") != warn:
+                logger.error(f"Storage: {warn}")
+            self.stats["disk_warning"] = warn
+            ServiceHealthTracker.report_status("evidence_storage", ServiceHealthTracker.DEGRADED, warn)
+        else:
+            self.stats["disk_warning"] = None
+            ServiceHealthTracker.report_status("evidence_storage", ServiceHealthTracker.HEALTHY)
         return report
 
     def enforce_kind_cap(self, kind_name: str) -> int:

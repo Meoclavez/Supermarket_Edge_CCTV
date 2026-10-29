@@ -30,13 +30,13 @@ from fastapi.responses import FileResponse
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
 from app.database import get_db
 from app.models.db_models import (AdminUserModel, CameraModel, RestrictedAreaAnnouncementModel,
                                   RestrictedAreaAuditModel, RestrictedAreaModel, SecurityEventModel,
                                   StoreZoneModel)
 from app.routes import ResilientRoute
 from app.services import restricted_areas as ra
+from app.services.evidence_urls import evidence_path
 from app.services.auth_service import (auth_service, effective_role, general_rate_limiter, is_admin_role,
                                        operator_allowed, require_admin)
 from app.services.restricted_area_engine import restricted_area_engine
@@ -184,16 +184,8 @@ async def get_status(request: Request, db: AsyncSession = Depends(get_db)):
     now = restricted_areas.clock()
     snap = restricted_areas.snapshot
     me = (getattr(request.state, "user", None) or {}).get("sub")
-    rows = (await db.execute(
-        select(SecurityEventModel.id, SecurityEventModel.metadata_json, SecurityEventModel.acknowledged,
-               SecurityEventModel.timestamp)
-        .where(SecurityEventModel.event_type == "RESTRICTED_AREA")
-        .order_by(desc(SecurityEventModel.timestamp)).limit(200))).all()
-    open_by: Dict[str, int] = {}
-    for _id, meta, _ack, _ts in rows:
-        meta = meta or {}
-        if meta.get("ra_area_id") and meta.get("ra_requires_outcome") and not meta.get("ra_outcome"):
-            open_by[meta["ra_area_id"]] = open_by.get(meta["ra_area_id"], 0) + 1
+    # Counted in SQL over every alert, not just the newest ones.
+    open_by: Dict[str, int] = await ra.open_outcome_counts(db)
     areas = []
     for a in snap.areas:
         st = _state(a, now, me)
@@ -269,7 +261,7 @@ def _event_entry(e: SecurityEventModel, names: Dict[str, str]) -> Dict[str, Any]
         "timestamp": e.timestamp.isoformat() if e.timestamp else None,
         "store_time": {"hhmm": local.strftime("%H:%M"), "date": local.date().isoformat(),
                        "label": f"{local.strftime('%a %d %b %H:%M')} {local.tzname() or ''}".strip()} if local else None,
-        "snapshot_url": e.snapshot_url, "clip_url": e.clip_url,
+        "snapshot_url": evidence_path(e.snapshot_url), "clip_url": evidence_path(e.clip_url),
         "evidence_expired": e.evidence_expired_at is not None, "people_inside": m.get("people_inside"),
         "test": bool(m.get("test")), "acknowledged": bool(e.acknowledged),
         "acknowledged_by": ack.get("name") if isinstance(ack, dict) else ack,
@@ -290,25 +282,12 @@ async def list_events(area_id: Optional[str] = None, trigger: Optional[str] = No
     """Restricted-area alerts, newest first (filters: area, trigger, still needing an outcome)."""
     if trigger and trigger not in ra.TRIGGERS:
         raise HTTPException(status_code=422, detail=f"Unknown trigger '{trigger}'")
-    rows = (await db.execute(
-        select(SecurityEventModel).where(SecurityEventModel.event_type == "RESTRICTED_AREA")
-        .order_by(desc(SecurityEventModel.timestamp)).limit(2000))).scalars().all()
+    # Filtered in SQL, so older alerts that still need an outcome are never cut off.
+    ids = await ra.event_ids(db, area_id=area_id, trigger=trigger, needs_outcome=needs_outcome, limit=limit)
+    rows = (await db.execute(select(SecurityEventModel).where(SecurityEventModel.id.in_(ids))
+                             .order_by(desc(SecurityEventModel.timestamp)))).scalars().all() if ids else []
     names = dict((await db.execute(select(CameraModel.id, CameraModel.name))).all())
-    out = []
-    for e in rows:
-        m = e.metadata_json or {}
-        if not m.get("ra_area_id"):
-            continue
-        if area_id and m.get("ra_area_id") != area_id:
-            continue
-        if trigger and m.get("ra_trigger") != trigger:
-            continue
-        entry = _event_entry(e, names)
-        if needs_outcome is not None and entry["needs_outcome"] != needs_outcome:
-            continue
-        out.append(entry)
-        if len(out) >= limit:
-            break
+    out = [_event_entry(e, names) for e in rows]
     return {"events": out, "total": len(out)}
 
 
@@ -576,11 +555,54 @@ async def announce(area_id: str, request: Request, body: Dict[str, Any] = Body(d
                                                                      "note": note, "source": source,
                                                                      "announcement_id": ann.id})
     await db.commit()
+    if not is_admin_role(who["role"]):
+        await _notice_repeated_announcements(db, row, who, now)
     area = await _refresh_and_get(area_id)
     return {"announcement": {"id": ann.id, "area_id": area_id, "area_name": row.name, "user_name": who["name"],
                              "until": ann.until.isoformat() + "Z", "until_store": _store_time(ra.ts_of(ann.until)),
                              "minutes": minutes, "people": people, "note": note},
             "state": _state(area, restricted_areas.clock(), who["id"]) if area else None}
+
+
+# An announcement keeps an armed area quiet for up to ANNOUNCE_MAX minutes and an
+# operator may renew it; owners and administrators hear about an area that is
+# announced again and again, so "announced" cannot quietly become "disarmed".
+REPEAT_ANNOUNCE_LIMIT = 3
+REPEAT_ANNOUNCE_WINDOW = timedelta(hours=4)
+
+
+async def _notice_repeated_announcements(db: AsyncSession, row, who: Dict[str, Any], now) -> None:
+    from sqlalchemy import func as sa_func
+
+    try:
+        since = now - REPEAT_ANNOUNCE_WINDOW
+        count = (await db.execute(select(sa_func.count()).select_from(RestrictedAreaAnnouncementModel).where(
+            RestrictedAreaAnnouncementModel.area_id == row.id,
+            RestrictedAreaAnnouncementModel.started_at >= since))).scalar_one()
+        if count <= REPEAT_ANNOUNCE_LIMIT:
+            return
+        # Once per window per area: no notice while an earlier one is recent.
+        recent = (await db.execute(select(sa_func.count()).select_from(RestrictedAreaAuditModel).where(
+            RestrictedAreaAuditModel.area_id == row.id, RestrictedAreaAuditModel.action == "announce_repeated",
+            RestrictedAreaAuditModel.ts >= since))).scalar_one()
+        if recent:
+            return
+        await restricted_areas.audit(db, "announce_repeated", row, who,
+                                     detail={"announcements": int(count), "hours": 4})
+        await db.commit()
+        from app.services.alert_dispatcher import alert_dispatcher
+
+        title = f"Review: {row.name} announced {count} times in 4 hours"
+        body = (f"Entry to {row.name} was announced {count} times in the last 4 hours "
+                f"(latest by {who['name']}). An announcement keeps the area quiet; check this is expected.")
+        await alert_dispatcher.dispatch("RESTRICTED_AREA", "INFO", title, body, {
+            "area_id": row.id, "area_name": row.name, "zone_id": row.id, "zone_name": row.name,
+            "ra_area_id": row.id, "ra_trigger": "repeated_announcements",
+            "ra_trigger_label": "Entry announced again and again", "ra_requires_outcome": False,
+            "alert_tier": "review", "alert_id": ra.new_id("ra"), "timestamp": ra.utcnow().isoformat() + "Z",
+        })
+    except Exception as exc:  # noqa: BLE001 - the announcement itself already succeeded
+        logger.error("Repeated-announcement notice for %s not sent: %s", getattr(row, "id", "?"), exc)
 
 
 @router.post("/announcements/{ann_id}/end")
@@ -630,22 +652,3 @@ async def forget_still_figures(area_id: str, request: Request, db: AsyncSession 
     await restricted_areas.audit(db, "still_figures_cleared", row, who, detail={"forgotten": n})
     await db.commit()
     return {"forgotten": n}
-
-
-if settings.RESTRICTED_QA_HOOK:
-    @router.post("/qa/feed", include_in_schema=False)
-    async def qa_feed(body: Dict[str, Any] = Body(...), _admin=Depends(require_admin)):
-        """QA / tests only (EDGE_RESTRICTED_QA_HOOK=1): feed synthetic tracks into the engine."""
-        cam = str(body.get("camera_id") or "")
-        if not cam:
-            raise HTTPException(status_code=422, detail="camera_id required")
-        await restricted_areas.refresh()
-        return restricted_area_engine.qa_feed(cam, body.get("frames") or [], int(body.get("width", 1280)),
-                                              int(body.get("height", 720)), camera_name=body.get("camera_name"))
-
-    @router.post("/qa/health", include_in_schema=False)
-    async def qa_health(body: Dict[str, Any] = Body(...), _admin=Depends(require_admin)):
-        """QA / tests only: mark a camera silent for ``seconds`` (offline tamper)."""
-        cam = str(body.get("camera_id") or "")
-        restricted_area_engine._frames[cam] = restricted_area_engine.clock() - float(body.get("seconds", 60))
-        return {"raised": await restricted_area_engine.tick()}

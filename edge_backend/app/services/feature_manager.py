@@ -27,6 +27,10 @@ FEATURE_FLAGS = tuple(
 ANALYTICS_FLAGS = ("people_counting", "shelf_interaction", "theft_detection")
 
 
+# The database could not be read (locked, busy): not the same as "never configured".
+READ_FAILED: Dict[str, Any] = {"__read_failed__": True}
+
+
 def _read_stored_features(camera_id: str) -> Optional[Dict[str, Any]]:
     """The camera row's ``features`` JSON, read synchronously (thread safe)."""
     import json
@@ -39,7 +43,7 @@ def _read_stored_features(camera_id: str) -> Optional[Dict[str, Any]]:
         with closing(sqlite3.connect(str(settings.DATABASE_PATH), timeout=2.0)) as conn:
             row = conn.execute("SELECT features FROM cameras WHERE id = ?", (camera_id,)).fetchone()
     except sqlite3.Error:
-        return None
+        return READ_FAILED
     if not row or not row[0]:
         return None
     try:
@@ -53,6 +57,7 @@ class FeatureManager:
     def __init__(self):
         self._lock = threading.Lock()
         self._camera_features: Dict[str, CameraFeatureConfig] = {}
+        self._read_failed_at: Dict[str, float] = {}
 
     def get_camera_features(self, camera_id: str, stored: Optional[Dict[str, Any]] = None) -> CameraFeatureConfig:
         with self._lock:
@@ -70,7 +75,18 @@ class FeatureManager:
         with self._lock:
             cfg = self._camera_features.get(camera_id)
         if cfg is None:
+            import time as _time
+            failed_at = self._read_failed_at.get(camera_id)
+            if failed_at is not None and _time.monotonic() - failed_at < 10.0:
+                return CameraFeatureConfig()
             stored = _read_stored_features(camera_id)
+            if stored is READ_FAILED:
+                # Not cached: a locked database at start must not pin the
+                # all-on defaults (an operator's "theft off") until restart.
+                # Retried every 10 s, not on every frame.
+                self._read_failed_at[camera_id] = _time.monotonic()
+                return CameraFeatureConfig()
+            self._read_failed_at.pop(camera_id, None)
             try:
                 loaded = CameraFeatureConfig.model_validate(stored) if stored else CameraFeatureConfig()
             except Exception:

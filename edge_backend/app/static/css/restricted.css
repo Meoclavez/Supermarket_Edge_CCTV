@@ -116,3 +116,24 @@
   .ra-dialog-body, .ra-dialog-head, .ra-dialog-foot { padding-left: var(--space-3); padding-right: var(--space-3); }
   .ra-filter-row .ra-select { flex: 1 1 140px; }
 }
+
+/* Click-to-place points of interest (restricted.js pickerHtml / wirePickers). */
+.ra-pick { position: relative; width: 100%; max-width: 420px; border: 1px solid var(--border); border-radius: var(--radius-xs); background: var(--surface-2); overflow: hidden; touch-action: none; }
+.ra-pick-floor .ra-pick-svg { display: block; width: 100%; height: auto; max-height: 260px; aspect-ratio: 4 / 3; cursor: crosshair; }
+.ra-pick-camera .ra-pick-frame { position: relative; line-height: 0; }
+.ra-pick-camera .ra-pick-img { display: block; width: 100%; height: auto; min-height: 90px; background: var(--surface); }
+.ra-pick-camera .ra-pick-svg { position: absolute; inset: 0; width: 100%; height: 100%; cursor: crosshair; }
+.ra-pick.is-readonly .ra-pick-svg { cursor: default; }
+.ra-pick.is-dragging .ra-pick-svg { cursor: grabbing; }
+.ra-pick-zone { fill: var(--danger-bg, rgba(240, 68, 56, 0.12)); stroke: var(--danger, #f04438); stroke-width: 0.06; }
+.ra-pick-camera .ra-pick-zone { stroke-width: 2px; }
+.ra-pick-struct { fill: var(--surface); stroke: var(--text-faint); stroke-width: 0.04; }
+.ra-pick-wall { fill: none; stroke: var(--text-faint); stroke-linecap: round; }
+.ra-pick-wall.is-door { stroke-dasharray: 0.3 0.2; opacity: 0.7; }
+.ra-pick-other { fill: var(--text-faint); opacity: 0.8; }
+.ra-pick-dot { fill: var(--danger, #f04438); stroke: #fff; stroke-width: 0.05; }
+.ra-pick-camera .ra-pick-dot { stroke-width: 2px; }
+.ra-pick-halo { fill: transparent; }
+.ra-pick-marker { cursor: grab; outline: none; }
+.ra-pick-marker:focus-visible .ra-pick-dot { stroke: var(--accent); stroke-width: 0.12; }
+.ra-pick-camera .ra-pick-marker:focus-visible .ra-pick-dot { stroke-width: 3px; }

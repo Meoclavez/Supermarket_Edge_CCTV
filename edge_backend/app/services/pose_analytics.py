@@ -735,7 +735,14 @@ class PoseAnalytics:
             try:
                 self._observe_locked(cam, float(ts), frame_bgr, tracks or [], result)
             except Exception as e:  # never break the capture loop
-                logger.exception(f"pose_analytics.observe failed for {camera_id}: {e}")
+                # Once a minute per camera with the traceback, then counted:
+                # a persistent bug logged a traceback on every analysed frame.
+                self.stats["observe_errors"] = self.stats.get("observe_errors", 0) + 1
+                now = time.monotonic()
+                if now - getattr(cam, "_last_error_log", 0.0) > 60.0:
+                    cam._last_error_log = now
+                    logger.exception(f"pose_analytics.observe failed for {camera_id} "
+                                     f"({self.stats['observe_errors']} so far): {e}")
         self.stats["frames"] += 1
         return result
 
@@ -1983,6 +1990,17 @@ class PoseAnalytics:
             written = 0
             notifications: List[Tuple[str, str, Dict[str, Any]]] = []
             clip_jobs: List[Dict[str, Any]] = []
+            # Evidence stills are rendered and written before the session opens:
+            # inside it, the autoflushed INSERTs held the SQLite write lock across
+            # the image encode and disk write (audit M9). Kept on the item, so a
+            # retried flush does not write the picture again.
+            for kind, p in batch:
+                if kind == "incident" and "_snapshot_path" not in p:
+                    try:
+                        p["_snapshot_path"] = self._write_evidence(p)
+                    except Exception as e:  # noqa: BLE001 - the incident row matters more
+                        logger.error(f"theft evidence still not written for {p.get('id')}: {e}")
+                        p["_snapshot_path"] = None
             try:
                 with Session(self._engine()) as db:
                     cams: Dict[str, Any] = {}
@@ -2018,8 +2036,7 @@ class PoseAnalytics:
                             if cid not in cams:
                                 cams[cid] = db.get(CameraModel, cid)
                             cam = cams[cid]
-                            snapshot_path = self._write_evidence(p)
-                            row = self._incident_row(p, cam, snapshot_path)
+                            row = self._incident_row(p, cam, p.get("_snapshot_path"))
                             db.add(TheftIncidentModel(**row))
                             written += 1
                             notifications.append(self._notification(p, row))
@@ -2028,12 +2045,13 @@ class PoseAnalytics:
             except Exception as e:
                 self.stats["write_errors"] += 1
                 logger.error(f"pose_analytics flush failed ({len(batch)} item(s)): {e}")
-                # Re-queue for a few attempts so a transient lock does not
-                # lose observations; a persistent failure drops them.
+                # Re-queue so a transient lock does not lose observations; a
+                # persistent failure drops them. Theft incidents get far more
+                # tries (about 2.5 min of flushes) than shelf interactions.
                 retry = []
                 for k, v in batch:
                     v["_attempts"] = int(v.get("_attempts", 0)) + 1
-                    if v["_attempts"] < 3:
+                    if v["_attempts"] < (30 if k == "incident" else 3):
                         retry.append((k, v))
                 with self._pending_lock:
                     self._pending[:0] = retry

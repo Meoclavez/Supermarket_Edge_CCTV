@@ -772,6 +772,20 @@
     }, 60000);
   }
 
+  /** Open the gallery at "Not placed" (help.js go 'place-cameras'); every camera placed: all of them. */
+  function showUnplaced() {
+    if (!els.panel) return false;
+    state.filter = state.cameras.some((c) => !c.placed) ? 'unplaced' : 'all';
+    writePrefs();
+    if (state.collapsed) setCollapsed(false);
+    renderList();
+    try { els.panel.scrollIntoView({ block: 'start', behavior: 'smooth' }); } catch (_) { els.panel.scrollIntoView(); }
+    const first = els.list && els.list.querySelector('.cg-place, .cg-name');
+    if (first) { try { first.focus({ preventScroll: true }); } catch (_) {} }
+    return true;
+  }
+  window.EdgeCameraGallery = { showUnplaced };
+
   function boot() {
     if (window.edgeAuth && typeof window.edgeAuth.onReady === 'function') window.edgeAuth.onReady(start);
     else if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);

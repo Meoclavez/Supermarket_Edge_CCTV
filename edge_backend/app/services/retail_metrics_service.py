@@ -17,12 +17,14 @@ so the floor always won and the figure never changed.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from sqlalchemy import Float, and_, case, func, or_, select, true
+from sqlalchemy import Float, String, and_, case, func, or_, select, true, type_coerce
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -249,6 +251,34 @@ PATH_MAX_STEP_M = 4.0
 PATH_MAX_SPEED_MPS = 3.0
 
 
+def _raw_points():
+    """trajectory_points as stored text: decoded on a worker thread, not on the event loop."""
+    return type_coerce(CustomerTrackModel.trajectory_points, String)
+
+
+def _decode_points(raw) -> list:
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple)):
+        return list(raw)
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    return value if isinstance(value, list) else []
+
+
+def paths_retained_since(now: Optional[datetime] = None) -> Optional[datetime]:
+    """Oldest start_time whose raw path points are still kept (db_maintenance), naive UTC; None = all."""
+    from app.services.db_maintenance import _points_retention_days
+
+    days = _points_retention_days()
+    if days <= 0:
+        return None
+    now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    return now - timedelta(days=days)
+
+
 def path_length_m(points: list) -> Optional[float]:
     """Metres walked along one track's recorded floor points ({x, y, t}).
 
@@ -301,6 +331,9 @@ class ZoneMetrics:
     # Shelf reaches recorded against this zone (shelf_interactions.shelf_zone_id),
     # None when none were recorded in the window.
     reaches: Optional[int] = None
+    # CHECKOUT zones: the queue right now in floor metres (services/queue_length.py),
+    # with a reason instead of a number when no calibrated camera sees the zone.
+    queue: Optional[dict] = None
 
     @property
     def engagement_rate(self) -> Optional[float]:
@@ -332,6 +365,9 @@ class ZoneMetrics:
             "shelf_length_m": self.shelf_length_m,
             "reaches": self.reaches,
             "reaches_per_shelf_m": self.reaches_per_shelf_m,
+            # CHECKOUT zones only (None elsewhere): first to last person, metres.
+            "queue_length_m": self.queue.get("length_m") if self.queue else None,
+            "queue": self.queue,
         }
 
     def _per_area(self, value: Optional[float], digits: int = 3) -> Optional[float]:
@@ -578,6 +614,42 @@ class RetailMetricsService:
                 m.interactions = int(interactions or 0)
             m.occupancy_now = occupancy.get(z.id, 0)
             out.append(m)
+        queues = [z for z in zones if z.category == "CHECKOUT"]
+        if queues:
+            lengths = self.queue_lengths(queues)
+            for m in out:
+                m.queue = lengths.get(m.zone_id)
+        return out
+
+    @staticmethod
+    def queue_lengths(zones: list) -> dict:
+        """Queue length now for each zone, from calibrated floor positions only.
+
+        Coverage is the largest share of the zone one calibrated camera sees
+        (``restricted_areas.floor_coverage``, cached per camera and zone). The
+        people are the live map's persons (confirmed tracks of calibrated cameras).
+        """
+        from app.services import queue_length
+        from app.services.live_analytics_engine import live_engine
+        from app.services.restricted_areas import floor_coverage
+        from app.services.tracking_service import floor_projector
+
+        try:
+            persons = live_engine.live_snapshot().get("persons") or []
+        except Exception:  # noqa: BLE001 - the live map must never break the figures
+            persons = []
+        calibrated = [cid for cid in list(live_engine.runtimes) if floor_projector.has_homography(cid)]
+        out = {}
+        for z in zones:
+            poly = [(float(p["x"]), float(p["y"])) if isinstance(p, dict) else (float(p[0]), float(p[1]))
+                    for p in (z.polygon or [])]
+            covered = 0.0
+            for cid in calibrated:
+                try:
+                    covered = max(covered, float(floor_coverage(cid, poly, None)[0]))
+                except Exception as e:  # noqa: BLE001 - one bad matrix must not hide the rest
+                    logger.debug(f"queue coverage {cid}/{z.id}: {e}")
+            out[z.id] = queue_length.measure(persons, poly, covered or None)
         return out
 
     # --------------------------------------------------------------- funnel
@@ -728,9 +800,18 @@ class RetailMetricsService:
             )
             extra = {"unplaced_interactions": unplaced, "interactions_total": len(rows)}
         else:
+            # Raw shopper paths are kept TRACK_POINTS_RETENTION_DAYS (db_maintenance);
+            # older hours live in the recorded heatmap history (/heatmaps/history).
+            kept_since = paths_retained_since()
+            extra = {}
+            if kept_since is not None and start < kept_since:
+                extra["paths_from"] = kept_since.isoformat() + "Z"
+                extra["note"] = ("Shopper paths older than the raw-path retention are kept only as the "
+                                 "recorded heatmap history; this map covers the period since then.")
+                start = max(start, kept_since)
             rows = (
                 await db.execute(
-                    select(CustomerTrackModel.trajectory_points).where(
+                    select(_raw_points()).where(
                         and_(
                             CustomerTrackModel.start_time >= start,
                             CustomerTrackModel.start_time < end,
@@ -739,13 +820,15 @@ class RetailMetricsService:
                     )
                 )
             ).scalars().all()
-            grid, samples = bin_heatmap_paths(
-                ((points, True) for points in rows), kind, width_m, height_m, grid_w, grid_h,
-                presence_weighting=presence_weighting,
-            )
+            # JSON decode and binning of possibly months of paths: a worker
+            # thread, not the event loop (audit L10).
+            grid, samples = await asyncio.to_thread(
+                lambda: bin_heatmap_paths(
+                    ((_decode_points(raw), True) for raw in rows), kind, width_m, height_m, grid_w, grid_h,
+                    presence_weighting=presence_weighting,
+                ))
             unit = heatmap_unit(kind, presence_weighting)
             empty_msg = "No trajectories recorded. Calibrate a camera to place people on the floor plan."
-            extra = {}
         if kind == "presence":
             extra["presence_weighting"] = presence_weighting
 
@@ -835,6 +918,11 @@ class RetailMetricsService:
                     "kind": "checkout",
                     "camera_ids": sorted(zone_cams.get(m.zone_id, ())),
                     "queue_length_now": m.occupancy_now,
+                    # Metres from the first to the last person, None (with the reason) when
+                    # no calibrated camera sees the lane: never a guess from the count.
+                    "queue_length_m": m.queue.get("length_m") if m.queue else None,
+                    "queue_length_reason": m.queue.get("reason") if m.queue else None,
+                    "queue_spacing_m": m.queue.get("spacing_m") if m.queue else None,
                     "avg_wait_seconds": wait,
                     "avg_wait_minutes": round(wait / 60.0, 1) if wait else None,
                     "served_today": m.unique_visitors,
@@ -938,14 +1026,22 @@ class RetailMetricsService:
         Surfacing this stops an operator reading an empty heatmap as "no
         shoppers" when the real cause is "no camera is calibrated".
         """
-        cams = (await db.execute(select(CameraModel))).scalars().all()
+        from app.services.camera_setup_state import camera_setup_state
+
+        cams = (await db.execute(select(CameraModel).order_by(CameraModel.name))).scalars().all()
         total = len(cams)
         calibrated = sum(1 for c in cams if c.homography_matrix)
+        zone_ids = {z for (z,) in (await db.execute(select(StoreZoneModel.id))).all()}
+        state = camera_setup_state(cams, zone_ids)
         return {
             "cameras_total": total,
             "cameras_calibrated": calibrated,
             "cameras_uncalibrated": total - calibrated,
+            # On the store map (cameras.map_placed). Placed is NOT calibrated.
+            "cameras_placed": state["placed"],
             "floor_tracking_possible": calibrated > 0,
+            # Not placed / placed but not calibrated / calibrated, with text and next action.
+            "camera_setup": state,
         }
 
     # -------------------------------------------------------------- forecast
@@ -1050,20 +1146,27 @@ class RetailMetricsService:
         figures are None when no path with two floor points was recorded.
         """
         excluded = sorted(set(await staff_only_camera_ids(db)) | set(duplicate_camera_ids()))
+        kept_since = paths_retained_since()
+        extra = {}
+        if kept_since is not None and start < kept_since:
+            extra["paths_from"] = kept_since.isoformat() + "Z"
+            start = max(start, kept_since)
         rows = (
             await db.execute(
-                select(CustomerTrackModel.trajectory_points).where(
+                select(_raw_points()).where(
                     and_(CustomerTrackModel.start_time >= start, CustomerTrackModel.start_time < end,
                          _track_is_real(), CustomerTrackModel.camera_id.notin_(excluded))
                 )
             )
         ).scalars().all()
-        lengths = sorted(v for v in (path_length_m(r) for r in rows) if v is not None)
+        lengths = await asyncio.to_thread(
+            lambda: sorted(v for v in (path_length_m(_decode_points(r)) for r in rows) if v is not None))
         if not lengths:
             return {"paths_measured": 0, "avg_path_m": None, "median_path_m": None,
-                    "p90_path_m": None, "total_walked_m": None}
+                    "p90_path_m": None, "total_walked_m": None, **extra}
         n = len(lengths)
         return {
+            **extra,
             "paths_measured": n,
             "avg_path_m": round(sum(lengths) / n, 1),
             "median_path_m": round(lengths[n // 2] if n % 2 else (lengths[n // 2 - 1] + lengths[n // 2]) / 2, 1),
@@ -1112,15 +1215,28 @@ class RetailMetricsService:
             "zones": [
                 {k: d[k] for k in ("zone_id", "name", "category", "area_m2", "visits", "visits_per_m2",
                                    "dwell_seconds_per_m2", "people_per_m2_now", "shelf_length_m",
-                                   "reaches", "reaches_per_shelf_m", "observed")}
+                                   "reaches", "reaches_per_shelf_m", "observed", "queue_length_m")}
                 for d in (z.to_dict() for z in zones)
             ],
+            # Checkout queues now, in metres (null + reason where no calibrated camera sees them).
+            "queues": [
+                {"zone_id": z.zone_id, "name": z.name, **(z.queue or {})}
+                for z in zones if z.queue is not None
+            ],
+            # Sales per m2 per zone needs till line items mapped to store areas, which the
+            # till data does not carry (SKU only, no department): left out, not estimated.
+            "zone_sales_per_m2": None,
+            "zone_sales_per_m2_reason": ("The tills send product codes (SKU) only, with no department, and "
+                                         "no product list links codes to store areas, so sales cannot be "
+                                         "split by area honestly."),
         }
 
     # -------------------------------------------------------------- overview
 
-    async def overview(self, db: AsyncSession, layout_id: str, store_name: str) -> dict:
-        start, end = day_bounds()
+    async def overview(self, db: AsyncSession, layout_id: str, store_name: str,
+                       day: Optional[datetime] = None) -> dict:
+        """Today's figures, or ``day``'s (store-local date; "now" values stay live)."""
+        start, end = day_bounds(day)
         footfall = await self.footfall(db, start, end)
         revenue, txns = await self.pos_totals(db, start, end)
         dwell = await self.avg_dwell_seconds(db, start, end)

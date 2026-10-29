@@ -145,6 +145,15 @@ button.fp-badge { line-height: inherit; text-align: left; }
 .fp-setup-step .fp-step-text { flex: 1; font-size: 13px; color: var(--text-2); }
 .fp-setup-step .fp-step-text small { display: block; color: var(--text-faint); font-size: 12px; }
 
+/* ---- side panel: place, then calibrate ---------------------------- */
+.fp-camstate-card { border-color: var(--warning-border); background: var(--warning-bg); }
+.fp-camstate-card[hidden] { display: none; }
+.fp-camstate-title { display: flex; align-items: center; gap: 6px; font-size: 14px; color: var(--text-strong); margin-bottom: 4px; }
+.fp-camstate-title .icon { color: var(--warning); flex-shrink: 0; }
+.fp-camstate-text { font-size: 13px; color: var(--text-2); line-height: 1.5; margin: 0 0 8px; overflow-wrap: anywhere; }
+.fp-camstate-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.fp-camstate-actions .btn { max-width: 100%; white-space: normal; text-align: left; }
+
 /* ---- side panel: inspector --------------------------------------- */
 .fp-inspector-kind { font-size: 12px; font-weight: 500; color: var(--text-secondary); }
 .fp-kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 13px; font-variant-numeric: tabular-nums; color: var(--text-dim); margin: 8px 0; }

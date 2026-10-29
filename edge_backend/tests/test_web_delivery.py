@@ -61,7 +61,13 @@ def test_dashboard_is_gzipped_revalidated_and_hash_versioned(client):
     refs = re.findall(r'(?:src|href)="(/static/[^"?]+)\?v=([^"]+)"', html)
     assert len(refs) >= 20
     for path, version in refs:
-        assert version == _sha12(STATIC / path[len("/static/"):]), path
+        assert version.split("#")[0] == _sha12(STATIC / path[len("/static/"):]), path
+    # SVG <use href="/static/icons/sprite.svg#i-x">: versioned with the fragment kept, so a
+    # re-rendered icon is served from the browser cache instead of revalidated.
+    sprite = _sha12(STATIC / "icons" / "sprite.svg")
+    assert f'href="/static/icons/sprite.svg?v={sprite}#i-house"' in html
+    assert 'href="/static/icons/sprite.svg#' not in html
+    assert f'<template id="edgeIconSprite"><img src="/static/icons/sprite.svg?v={sprite}"' in html
     assert "?v=2.3.0" not in html
     assert "cdn.jsdelivr.net" not in html
 
@@ -171,10 +177,14 @@ def test_pages_load_scripts_locally_and_deferred():
         for before, src, after in srcs:
             assert src.startswith("/static/"), f"{page}: third-party script {src}"
             deferred = "defer" in before + after
-            # auth.js must run before anything else can fetch; the rest defer.
-            assert deferred == (not src.startswith("/static/js/auth.js")), f"{page}: {src}"
+            # auth.js must run before anything else can fetch, then poll.js wraps that fetch
+            # (429 back-off, shared polls) before any module polls; the rest defer.
+            sync = src.startswith("/static/js/auth.js") or src.startswith("/static/js/poll.js")
+            assert deferred == (not sync), f"{page}: {src}"
         names = [s for _b, s, _a in srcs]
         assert names[0].startswith("/static/js/auth.js")
+        if page == "index.html":
+            assert names[1].startswith("/static/js/poll.js")
         assert names[-1].startswith("/static/js/theme.js")  # same run order as before defer
     index = (STATIC / "index.html").read_text()
     assert index.index("vendor/chartjs/chart.umd.min.js") < index.index("/static/js/analytics.js")
@@ -409,3 +419,4 @@ def test_csp_host_is_sanitised():
                    "headers": [(b"host", b"evil.com; script-src *")]})
     csp = content_security_policy(req)
     assert "evil.com" not in csp and "script-src *" not in csp
+

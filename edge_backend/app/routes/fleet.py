@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Dict
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.services.actor import describe_actor
 from app.services.auth_service import auth_service, require_admin
@@ -34,7 +34,10 @@ async def fleet_reset_key(request: Request, _admin: Dict[str, Any] = Depends(req
 
     async with async_session_factory() as db:
         actor = await describe_actor(request, db)
-    return await fleet_control.reset_key(f"local admin {actor}")
+    try:
+        return await fleet_control.reset_key(f"local admin {actor}")
+    except PermissionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
 
 @router.post("/checkin-now")

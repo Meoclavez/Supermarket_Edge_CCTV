@@ -204,6 +204,8 @@ async def patch_paired_device(paired_device_id: str, req: DevicePatchReq, sessio
 async def revoke_paired_device(paired_device_id: str, session: AsyncSession = Depends(get_db)):
     if not await pairing_service.revoke_device(session, paired_device_id):
         raise HTTPException(status_code=404, detail="Paired device not found (or already revoked).")
+    from app.services.notification_service import alert_hub
+    await alert_hub.prune_revoked()  # close its live alert sockets now
     return {"revoked": True, "id": paired_device_id}
 
 

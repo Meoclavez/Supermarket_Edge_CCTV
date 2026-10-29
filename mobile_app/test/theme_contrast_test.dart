@@ -16,7 +16,6 @@ import 'package:edge_ai_cctv/models/theft_incident.dart';
 import 'package:edge_ai_cctv/screens/app_shell.dart';
 import 'package:edge_ai_cctv/screens/clip_archives_screen.dart';
 import 'package:edge_ai_cctv/screens/dashboard_screen.dart';
-import 'package:edge_ai_cctv/screens/dvr_playback_screen.dart';
 import 'package:edge_ai_cctv/screens/events_center_screen.dart';
 import 'package:edge_ai_cctv/screens/loss_prevention_alert_screen.dart';
 import 'package:edge_ai_cctv/screens/loss_prevention_screen.dart';
@@ -139,7 +138,6 @@ void main() {
     'clip archives': () => const ClipArchivesScreen(),
     'storage health': () => const StorageHealthScreen(),
     'app shell': () => const AppShell(),
-    'DVR playback': () => const DVRPlaybackScreen(),
     'zone editor': () => const ZoneEditorScreen(),
   };
 

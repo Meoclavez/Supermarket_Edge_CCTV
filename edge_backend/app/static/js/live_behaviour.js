@@ -215,7 +215,8 @@
       state.at = Date.now();
     }
     render();
-    schedule(state.status === 'error' ? POLL_MS * 3 : POLL_MS);
+    // Someone flagged: every 2 s; nobody flagged: every 6 s (theft alerts also arrive on the websocket).
+    schedule(state.status === 'error' ? POLL_MS * 3 : (state.tracks && state.tracks.length ? POLL_MS : POLL_MS * 3));
   }
 
   function onClick(e) {

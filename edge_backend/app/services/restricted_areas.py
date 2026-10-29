@@ -1161,3 +1161,51 @@ def catalogue() -> Dict[str, Any]:
                                                       "flag shadows.")}},
         "days": list(DAY_KEYS),
     }
+
+
+# --------------------------------------------------------------------------- event queries (audit M8)
+#
+# The status poll (every 3 s) and the event list counted "still needs an
+# outcome" and filtered by area/trigger in Python over only the newest 200 or
+# 2000 alerts, so older unresolved alerts were missed. These do it in SQL
+# (json_extract on metadata_json) over every RESTRICTED_AREA row, using the
+# m0024 index on security_events(event_type, timestamp).
+
+_RA_AREA = "json_extract(metadata_json, '$.ra_area_id')"
+_RA_TRIGGER = "json_extract(metadata_json, '$.ra_trigger')"
+_RA_NEEDS = ("(json_extract(metadata_json, '$.ra_requires_outcome') IN (1, 'true') "
+             "AND json_extract(metadata_json, '$.ra_outcome') IS NULL)")
+
+
+async def open_outcome_counts(db) -> Dict[str, int]:
+    """Area id -> number of its alerts still waiting for an outcome."""
+    from sqlalchemy import text
+
+    rows = (await db.execute(text(
+        f"SELECT {_RA_AREA} AS area, count(*) FROM security_events "
+        f"WHERE event_type = 'RESTRICTED_AREA' AND {_RA_AREA} IS NOT NULL AND {_RA_NEEDS} "
+        f"GROUP BY area"))).all()
+    return {str(a): int(n) for a, n in rows if a}
+
+
+async def event_ids(db, *, area_id: Optional[str] = None, trigger: Optional[str] = None,
+                    needs_outcome: Optional[bool] = None, limit: int = 100) -> List[str]:
+    """Ids of restricted-area alerts matching the filters, newest first (filtered in SQL)."""
+    from sqlalchemy import text
+
+    where = ["event_type = 'RESTRICTED_AREA'", f"{_RA_AREA} IS NOT NULL"]
+    params: Dict[str, Any] = {"limit": max(1, min(int(limit), 500))}
+    if area_id:
+        where.append(f"{_RA_AREA} = :area")
+        params["area"] = area_id
+    if trigger:
+        where.append(f"{_RA_TRIGGER} = :trigger")
+        params["trigger"] = trigger
+    if needs_outcome is True:
+        where.append(_RA_NEEDS)
+    elif needs_outcome is False:
+        where.append(f"NOT {_RA_NEEDS}")
+    rows = (await db.execute(text(
+        f"SELECT id FROM security_events WHERE {' AND '.join(where)} "
+        f"ORDER BY timestamp DESC LIMIT :limit"), params)).all()
+    return [r[0] for r in rows]

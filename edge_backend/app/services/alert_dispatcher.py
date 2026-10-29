@@ -145,6 +145,13 @@ def sign_jwt_rs256(claims: dict, private_key_pem: str, kid: Optional[str] = None
 
 # --------------------------------------------------------------------------- FCM v1
 
+# Push data keys the phone app routes on (push_router.dart, notification_service.dart).
+FCM_DATA_KEYS = frozenset({
+    "device_id", "alert_id", "incident_id", "id", "event_type", "severity", "camera_id",
+    "alert_tier", "ra_area_id", "timestamp",
+})
+
+
 class FcmV1Provider:
     name = "fcm"
 
@@ -244,7 +251,11 @@ class FcmV1Provider:
         time-sensitive`` (needs only the Time Sensitive capability, never the
         critical-alert entitlement). Data values are strings, as FCM requires.
         """
-        str_data = _as_str_map(dict(data, title=title, body=body, type=APNS_CATEGORY))
+        # Ids and codes only (FCM_DATA_KEYS): the data block travels through
+        # Google in plain text, so no camera or staff names, notes or evidence
+        # links (the phone fetches those from the store with its session).
+        safe = {k: v for k, v in (data or {}).items() if k in FCM_DATA_KEYS}
+        str_data = _as_str_map(dict(safe, title=title, body=body, type=APNS_CATEGORY))
         thread = str(data.get("camera_id") or "store")
         return {
             "message": {

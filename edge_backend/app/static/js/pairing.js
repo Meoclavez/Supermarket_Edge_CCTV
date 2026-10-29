@@ -14,7 +14,8 @@
 (function () {
   'use strict';
 
-  const POLL_MS = 3000;
+  const POLL_MS = 3000;          // while a pairing code is shown
+  const IDLE_POLL_MS = 27000;    // otherwise: paired phones and deliveries about every 30 s
   const $ = (id) => document.getElementById(id);
 
   let sessionInfo = null;     // last POST /pairing/sessions response
@@ -680,7 +681,7 @@
       if (!settingsVisible()) return;
       await loadDevices(false);
       if (sessionInfo && secondsLeft() > 0) schedulePoll();
-      else if (settingsVisible()) { pollTimer = setTimeout(() => { pollTimer = null; if (settingsVisible()) { loadDeliveries(); schedulePoll(); } }, POLL_MS * 3); }
+      else if (settingsVisible()) { pollTimer = setTimeout(() => { pollTimer = null; if (settingsVisible()) { loadDeliveries(); schedulePoll(); } }, IDLE_POLL_MS); }
     }, POLL_MS);
   }
 

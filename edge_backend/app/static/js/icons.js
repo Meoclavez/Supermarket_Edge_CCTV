@@ -12,7 +12,19 @@
 (function () {
   'use strict';
 
-  var SPRITE = '/static/icons/sprite.svg';
+  // The page carries <template id="edgeIconSprite"><img src="/static/icons/sprite.svg"></template>,
+  // which the server rewrites to ?v=<content hash> (cached for a year, immutable). Using that
+  // URL means a re-rendered icon never asks the server again; '/static/icons/sprite.svg'
+  // alone is no-cache and was revalidated on every innerHTML render (~12 requests a minute).
+  var SPRITE = (function () {
+    try {
+      var t = document.getElementById('edgeIconSprite');
+      var img = t && t.content && t.content.querySelector('img');
+      var h = img && img.getAttribute('src');
+      if (h && /^\/static\/icons\/sprite\.svg(\?v=[A-Za-z0-9_-]+)?$/.test(h)) return h;
+    } catch (_) { /* no document */ }
+    return '/static/icons/sprite.svg';
+  })();
   var FALLBACK = 'circle';
   var SIZES = { sm: 'icon-sm', md: 'icon-md', lg: 'icon-lg' };
   var NS = 'http://www.w3.org/2000/svg';

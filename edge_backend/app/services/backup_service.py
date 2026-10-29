@@ -3,20 +3,27 @@
 Policy
 ------
 * Every snapshot is taken with the SQLite online backup API, so it is
-  consistent even while the server is writing in WAL mode.
-* Automatic snapshots (tag ``startup`` or ``auto``) are **deduplicated**: the
-  new snapshot's logical content hash (schema + every row) is compared with the
-  newest existing backup and, when equal, the new file is discarded. Restarting
-  the server ten times without any change produces one backup, not ten.
-* Retention (:meth:`BackupService.apply_retention`) only ever deletes automatic
-  snapshots. It keeps the newest ``keep_startup`` of them, plus the newest one
-  of each UTC day for the last ``keep_daily_days`` days. Pre-migration
-  snapshots (``pre-v0005`` ...) and operator snapshots (``manual``, custom
-  tags) are never deleted automatically.
-* Older automatic snapshots are gzip-compressed (``.db.gz``); the newest backup
-  stays a plain ``.db`` so it restores and deduplicates without decompression.
-  Pre-migration snapshots stay uncompressed so the documented manual rollback
-  (``cp storage/backups/*pre-vNNNN.db ...``) keeps working.
+  consistent even while the server is writing in WAL mode, and only after a
+  free-space check (the copy is as big as the database: 2.8 GB at Pearcedale).
+* Automatic snapshots (tag ``startup`` or ``auto``) are **deduplicated** with a
+  cheap change key of the live database (schema; every small table's rows;
+  row count and highest rowid of the big append-mostly tables), stored next
+  to each backup as ``<name>.key.json``. When the key equals the newest
+  backup's and that backup is under 24 h old, no copy is made at all.
+  Restarting the server ten times without any change produces one backup.
+* Retention (:meth:`BackupService.apply_retention`) keeps the newest
+  ``keep_startup`` automatic snapshots plus the newest one of each UTC day for
+  ``keep_daily_days`` days, and the newest ``keep_per_kind`` (2) of every
+  other kind: before upgrade (``pre-v*``), manual, before restore, before
+  reset, uploaded. Then the total is held under a byte budget
+  (``BACKUP_MAX_GB``; automatic: 15 % of the disk, at least two database
+  copies): oldest automatic snapshots go first, then older ones of other kinds.
+  The newest backup is never deleted.
+* Everything but the newest backup and the newest pre-migration snapshot is
+  gzip-compressed (``.db.gz``); restore accepts both. The newest ``pre-v*``
+  stays plain so the documented manual rollback
+  (``cp storage/backups/*pre-vNNNN.db ...``) works for the latest upgrade;
+  older ones need ``gunzip -k`` first.
 * :meth:`BackupService.restore_backup` accepts ``.db`` and ``.db.gz``; the
   snapshot is integrity-checked before it replaces anything.
 """
@@ -94,6 +101,66 @@ def content_hash(db_path: Path) -> str:
     return h.hexdigest()
 
 
+# Tables with more rows than this are keyed by (row count, highest rowid)
+# only: they are the append-mostly history tables (customer_tracks,
+# zone_visits, ...), whose changes always add rows. Smaller tables (settings,
+# layout, cameras, users) are hashed row by row, which catches updates too.
+_SMALL_TABLE_ROWS = 50_000
+
+
+def change_key(db_path: Path) -> str:
+    """Cheap fingerprint of a database for backup dedupe (seconds, not minutes, on GBs)."""
+    resolved = Path(db_path).resolve()
+    immutable = "" if Path(f"{resolved}-wal").exists() else "&immutable=1"
+    conn = sqlite3.connect(f"file:{resolved}?mode=ro{immutable}", uri=True, timeout=15.0)
+    h = hashlib.sha256()
+    try:
+        schema = conn.execute(
+            "SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name"
+        ).fetchall()
+        h.update(repr(schema).encode())
+        for (t, name, _sql) in schema:
+            if t != "table" or name.startswith("sqlite_"):
+                continue
+            quoted = '"' + name.replace('"', '""') + '"'
+            h.update(b"\x00T" + name.encode())
+            try:
+                count, top = conn.execute(f"SELECT count(*), max(rowid) FROM {quoted}").fetchone()
+            except sqlite3.OperationalError:  # WITHOUT ROWID
+                count, top = conn.execute(f"SELECT count(*), NULL FROM {quoted}").fetchone()
+            h.update(repr((count, top)).encode())
+            if (count or 0) <= _SMALL_TABLE_ROWS:
+                try:
+                    rows = conn.execute(f"SELECT * FROM {quoted} ORDER BY rowid")
+                except sqlite3.OperationalError:
+                    rows = sorted(conn.execute(f"SELECT * FROM {quoted}").fetchall(), key=repr)
+                for row in rows:
+                    h.update(repr(row).encode())
+    finally:
+        conn.close()
+    return h.hexdigest()
+
+
+def _key_path(backup: Path) -> Path:
+    name = backup.name
+    for suffix in (".db.gz", ".db"):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    return backup.with_name(f"{name}.key.json")
+
+
+def db_bytes(db_path: Path) -> int:
+    """Database plus its WAL, the size a full backup copy needs."""
+    total = 0
+    for suffix in ("", "-wal"):
+        try:
+            total += os.path.getsize(f"{db_path}{suffix}")
+        except OSError:
+            pass
+    return total
+
+
 class BackupService:
     """Transactional backups, deduplication, retention and safe restore of the SQLite DB."""
 
@@ -104,6 +171,8 @@ class BackupService:
         keep_startup: Optional[int] = None,
         keep_daily_days: Optional[int] = None,
         compress: Optional[bool] = None,
+        keep_per_kind: Optional[int] = None,
+        max_bytes: Optional[int] = None,
     ):
         self.backups_dir = Path(backups_dir or settings.BACKUPS_DIR)
         self.db_path = Path(db_path or settings.DATABASE_PATH)
@@ -113,7 +182,32 @@ class BackupService:
                                    else getattr(settings, "BACKUP_KEEP_DAILY_DAYS", 14))
         self.compress = bool(compress if compress is not None
                              else getattr(settings, "BACKUP_COMPRESS", True))
+        self.keep_per_kind = max(1, int(keep_per_kind if keep_per_kind is not None
+                                        else getattr(settings, "BACKUP_KEEP_PER_KIND", 2)))
+        self.max_bytes_setting = (max_bytes if max_bytes is not None
+                                  else int(float(getattr(settings, "BACKUP_MAX_GB", 0) or 0) * 1024 ** 3))
         self.backups_dir.mkdir(parents=True, exist_ok=True)
+
+    def budget_bytes(self) -> int:
+        """Byte budget for all backups: the setting, or 15 % of the backups disk (>= 2 DB copies)."""
+        if self.max_bytes_setting and self.max_bytes_setting > 0:
+            return int(self.max_bytes_setting)
+        try:
+            total = shutil.disk_usage(str(self.backups_dir)).total
+        except OSError:
+            total = 0
+        return int(max(total * 0.15, 2.2 * db_bytes(self.db_path), 256 * 1024 ** 2))
+
+    def space_check(self) -> tuple[bool, str]:
+        """(ok, reason): room for one more full copy of the database (1.2x its size)?"""
+        need = int(db_bytes(self.db_path) * 1.2)
+        try:
+            free = shutil.disk_usage(str(self.backups_dir)).free
+        except OSError as exc:
+            return False, f"cannot read free disk space: {exc}"
+        if free >= need:
+            return True, ""
+        return False, (f"only {free / 1e9:.1f} GB free; a backup copy needs about {need / 1e9:.1f} GB")
 
     # ------------------------------------------------------------------ helpers
 
@@ -137,6 +231,41 @@ class BackupService:
     def _remove_sidecars(path: Path) -> None:
         for suffix in ("-wal", "-shm", "-journal"):
             Path(f"{path}{suffix}").unlink(missing_ok=True)
+
+    def _delete_backup(self, path: Path) -> None:
+        path.unlink(missing_ok=True)
+        self._remove_sidecars(path)
+        _key_path(path).unlink(missing_ok=True)
+
+    def _key_of_backup(self, path: Path) -> dict:
+        """Change key of a backup written before keys were stored (once; then saved beside it)."""
+        import json
+        tmp: Optional[Path] = None
+        try:
+            src = path
+            if path.name.endswith(".gz"):
+                tmp = path.with_name(f".key_{os.getpid()}_{path.name[:-3]}")
+                with gzip.open(path, "rb") as fin, open(tmp, "wb") as fout:
+                    shutil.copyfileobj(fin, fout)
+                src = tmp
+            data = {"key": change_key(src), "tag": "computed"}
+            _key_path(path).write_text(json.dumps(data))
+            return data
+        except Exception as e:
+            logger.warning(f"Could not compute the change key of backup {path.name}: {e}")
+            return {}
+        finally:
+            if tmp is not None:
+                tmp.unlink(missing_ok=True)
+                self._remove_sidecars(tmp)
+
+    @staticmethod
+    def _read_key(path: Path) -> Optional[dict]:
+        try:
+            import json
+            return json.loads(_key_path(path).read_text())
+        except Exception:
+            return None
 
     def _unique_dest(self, timestamp_str: str, tag: str) -> Path:
         """edge_cctv_<ts>_<tag>.db, with a -N suffix on the tag if that second is taken."""
@@ -207,22 +336,6 @@ class BackupService:
         out.sort(key=lambda b: (b["_ts"], b["_mtime"], b["filename"]), reverse=True)
         return out
 
-    def _hash_backup(self, path: Path) -> Optional[str]:
-        """Content hash of an existing backup, decompressing a .gz to a temp file."""
-        try:
-            if path.name.endswith(".gz"):
-                tmp = path.with_name(f".hash_{os.getpid()}_{path.name[:-3]}")
-                try:
-                    with gzip.open(path, "rb") as fin, open(tmp, "wb") as fout:
-                        shutil.copyfileobj(fin, fout)
-                    return content_hash(tmp)
-                finally:
-                    tmp.unlink(missing_ok=True)
-            return content_hash(path)
-        except Exception as e:
-            logger.warning(f"Could not hash backup {path.name}: {e}")
-            return None
-
     # ------------------------------------------------------------------ public API
 
     def create_backup(self, tag: str = "auto", dedupe: Optional[bool] = None) -> Dict[str, Any]:
@@ -253,6 +366,34 @@ class BackupService:
                     "size_bytes": file_size, "size_mb": round(file_size / (1024 * 1024), 2),
                     "timestamp": now_utc.isoformat(), "tag": safe_tag}
 
+        ok, why = self.space_check()
+        if not ok:
+            logger.error(f"Backup ({safe_tag}) not taken: {why}. Free disk space (old clips, backups).")
+            if dedupe:
+                return {"status": "skipped", "reason": "no_space", "detail": why, "filename": "",
+                        "filepath": None, "size_bytes": 0, "size_mb": 0.0,
+                        "timestamp": now_utc.isoformat(), "tag": safe_tag}
+            raise OSError(f"Not enough disk space for a backup: {why}")
+
+        key = None
+        if dedupe:
+            # Compare a cheap change key of the live database with the newest
+            # backup's before copying anything (a 2.8 GB copy plus a full row
+            # hash took minutes of every start). Foreign files (salvage
+            # exports, hand copies) are never a dedupe reference.
+            key = change_key(self.db_path)
+            existing = [b for b in self._entries() if BACKUP_FILENAME_PATTERN.match(b["filename"])]
+            if existing:
+                newest = existing[0]
+                stored = self._read_key(Path(newest["filepath"])) or self._key_of_backup(Path(newest["filepath"]))
+                age_s = (now_utc - newest["_ts"]).total_seconds()
+                if stored.get("key") == key and age_s < 24 * 3600:
+                    logger.info(f"Database unchanged since {newest['filename']}; {safe_tag} backup skipped.")
+                    return {"status": "skipped", "reason": "unchanged", "duplicate_of": newest["filename"],
+                            "filename": newest["filename"], "filepath": newest["filepath"],
+                            "size_bytes": newest["size_bytes"], "size_mb": newest["size_mb"],
+                            "timestamp": now_utc.isoformat(), "tag": safe_tag}
+
         dest_path = self._unique_dest(timestamp_str, safe_tag)
         # Write under a hidden temp name so a crash mid-backup never leaves a
         # truncated file that looks like a valid backup.
@@ -260,31 +401,29 @@ class BackupService:
         logger.info(f"Initiating online SQLite backup from {self.db_path} to {dest_path}...")
         try:
             self._snapshot(tmp_path)
-            digest = content_hash(tmp_path)
-            if dedupe:
-                # Foreign files (salvage exports, hand copies) are listed but
-                # never used as a dedup reference nor touched by retention.
-                existing = [b for b in self._entries() if BACKUP_FILENAME_PATTERN.match(b["filename"])]
-                if existing:
-                    newest = existing[0]
-                    if self._hash_backup(Path(newest["filepath"])) == digest:
-                        tmp_path.unlink(missing_ok=True)
-                        logger.info(f"Database unchanged since {newest['filename']}; {safe_tag} backup skipped.")
-                        return {"status": "skipped", "reason": "unchanged", "duplicate_of": newest["filename"],
-                                "filename": newest["filename"], "filepath": newest["filepath"],
-                                "size_bytes": newest["size_bytes"], "size_mb": newest["size_mb"],
-                                "timestamp": now_utc.isoformat(), "tag": safe_tag, "content_sha256": digest}
+            if key is None:
+                key = change_key(tmp_path)
             os.replace(tmp_path, dest_path)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            self._remove_sidecars(tmp_path)
+            raise
         finally:
             tmp_path.unlink(missing_ok=True)
             self._remove_sidecars(tmp_path)
+        try:
+            import json
+            _key_path(dest_path).write_text(json.dumps({"key": key, "tag": safe_tag}))
+        except OSError as exc:
+            logger.warning(f"Could not write the change key of {dest_path.name}: {exc}")
+        _clear_migration_backup_warning(self.db_path)
 
         file_size = os.path.getsize(dest_path)
         size_mb = round(file_size / (1024 * 1024), 2)
         logger.info(f"Backup created: {dest_path.name} ({size_mb} MB)")
         return {"status": "success", "filename": dest_path.name, "filepath": str(dest_path.resolve()),
                 "size_bytes": file_size, "size_mb": size_mb, "timestamp": now_utc.isoformat(),
-                "tag": safe_tag, "content_sha256": digest}
+                "tag": safe_tag, "change_key": key}
 
     def list_backups(self) -> List[Dict[str, Any]]:
         """All snapshots (.db and .db.gz), newest first."""
@@ -295,13 +434,16 @@ class BackupService:
         return entries
 
     def apply_retention(self, now: Optional[datetime] = None) -> Dict[str, Any]:
-        """Prune and compress automatic snapshots according to the policy above.
+        """Prune and compress snapshots according to the policy above.
 
-        Returns ``{"deleted": [...], "compressed": [...], "kept": int}``.
+        Returns ``{"deleted": [...], "compressed": [...], "kept": int, "total_bytes": int,
+        "budget_bytes": int}``.
         """
         now = now or datetime.now(timezone.utc)
         entries = self._entries()
-        auto = [b for b in entries if BACKUP_FILENAME_PATTERN.match(b["filename"]) and is_auto_tag(b["tag"])]
+        ours = [b for b in entries if BACKUP_FILENAME_PATTERN.match(b["filename"])]
+        newest_name = ours[0]["filename"] if ours else None
+        auto = [b for b in ours if is_auto_tag(b["tag"])]
 
         keep: set[str] = {b["filename"] for b in auto[: max(self.keep_startup, 0)]}
         cutoff = now - timedelta(days=max(self.keep_daily_days, 0))
@@ -311,40 +453,77 @@ class BackupService:
             if b["_ts"] >= cutoff and day not in seen_days:
                 seen_days.add(day)
                 keep.add(b["filename"])
+        # Other kinds: the newest keep_per_kind of each (pre-v* counted together).
+        per_kind: Dict[str, int] = {}
+        doomed_other: List[Dict[str, Any]] = []
+        for b in ours:
+            if is_auto_tag(b["tag"]):
+                continue
+            kind = "pre-v" if is_pre_migration_tag(b["tag"]) else re.sub(r"-\d+$", "", b["tag"])
+            per_kind[kind] = per_kind.get(kind, 0) + 1
+            if per_kind[kind] <= self.keep_per_kind:
+                keep.add(b["filename"])
+            else:
+                doomed_other.append(b)
+        if newest_name:
+            keep.add(newest_name)
 
         deleted: List[str] = []
-        for b in auto:
-            if b["filename"] in keep:
-                continue
-            p = Path(b["filepath"])
+
+        def _drop(b: Dict[str, Any], why: str) -> None:
             try:
-                p.unlink(missing_ok=True)
-                self._remove_sidecars(p)
+                self._delete_backup(Path(b["filepath"]))
                 deleted.append(b["filename"])
+                logger.info(f"Backup retention: deleted {b['filename']} ({why})")
             except Exception as e:
                 logger.error(f"Failed to prune backup {b['filename']}: {e}")
 
+        for b in auto:
+            if b["filename"] not in keep:
+                _drop(b, "automatic, outside the kept window")
+        for b in doomed_other:
+            _drop(b, f"more than {self.keep_per_kind} of its kind")
+
         compressed: List[str] = []
         if self.compress:
-            ours = [b for b in entries if BACKUP_FILENAME_PATTERN.match(b["filename"])]
-            newest = ours[0]["filename"] if ours else None
-            for b in entries:
-                if (
-                    b["filename"] in deleted
-                    or b["compressed"]
-                    or b["filename"] == newest
-                    or not BACKUP_FILENAME_PATTERN.match(b["filename"])
-                    or is_pre_migration_tag(b["tag"])
-                ):
+            pre = [b for b in ours if is_pre_migration_tag(b["tag"]) and b["filename"] not in deleted]
+            newest_pre = pre[0]["filename"] if pre else None
+            for b in ours:
+                if (b["filename"] in deleted or b["compressed"]
+                        or b["filename"] in (newest_name, newest_pre)):
                     continue
                 try:
                     compressed.append(self.compress_backup(b["filename"]))
                 except Exception as e:
                     logger.error(f"Failed to compress backup {b['filename']}: {e}")
 
+        # Byte budget over everything this service wrote; oldest automatic
+        # first, then oldest of any kind. The newest backup always stays.
+        budget = self.budget_bytes()
+        remaining = [b for b in self._entries() if BACKUP_FILENAME_PATTERN.match(b["filename"])]
+        total = sum(b["size_bytes"] for b in remaining)
+        if total > budget:
+            order = sorted((b for b in remaining if b["filename"] != newest_name),
+                           key=lambda b: (0 if is_auto_tag(b["tag"]) else 1, b["_ts"]))
+            for b in order:
+                if total <= budget:
+                    break
+                _drop(b, f"backups over the {budget / 1024 ** 3:.1f} GB budget")
+                total -= b["size_bytes"]
+            if total > budget:
+                logger.warning(f"Backups use {total / 1024 ** 3:.1f} GB, over the "
+                               f"{budget / 1024 ** 3:.1f} GB budget, with only the newest left.")
+
         if deleted or compressed:
             logger.info(f"Backup retention: deleted {len(deleted)}, compressed {len(compressed)}")
-        return {"deleted": deleted, "compressed": compressed, "kept": len(entries) - len(deleted)}
+        return {"deleted": deleted, "compressed": compressed, "kept": len(entries) - len(deleted),
+                "total_bytes": int(total), "budget_bytes": int(budget)}
+
+    def usage(self) -> Dict[str, Any]:
+        """Bytes used by backups (for storage accounting)."""
+        entries = self._entries()
+        return {"count": len(entries), "bytes": int(sum(b["size_bytes"] for b in entries)),
+                "budget_bytes": self.budget_bytes()}
 
     def compress_backup(self, filename: str) -> str:
         """gzip a .db backup in place (atomic), verifying the archive before removing the original."""
@@ -524,7 +703,7 @@ class BackupService:
                     with gzip.open(tmp_file, "rb") as fin, open(decompressed, "wb") as fout:
                         for chunk in iter(lambda: fin.read(1 << 20), b""):
                             written += len(chunk)
-                            if written > MAX_UPLOAD_EXPANDED_BYTES:
+                            if written > max_upload_expanded_bytes():
                                 raise ValueError("The uploaded archive expands to more than the allowed size.")
                             fout.write(chunk)
                 except (OSError, EOFError, gzip.BadGzipFile) as e:
@@ -549,9 +728,32 @@ class BackupService:
                 self._remove_sidecars(decompressed)
 
 
-# Uploaded backups: hard caps so an upload cannot fill the disk.
-MAX_UPLOAD_BYTES = 2 * 1024 ** 3
+def _clear_migration_backup_warning(db_path: Path) -> None:
+    """A full backup now exists: drop the "upgraded without a backup" marker (runner.py)."""
+    try:
+        marker = Path(f"{Path(db_path).resolve()}.backup-status.json")
+        if marker.exists():
+            import json
+            if json.loads(marker.read_text() or "{}").get("state") == "skipped":
+                marker.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+# Uploaded backups: hard caps so an upload cannot fill the disk. A plain
+# backup is as big as the database, so the cap follows it (2 GB minimum).
 MAX_UPLOAD_EXPANDED_BYTES = 8 * 1024 ** 3
+
+
+def max_upload_bytes() -> int:
+    return int(max(2 * 1024 ** 3, 1.5 * db_bytes(Path(settings.DATABASE_PATH))))
+
+
+def max_upload_expanded_bytes() -> int:
+    return int(max(MAX_UPLOAD_EXPANDED_BYTES, 3 * db_bytes(Path(settings.DATABASE_PATH))))
+
+
+MAX_UPLOAD_BYTES = 2 * 1024 ** 3  # kept for importers; the live limit is max_upload_bytes()
 
 # Tables every database of this application has (m0001 baseline onwards).
 CORE_TABLES = frozenset({"admin_users", "cameras", "store_layouts", "store_zones"})
@@ -626,8 +828,14 @@ def seconds_until_daily_backup(now_local: datetime, hour: int = 3) -> float:
     """Seconds from ``now_local`` (store time) to the next ``hour``:00 store time."""
     target = now_local.replace(hour=hour, minute=0, second=0, microsecond=0)
     if target <= now_local:
-        target += timedelta(days=1)
-    return max(60.0, (target - now_local).total_seconds())
+        target = (target + timedelta(days=1)).replace(hour=hour)
+    # Subtract in UTC: aware datetimes sharing a tzinfo subtract as wall clock,
+    # which put the backup at 04:00 (or 02:00) on DST change nights.
+    if now_local.tzinfo is not None:
+        delta = target.astimezone(timezone.utc) - now_local.astimezone(timezone.utc)
+    else:
+        delta = target - now_local
+    return max(60.0, delta.total_seconds())
 
 
 class DailyBackupScheduler:

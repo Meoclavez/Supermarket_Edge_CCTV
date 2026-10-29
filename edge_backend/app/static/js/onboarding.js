@@ -57,7 +57,14 @@
     return !!(st && st.features && st.features[key] === false);
   }
 
+  // Reads every module makes (layout, pipeline, cameras, store setup) come from the
+  // shared cache (js/poll.js) when it is fresh enough for a once-a-minute checklist.
+  const SHARED = { '/api/v1/layout': 60000, '/api/v1/layout/pipeline/status': 30000, '/api/v1/cameras': 30000, '/api/v1/store/setup': 60000 };
   async function get(url) {
+    if (window.EdgePoll && SHARED[url]) {
+      const data = await window.EdgePoll.get(url, SHARED[url]);
+      return data ? { ok: true, data } : { ok: false, status: 0, message: 'Could not be checked.' };
+    }
     const h = help();
     if (h) return h.fetchJSON(url);
     try {
@@ -168,32 +175,40 @@
     },
     {
       id: 'place', card: 'placement-calibration', title: 'Put each camera on the map',
-      why: 'So everyone can see where a camera is mounted and what it covers.',
+      why: 'So everyone can see where a camera is mounted and what it covers. This is step 1 of 2: calibrate it next.',
       check(d) {
         if (!ok(d.layout)) return unknown(d.layout);
         const cams = camerasOf(d);
         if (!cams.length) return { state: 'todo', detail: 'Add cameras first.', go: 'add-cameras', goLabel: 'Add cameras' };
-        const left = cams.filter((c) => c.map_placed === false).length;
-        if (!left) return { state: 'done', detail: 'Every camera is on the map.' };
-        return { state: left < cams.length ? 'partial' : 'todo', detail: `${left} of ${cams.length} not placed yet. Drag them from the camera gallery beside the map.` };
+        const left = cams.filter((c) => c.map_placed !== true).length;
+        const cal = cams.filter((c) => c.has_homography).length;
+        if (!left) return { state: 'done', detail: `All ${plural(cams.length, 'camera')} on the map${cal < cams.length ? '. Placing alone does not put people on the map: calibrate them next.' : '.'}` };
+        return { state: left < cams.length ? 'partial' : 'todo', detail: `${cams.length - left} of ${plural(cams.length, 'camera')} placed. Drag the other ${left} from the camera gallery beside the map.` };
       },
-      go: 'map', goLabel: 'Open the Store map',
+      go: 'place-cameras', goLabel: 'Place cameras',
     },
     {
-      id: 'calibrate', card: 'placement-calibration', title: 'Calibrate cameras, or link them to an area',
-      why: 'Calibration puts shoppers on the map and heatmap; linking an uncalibrated camera to an area still counts its visits.',
+      id: 'calibrate', card: 'placement-calibration', title: 'Calibrate each camera to the floor',
+      why: 'Step 2 of 2. Only a calibrated camera puts shoppers on the live map and heatmap and measures in metres. Until then its coverage is an estimate and speeds and sizes are guessed in body heights.',
       check(d) {
         if (!ok(d.layout)) return unknown(d.layout);
         const cams = camerasOf(d);
         if (!cams.length) return { state: 'todo', detail: 'Add cameras first.', go: 'add-cameras', goLabel: 'Add cameras' };
-        const s = d.layout.data.setup || {};
-        const cal = s.cameras_calibrated || 0, linked = s.cameras_zone_linked || 0;
-        const left = cams.filter((c) => !c.has_homography && !c.watch_zone_id);
-        if (!left.length) return { state: 'done', detail: `${cal} calibrated${linked ? `, ${linked} linked to an area` : ''}.` };
-        return { state: cal + linked ? 'partial' : 'todo',
-          detail: `${cal} calibrated, ${linked} linked, ${left.length} still to do, starting with "${left[0].name}".`,
-          go: `calibrate:${left[0].camera_id}`, goLabel: 'Calibrate' };
+        const cs = (d.layout.data.setup || {}).camera_setup;
+        const cal = cams.filter((c) => c.has_homography).length;
+        const placed = cams.filter((c) => c.map_placed === true).length;
+        const left = cams.filter((c) => !c.has_homography);
+        const linked = left.filter((c) => c.watch_zone_id).length;
+        const counts = cs ? cs.counts : `${plural(placed, 'camera')} placed, ${cal} calibrated`;
+        if (!left.length) return { state: 'done', detail: `${counts}.` };
+        // Linking a camera to an area counts its visits but is not calibration: never "done".
+        const next = left.find((c) => c.map_placed === true) || left[0];
+        const link = linked ? ` ${linked} ${linked === 1 ? 'counts' : 'count'} visits into a linked area (not calibration).` : '';
+        return { state: cal ? 'partial' : 'todo',
+          detail: `${counts}.${link} Next: "${next.name || next.camera_id}".`,
+          go: `calibrate:${next.camera_id}`, goLabel: 'Calibrate' };
       },
+      go: 'calibrate-next', goLabel: 'Calibrate',
     },
     {
       id: 'zones', card: 'store-areas', title: 'Draw store areas (aisles, entrance, checkout)',
@@ -349,12 +364,6 @@
         const m = $('nightWatchMount');
         if (m) m.scrollIntoView({ behavior: 'instant', block: 'start' });
       }, 300));
-      return;
-    }
-    if (a.startsWith('calibrate:')) {
-      const id = a.slice(10);
-      call('switchTab', 'map');
-      later(() => { if (window.calibrationTool) window.calibrationTool.open(id); }, 200);
       return;
     }
     if (a.startsWith('studio-url:')) { window.location.href = a.slice(11); return; }

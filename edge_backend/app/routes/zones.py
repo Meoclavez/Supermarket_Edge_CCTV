@@ -435,6 +435,24 @@ def get_camera_zones(camera_id: str):
     return combined
 
 
+def _require_area_drawing() -> None:
+    """Camera-drawn restricted areas belong to the plan's zone alerts or restricted
+    areas (as the /api/zones/intrusion gate in services/entitlements.py); the
+    generic camera-zone routes and "clear" must not get round that gate."""
+    from ..services import entitlements
+
+    if not (entitlements.feature_enabled("zone_alerts") or entitlements.feature_enabled("restricted_areas")):
+        raise entitlements.GateError(403, entitlements.feature_disabled_body("zone_alerts"))
+
+
+def _area_drawing_allowed() -> bool:
+    try:
+        _require_area_drawing()
+        return True
+    except Exception:  # noqa: BLE001 - GateError
+        return False
+
+
 @router.post("/api/v1/cameras/{camera_id}/zones")
 def create_camera_zone(camera_id: str, payload: Dict[str, Any]):
     z_type = str(payload.get("zone_type", "TRIPWIRE")).upper()
@@ -444,6 +462,7 @@ def create_camera_zone(camera_id: str, payload: Dict[str, Any]):
     if z_type == "TRIPWIRE" or "line_start" in payload:
         return ai_zone_service.add_tripwire(_tripwire_record(payload))
     if z_type in ("INTRUSION", "RESTRICTED_ZONE", "RESTRICTED_AREA"):
+        _require_area_drawing()
         return ai_zone_service.add_intrusion(_area_record(payload))
     if z_type in ("QUEUE_AREA", "CHECKOUT", "QUEUE"):
         if "kind" not in payload and z_type in ("CHECKOUT", "QUEUE"):
@@ -472,6 +491,8 @@ def create_camera_zone(camera_id: str, payload: Dict[str, Any]):
 
 @router.delete("/api/v1/cameras/{camera_id}/zones/{zone_id}")
 def delete_camera_zone(camera_id: str, zone_id: str):
+    if zone_id in ai_zone_service.intrusion_zones:
+        _require_area_drawing()
     if ai_zone_service.delete_tripwire(zone_id) or \
        ai_zone_service.delete_intrusion(zone_id) or \
        ai_zone_service.delete_exclusion(zone_id) or \
@@ -650,6 +671,12 @@ def clear_all_zones(kinds: Optional[str] = Query(None, description="Comma-separa
                     body: Optional[ClearReq] = None):
     """Delete overlays. ``kinds`` / ``camera_id`` as query parameters or a JSON body."""
     wanted = _kinds_list(kinds if kinds else (body.kinds if body is not None else None))
+    if not _area_drawing_allowed() and (wanted is None or "all" in wanted or "intrusion_zones" in wanted):
+        # Restricted areas are outside the plan: clear the rest, keep those.
+        wanted = [k for k in (wanted if wanted and "all" not in wanted else
+                              ["tripwires", "exclusion_masks", "queue_zones"]) if k != "intrusion_zones"]
+        if not wanted:
+            _require_area_drawing()
     cam = camera_id or (body.camera_id if body is not None else None)
     n = ai_zone_service.clear_all(wanted, camera_id=cam)
     return {"status": "success", "removed": n, "message": "Zones cleared."}

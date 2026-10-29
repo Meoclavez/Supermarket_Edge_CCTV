@@ -1386,6 +1386,17 @@
   }
 
   function schedule() {
+    const EP = window.EdgePoll;
+    if (EP) {
+      // New alerts arrive at once over the alert websocket (load below); the poll only
+      // catches status changes made elsewhere: 5 s without the websocket, else 15 s on
+      // this tab and 30 s behind other tabs. Paused while the page is hidden.
+      if (state.poll) return;
+      state.poll = EP.every(POLL_MS, () => (theftOff() ? null : load(false)),
+        { wsMs: () => (tabVisible() ? 15000 : 30000) });
+      EP.ws.on((msg) => { if (!msg.ra_area_id && !theftOff()) load(false); });
+      return;
+    }
     clearTimeout(state.timer);
     state.timer = setTimeout(async () => {
       if (!document.hidden && !theftOff()) await load(false);

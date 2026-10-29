@@ -836,7 +836,7 @@
     host.innerHTML = `
       <p class="ins-report-summary"><b>${esc(data.date || '')}</b> · ${esc(data.executive_summary || 'No summary produced.')}</p>
       <div class="overview-strip ins-report-kpis">${tiles}</div>
-      <div class="action-meta">Coverage: ${esc(cov.cameras_total ?? dash())} camera(s), ${esc(cov.cameras_calibrated ?? dash())} placed on the store map · ${data.data_available ? 'shopper activity recorded' : 'no shopper activity recorded for this day'}</div>
+      <div class="action-meta">Coverage: ${esc(cov.cameras_total ?? dash())} camera(s), ${isFinite(cov.cameras_placed) ? `${esc(cov.cameras_placed)} placed on the store map, ` : ''}${esc(cov.cameras_calibrated ?? dash())} calibrated · ${data.data_available ? 'shopper activity recorded' : 'no shopper activity recorded for this day'}</div>
       <h4 class="ins-report-h">Findings (${esc(data.findings_count ?? findings.length)})</h4>
       <div class="ins-list">${findingsHtml}</div>
       <div class="action-meta ins-report-gen">Report generated ${esc(clock(data.generated_at))}</div>`;
@@ -917,6 +917,7 @@
     if (isVisible('insights-recs')) onRecsShown();
     if (isVisible('tab-digest')) loadDigest();
     setInterval(() => {
+      if (document.hidden) return;
       loadRecs(false);
       loadTopics(false);
       if (isVisible('insights-recs')) { loadLatest(); loadModelStatus(false); }

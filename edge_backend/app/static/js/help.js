@@ -146,7 +146,9 @@
    *   view:<route>#<element id>       any view (e.g. loss, insights/footfall), then that element
    *   camera:<id> / night:<id>        the camera settings dialog (night: at "Night watch")
    *   camera-part:<id>#<element id>   the camera settings dialog at that part
+   *   place-cameras                   Store map with the camera gallery open at "Not placed"
    *   calibrate:<id>                  Store map with the calibration tool open for that camera
+   *   calibrate-next                  the same for the first placed camera not calibrated yet (else the map)
    *   studio-url:<path>               the Camera setup page (same-site path only)
    *   feature:<id>                    the Features tab at that feature's card
    *   feature-setup:<id>              the same, with its Easy setup open
@@ -165,10 +167,19 @@
     if (a.startsWith('camera-part:')) { const [cam, id] = a.slice(12).split('#'); openCameraPart(cam, id); return; }
     if (a.startsWith('camera:')) { call('openCameraConfigModal', a.slice(7)); return; }
     if (a.startsWith('night:')) { openCameraPart(a.slice(6), 'nightWatchMount'); return; }
-    if (a.startsWith('calibrate:')) {
-      const id = a.slice(10);
+    if (a === 'calibrate-next' || a.startsWith('calibrate:')) {
+      // The calibration tool needs the map's cameras: wait for the map to have loaded.
       call('switchTab', 'map');
-      later(() => { if (window.calibrationTool) window.calibrationTool.open(id); }, 200);
+      const fp = window.FloorplanAPI;
+      Promise.resolve(fp && fp.ready).catch(() => null).then(() => later(() => {
+        let id = a.slice(10);
+        if (a === 'calibrate-next') {
+          const cams = (window.blueprintEditor && window.blueprintEditor.cameras) || [];
+          const next = cams.find((c) => !c.has_homography && c.map_placed) || cams.find((c) => !c.has_homography);
+          id = next ? next.camera_id : null;
+        }
+        if (id && window.calibrationTool) window.calibrationTool.open(id);
+      }, 200));
       return;
     }
     if (a.startsWith('studio-url:')) {
@@ -195,6 +206,11 @@
         call('switchTab', a); break;
       case 'insights-footfall': call('switchTab', 'insights/footfall'); break;
       case 'add-cameras': call('openDeviceManager'); break;
+      case 'place-cameras':
+        // Step 1 of "place, then calibrate": the gallery beside the map, showing the cameras still to place.
+        call('switchTab', 'map');
+        later(() => { if (window.EdgeCameraGallery) window.EdgeCameraGallery.showUnplaced(); }, 200);
+        break;
       case 'map-edit':
         call('switchTab', 'map');
         later(() => call('toggleMapEditing', true), 150);
@@ -542,7 +558,7 @@
     currentArticle = id;
     markRead(id);
     const body = centre.querySelector('#helpCentreBody');
-    const canGo = a.go && (isAdmin() || !String(a.go).startsWith('map-') && a.go !== 'add-cameras' && a.go !== 'studio');
+    const canGo = a.go && (isAdmin() || !String(a.go).startsWith('map-') && !String(a.go).startsWith('calibrate') && !['add-cameras', 'place-cameras', 'studio'].includes(a.go));
     body.innerHTML = `
       <button type="button" class="btn btn-ghost btn-sm help-back" data-hc="back">${ico('arrow-left', 'sm')}All guides</button>
       <article class="help-article" aria-labelledby="helpArticleTitle">

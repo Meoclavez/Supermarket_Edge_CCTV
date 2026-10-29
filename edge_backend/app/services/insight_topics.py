@@ -1087,6 +1087,11 @@ class InsightTopicService:
             "rules": sorted(rules),
         })
         if narrate:
+            # Release the SQLite write lock before the model call (up to 3 x 60 s):
+            # an autoflushed topic UPDATE held it across narration, so the
+            # pipeline flush, theft incidents and alert rows timed out and were
+            # lost meanwhile (audit L4). Nothing below needs the old transaction.
+            await db.commit()
             narrated = await asyncio.to_thread(self._narrate, t, meta, summary)
             if narrated:
                 summary, meta["summary_source"], meta["model"] = narrated[0], "local_model", narrated[1]

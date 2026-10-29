@@ -28,13 +28,36 @@ engine = create_async_engine(
     pool_recycle=3600,
 )
 
-@event.listens_for(engine.sync_engine, "connect")
-def set_sqlite_pragma(dbapi_connection, connection_record):
-    cursor = dbapi_connection.cursor()
+def _page_cache_kib() -> int:
+    """Per-connection page cache: 16 MiB on boxes with >= 12 GB RAM, else 8 MiB."""
+    try:
+        total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (ValueError, OSError, AttributeError):
+        total = 0
+    return 16384 if total >= 12 * 1024 ** 3 else 8192
+
+
+_CACHE_KIB = _page_cache_kib()
+# The WAL file is truncated back to this size after a checkpoint, so one large
+# transaction (layout fit, retention) does not leave a multi-GB -wal behind.
+WAL_SIZE_LIMIT = 64 * 1024 * 1024
+
+
+def apply_connection_pragmas(cursor) -> None:
+    """PRAGMAs every connection to the main database should carry (also ad-hoc sqlite3 ones)."""
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA synchronous=NORMAL")
     cursor.execute("PRAGMA busy_timeout=15000")
     cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.execute(f"PRAGMA journal_size_limit={WAL_SIZE_LIMIT}")
+    cursor.execute(f"PRAGMA cache_size=-{_CACHE_KIB}")
+    cursor.execute("PRAGMA temp_store=MEMORY")
+
+
+@event.listens_for(engine.sync_engine, "connect")
+def set_sqlite_pragma(dbapi_connection, connection_record):
+    cursor = dbapi_connection.cursor()
+    apply_connection_pragmas(cursor)
     cursor.close()
 
 async_session_factory = async_sessionmaker(
@@ -42,6 +65,45 @@ async_session_factory = async_sessionmaker(
     expire_on_commit=False,
     class_=AsyncSession
 )
+
+_startup_backup_task = None
+
+
+async def _startup_backup(skip_copy: bool = False, delay_s: float = 30.0) -> None:
+    """Background startup snapshot + retention (see init_db)."""
+    from app.services.backup_service import backup_service
+
+    try:
+        await asyncio.sleep(delay_s)  # let cameras and the API come up first
+        if skip_copy:
+            logger.info("Startup backup skipped: this start already made a pre-upgrade backup.")
+        else:
+            backup_res = await asyncio.to_thread(backup_service.create_backup, "startup")
+            if backup_res.get("status") == "skipped":
+                logger.info(f"Startup backup skipped ({backup_res.get('reason')}): "
+                            f"{backup_res.get('duplicate_of') or backup_res.get('detail') or 'no source database'}")
+            else:
+                logger.info(f"Startup backup created: {backup_res.get('filename')}")
+        retention = await asyncio.to_thread(backup_service.apply_retention)
+        if retention["deleted"] or retention["compressed"]:
+            logger.info(f"Backup retention: deleted {len(retention['deleted'])}, "
+                        f"compressed {len(retention['compressed'])}")
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.error(f"Startup backup or prune error: {e}")
+
+
+async def stop_background_tasks() -> None:
+    """Cancel the background startup backup (shutdown)."""
+    task = _startup_backup_task
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
 
 async def check_db_health():
     """Periodic connection health check."""
@@ -145,20 +207,13 @@ async def init_db():
     await _ensure_default_store_layout()
 
 
-    # Startup snapshot (skipped when the content equals the newest backup),
-    # then retention: last N startup + one per day for 14 days, pre-migration
-    # and operator backups kept, older snapshots gzip-compressed.
-    try:
-        backup_res = await asyncio.to_thread(backup_service.create_backup, "startup")
-        if backup_res.get("status") == "skipped":
-            logger.info(f"Startup backup skipped ({backup_res.get('reason')}): "
-                        f"{backup_res.get('duplicate_of') or 'no source database'}")
-        else:
-            logger.info(f"Startup backup created: {backup_res.get('filename')}")
-        retention = await asyncio.to_thread(backup_service.apply_retention)
-        if retention["deleted"] or retention["compressed"]:
-            logger.info(f"Backup retention: deleted {len(retention['deleted'])}, "
-                        f"compressed {len(retention['compressed'])}")
-    except Exception as e:
-        logger.error(f"Startup backup or prune error: {e}")
+    # Startup snapshot (skipped when the database is unchanged since the newest
+    # backup, or when this start already took a pre-migration copy), then
+    # retention. Runs in the background after the app starts serving: on a
+    # 2.8 GB database it took 1-2 minutes of every start (twice after an upgrade).
+    global _startup_backup_task
+    took_copy = bool(report.get("backup"))
+    _startup_backup_task = asyncio.create_task(_startup_backup(skip_copy=took_copy),
+                                               name="startup-backup")
+
 

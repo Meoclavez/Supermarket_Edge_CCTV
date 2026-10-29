@@ -16,7 +16,7 @@ from typing import Dict, Optional
 from urllib.parse import urlsplit
 
 import cv2
-from fastapi import APIRouter, Body, Depends, HTTPException, Response
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,6 +32,7 @@ from ..models.schemas import (
     MuteCameraRequest,
 )
 from ..services.auth_service import auth_service
+from ..services.evidence_urls import signed_path
 from ..services import camera_roles, camera_source
 from ..services.camera_discovery import camera_discovery_service
 from ..services.clip_recorder import clip_recorder_service
@@ -956,7 +957,7 @@ async def get_camera_live_status(camera_id: str, db: AsyncSession = Depends(get_
 
 
 @router.post("/{camera_id}/actions/snapshot")
-async def save_camera_snapshot(camera_id: str, db: AsyncSession = Depends(get_db)):
+async def save_camera_snapshot(camera_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     """Persist the camera's current real frame to ``settings.SNAPSHOTS_DIR``.
 
     409 when the camera has no frame: nothing is written and nothing is
@@ -989,9 +990,9 @@ async def save_camera_snapshot(camera_id: str, db: AsyncSession = Depends(get_db
     return {
         "saved": True,
         "filename": filename,
-        # <img>/<a> cannot send a bearer header; the snapshot route takes a short-lived
-        # clip-access token like event clips do.
-        "url": f"/api/v1/events/snapshots/{filename}?token={auth_service.generate_clip_token(filename)}",
+        # <img>/<a> cannot send a bearer header; a 15-minute clip token for this
+        # one file and the caller's session (the dashboard also has its cookie).
+        "url": signed_path(f"/api/v1/events/snapshots/{filename}", getattr(request.state, "user", None)),
         "camera_id": camera_id,
         "frame_width": int(w),
         "frame_height": int(h),
@@ -1081,22 +1082,52 @@ async def studio_rescan():
 @router.post("/{camera_id}/mute")
 async def mute_camera(
     camera_id: str,
+    request: Request,
     req: MuteCameraRequest = Body(default_factory=MuteCameraRequest),
     db: AsyncSession = Depends(get_db),
 ):
     """Hold back loss-prevention phone pushes for this camera (e.g. during restocking).
 
     Alerts are still logged and still reach the dashboard; only pushes stop.
-    ``duration_minutes: 0`` unmutes.
+    ``duration_minutes: 0`` unmutes. Operators may mute for at most
+    OPERATOR_MUTE_MAX_MIN minutes at a time (owners and administrators up to
+    24 hours), and every mute is recorded with who did it (restricted-area
+    audit trail, action ``camera_mute``).
     """
+    from ..services.auth_service import effective_role, is_admin_role
+
+    user = getattr(request.state, "user", None)
+    role = effective_role(user)
+    if req.duration_minutes > OPERATOR_MUTE_MAX_MIN and not is_admin_role(role):
+        raise HTTPException(status_code=403, detail=(
+            f"You can mute a camera for up to {OPERATOR_MUTE_MAX_MIN} minutes. "
+            "Ask an administrator for longer."))
     cam = await _get_camera_or_404(camera_id, db)
     cam.muted_until = (
         datetime.utcnow() + timedelta(minutes=req.duration_minutes) if req.duration_minutes > 0 else None
     )
     await db.commit()
+    await _audit_mute(user, role, cam, req.duration_minutes)
     return {
         "status": "success",
         "camera_id": camera_id,
         "muted_minutes": req.duration_minutes,
         "muted_until": cam.muted_until,
     }
+
+
+OPERATOR_MUTE_MAX_MIN = 60
+
+
+async def _audit_mute(user, role: str, cam, minutes: int) -> None:
+    from ..services.auth_service import account_record
+    from ..services.restricted_areas import restricted_areas
+
+    uid = (user or {}).get("sub")
+    acct = account_record(uid) if uid else None
+    name = (acct or {}).get("display_name") or (acct or {}).get("username") or (str(uid) if uid else "Service")
+    logger.warning("Camera %s phone alerts %s by %s (%s)", cam.id,
+                   f"muted for {minutes} min" if minutes > 0 else "unmuted", name, role)
+    await restricted_areas.audit_now("camera_mute" if minutes > 0 else "camera_unmute", None,
+                                     {"id": str(uid) if uid else None, "name": name, "role": role},
+                                     detail={"camera_id": cam.id, "camera_name": cam.name, "minutes": minutes})

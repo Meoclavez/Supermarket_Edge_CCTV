@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import '../core/theme/app_theme.dart';
 import 'multi_cam_grid_screen.dart';
-import 'dvr_playback_screen.dart';
 import 'events_center_screen.dart';
 import 'zone_editor_screen.dart';
 import 'clip_archives_screen.dart';
@@ -13,7 +12,6 @@ import '../widgets/server_switcher.dart';
 
 enum NavSection {
   liveGrid,
-  dvrTimeline,
   eventsCenter,
   zoneEditor,
   clipArchives,
@@ -39,13 +37,6 @@ class _AppShellState extends State<AppShell> {
       label: 'Live Grid Wall',
       icon: Icons.grid_view_rounded,
       selectedIcon: Icons.grid_view_rounded,
-      badgeCount: 0,
-    ),
-    NavSectionItem(
-      section: NavSection.dvrTimeline,
-      label: '24/7 DVR Playback',
-      icon: Icons.history_rounded,
-      selectedIcon: Icons.history_toggle_off_rounded,
       badgeCount: 0,
     ),
     NavSectionItem(
@@ -96,9 +87,6 @@ class _AppShellState extends State<AppShell> {
     switch (NavSection.values[_currentIndex]) {
       case NavSection.liveGrid:
         child = const MultiCamGridScreen();
-        break;
-      case NavSection.dvrTimeline:
-        child = const DVRPlaybackScreen();
         break;
       case NavSection.eventsCenter:
         child = const EventsCenterScreen();

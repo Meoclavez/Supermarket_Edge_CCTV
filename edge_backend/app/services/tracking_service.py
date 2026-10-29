@@ -147,6 +147,9 @@ def _xywh_to_xyxy(m) -> tuple[float, float, float, float]:
 # -------------------------------------------------------------------- track
 
 
+FLOOR_POINTS_MAX = 500
+
+
 @dataclass
 class Track:
     """One person followed across frames of a single camera."""
@@ -167,7 +170,10 @@ class Track:
     # Latest floor position in metres, set by the engine when calibrated.
     floor_xy: Optional[tuple[float, float]] = None
     # Trajectory in floor metres, appended only while a homography exists.
-    floor_points: list[dict] = field(default_factory=list)
+    # Bounded: one point per analysed frame for a cashier on a 10 h shift was
+    # ~47 MB per person (audit M5). Only the latest point is read live; the
+    # persisted path is path_points.
+    floor_points: deque = field(default_factory=lambda: deque(maxlen=FLOOR_POINTS_MAX), repr=False)
     # Persisted path (customer_tracks.trajectory_points), sampled every
     # TRAJECTORY_SAMPLE_SEC while people_counting is on: normalised image foot
     # point {"u", "v", "t"} for every camera, plus floor {"x", "y"} when

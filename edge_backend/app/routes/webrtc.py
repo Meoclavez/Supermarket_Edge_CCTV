@@ -75,7 +75,7 @@ def _check_watch(request: Request, camera_id: str) -> None:
     if user is None:
         return
     kind = user.get("type")
-    if kind == "stream_access" and user.get("camera_id") not in (None, camera_id):
+    if kind == "stream_access" and user.get("camera_id") != camera_id:
         raise HTTPException(status_code=403, detail="This stream token is for another camera.")
     if kind == "clip_access":
         raise HTTPException(status_code=403, detail="A clip token cannot open live video.")
@@ -186,9 +186,17 @@ async def diagnostics(request: Request, nat: bool = True):
 # --------------------------------------------------------------------------- #
 
 @router.get("/token", dependencies=GENERAL)
-async def get_stream_token(camera_id: str):
-    """Generates a short-lived authorization token for live WebRTC stream viewing."""
-    token = auth_service.generate_stream_token(camera_id)
+async def get_stream_token(camera_id: str, request: Request):
+    """A short-lived token for live video of one camera, for a signed-in person.
+
+    Only a dashboard or phone session may ask (not a stream or clip token: a
+    forwarded alert link must never turn into live video), and the token dies
+    with that session.
+    """
+    user = _user(request)
+    if user is not None and user.get("type") != "user_session":
+        raise HTTPException(status_code=403, detail="Sign in to watch live video.")
+    token = auth_service.generate_stream_token(camera_id, owner=user)
     return {"token": token, "camera_id": camera_id, "expires_in": settings.STREAM_TOKEN_EXPIRE_SECONDS}
 
 

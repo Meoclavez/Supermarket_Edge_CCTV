@@ -26,7 +26,6 @@ from sqlalchemy import select, delete, func, and_, desc
 from app.config import settings
 from app.database import async_session_factory
 from app.models.db_models import DVRSegmentModel, IncidentArchiveModel, CameraModel
-from app.services.auth_service import auth_service
 from app.services.evidence_storage import evidence_storage
 
 logger = logging.getLogger("DVRRecorder")
@@ -189,7 +188,7 @@ class DVRRecorderService:
                     lines.append("#EXT-X-DISCONTINUITY")
 
             lines.append(f"#EXTINF:{seg.duration_seconds:.3f},")
-            video_url = f"{settings.EDGE_BASE_URL}/api/v1/dvr/segments/{seg.id}/video?token={token}"
+            video_url = f"/api/v1/dvr/segments/{seg.id}/video?token={token}"
             lines.append(video_url)
 
         lines.append("#EXT-X-ENDLIST")
@@ -272,8 +271,8 @@ class DVRRecorderService:
 
         file_size = out_path.stat().st_size
         duration = await asyncio.to_thread(self._probe_duration, out_path)
-        download_token = auth_service.generate_clip_token(archive_id)
-        download_url = f"{settings.EDGE_BASE_URL}/api/v1/dvr/archives/{archive_id}/download?token={download_token}"
+        # Stored without a token; routes/dvr.py signs it for each caller.
+        download_url = f"/api/v1/dvr/archives/{archive_id}/download"
 
         archive_entry = IncidentArchiveModel(
             id=archive_id,

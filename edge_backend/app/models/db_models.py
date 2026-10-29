@@ -131,6 +131,13 @@ class SecurityEventModel(Base):
 
     camera: Mapped["CameraModel"] = relationship("CameraModel", back_populates="events")
 
+    # m0024: the alert list, restricted-area status and night watch filter by
+    # type/camera and sort by time.
+    __table_args__ = (
+        Index("ix_security_events_type_ts", "event_type", "timestamp"),
+        Index("ix_security_events_camera_ts", "camera_id", "timestamp"),
+    )
+
 
 class DVRSegmentModel(Base):
     __tablename__ = "dvr_segments"
@@ -407,6 +414,9 @@ class TheftIncidentModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+    # m0024: incident lists filter by status and sort by time.
+    __table_args__ = (Index("ix_theft_incidents_status_ts", "status", "timestamp"),)
+
 
 
 
@@ -502,7 +512,11 @@ class ZoneVisitModel(Base):
     interacted: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
-    __table_args__ = (Index("ix_zone_visits_zone_entered", "zone_id", "entered_at"),)
+    __table_args__ = (
+        Index("ix_zone_visits_zone_entered", "zone_id", "entered_at"),
+        # m0024: open visits (live occupancy) without scanning closed ones.
+        Index("ix_zone_visits_open", "zone_id", sqlite_where=text("exited_at IS NULL")),
+    )
 
 
 class DiscoveredDeviceModel(Base):

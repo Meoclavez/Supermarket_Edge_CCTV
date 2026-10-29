@@ -146,7 +146,8 @@
 
     // Lucide sprite icons (icons/sprite.svg), the same markup as js/icons.js; the old text glyphs
     // (minus, plus, U+26F6) sat off-centre and U+26F6 is a pictograph.
-    const ICON = (name) => `<svg class="icon icon-md" aria-hidden="true" focusable="false"><use href="/static/icons/sprite.svg#i-${name}"></use></svg>`;
+    const SPRITE = (window.EdgeIcon && window.EdgeIcon.sprite) || '/static/icons/sprite.svg';
+    const ICON = (name) => `<svg class="icon icon-md" aria-hidden="true" focusable="false"><use href="${SPRITE}#i-${name}"></use></svg>`;
 
     function renderControls() {
       const host = o.controlsHost;
@@ -192,7 +193,7 @@
         fs.title = full ? 'Leave full screen' : 'Full screen';
         const want = full ? 'minimize-2' : 'maximize-2';
         const use = fs.querySelector('use');
-        if (use && !use.getAttribute('href').endsWith(want)) use.setAttribute('href', `/static/icons/sprite.svg#i-${want}`);
+        if (use && !use.getAttribute('href').endsWith(want)) use.setAttribute('href', `${(window.EdgeIcon && window.EdgeIcon.sprite) || '/static/icons/sprite.svg'}#i-${want}`);
       }
     }
 

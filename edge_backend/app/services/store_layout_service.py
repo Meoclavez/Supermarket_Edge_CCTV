@@ -36,6 +36,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.camera_setup_state import camera_setup_state
 from app.config import settings
 from app.services import coverage_geometry
 from app.models.db_models import (
@@ -1157,6 +1158,11 @@ class StoreLayoutService:
             "cameras_calibrated": calibrated,
             # Uncalibrated cameras counting into a zone they are linked to.
             "cameras_zone_linked": linked,
+            # On the map (m0020). Placed is not calibrated: see camera_setup.
+            "cameras_placed": sum(1 for c in cameras if c.get("map_placed") is True),
+            # Not placed / placed but not calibrated / calibrated, with plain text
+            # and the next action (services/camera_setup_state.py).
+            "camera_setup": camera_setup_state(cameras, zone_ids),
         }
 
     async def serialize_cameras(self, db: AsyncSession, layout: StoreLayoutModel) -> list[dict]:

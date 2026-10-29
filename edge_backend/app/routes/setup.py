@@ -133,7 +133,7 @@ async def verify_setup_or_admin_access(
     if settings.AUTH_DISABLED:
         return True
     if await active_admin_exists(session):
-        return auth_service.verify_api_access(request)
+        return auth_service.verify_api_access(request, None, None, None)
     if _has_valid_credential(request):
         return True
     _require_setup_code(request, None)
@@ -141,10 +141,13 @@ async def verify_setup_or_admin_access(
 
 @router.get("/setup/status")
 async def get_setup_status(session: AsyncSession = Depends(get_db)):
+    """Setup progress. This route needs no sign-in (first run), so after setup
+    it no longer describes the hardware; before that the report is cached
+    (``vainfo`` is not spawned on every call)."""
     is_completed = await setup_service.is_setup_completed(session)
     current_step = await setup_service.get_setup_step(session)
-    hardware = setup_service.detect_hardware()
-    
+    hardware = None if is_completed else await asyncio.to_thread(setup_service.cached_hardware)
+
     return {
         "is_completed": is_completed,
         "current_step": current_step,
@@ -432,6 +435,8 @@ async def logout(request: Request, req: Optional[LogoutReq] = None):
     if not access and not refresh_tok:
         raise HTTPException(status_code=401, detail="No session token was presented.")
     revoked = await asyncio.to_thread(auth_service.revoke_session, access, refresh_tok)
+    from app.services.notification_service import alert_hub
+    await alert_hub.prune_revoked()  # close its live alert sockets now
     return {"status": "signed_out", "revoked": revoked}
 
 
@@ -461,6 +466,8 @@ async def change_password(
             _raise_if_locked_out(ip)
         raise
     cutoff = await asyncio.to_thread(auth_service.sign_out_account, user["sub"], False)
+    from app.services.notification_service import alert_hub
+    await alert_hub.prune_revoked()  # close its live alert sockets now
     _setup_log.warning("Password changed for account %s from %s; its other browser sessions were signed out.",
                        user["sub"], ip)
     result = {"status": "success", "other_sessions_signed_out": True}

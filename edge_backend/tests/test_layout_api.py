@@ -433,7 +433,10 @@ def test_reset_requires_confirmation_and_returns_fresh_state(client, auth_header
         "cameras": 0,
         "cameras_calibrated": 0,
         "cameras_zone_linked": 0,
+        "cameras_placed": 0,
+        "camera_setup": fresh["setup"]["camera_setup"],
     }
+    assert fresh["setup"]["camera_setup"]["step"] == "add_cameras"
     assert client.get("/api/v1/layout/pipeline/status", headers=auth_headers).json()["cameras_total"] == 0
     live = client.get("/api/v1/layout/live", headers=auth_headers).json()
     assert live["persons"] == [] and live["detections"] == []

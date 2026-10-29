@@ -12,7 +12,10 @@
 (function () {
   'use strict';
 
-  const POLL_MS = 3000;
+  // Settings > Online access only (paused on other tabs and while hidden). 10 s: the
+  // connection state is shown live enough, and three settings cards no longer use up the
+  // 100 requests a minute between them.
+  const POLL_MS = 10000;
   let pollTimer = null;
   let state = null;          // last GET /api/v1/remote-access
   let identity = null;       // last GET /api/v1/device/identity

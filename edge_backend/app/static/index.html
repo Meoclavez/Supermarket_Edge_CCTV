@@ -40,7 +40,11 @@
        parsing; theme.js is listed last so it still runs after the modules.
        The server rewrites each ?v= to a hash of the file (web_delivery.py). -->
   <script src="/static/js/auth.js?v=2.6.0"></script>
+  <!-- Shared polling: hidden-page pause, shared GETs, 429 back-off, the one alert websocket. -->
+  <script src="/static/js/poll.js?v=2.6.0"></script>
   <!-- Icons (Lucide sprite, icons/sprite.svg): window.EdgeIcon, used by every module below. -->
+  <!-- Versioned icon sprite URL for js/icons.js (the server adds ?v=<hash>; a template loads nothing). -->
+  <template id="edgeIconSprite"><img src="/static/icons/sprite.svg" alt=""></template>
   <script src="/static/js/icons.js?v=2.6.0" defer></script>
   <!-- Intro screen (#edgeSplash below): fades out once sign-in has been checked. -->
   <script src="/static/js/splash.js?v=2.6.0" defer></script>
@@ -388,6 +392,10 @@
         <div class="blueprint-side" id="fpSide">
           <!-- Fresh-state guide: only rendered while nothing is configured. -->
           <div class="glass-card fp-setup-card" id="fpSetupPanel" style="display:none;"></div>
+
+          <!-- Place, then calibrate (floorplan.js renderCameraState): shown while a camera is
+               not on the map or not calibrated, with the counts and the button for the open step. -->
+          <div class="glass-card fp-camstate-card" id="fpCamStatePanel" role="status" hidden></div>
 
           <!-- Inspector: the selected area, structure, camera or store settings. -->
           <div class="glass-card zone-inspector-card">

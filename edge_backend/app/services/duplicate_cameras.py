@@ -60,6 +60,7 @@ from urllib.parse import parse_qsl, urlsplit
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+_BACKGROUND: set = set()
 
 STATE_FILE = "duplicate_cameras.json"
 RECORDERS_FILE = "recorder_devices.json"
@@ -801,7 +802,10 @@ class DuplicateGuard:
                     logger.debug(f"recorder device list {h}: {e}")
 
         try:
-            asyncio.get_running_loop().create_task(run(), name="recorder-device-lists")
+            # Kept referenced until done: the loop holds tasks only weakly.
+            task = asyncio.get_running_loop().create_task(run(), name="recorder-device-lists")
+            _BACKGROUND.add(task)
+            task.add_done_callback(_BACKGROUND.discard)
         except RuntimeError:
             return []
         return hosts

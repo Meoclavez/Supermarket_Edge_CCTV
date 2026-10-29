@@ -23,7 +23,6 @@ from app.models.db_models import (
     POSTransactionModel,
     ShelfInteractionModel,
     CustomerTrackModel,
-    RetailAnalyticsSummaryModel,
     AIDecisionRecommendationModel,
     CameraModel
 )
@@ -37,7 +36,6 @@ from app.models.schemas import (
     RetailAnalyticsSummary,
     AIDecisionRecommendation,
     DecisionActionRequest,
-    TelemetrySyncRequest,
     StoreOverviewResponse,
     FloorplanResponse,
     FloorplanCamera,
@@ -74,7 +72,7 @@ def verify_analytics_access(
     # No environment-variable shortcuts (TESTING / PYTEST_CURRENT_TEST / DEBUG
     # used to open these routes); AUTH_DISABLED is honoured inside
     # verify_api_access and is the only bypass.
-    return auth_service.verify_api_access(request, api_key, bearer)
+    return auth_service.verify_api_access(request, api_key, bearer, None)
 
 router = APIRouter(
     prefix="/api/v1/analytics",
@@ -432,10 +430,12 @@ async def get_checkout_queues(db: AsyncSession = Depends(get_db)):
 async def get_ai_decisions(
     status: Optional[str] = None,
     severity: Optional[str] = None,
+    limit: int = Query(200, ge=1, le=1000),
     db: AsyncSession = Depends(get_db)
 ):
-    """Retrieve prioritized AI store improvement recommendations."""
-    stmt = select(AIDecisionRecommendationModel).order_by(AIDecisionRecommendationModel.created_at.desc())
+    """Retrieve prioritized AI store improvement recommendations (newest first, at most ``limit``)."""
+    stmt = (select(AIDecisionRecommendationModel)
+            .order_by(AIDecisionRecommendationModel.created_at.desc()).limit(limit))
     if isinstance(status, str) and status.strip():
         stmt = stmt.where(AIDecisionRecommendationModel.status == status.strip().upper())
     if isinstance(severity, str) and severity.strip():
@@ -468,8 +468,8 @@ async def get_ai_decisions(
 
 # Alias for backwards compatibility
 @router.get("/actions")
-async def get_actions_alias(db: AsyncSession = Depends(get_db)):
-    return await get_ai_decisions(db=db)
+async def get_actions_alias(limit: int = Query(200, ge=1, le=1000), db: AsyncSession = Depends(get_db)):
+    return await get_ai_decisions(status=None, severity=None, limit=limit, db=db)
 
 
 # ---------------- 7. POST /api/v1/analytics/decisions/{id}/action ----------------
@@ -528,10 +528,17 @@ async def get_daily_executive_report(
     """
     layout = await _active_layout(db)
     target_date = date_str or local_now().date().isoformat()
+    try:
+        target_day = datetime.strptime(target_date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=422, detail="date must be YYYY-MM-DD")
 
-    overview = await retail_metrics_service.overview(db, layout.id, settings.STORE_NAME)
-    funnel = await retail_metrics_service.funnel(db, layout.id, *day_bounds())
-    queues = await retail_metrics_service.checkout_queues(db, layout.id, *day_bounds())
+    # The requested day for every figure (overview, funnel and queues used to
+    # be today's whatever ``date`` said; audit LOW).
+    bounds = day_bounds(target_day)
+    overview = await retail_metrics_service.overview(db, layout.id, settings.STORE_NAME, day=target_day)
+    funnel = await retail_metrics_service.funnel(db, layout.id, *bounds)
+    queues = await retail_metrics_service.checkout_queues(db, layout.id, *bounds)
     # Read-only: a GET never persists findings (POST /business/analysis/run does).
     analysis = await business_analysis_service.analyse(
         db, layout.id, persist=False, narrate=narrate
@@ -577,8 +584,9 @@ async def get_daily_executive_report(
     if not overview["has_data"]:
         report["executive_summary"] = (
             "No shopper activity has been recorded for this period. "
-            f"{overview['coverage']['cameras_total']} camera(s) are configured and "
-            f"{overview['coverage']['cameras_calibrated']} are calibrated for floor tracking."
+            f"{overview['coverage']['cameras_total']} camera(s) are configured, "
+            f"{overview['coverage'].get('cameras_placed', 0)} placed on the store map and "
+            f"{overview['coverage']['cameras_calibrated']} calibrated for floor tracking."
         )
     elif narrate and (report.get("narrative") or {}).get("summary"):
         report["executive_summary"] = report["narrative"]["summary"]
@@ -673,44 +681,6 @@ async def ingest_pos_transactions(payload: Any, db: AsyncSession):
         "ingested_count": len(transactions_to_save),
         "total_amount": round(total_amt, 2),
         "transaction_ids": transactions_to_save
-    }
-
-
-# ---------------- 10. POST /api/v1/analytics/sync ----------------
-
-@router.post("/sync")
-async def sync_edge_telemetry(
-    sync_req: TelemetrySyncRequest = Body(default_factory=TelemetrySyncRequest),
-    db: AsyncSession = Depends(get_db)
-):
-    """Synchronize aggregated edge analytics telemetry to Cloud."""
-    batch_id = f"sync_{uuid.uuid4().hex[:10]}"
-    target_date = sync_req.date or local_now().date().isoformat()
-
-    # Query local summaries
-    summary_stmt = select(RetailAnalyticsSummaryModel).where(RetailAnalyticsSummaryModel.date == target_date)
-    res = await db.execute(summary_stmt)
-    summary = res.scalar_one_or_none()
-
-    # Query total transaction count
-    pos_count_stmt = select(func.count(POSTransactionModel.id))
-    pos_count = (await db.execute(pos_count_stmt)).scalar() or 0
-
-    # Query total shelf interactions
-    interact_stmt = select(func.count(ShelfInteractionModel.id))
-    interact_count = (await db.execute(interact_stmt)).scalar() or 0
-
-    records_synced = pos_count + interact_count
-
-    return {
-        "status": "success",
-        "batch_id": batch_id,
-        "store_id": sync_req.store_id,
-        "date": target_date,
-        "synced_at": datetime.utcnow().isoformat(),
-        "records_synced": records_synced,
-        "cloud_endpoint": sync_req.cloud_endpoint or "https://cloud.retail-ai.internal/v1/telemetry",
-        "mode": "EDGE_OFFLINE_BUFFER_FLUSHED"
     }
 
 
@@ -1039,14 +1009,22 @@ async def get_business_analysis(
     return result
 
 
-@router.get("/business/model-status")
+@router.get("/business/model-status", dependencies=[Depends(require_admin)])
 async def get_business_model_status():
     """Which local model would be used, verified by actually generating.
 
     The old status endpoint only pinged Ollama's model list, so it reported
     the service healthy while every real generation request timed out and
-    silently fell back to a canned string.
+    silently fell back to a canned string. A real generation costs seconds of
+    GPU time, so only owners and administrators may ask, and it runs off the
+    event loop.
     """
+    import asyncio
+
+    return await asyncio.to_thread(_business_model_status)
+
+
+def _business_model_status() -> dict:
     model = business_analysis_service.select_model()
     if not model:
         return {

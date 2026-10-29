@@ -492,10 +492,14 @@ class ShadowTrial:
             return (fn(),)
         gate = det.device_gate
         deadline = time.monotonic() + wait          # real time: this waits for real threads
+        pause = 0.002
         while not gate.try_low():
             if time.monotonic() > deadline or self._stop.is_set():
                 return None
-            time.sleep(0.002)
+            # Back off to 50 ms: a fixed 2 ms poll woke this thread ~500 times a
+            # second while the cameras held the device (audit optimisation 10).
+            time.sleep(pause)
+            pause = min(pause * 2.0, 0.05)
         try:
             return (fn(),)
         finally:

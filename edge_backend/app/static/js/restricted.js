@@ -26,8 +26,9 @@
   'use strict';
 
   const API = '/api/v1/restricted-areas';
-  const POLL_VISIBLE_MS = 3000;
-  const POLL_HIDDEN_MS = 15000;
+  const POLL_VISIBLE_MS = 5000;     // websocket down
+  const POLL_WS_MS = 10000;         // websocket up: alerts arrive at once, this only follows announcements
+  const POLL_HIDDEN_MS = 30000;
   const EVENTS_EVERY_MS = 30000;
   const D = (typeof DASH !== 'undefined') ? DASH : '—';
   const $ = (id) => document.getElementById(id);
@@ -746,10 +747,12 @@
         ${p.camera_id || !isFloor ? `<div class="ra-inline"><label for="raP${i}_cam">Camera</label><select class="select" id="raP${i}_cam" name="p${i}:camera_id">${cams.map((c) => `<option value="${esc(c.id)}"${c.id === p.camera_id ? ' selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
           <label for="raP${i}_u">Across</label><input class="input ra-num" type="number" id="raP${i}_u" name="p${i}:u" min="0" max="1" step="0.01" value="${esc(p.u !== undefined ? p.u : 0.5)}">
           <label for="raP${i}_v">Down</label><input class="input ra-num" type="number" id="raP${i}_v" name="p${i}:v" min="0" max="1" step="0.01" value="${esc(p.v !== undefined ? p.v : 0.5)}"></div>
-          <p class="ra-hint">Position in the camera picture: 0 = left / top, 1 = right / bottom.</p>`
-    : `<div class="ra-inline"><label for="raP${i}_x">x</label><input class="input ra-num" type="number" id="raP${i}_x" name="p${i}:x" step="0.1" value="${esc(p.x !== undefined ? p.x : 0)}"><span>m</span>
+          ${pickerHtml(i, 'camera', p, a)}
+          <p class="ra-hint">Click or drag on the picture to place it, or type the position: 0 = left / top, 1 = right / bottom.</p>`
+    : `${pickerHtml(i, 'floor', p, a)}
+          <div class="ra-inline"><label for="raP${i}_x">x</label><input class="input ra-num" type="number" id="raP${i}_x" name="p${i}:x" step="0.1" value="${esc(p.x !== undefined ? p.x : 0)}"><span>m</span>
           <label for="raP${i}_y">y</label><input class="input ra-num" type="number" id="raP${i}_y" name="p${i}:y" step="0.1" value="${esc(p.y !== undefined ? p.y : 0)}"><span>m</span></div>
-          <p class="ra-hint">Store-map metres (the map shows x across, y down).</p>`}
+          <p class="ra-hint">Click or drag on the map to place it, or type store-map metres (x across, y down).</p>`}
         <input type="hidden" name="p${i}:id" value="${esc(p.id || '')}">
         <button type="button" class="btn btn-xs btn-ghost" data-ra="poi-del" data-ra-row="${i}">${ico('trash-2')}Remove</button></div>`).join('')}
       <button type="button" class="btn btn-sm" data-ra="poi-add">${ico('plus')}Add a point</button>
@@ -773,6 +776,159 @@
     f.scrollTop = keepScroll;
     $('raDialogFoot').innerHTML = foot;
     if (!s.editable) f.querySelectorAll('input, select, button').forEach((n) => { if (!n.hasAttribute('data-operator-ok')) n.disabled = true; });
+    wirePickers(f, s.editable);
+  }
+
+  // ------------------------------------------------ click-to-place points of interest
+  // A point of interest is placed by clicking or dragging on a small store map of the
+  // area's zone (floor metres) or on the camera picture (0..1 of the picture). The
+  // numeric fields stay as the fallback and always show the exact value.
+  const PICK_SNAP_M = 0.1;
+  const PICK_SNAP_UV = 0.005;
+
+  /** Store-map geometry for the picker: the zone outline (FloorplanAPI when the map is loaded). */
+  function pickZone(a) {
+    const L = state.settings && state.settings.list;
+    const id = a && a.floor_zone_id;
+    if (!id) return null;
+    let zone = null;
+    try {
+      const api = window.FloorplanAPI;
+      if (api && typeof api.getZone === 'function') zone = api.getZone(id);
+    } catch (_) { zone = null; }
+    if (!zone && L) zone = (L.zones || []).find((z) => z.id === id) || null;
+    const poly = zone && Array.isArray(zone.polygon) ? zone.polygon.map((q) => ({ x: +q.x, y: +q.y })).filter((q) => Number.isFinite(q.x) && Number.isFinite(q.y)) : [];
+    if (poly.length < 3) return null;
+    const xs = poly.map((q) => q.x), ys = poly.map((q) => q.y);
+    const pad = 1.5;
+    const box = { x: Math.min(...xs) - pad, y: Math.min(...ys) - pad, w: Math.max(...xs) - Math.min(...xs) + 2 * pad, h: Math.max(...ys) - Math.min(...ys) + 2 * pad };
+    let structures = [];
+    try {
+      const api = window.FloorplanAPI;
+      if (api && typeof api.structuresIn === 'function') structures = api.structuresIn(box) || [];
+    } catch (_) { structures = []; }
+    return { id, name: zone.name || id, poly, box, structures };
+  }
+
+  function pickerHtml(i, kind, p, a) {
+    if (kind === 'floor') {
+      const z = pickZone(a);
+      if (!z) return '<p class="ra-hint">Choose a zone on the store map above to place this point by clicking.</p>';
+      const { box } = z;
+      const r = Math.max(box.w, box.h) / 40;
+      const pts = (arr) => arr.map((q) => `${q.x},${q.y}`).join(' ');
+      const others = (a.points_of_interest || []).map((o, j) => (j !== i && !o.camera_id && Number.isFinite(+o.x) ? `<circle class="ra-pick-other" cx="${+o.x}" cy="${+o.y}" r="${r * 0.7}"><title>${esc(o.name || 'Point')}</title></circle>` : '')).join('');
+      const x = Number.isFinite(+p.x) ? +p.x : box.x + box.w / 2, y = Number.isFinite(+p.y) ? +p.y : box.y + box.h / 2;
+      return `<div class="ra-pick ra-pick-floor" data-ra-pick="${i}" data-kind="floor">
+        <svg class="ra-pick-svg" viewBox="${box.x} ${box.y} ${box.w} ${box.h}" preserveAspectRatio="xMidYMid meet" role="application"
+          aria-label="Store map of ${esc(z.name)}: click or drag to place the point" data-box="${box.x},${box.y},${box.w},${box.h}">
+          ${z.structures.map((st) => (st.kind === 'WALL' || st.kind === 'DOOR'
+    ? `<polyline class="ra-pick-wall${st.kind === 'DOOR' ? ' is-door' : ''}" points="${pts(st.polygon)}" stroke-width="${Math.max(0.1, +st.thickness_m || 0.15)}"></polyline>`
+    : `<polygon class="ra-pick-struct" points="${pts(st.polygon)}"></polygon>`)).join('')}
+          <polygon class="ra-pick-zone" points="${pts(z.poly)}"></polygon>
+          ${others}
+          <g class="ra-pick-marker" data-ra-marker tabindex="0" role="slider" aria-label="${esc(p.name || 'Point')}: position on the map (arrow keys move it)" aria-valuetext="x ${x.toFixed(1)} m, y ${y.toFixed(1)} m" transform="translate(${x} ${y})">
+            <circle r="${r * 2.4}" class="ra-pick-halo"></circle><circle r="${r}" class="ra-pick-dot"></circle></g>
+        </svg></div>`;
+    }
+    const cam = p.camera_id || ((state.settings.list.cameras || [])[0] || {}).id;
+    if (!cam) return '';
+    const regions = (a.camera_regions || []).filter((rg) => rg.camera_id === cam).map((rg) => {
+      const ca = rg.intrusion_zone_id ? (state.settings.list.camera_areas || []).find((c) => c.id === rg.intrusion_zone_id) : null;
+      return (ca && ca.points) || rg.points || null;
+    }).filter((ptsList) => Array.isArray(ptsList) && ptsList.length >= 3);
+    const u = Number.isFinite(+p.u) ? +p.u : 0.5, v = Number.isFinite(+p.v) ? +p.v : 0.5;
+    return `<div class="ra-pick ra-pick-camera" data-ra-pick="${i}" data-kind="camera" data-camera="${esc(cam)}">
+      <div class="ra-pick-frame"><img class="ra-pick-img" alt="Picture from ${esc(camName(cam))}" src="${esc(authUrl(`/api/v1/cameras/${encodeURIComponent(cam)}/snapshot`))}">
+        <svg class="ra-pick-svg" viewBox="0 0 1 1" preserveAspectRatio="none" role="application" aria-label="Camera picture: click or drag to place the point" data-box="0,0,1,1">
+          ${regions.map((rp) => `<polygon class="ra-pick-zone" points="${rp.map((q) => `${+q.x},${+q.y}`).join(' ')}" vector-effect="non-scaling-stroke"></polygon>`).join('')}
+          <g class="ra-pick-marker" data-ra-marker tabindex="0" role="slider" aria-label="${esc(p.name || 'Point')}: position in the picture (arrow keys move it)" aria-valuetext="${Math.round(u * 100)}% across, ${Math.round(v * 100)}% down" transform="translate(${u} ${v})">
+            <ellipse class="ra-pick-dot" rx="0.014" ry="0.022" vector-effect="non-scaling-stroke"></ellipse></g>
+        </svg></div></div>`;
+  }
+
+  /** A new floor point starts in the middle of the zone (then click or drag it into place). */
+  function zoneMiddle(a) {
+    const z = pickZone(a);
+    if (!z) return { name: '', x: 0, y: 0 };
+    const xs = z.poly.map((q) => q.x), ys = z.poly.map((q) => q.y);
+    const mid = (v) => Math.round(((Math.min(...v) + Math.max(...v)) / 2) * 10) / 10;
+    return { name: '', x: mid(xs), y: mid(ys) };
+  }
+
+  function wirePickers(f, editable) {
+    const zoneSel = f.elements.namedItem('floor_zone_id');
+    if (zoneSel) zoneSel.addEventListener('change', () => { readSettings(); renderSettings(); });
+    f.querySelectorAll('select[name$=":camera_id"]').forEach((sel) => sel.addEventListener('change', () => { readSettings(); renderSettings(); }));
+    f.querySelectorAll('[data-ra-pick]').forEach((host) => {
+      const i = host.getAttribute('data-ra-pick');
+      const floor = host.getAttribute('data-kind') === 'floor';
+      const svg = host.querySelector('svg');
+      const marker = host.querySelector('[data-ra-marker]');
+      if (!svg || !marker) return;
+      const [bx, by, bw, bh] = svg.getAttribute('data-box').split(',').map(Number);
+      const fx = f.elements.namedItem(`p${i}:${floor ? 'x' : 'u'}`);
+      const fy = f.elements.namedItem(`p${i}:${floor ? 'y' : 'v'}`);
+      const snap = floor ? PICK_SNAP_M : PICK_SNAP_UV;
+      const round = (n) => Math.round(n / snap) * snap;
+      const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
+      const set = (x, y, announce) => {
+        x = floor ? clamp(round(x), bx, bx + bw) : clamp(round(x), 0, 1);
+        y = floor ? clamp(round(y), by, by + bh) : clamp(round(y), 0, 1);
+        marker.setAttribute('transform', `translate(${x} ${y})`);
+        marker.setAttribute('aria-valuetext', floor ? `x ${x.toFixed(1)} m, y ${y.toFixed(1)} m` : `${Math.round(x * 100)}% across, ${Math.round(y * 100)}% down`);
+        if (fx) fx.value = floor ? x.toFixed(1) : x.toFixed(3);
+        if (fy) fy.value = floor ? y.toFixed(1) : y.toFixed(3);
+        if (announce && fx) fx.dispatchEvent(new Event('input', { bubbles: true }));
+      };
+      const toLocal = (ev) => {
+        const ctm = svg.getScreenCTM();
+        if (!ctm) return null;
+        const pt = svg.createSVGPoint();
+        pt.x = ev.clientX; pt.y = ev.clientY;
+        const q = pt.matrixTransform(ctm.inverse());
+        return { x: q.x, y: q.y };
+      };
+      // Typing in the number fields moves the marker too.
+      [fx, fy].forEach((inp) => inp && inp.addEventListener('input', (e) => {
+        if (!e.isTrusted) return;
+        const x = Number(fx.value), y = Number(fy.value);
+        if (Number.isFinite(x) && Number.isFinite(y)) marker.setAttribute('transform', `translate(${x} ${y})`);
+      }));
+      if (!editable) { host.classList.add('is-readonly'); marker.removeAttribute('tabindex'); return; }
+      let dragging = false;
+      svg.addEventListener('pointerdown', (ev) => {
+        if (ev.button !== 0) return;
+        const q = toLocal(ev);
+        if (!q) return;
+        ev.preventDefault();
+        dragging = true;
+        try { svg.setPointerCapture(ev.pointerId); } catch (_) {}
+        host.classList.add('is-dragging');
+        set(q.x, q.y, true);
+      });
+      svg.addEventListener('pointermove', (ev) => {
+        if (!dragging) return;
+        const q = toLocal(ev);
+        if (q) set(q.x, q.y, false);
+      });
+      const end = (ev) => {
+        if (!dragging) return;
+        dragging = false;
+        host.classList.remove('is-dragging');
+        try { svg.releasePointerCapture(ev.pointerId); } catch (_) {}
+        try { marker.focus({ preventScroll: true }); } catch (_) {}
+      };
+      svg.addEventListener('pointerup', end);
+      svg.addEventListener('pointercancel', end);
+      marker.addEventListener('keydown', (ev) => {
+        const step = (floor ? (ev.shiftKey ? 0.5 : 0.1) : (ev.shiftKey ? 0.05 : 0.01));
+        const d = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[ev.key];
+        if (!d) return;
+        ev.preventDefault();
+        set(Number(fx.value) + d[0], Number(fy.value) + d[1], true);
+      });
+    });
   }
 
   /** The draft from the form (also used before a structural re-render). */
@@ -981,7 +1137,7 @@
       case 'clip': openEvidence(evId, 'clip'); break;
       case 'sched-add': readSettings(); state.settings.area.arming.schedule.push({ days: ['mon', 'tue', 'wed', 'thu', 'fri'], from: '18:00', to: '07:00' }); renderSettings(); break;
       case 'sched-del': readSettings(); state.settings.area.arming.schedule.splice(Number(b.getAttribute('data-ra-row')), 1); renderSettings(); break;
-      case 'poi-add': readSettings(); state.settings.area.points_of_interest.push(state.settings.area.floor_zone_id ? { name: '', x: 0, y: 0 }
+      case 'poi-add': readSettings(); state.settings.area.points_of_interest.push(state.settings.area.floor_zone_id ? zoneMiddle(state.settings.area)
         : { name: '', camera_id: ((state.settings.area.camera_regions || [])[0] || {}).camera_id || ((state.settings.list.cameras || [])[0] || {}).id, u: 0.5, v: 0.5 }); renderSettings(); break;
       case 'poi-del': readSettings(); state.settings.area.points_of_interest.splice(Number(b.getAttribute('data-ra-row')), 1); renderSettings(); break;
       case 'draw': {
@@ -1012,7 +1168,17 @@
 
   // ------------------------------------------------------------ instant alerts (websocket)
 
+  function onWsMessage(msg) {
+    if (!msg || !msg.ra_area_id || planOff()) return;
+    const za = window.edgeZoneAlerts;
+    if (za && typeof za.ingest === 'function') za.ingest(wsEntry(msg));
+    state.eventsSig = null;
+    load();
+  }
+
   function connectWs() {
+    // The dashboard's one alert websocket lives in js/poll.js; this module only listens.
+    if (window.EdgePoll) { if (!state.wsOn) { state.wsOn = true; window.EdgePoll.ws.on(onWsMessage); } return; }
     if (state.ws || planOff() || typeof WebSocket === 'undefined') return;
     let ws;
     try {
@@ -1048,6 +1214,14 @@
   // ------------------------------------------------------------ start
 
   function schedule() {
+    const EP = window.EdgePoll;
+    if (EP) {
+      // Alerts come over the websocket at once; this cheap poll (not rate limited) keeps
+      // the strip's announcements and arming current: 5 s, 10 s while the websocket is up.
+      if (state.poll) return;
+      state.poll = EP.every(POLL_VISIBLE_MS, () => (planOff() ? null : load()), { hiddenMs: POLL_HIDDEN_MS, wsMs: POLL_WS_MS });
+      return;
+    }
     clearTimeout(state.timer);
     state.timer = setTimeout(async () => {
       if (!planOff()) await load();
@@ -1102,7 +1276,7 @@
       const z = e && e.detail && e.detail.zone_id;
       openSettings(z ? { zone_id: z } : null);
     });
-    document.addEventListener('visibilitychange', () => { if (!document.hidden && state.started) { load(); schedule(); } });
+    document.addEventListener('visibilitychange', () => { if (!document.hidden && state.started && !state.poll) { load(); schedule(); } });
     window.addEventListener('edge:account', () => render());
     state.tick = setInterval(tickCountdowns, 1000);
     const canPollNow = typeof canPoll === 'function' ? canPoll() : true;

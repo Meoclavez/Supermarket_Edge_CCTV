@@ -1050,7 +1050,14 @@ class FleetControl:
 
     # ---- local actions (dashboard)
     async def reset_key(self, actor: str) -> Dict[str, Any]:
-        """Forget the pinned key: the next authenticated check-in pins the VPS's key again."""
+        """Forget the pinned key: the next authenticated check-in pins the VPS's key again.
+
+        Refused when the iKorex key is fixed in .env (``FLEET_CONTROL_PUBLIC_KEY``):
+        then there is no pin to reset, and a store administrator must not be
+        able to swap the key that signs its plan.
+        """
+        if env_public_key():
+            raise PermissionError("The iKorex control key is fixed on this box and cannot be reset here.")
         async with self._alock():
             state = await asyncio.to_thread(load_state)
             old = state.get("fingerprint")

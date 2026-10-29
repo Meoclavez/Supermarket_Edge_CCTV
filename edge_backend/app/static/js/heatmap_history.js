@@ -691,7 +691,7 @@
       } else {
         const due = nextHour(now) + settle * 1000;
         const need = S.space === 'floor'
-          ? 'a calibrated camera (placed on the store map) delivering frames'
+          ? 'a camera placed on the store map and calibrated, delivering frames'
           : `${cameraName(S.cameraId)} delivering frames with people counting on`;
         msg = `${sayStarted}nothing has been measured for ${whereLabel()} yet. It needs ${need}${S.kind === 'interaction' ? ' and shelf-reach detection switched on' : ''}. The next hourly heatmap is written after ${fmtClock(new Date(due).toISOString())}.`;
       }
